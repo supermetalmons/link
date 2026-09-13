@@ -854,6 +854,94 @@ describe("canonical profile D1 store", () => {
     ).rejects.toBeInstanceOf(CanonicalProfileConflict);
   });
 
+  it("roundtrips every profile write field on insert and update", async () => {
+    const profileId = "canonical-profile-fields";
+    const initial = profileValue(profileId, {
+      profile: profile(profileId, { username: "InitialFields", emoji: 3 }),
+      createdAtMs: 101,
+      updatedAtMs: 202,
+      legacyFields: { opaque: ["initial", null, { preserved: true }] },
+      sortPresence: {
+        rating: true,
+        mp: true,
+        nonce: false,
+        dust: true,
+        slime: false,
+        gum: true,
+        metal: true,
+        ice: true,
+      },
+      sortValues: {
+        rating: 1411,
+        mp: null,
+        nonce: null,
+        dust: 23,
+        slime: null,
+        gum: 0,
+        metal: 73,
+        ice: 91,
+      },
+      winPresent: false,
+      emojiPresent: true,
+    });
+    await commitCanonicalPlan(testEnv.PROFILE_DB, {
+      expectations: [{ kind: "profile-absent", profileId }],
+      mutations: [{ kind: "insert-active-profile", value: initial }],
+    });
+    await expect(
+      readCanonicalProfile(testEnv.PROFILE_DB, profileId),
+    ).resolves.toEqual({
+      ...initial,
+      profileId,
+      revision: 1,
+    });
+    const updated = profileValue(profileId, {
+      profile: profile(profileId, {
+        username: "UpdatedFields",
+        win: false,
+        completedProblemIds: ["two", "three"],
+        isTutorialCompleted: false,
+      }),
+      createdAtMs: 303,
+      updatedAtMs: 404,
+      legacyFields: { opaque: ["updated", { values: [0, false, null] }] },
+      sortPresence: {
+        rating: false,
+        mp: true,
+        nonce: true,
+        dust: false,
+        slime: true,
+        gum: true,
+        metal: true,
+        ice: false,
+      },
+      sortValues: {
+        rating: null,
+        mp: 52,
+        nonce: 63,
+        dust: null,
+        slime: 85,
+        gum: null,
+        metal: 0,
+        ice: null,
+      },
+      winPresent: true,
+      emojiPresent: false,
+      gameplayEmoji: "legacy-emoji",
+    });
+    await commitCanonicalPlan(testEnv.PROFILE_DB, {
+      expectations: [{ kind: "profile-revision", profileId, revision: 1 }],
+      mutations: [{ kind: "update-active-profile", value: updated }],
+    });
+    await expect(
+      readCanonicalProfile(testEnv.PROFILE_DB, profileId),
+    ).resolves.toEqual({
+      ...updated,
+      profileId,
+      revision: 2,
+    });
+  });
+
   it("rejects unsafe plans and missing-row updates", async () => {
     const value = profileValue("canonical-unsafe-plan");
     await expect(
@@ -950,6 +1038,14 @@ describe("canonical profile D1 store", () => {
       source.profile.id,
     );
     if (!retired) throw new Error("missing retired profile");
+    expect(retired).toEqual({
+      ...sourceSnapshot,
+      state: "retiring",
+      mergedIntoProfileId: targetSnapshot.profileId,
+      mergedAtMs: 2_000,
+      updatedAtMs: 2_000,
+      revision: sourceSnapshot.revision + 1,
+    });
     await expect(
       readCanonicalProfileAggregateSnapshot(
         testEnv.PROFILE_DB,
@@ -2494,6 +2590,68 @@ describe("canonical profile D1 store", () => {
     expect(
       await readCanonicalRatingUpdate(testEnv.PROFILE_DB, operationId),
     ).toMatchObject({ status: "done", revision: 2, completedAtMs: 2_000 });
+  });
+
+  it("roundtrips every rating write field on insert and update", async () => {
+    const operationId = "canonical-rating-fields";
+    const initial = ratingValue(operationId, {
+      payload: { operationId, nested: ["initial", null, { retained: true }] },
+      playerProfileId: "player-profile",
+      opponentProfileId: "opponent-profile",
+      startedAtMs: 101,
+      updatedAtMs: 202,
+      leaseExpiresAtMs: 303,
+      telegramProjectionState: "pending",
+      telegramProjectionUpdatedAtMs: 404,
+      telegramProjectionVersion: 5,
+      profileGameProjectionState: "done",
+      profileGameProjectionUpdatedAtMs: 606,
+      profileGameProjectionVersion: 7,
+      eventProgressState: "dead",
+      eventProgressUpdatedAtMs: 808,
+      eventProgressVersion: 9,
+    });
+    await commitCanonicalPlan(testEnv.PROFILE_DB, {
+      expectations: [{ kind: "rating-update-absent", operationId }],
+      mutations: [{ kind: "insert-rating-update", value: initial }],
+    });
+    await expect(
+      readCanonicalRatingUpdate(testEnv.PROFILE_DB, operationId),
+    ).resolves.toEqual({ ...initial, revision: 1 });
+    const updated = ratingValue(operationId, {
+      payload: { operationId, nested: ["updated", false, { retained: null }] },
+      status: "done",
+      inviteId: "updated-invite",
+      matchId: "updated-match",
+      playerId: "updated-player",
+      opponentId: "updated-opponent",
+      playerProfileId: null,
+      opponentProfileId: null,
+      ownerUid: "updated-owner",
+      ownerToken: "updated-token",
+      startedAtMs: 1_101,
+      updatedAtMs: 1_202,
+      leaseExpiresAtMs: 1_303,
+      completedAtMs: 1_204,
+      telegramProjectionState: "dead",
+      telegramProjectionUpdatedAtMs: 1_405,
+      telegramProjectionVersion: 16,
+      profileGameProjectionState: "pending",
+      profileGameProjectionUpdatedAtMs: 1_607,
+      profileGameProjectionVersion: 18,
+      eventProgressState: null,
+      eventProgressUpdatedAtMs: null,
+      eventProgressVersion: null,
+    });
+    await commitCanonicalPlan(testEnv.PROFILE_DB, {
+      expectations: [
+        { kind: "rating-update-revision", operationId, revision: 1 },
+      ],
+      mutations: [{ kind: "update-rating-update", value: updated }],
+    });
+    await expect(
+      readCanonicalRatingUpdate(testEnv.PROFILE_DB, operationId),
+    ).resolves.toEqual({ ...updated, revision: 2 });
   });
 
   it("keeps wager fingerprints immutable and rejects mismatched replay", async () => {

@@ -306,7 +306,16 @@ const eventDb = {
   prepare: (query: string): D1PreparedStatement =>
     query.includes("event_write_admissions")
       ? eventAdmissionStatement(query)
-      : profileGamesDb.prepare(query),
+      : query.includes("event_scheduled_recovery_cursor")
+        ? {
+            all: d1Statement.all,
+            bind: d1Statement.bind,
+            raw: d1Statement.raw,
+            run: d1Statement.run,
+            first: async <T>() =>
+              ({ start_at_ms: null, event_id: null, revision: 0 }) as T,
+          }
+        : profileGamesDb.prepare(query),
 } satisfies D1Database;
 
 const eventPrizeWithdrawalStatement: D1PreparedStatement = {

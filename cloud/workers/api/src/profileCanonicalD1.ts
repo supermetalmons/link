@@ -1002,38 +1002,40 @@ export function materializeCanonicalProfile(input: {
   return value;
 }
 
-function profileValues(value: CanonicalProfileValue): D1Value[] {
+function profileWriteRow(
+  value: CanonicalProfileValue,
+): Omit<ProfileRow, "revision"> {
   assertCanonicalProfileValue(value);
-  return [
-    value.profile.id,
-    value.state,
-    JSON.stringify(value.profile),
-    JSON.stringify(value.gameplayEmoji),
-    value.usernameKey,
-    value.mergedIntoProfileId,
-    JSON.stringify(value.legacyFields),
-    value.createdAtMs,
-    value.updatedAtMs,
-    value.mergedAtMs,
-    value.sortValues.rating,
-    value.sortValues.mp,
-    value.sortValues.nonce,
-    value.sortValues.dust,
-    value.sortValues.slime,
-    value.sortValues.gum,
-    value.sortValues.metal,
-    value.sortValues.ice,
-    Number(value.sortPresence.rating),
-    Number(value.sortPresence.mp),
-    Number(value.sortPresence.nonce),
-    Number(value.sortPresence.dust),
-    Number(value.sortPresence.slime),
-    Number(value.sortPresence.gum),
-    Number(value.sortPresence.metal),
-    Number(value.sortPresence.ice),
-    Number(value.winPresent),
-    Number(value.emojiPresent),
-  ];
+  return {
+    profile_id: value.profile.id,
+    state: value.state,
+    payload_json: JSON.stringify(value.profile),
+    gameplay_emoji_json: JSON.stringify(value.gameplayEmoji),
+    username_key: value.usernameKey,
+    merged_into_profile_id: value.mergedIntoProfileId,
+    legacy_fields_json: JSON.stringify(value.legacyFields),
+    created_at_ms: value.createdAtMs,
+    updated_at_ms: value.updatedAtMs,
+    merged_at_ms: value.mergedAtMs,
+    rating_sort: value.sortValues.rating,
+    mana_points_sort: value.sortValues.mp,
+    nonce_sort: value.sortValues.nonce,
+    dust_sort: value.sortValues.dust,
+    slime_sort: value.sortValues.slime,
+    gum_sort: value.sortValues.gum,
+    metal_sort: value.sortValues.metal,
+    ice_sort: value.sortValues.ice,
+    rating_sort_present: Number(value.sortPresence.rating),
+    mana_points_sort_present: Number(value.sortPresence.mp),
+    nonce_sort_present: Number(value.sortPresence.nonce),
+    dust_sort_present: Number(value.sortPresence.dust),
+    slime_sort_present: Number(value.sortPresence.slime),
+    gum_sort_present: Number(value.sortPresence.gum),
+    metal_sort_present: Number(value.sortPresence.metal),
+    ice_sort_present: Number(value.sortPresence.ice),
+    win_present: Number(value.winPresent),
+    emoji_present: Number(value.emojiPresent),
+  };
 }
 
 export async function readCanonicalControl(
@@ -2508,46 +2510,45 @@ export type CanonicalCommitPlan = {
   mutations: readonly CanonicalMutation[];
 };
 
-const PROFILE_COLUMNS = `
-  profile_id, state, payload_json, gameplay_emoji_json, username_key,
-  merged_into_profile_id, legacy_fields_json, created_at_ms, updated_at_ms,
-  merged_at_ms, rating_sort,
-  mana_points_sort, nonce_sort, dust_sort, slime_sort, gum_sort, metal_sort,
-  ice_sort, rating_sort_present, mana_points_sort_present,
-  nonce_sort_present, dust_sort_present, slime_sort_present, gum_sort_present,
-  metal_sort_present, ice_sort_present, win_present, emoji_present
-`;
+function canonicalRowMutationStatement<Row extends Record<string, D1Value>>(
+  db: D1Database,
+  table: "profile_records" | "rating_updates",
+  keyColumn: keyof Row & string,
+  row: Row,
+  insert: boolean,
+): D1PreparedStatement {
+  const fields = Object.entries(row);
+  if (insert) {
+    return db
+      .prepare(
+        `INSERT INTO ${table} (${fields.map(([column]) => column).join(", ")}, revision)
+         VALUES (${fields.map(() => "?").join(", ")}, 1)`,
+      )
+      .bind(...fields.map(([, value]) => value));
+  }
+  const updates = fields.filter(([column]) => column !== keyColumn);
+  return db
+    .prepare(
+      `UPDATE ${table} SET
+         ${updates.map(([column]) => `${column} = ?`).join(", ")},
+         revision = revision + 1
+       WHERE ${keyColumn} = ?`,
+    )
+    .bind(...updates.map(([, value]) => value), row[keyColumn]);
+}
 
 function profileMutationStatement(
   db: D1Database,
   value: CanonicalProfileValue,
   insert: boolean,
 ): D1PreparedStatement {
-  const values = profileValues(value);
-  if (insert) {
-    return db
-      .prepare(
-        `INSERT INTO profile_records (${PROFILE_COLUMNS}, revision)
-         VALUES (${Array.from({ length: values.length }, () => "?").join(", ")}, 1)`,
-      )
-      .bind(...values);
-  }
-  const [profileId, ...updates] = values;
-  return db
-    .prepare(
-      `UPDATE profile_records SET
-         state = ?, payload_json = ?, gameplay_emoji_json = ?, username_key = ?,
-         merged_into_profile_id = ?, legacy_fields_json = ?,
-         created_at_ms = ?, updated_at_ms = ?, merged_at_ms = ?,
-         rating_sort = ?, mana_points_sort = ?, nonce_sort = ?, dust_sort = ?,
-         slime_sort = ?, gum_sort = ?, metal_sort = ?, ice_sort = ?,
-         rating_sort_present = ?, mana_points_sort_present = ?,
-         nonce_sort_present = ?, dust_sort_present = ?, slime_sort_present = ?,
-         gum_sort_present = ?, metal_sort_present = ?, ice_sort_present = ?,
-         win_present = ?, emoji_present = ?, revision = revision + 1
-       WHERE profile_id = ?`,
-    )
-    .bind(...updates, profileId);
+  return canonicalRowMutationStatement(
+    db,
+    "profile_records",
+    "profile_id",
+    profileWriteRow(value),
+    insert,
+  );
 }
 
 function authMethodParams(value: CanonicalAuthMethodValue): D1Value[] {
@@ -2617,44 +2618,37 @@ function recoveryParams(value: CanonicalAuthRecoveryValue): D1Value[] {
   ];
 }
 
-function ratingParams(value: CanonicalRatingUpdateValue): D1Value[] {
-  return [
-    value.operationId,
-    JSON.stringify(value.payload),
-    value.status,
-    value.inviteId,
-    value.matchId,
-    value.playerId,
-    value.opponentId,
-    value.playerProfileId,
-    value.opponentProfileId,
-    value.ownerUid,
-    value.ownerToken,
-    value.startedAtMs,
-    value.updatedAtMs,
-    value.leaseExpiresAtMs,
-    value.completedAtMs,
-    value.telegramProjectionState,
-    value.telegramProjectionUpdatedAtMs,
-    value.telegramProjectionVersion,
-    value.profileGameProjectionState,
-    value.profileGameProjectionUpdatedAtMs,
-    value.profileGameProjectionVersion,
-    value.eventProgressState,
-    value.eventProgressUpdatedAtMs,
-    value.eventProgressVersion,
-  ];
+function ratingWriteRow(
+  value: CanonicalRatingUpdateValue,
+): Omit<RatingRow, "revision"> {
+  return {
+    operation_id: value.operationId,
+    payload_json: JSON.stringify(value.payload),
+    status: value.status,
+    invite_id: value.inviteId,
+    match_id: value.matchId,
+    player_id: value.playerId,
+    opponent_id: value.opponentId,
+    player_profile_id: value.playerProfileId,
+    opponent_profile_id: value.opponentProfileId,
+    owner_uid: value.ownerUid,
+    owner_token: value.ownerToken,
+    started_at_ms: value.startedAtMs,
+    updated_at_ms: value.updatedAtMs,
+    lease_expires_at_ms: value.leaseExpiresAtMs,
+    completed_at_ms: value.completedAtMs,
+    telegram_projection_state: value.telegramProjectionState,
+    telegram_projection_updated_at_ms: value.telegramProjectionUpdatedAtMs,
+    telegram_projection_version: value.telegramProjectionVersion,
+    profile_game_projection_state: value.profileGameProjectionState,
+    profile_game_projection_updated_at_ms:
+      value.profileGameProjectionUpdatedAtMs,
+    profile_game_projection_version: value.profileGameProjectionVersion,
+    event_progress_state: value.eventProgressState,
+    event_progress_updated_at_ms: value.eventProgressUpdatedAtMs,
+    event_progress_version: value.eventProgressVersion,
+  };
 }
-
-const RATING_COLUMNS = `
-  operation_id, payload_json, status, invite_id, match_id, player_id,
-  opponent_id, player_profile_id, opponent_profile_id, owner_uid, owner_token,
-  started_at_ms, updated_at_ms, lease_expires_at_ms, completed_at_ms,
-  telegram_projection_state, telegram_projection_updated_at_ms,
-  telegram_projection_version, profile_game_projection_state,
-  profile_game_projection_updated_at_ms, profile_game_projection_version,
-  event_progress_state, event_progress_updated_at_ms, event_progress_version
-`;
 
 type CanonicalLifecycleMutation = Extract<
   CanonicalMutation,
@@ -2909,33 +2903,14 @@ function mutationStatement(
         .prepare("DELETE FROM profile_auth_recovery_jobs WHERE profile_id = ?")
         .bind(mutation.profileId);
     case "insert-rating-update":
-      return db
-        .prepare(
-          `INSERT INTO rating_updates (${RATING_COLUMNS}, revision)
-           VALUES (${Array.from({ length: 24 }, () => "?").join(", ")}, 1)`,
-        )
-        .bind(...ratingParams(mutation.value));
-    case "update-rating-update": {
-      const [operationId, ...updates] = ratingParams(mutation.value);
-      return db
-        .prepare(
-          `UPDATE rating_updates SET
-             payload_json = ?, status = ?, invite_id = ?, match_id = ?,
-             player_id = ?, opponent_id = ?, player_profile_id = ?,
-             opponent_profile_id = ?, owner_uid = ?, owner_token = ?,
-             started_at_ms = ?, updated_at_ms = ?, lease_expires_at_ms = ?,
-             completed_at_ms = ?, telegram_projection_state = ?,
-             telegram_projection_updated_at_ms = ?,
-             telegram_projection_version = ?,
-             profile_game_projection_state = ?,
-             profile_game_projection_updated_at_ms = ?,
-             profile_game_projection_version = ?, event_progress_state = ?,
-             event_progress_updated_at_ms = ?, event_progress_version = ?,
-             revision = revision + 1
-           WHERE operation_id = ?`,
-        )
-        .bind(...updates, operationId);
-    }
+    case "update-rating-update":
+      return canonicalRowMutationStatement(
+        db,
+        "rating_updates",
+        "operation_id",
+        ratingWriteRow(mutation.value),
+        mutation.kind === "insert-rating-update",
+      );
     case "delete-rating-update":
       return db
         .prepare("DELETE FROM rating_updates WHERE operation_id = ?")

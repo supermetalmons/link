@@ -1042,6 +1042,182 @@ describe("event D1 store", () => {
     });
   });
 
+  it.each([
+    ["events", ""],
+    ["events", "/unknownFutureField"],
+    ["eventPrizeSelections", ""],
+    ["eventPrizeSelections", `/${profileId}`],
+  ])("reuses the snapshot for %s%s transactions", async (root, suffix) => {
+    await seedPrizeRows();
+    let reads = 0;
+    const batches: number[] = [];
+    const db: EventD1Connection = {
+      prepare(query) {
+        if (/^\s*SELECT\b/i.test(query)) reads += 1;
+        return testEnv.EVENT_DB.prepare(query);
+      },
+      batch(statements) {
+        batches.push(statements.length);
+        return testEnv.EVENT_DB.batch(statements);
+      },
+    };
+    await transactEventOwnedPath(
+      db,
+      `${root}/${eventId}${suffix}`,
+      (current) => {
+        if (root === "events") {
+          const value = current as Record<string, unknown>;
+          value.transactionValue = { retained: [1, 2, 3] };
+          return { value };
+        }
+        if (suffix) return { value: "1514" };
+        const value = current as Record<string, string>;
+        value[profileId] = "1514";
+        delete value["profile-two"];
+        return { value };
+      },
+    );
+    expect(reads).toBe(2);
+    expect(batches).toEqual([2, expect.any(Number)]);
+    const stored = await readEventSnapshot(testEnv.EVENT_DB, eventId);
+    expect(stored.revision).toBe(2);
+    if (root === "events") {
+      const value = suffix ? stored.event!.unknownFutureField : stored.event;
+      expect(value).toMatchObject({
+        transactionValue: { retained: [1, 2, 3] },
+      });
+      expect(stored.prizeSelections).toEqual({
+        [profileId]: prizeId,
+        "profile-two": "1111",
+      });
+    } else {
+      expect(stored.prizeSelections).toEqual({
+        [profileId]: "1514",
+        ...(suffix ? { "profile-two": "1111" } : {}),
+      });
+    }
+  });
+
+  it.each(["events", "eventPrizeSelections"])(
+    "distinguishes declining %s transactions from unchanged commits",
+    async (root) => {
+      await seedPrizeRows();
+      const before = await readPrizeStorage();
+      const path = `${root}/${eventId}`;
+      await expect(
+        transactEventOwnedPath(testEnv.EVENT_DB, path, (current) => {
+          (current as Record<string, unknown>).discarded = "1514";
+          return { commit: false };
+        }),
+      ).resolves.toMatchObject({ committed: false });
+      expect(await readPrizeStorage()).toEqual(before);
+      await expect(
+        transactEventOwnedPath(testEnv.EVENT_DB, path, (current) => ({
+          value: current,
+        })),
+      ).resolves.toMatchObject({ committed: true });
+      const after = await readPrizeStorage();
+      expect(after.selections).toEqual(before.selections);
+      expect(after.prizes).toEqual(before.prizes);
+      expect(after.events.find((row) => row.event_id === eventId)).toEqual({
+        ...before.events.find((row) => row.event_id === eventId),
+        revision: 2,
+      });
+    },
+  );
+
+  it.each(["events", "eventPrizeSelections"])(
+    "refreshes the %s snapshot after a concurrent sibling write",
+    async (root) => {
+      await seedPrizeRows();
+      const observed: unknown[] = [];
+      let changeSibling = false;
+      const db: EventD1Connection = {
+        prepare: (query) => testEnv.EVENT_DB.prepare(query),
+        async batch(statements) {
+          if (changeSibling) {
+            changeSibling = false;
+            await patchEventOwnedPaths(testEnv.EVENT_DB, {
+              [`${root}/${eventId}/sibling`]:
+                root === "events" ? { retained: true } : "1111",
+            });
+          }
+          return testEnv.EVENT_DB.batch(statements);
+        },
+      };
+      await transactEventOwnedPath(db, `${root}/${eventId}`, (current) => {
+        const value = current as Record<string, unknown>;
+        observed.push(value.sibling);
+        changeSibling = observed.length === 1;
+        value.transactionValue =
+          root === "events" ? { retained: true } : "1514";
+        return { value };
+      });
+      const sibling = root === "events" ? { retained: true } : "1111";
+      expect(observed).toEqual([undefined, sibling]);
+      const stored = await readEventSnapshot(testEnv.EVENT_DB, eventId);
+      expect(stored.revision).toBe(3);
+      expect(
+        root === "events" ? stored.event : stored.prizeSelections,
+      ).toMatchObject({
+        sibling,
+        transactionValue: root === "events" ? { retained: true } : "1514",
+      });
+    },
+  );
+
+  it.each(["events", "eventPrizeSelections"])(
+    "preserves an intent attached after a %s transaction read",
+    async (root) => {
+      await seedPrizeRows();
+      const before = await readEventSnapshot(testEnv.EVENT_DB, eventId);
+      const intent = {
+        schemaVersion: 1 as const,
+        transitionId: "transition-attached-after-read",
+        eventId,
+        expectedRevision: before.revision,
+        rtdbEffects: { "invites/pending": { eventId } },
+        canonicalUpdates: { [`events/${eventId}/status`]: "active" },
+        createdAtMs: 200,
+        updatedAtMs: 200,
+      };
+      let attachIntent = false;
+      let attached = false;
+      const db: EventD1Connection = {
+        prepare: (query) => testEnv.EVENT_DB.prepare(query),
+        async batch(statements) {
+          if (attachIntent && !attached) {
+            attached = true;
+            await createEventTransitionIntent(testEnv.EVENT_DB, intent);
+          }
+          return testEnv.EVENT_DB.batch(statements);
+        },
+      };
+      await expect(
+        transactEventOwnedPath(db, `${root}/${eventId}`, (current) => {
+          attachIntent = true;
+          const value = current as Record<string, unknown>;
+          value.transactionValue = root === "events" ? true : "1514";
+          return { value };
+        }),
+      ).rejects.toBeInstanceOf(EventD1Conflict);
+      expect(attached).toBe(true);
+      expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toEqual(
+        before,
+      );
+      expect(await listPendingEventTransitionIntents(testEnv.EVENT_DB)).toEqual(
+        [{ ...intent, attempts: 0 }],
+      );
+      expect(
+        await testEnv.EVENT_DB.prepare(
+          "SELECT pending_transition_id FROM event_records WHERE event_id = ?",
+        )
+          .bind(eventId)
+          .first("pending_transition_id"),
+      ).toBe(intent.transitionId);
+    },
+  );
+
   it("transacts one profile prize in one read despite a malformed sibling", async () => {
     const { otherEventId, otherAssignment } = await seedPrizeRows();
     await testEnv.EVENT_DB.prepare(

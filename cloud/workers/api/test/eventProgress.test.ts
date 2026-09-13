@@ -20,6 +20,58 @@ import {
   type EventProgressWorkflowParams,
 } from "../src/eventProgress.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+import {
+  SCHEDULED_EVENT_RECOVERY_PAGE_SIZE,
+  SCHEDULED_EVENT_RECOVERY_URGENT_LIMIT,
+  type EventScheduledRecoveryStore,
+  type ScheduledEventRecoveryCandidate,
+  type ScheduledEventRecoveryCursor,
+} from "../src/eventScheduledRecoveryD1.ts";
+
+function scheduledRecovery(
+  events: Record<string, { startAtMs: number; isSundayMons?: boolean }>,
+): EventScheduledRecoveryStore {
+  let cursor: ScheduledEventRecoveryCursor | null = null;
+  let revision = 0;
+  const rows = (): ScheduledEventRecoveryCandidate[] =>
+    Object.entries(events)
+      .map(([eventId, event]) => ({
+        cursor: { eventId, startAtMs: event.startAtMs },
+        event: {
+          eventId,
+          status: "scheduled" as const,
+          startAtMs: event.startAtMs,
+          isSundayMons: event.isSundayMons === true,
+        },
+      }))
+      .sort(
+        (left, right) =>
+          left.cursor.startAtMs - right.cursor.startAtMs ||
+          left.cursor.eventId.localeCompare(right.cursor.eventId),
+      );
+  return {
+    readCursor: async () => ({ cursor, revision }),
+    listUrgent: async (throughMs) =>
+      rows()
+        .filter((row) => row.cursor.startAtMs <= throughMs)
+        .slice(0, SCHEDULED_EVENT_RECOVERY_URGENT_LIMIT),
+    listPage: async (after) =>
+      rows()
+        .filter(
+          ({ cursor: key }) =>
+            !after ||
+            key.startAtMs > after.startAtMs ||
+            (key.startAtMs === after.startAtMs && key.eventId > after.eventId),
+        )
+        .slice(0, SCHEDULED_EVENT_RECOVERY_PAGE_SIZE + 1),
+    checkpoint: async (expected, next) => {
+      if (revision !== expected) return false;
+      cursor = next;
+      revision += 1;
+      return true;
+    },
+  };
+}
 
 function workflowEnvironment({
   status = "waiting",
@@ -61,7 +113,6 @@ function sweepRepository(
   const patches: Record<string, unknown>[] = [];
   const value: EventProgressSweepRepository = {
     readEvent: async () => null,
-    listEventsByStatus: async () => ({}),
     getStatePath: async (path) => {
       if (path === "eventProgressOutbox") return outbox;
       return null;
@@ -97,12 +148,9 @@ test("scheduled-event sweep discovers both announcements and retains their first
   let nowMs = 100_000;
   const records = new Map<string, unknown>();
   let creates = 0;
+  const recovery = scheduledRecovery({ [eventId]: event });
   const repository: EventProgressSweepRepository = {
     readEvent: async (id) => (id === eventId ? event : null),
-    listEventsByStatus: async (status) => {
-      assert.equal(status, "scheduled");
-      return { [eventId]: event };
-    },
     getStatePath: async (path) => {
       if (path === "eventProgressOutbox") return {};
       return records.get(path) ?? null;
@@ -117,6 +165,7 @@ test("scheduled-event sweep discovers both announcements and retains their first
     now: () => nowMs,
     repository,
     ratingRepository: null,
+    scheduledRecovery: recovery,
   });
   const plan = await buildEventPrizeAnnouncementPlan(eventId, event, nowMs);
   const reminder = await buildSundayMonsReminderPlan(eventId, event, nowMs);
@@ -136,6 +185,7 @@ test("scheduled-event sweep discovers both announcements and retains their first
     now: () => nowMs,
     repository,
     ratingRepository: null,
+    scheduledRecovery: recovery,
   });
   assert.deepEqual(
     records.get(`eventProgressOutbox/${plan.outboxId}`),
@@ -146,6 +196,309 @@ test("scheduled-event sweep discovers both announcements and retains their first
     reminder.outbox,
   );
   assert.equal(creates, 6);
+});
+
+test("scheduled recovery rotates beyond 1,000 events in bounded pages", async () => {
+  const events = Object.fromEntries(
+    Array.from({ length: 1_005 }, (_, index) => [
+      `event-${String(index).padStart(4, "0")}`,
+      { startAtMs: 50_000_000 },
+    ]),
+  );
+  const recovery = scheduledRecovery(events);
+  const environment = workflowEnvironment();
+  const create = environment.EVENT_PROGRESS_WORKFLOW.createBatch;
+  const seen = new Set<string>();
+  let count = 0;
+  environment.EVENT_PROGRESS_WORKFLOW.createBatch = async (items) => {
+    for (const item of items) {
+      seen.add(item.params!.eventId);
+      count += 1;
+    }
+    return create(items);
+  };
+  for (let page = 0; page < 11; page += 1) {
+    const before = count;
+    await sweepEventProgress(environment, {
+      now: () => 1_000,
+      repository: sweepRepository({}).value,
+      scheduledRecovery: recovery,
+      ratingRepository: null,
+    });
+    assert.equal(count - before, page === 10 ? 5 : 100);
+  }
+  assert.equal(seen.size, 1_005);
+  assert.deepEqual(await recovery.readCursor(), { cursor: null, revision: 11 });
+});
+
+test("urgent announcement deadlines are checked independently of the background cursor", async () => {
+  const nowMs = 1_000_000;
+  const eventId = "z3oj52Iiime";
+  const recovery = scheduledRecovery({
+    [eventId]: {
+      isSundayMons: true,
+      startAtMs: nowMs + 14_400_000 + 5 * 60_000,
+    },
+    distant: { startAtMs: 100_000_000 },
+  });
+  const started: string[] = [];
+  const observeStart = (row: ScheduledEventRecoveryCandidate) => ({
+    cursor: row.cursor,
+    get event() {
+      started.push(row.cursor.eventId);
+      return row.event;
+    },
+  });
+  const listUrgent = recovery.listUrgent;
+  const listPage = recovery.listPage;
+  recovery.listUrgent = async (throughMs) =>
+    (await listUrgent(throughMs)).map(observeStart);
+  recovery.listPage = async (after) =>
+    (await listPage(after)).map(observeStart);
+  await recovery.checkpoint(0, { eventId: "middle", startAtMs: 50_000_000 }, 0);
+  const environment = workflowEnvironment();
+  const create = environment.EVENT_PROGRESS_WORKFLOW.createBatch;
+  const created: Array<{ eventId: string; reason: string }> = [];
+  environment.EVENT_PROGRESS_WORKFLOW.createBatch = async (items) => {
+    for (const item of items) created.push(item.params!);
+    return create(items);
+  };
+  await sweepEventProgress(environment, {
+    now: () => nowMs,
+    repository: sweepRepository({}).value,
+    scheduledRecovery: recovery,
+    ratingRepository: null,
+  });
+  assert.deepEqual(
+    new Set(
+      created
+        .filter((plan) => plan.eventId === eventId)
+        .map((plan) => plan.reason),
+    ),
+    new Set([
+      "scheduled-start-reconciliation",
+      "event-prize-announcement",
+      "sunday-mons-reminder",
+    ]),
+  );
+  assert(created.some((plan) => plan.eventId === "distant"));
+  assert.deepEqual(started, [eventId, "distant"]);
+});
+
+test("recovery deduplicates urgent and background rows and bounds event concurrency", async () => {
+  const events = Object.fromEntries(
+    Array.from({ length: 25 }, (_, index) => [
+      `event-${String(index).padStart(4, "0")}`,
+      { startAtMs: 10_000 },
+    ]),
+  );
+  const recovery = scheduledRecovery(events);
+  const environment = workflowEnvironment();
+  const create = environment.EVENT_PROGRESS_WORKFLOW.createBatch;
+  const created: string[] = [];
+  let running = 0;
+  let maximum = 0;
+  environment.EVENT_PROGRESS_WORKFLOW.createBatch = async (items) => {
+    created.push(items[0].params!.eventId);
+    running += 1;
+    maximum = Math.max(maximum, running);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    running -= 1;
+    return create(items);
+  };
+  await sweepEventProgress(environment, {
+    now: () => 1_000,
+    repository: sweepRepository({}).value,
+    scheduledRecovery: recovery,
+    ratingRepository: null,
+  });
+  assert.equal(created.length, 25);
+  assert.equal(new Set(created).size, 25);
+  assert(maximum > 1 && maximum <= 10);
+});
+
+test("a failed or malformed event cannot block later recovery rows or cursor progress", async () => {
+  const events = Object.fromEntries(
+    Array.from({ length: 101 }, (_, index) => [
+      `event-${String(index).padStart(4, "0")}`,
+      { startAtMs: 50_000_000 },
+    ]),
+  );
+  const recovery = scheduledRecovery(events);
+  const listPage = recovery.listPage;
+  recovery.listPage = async (after) =>
+    (await listPage(after)).map((row) =>
+      row.cursor.eventId === "event-0001" ? { ...row, event: null } : row,
+    );
+  const attempted = new Set<string>();
+  const repository = sweepRepository({}, async (updates) => {
+    for (const value of Object.values(updates)) {
+      if (!value || typeof value !== "object" || !("eventId" in value))
+        continue;
+      const eventId = String(value.eventId);
+      attempted.add(eventId);
+      if (eventId === "event-0000") throw new Error("event-persistence-failed");
+    }
+  });
+  await assert.rejects(
+    sweepEventProgress(workflowEnvironment(), {
+      now: () => 1_000,
+      repository: repository.value,
+      scheduledRecovery: recovery,
+      ratingRepository: null,
+    }),
+    /scheduled-event-reconciliation-failed/,
+  );
+  assert.equal(attempted.size, 99);
+  assert(attempted.has("event-0099"));
+  assert.deepEqual(await recovery.readCursor(), {
+    cursor: { eventId: "event-0099", startAtMs: 50_000_000 },
+    revision: 1,
+  });
+  await sweepEventProgress(workflowEnvironment(), {
+    now: () => 1_000,
+    repository: repository.value,
+    scheduledRecovery: recovery,
+    ratingRepository: null,
+  });
+  assert(attempted.has("event-0100"));
+  assert.deepEqual(await recovery.readCursor(), { cursor: null, revision: 2 });
+  assert(events["event-0000"]);
+  assert.equal((await recovery.listPage(null))[0].cursor.eventId, "event-0000");
+});
+
+for (const method of ["readCursor", "listPage"] as const) {
+  test(
+    `urgent recovery proceeds while ${method} stalls and then fails`,
+    { timeout: 2_000 },
+    async () => {
+      const nowMs = 1_000_000;
+      const eventId = "z3oj52Iiime";
+      const recovery = scheduledRecovery({
+        [eventId]: {
+          isSundayMons: true,
+          startAtMs: nowMs + 14_400_000 + 30_000,
+        },
+      });
+      const dispatched = Promise.withResolvers<void>();
+      const environment = workflowEnvironment();
+      const create = environment.EVENT_PROGRESS_WORKFLOW.createBatch;
+      const reasons: string[] = [];
+      let checkpoints = 0;
+      environment.EVENT_PROGRESS_WORKFLOW.createBatch = async (items) => {
+        reasons.push(...items.map((item) => item.params!.reason));
+        if (reasons.length === 3) dispatched.resolve();
+        return create(items);
+      };
+      const failing = {
+        ...recovery,
+        [method]: async () => {
+          await dispatched.promise;
+          throw new Error(`${method}-failed`);
+        },
+        checkpoint: async () => {
+          checkpoints++;
+          return true;
+        },
+      };
+      await assert.rejects(
+        sweepEventProgress(environment, {
+          now: () => nowMs,
+          repository: sweepRepository({}).value,
+          scheduledRecovery: failing,
+          ratingRepository: null,
+        }),
+        (error: unknown) =>
+          error instanceof AggregateError &&
+          error.errors.some(
+            (cause: unknown) =>
+              cause instanceof Error && cause.message === `${method}-failed`,
+          ),
+      );
+      assert.deepEqual(
+        new Set(reasons),
+        new Set([
+          "scheduled-start-reconciliation",
+          "event-prize-announcement",
+          "sunday-mons-reminder",
+        ]),
+      );
+      assert.equal(checkpoints, 0);
+      assert.deepEqual(await recovery.readCursor(), {
+        cursor: null,
+        revision: 0,
+      });
+    },
+  );
+}
+
+test("background recovery continues after an urgent read failure without advancing the cursor", async () => {
+  const recovery = scheduledRecovery({ first: { startAtMs: 50_000_000 } });
+  let creates = 0;
+  await assert.rejects(
+    sweepEventProgress(workflowEnvironment({ onCreate: () => creates++ }), {
+      now: () => 1_000,
+      repository: sweepRepository({}).value,
+      scheduledRecovery: {
+        ...recovery,
+        listUrgent: async () => {
+          throw new Error("urgent-read-failed");
+        },
+      },
+      ratingRepository: null,
+    }),
+    /scheduled-event-reconciliation-failed/,
+  );
+  assert.equal(creates, 1);
+  assert.deepEqual(await recovery.readCursor(), { cursor: null, revision: 0 });
+});
+
+test("failed recovery queries and checkpoints preserve the cursor for replay", async () => {
+  const recovery = scheduledRecovery({ first: { startAtMs: 50_000_000 } });
+  const repository = sweepRepository({});
+  const environment = workflowEnvironment();
+  const create = environment.EVENT_PROGRESS_WORKFLOW.createBatch;
+  const created: string[] = [];
+  environment.EVENT_PROGRESS_WORKFLOW.createBatch = async (items) => {
+    created.push(items[0].id!);
+    return create(items);
+  };
+  for (const failing of [
+    {
+      ...recovery,
+      listPage: async () => {
+        throw new Error("list-failed");
+      },
+    },
+    {
+      ...recovery,
+      checkpoint: async () => {
+        throw new Error("checkpoint-failed");
+      },
+    },
+  ]) {
+    await assert.rejects(
+      sweepEventProgress(environment, {
+        now: () => 1_000,
+        repository: repository.value,
+        scheduledRecovery: failing,
+        ratingRepository: null,
+      }),
+    );
+    assert.deepEqual(await recovery.readCursor(), {
+      cursor: null,
+      revision: 0,
+    });
+  }
+  assert.equal(created.length, 1);
+  await sweepEventProgress(environment, {
+    now: () => 1_000,
+    repository: repository.value,
+    scheduledRecovery: recovery,
+    ratingRepository: null,
+  });
+  assert.equal(created.length, 2);
+  assert.equal(created[0], created[1]);
 });
 
 test("a failed concurrent dispatch keeps its sweep admitted until every other provider call settles", async () => {
@@ -248,10 +601,6 @@ test("both announcements survive slow start dispatch and all three jobs can fail
             : null;
     const repository: EventProgressSweepRepository = {
       readEvent: async (id) => (id === eventId ? event : null),
-      listEventsByStatus: async (status) => {
-        assert.equal(status, "scheduled");
-        return { [eventId]: event };
-      },
       getStatePath: async (path) =>
         path === "eventProgressOutbox" ? {} : (records.get(path) ?? null),
       patchStateRoot: async (updates) => {
@@ -285,6 +634,7 @@ test("both announcements survive slow start dispatch and all three jobs can fail
         now: () => nowMs,
         repository,
         ratingRepository: null,
+        scheduledRecovery: scheduledRecovery({ [eventId]: event }),
       });
     if (scenario === "slow-start") await run();
     else await assert.rejects(run(), /scheduled-event-reconciliation-failed/);

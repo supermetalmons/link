@@ -83,6 +83,18 @@ npm run publish:api:workflows -- --version-id <worker-version-id> --workflow mon
 
 This publication updates code for new instances and does not modify Queue delivery, Worker Cron, routes, or existing instances. Compatible releases preserve running instances on their original versions. A concrete incompatible state change requires the coordinated handoff described in its migration procedure.
 
+## Scheduled-event recovery cursor rollout
+
+Migration `0005_event_scheduled_recovery_cursor.sql` adds only an independent, seeded checkpoint table in `EVENT_DB`. It does not alter existing tables or canonical records, and previous Worker versions ignore it. Prepare the validated API candidate and affected smoke fixtures first, verify that this is the only pending event migration, then apply it before promotion:
+
+```sh
+npx wrangler d1 migrations list EVENT_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler d1 migrations apply EVENT_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler d1 execute EVENT_DB --remote --command "PRAGMA foreign_key_check; SELECT * FROM event_scheduled_recovery_cursor;" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+```
+
+Use the routine API promotion path with writes and Queues active. Publish both Workflow definitions when this release also changes their event/profile repository dependencies. Verify authenticated current/ended event reads, metadata/wager delivery, and the isolated gameplay lifecycle. Confirm checkpoint progress from a scheduled execution using bounded checks. Retain the additive table on rollback; do not reset canonical event records, outboxes, or Workflow instances.
+
 ## Wager settlement Queue rollout
 
 The settlement Queue split uses one compatible API release with unchanged wager payloads and no database migration. Keep writes and existing Queue delivery active. During preparation, inspect the two queue names and create only missing resources, then validate and upload the API candidate:

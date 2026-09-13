@@ -219,6 +219,13 @@ test("wager routes and preflight dispatch without touching identity or storage",
     "https://mons.link",
   );
   assert.equal(preflight.headers.get("Cache-Control"), "no-store");
+  const invalidPreflight = await handleInviteWagersRoute(
+    request({ method: "OPTIONS", path: "/invites/invite-one/wagers?extra=1" }),
+    h.env,
+    ctx,
+    h.dependencies,
+  );
+  assert.equal(invalidPreflight.status, 400);
   for (const method of ["POST", "PUT", "DELETE", "HEAD"]) {
     const response = await handleRequest(
       request({ method }),
@@ -687,6 +694,52 @@ test("rate limits return Retry-After without any source or room reads", async ()
     );
     assert.equal(h.calls.sources, 0);
     assert.equal(h.calls.reads, 0);
+  }
+});
+
+test("wagers validate access metadata before checking forbidden access", async () => {
+  for (const authenticated of [false, true]) {
+    const h = setup({
+      guestId: null,
+      passwordProtected: true,
+      caller: "outsider",
+    });
+    assert.equal(h.state.result.status, "ok");
+    h.state.result.metadata.snapshot.revision = -1;
+    const response = await handleInviteWagersRoute(
+      request({ authenticated }),
+      h.env,
+      ctx,
+      h.dependencies,
+    );
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), {
+      ok: false,
+      error: "unavailable",
+      message: "invite-wagers-unavailable",
+    });
+    assert.equal(h.calls.sockets.length, 0);
+  }
+});
+
+test("wagers pass through non-conflict room responses without another read", async () => {
+  for (const status of [400, 401, 429, 503]) {
+    const h = setup();
+    const rejection = new Response("admission failed", {
+      status,
+      headers: { "Retry-After": "30" },
+    });
+    h.dependencies.room!.fetch = async () => rejection;
+    const response = await handleInviteWagersRoute(
+      request({ socket: true }),
+      h.env,
+      ctx,
+      h.dependencies,
+    );
+    assert.equal(response, rejection);
+    assert.equal(response.headers.get("Retry-After"), "30");
+    assert.equal(await response.text(), "admission failed");
+    assert.equal(h.calls.reads, 1);
   }
 });
 

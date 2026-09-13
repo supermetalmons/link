@@ -25,6 +25,14 @@ import {
 } from "./eventRepository.ts";
 import { createEventMutationRepository } from "./eventMutationRepository.ts";
 import { scheduleEventAnnouncements } from "./eventPrizeAnnouncementSchedule.ts";
+import { EVENT_ANNOUNCEMENT_SPECS } from "./eventAnnouncementKinds.ts";
+import {
+  createEventScheduledRecoveryStore,
+  SCHEDULED_EVENT_RECOVERY_MARGIN_MS,
+  SCHEDULED_EVENT_RECOVERY_PAGE_SIZE,
+  type EventScheduledRecoveryStore,
+  type ScheduledEventRecoveryCandidate,
+} from "./eventScheduledRecoveryD1.ts";
 import {
   acquireEventWriteAdmission,
   EventWritesDisabled,
@@ -72,7 +80,7 @@ export type EventProgressWorkflowDependencies = {
 
 export type EventProgressSweepRepository = Pick<
   EventGameplayRepository,
-  "getStatePath" | "patchStateRoot" | "readEvent" | "listEventsByStatus"
+  "getStatePath" | "patchStateRoot" | "readEvent"
 >;
 
 export type EventProgressRatingRepository = Pick<
@@ -86,6 +94,7 @@ export type EventProgressSweepDependencies = {
   now?: () => number;
   ratingRepository?: EventProgressRatingRepository | null;
   repository?: EventProgressSweepRepository;
+  scheduledRecovery?: EventScheduledRecoveryStore;
 };
 
 export class InvalidEventProgressPayloadError extends Error {}
@@ -292,7 +301,7 @@ export async function parseEventProgressParams(
 
 async function withEventProgressDispatchAdmission(
   db: D1Database,
-  work: () => Promise<void>,
+  work: (admission: EventWriteAdmission) => Promise<void>,
 ): Promise<void> {
   let admission: EventWriteAdmission;
   try {
@@ -302,7 +311,7 @@ async function withEventProgressDispatchAdmission(
     throw error;
   }
   try {
-    await work();
+    await work(admission);
   } finally {
     let failureKind: string | null = null;
     try {
@@ -429,65 +438,113 @@ async function forEachConcurrent<T>(
 async function reconcileScheduledEvents(
   env: Env,
   repository: EventProgressSweepRepository,
+  recovery: EventScheduledRecoveryStore,
   now: () => number,
 ): Promise<void> {
-  const value = toRecord(await repository.listEventsByStatus("scheduled"));
-  if (!value) {
-    return;
-  }
   const discoveredAtMs = now();
-  await forEachConcurrent(
-    Object.entries(value),
-    EVENT_PROGRESS_SWEEP_CONCURRENCY,
-    async ([eventId, eventValue]) => {
-      const event = toRecord(eventValue);
-      const startAtMs = event?.startAtMs;
-      if (
-        !isSafeRecordKey(eventId) ||
-        typeof startAtMs !== "number" ||
-        !Number.isSafeInteger(startAtMs) ||
-        startAtMs < 0
-      ) {
-        return;
-      }
-      const results = await Promise.allSettled([
-        scheduleEventAnnouncements(
-          env,
-          repository,
-          eventId,
-          event,
-          discoveredAtMs,
-        ),
-        (async () => {
-          const plan = await buildEventProgressPlan(
-            {
-              eventId,
-              sourceKey: `start:${eventId}:${startAtMs}`,
-              reason: "scheduled-start-reconciliation",
-              runAtMs: startAtMs,
-            },
-            discoveredAtMs,
-          );
-          const existing = await repository.getStatePath(
-            `${EVENT_PROGRESS_OUTBOX_ROOT}/${plan.outboxId}`,
-          );
-          if (existing === null) {
-            await repository.patchStateRoot({
-              [`${EVENT_PROGRESS_OUTBOX_ROOT}/${plan.outboxId}`]: plan.outbox,
-            });
-          }
-          await dispatchOutboxPlan(env, repository, plan, now);
-        })(),
-      ]);
-      const failures = rejectedReasons(results);
-      if (failures.length > 0) {
-        throw new AggregateError(
-          failures,
-          "scheduled-event-reconciliation-failed",
-        );
-      }
-    },
+  const maxLeadMs = Math.max(
+    ...Object.values(EVENT_ANNOUNCEMENT_SPECS).map((spec) => spec.leadMs),
   );
+  const visited = new Set<string>();
+  const failures: unknown[] = [];
+  const recoverCandidate = async ({
+    cursor,
+    event,
+  }: ScheduledEventRecoveryCandidate) => {
+    const { eventId, startAtMs } = cursor;
+    if (visited.has(eventId)) return;
+    visited.add(eventId);
+    if (!event) {
+      console.error(
+        JSON.stringify({
+          event: "scheduled_event_recovery_invalid_record",
+          eventId,
+        }),
+      );
+      return;
+    }
+    const results = await Promise.allSettled([
+      scheduleEventAnnouncements(
+        env,
+        repository,
+        eventId,
+        event,
+        discoveredAtMs,
+      ),
+      (async () => {
+        const plan = await buildEventProgressPlan(
+          {
+            eventId,
+            sourceKey: `start:${eventId}:${startAtMs}`,
+            reason: "scheduled-start-reconciliation",
+            runAtMs: startAtMs,
+          },
+          discoveredAtMs,
+        );
+        const existing = await repository.getStatePath(
+          `${EVENT_PROGRESS_OUTBOX_ROOT}/${plan.outboxId}`,
+        );
+        if (existing === null) {
+          await repository.patchStateRoot({
+            [`${EVENT_PROGRESS_OUTBOX_ROOT}/${plan.outboxId}`]: plan.outbox,
+          });
+        }
+        await dispatchOutboxPlan(env, repository, plan, now);
+      })(),
+    ]);
+    const eventFailures = rejectedReasons(results);
+    if (eventFailures.length > 0) {
+      failures.push(...eventFailures);
+      console.error(
+        JSON.stringify({
+          event: "scheduled_event_recovery_failed",
+          eventId,
+        }),
+      );
+    }
+  };
+  const [urgent, background] = await Promise.allSettled([
+    (async () => {
+      const rows = await recovery.listUrgent(
+        discoveredAtMs + maxLeadMs + SCHEDULED_EVENT_RECOVERY_MARGIN_MS,
+      );
+      await forEachConcurrent(
+        rows,
+        EVENT_PROGRESS_SWEEP_CONCURRENCY,
+        recoverCandidate,
+      );
+    })(),
+    (async () => {
+      const snapshot = await recovery.readCursor();
+      return { snapshot, rows: await recovery.listPage(snapshot.cursor) };
+    })(),
+  ]);
+  if (urgent.status === "rejected") failures.push(urgent.reason);
+  if (background.status === "rejected") {
+    failures.push(background.reason);
+  } else {
+    const { snapshot, rows } = background.value;
+    const page = rows.slice(0, SCHEDULED_EVENT_RECOVERY_PAGE_SIZE);
+    await forEachConcurrent(
+      page,
+      EVENT_PROGRESS_SWEEP_CONCURRENCY,
+      recoverCandidate,
+    );
+    if (urgent.status === "fulfilled") {
+      const nextCursor =
+        rows.length > SCHEDULED_EVENT_RECOVERY_PAGE_SIZE
+          ? page[page.length - 1].cursor
+          : null;
+      try {
+        await recovery.checkpoint(snapshot.revision, nextCursor, now());
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "scheduled-event-reconciliation-failed");
+  }
 }
 
 async function recoverRatingEventProgress(
@@ -560,14 +617,15 @@ export async function sweepEventProgress(
   dependencies: EventProgressSweepDependencies = {},
 ): Promise<void> {
   await requireActiveDurableMatchState(env.PROFILE_GAMES_DB);
-  await withEventProgressDispatchAdmission(env.EVENT_DB, () =>
-    sweepAdmittedEventProgress(env, dependencies),
+  await withEventProgressDispatchAdmission(env.EVENT_DB, (admission) =>
+    sweepAdmittedEventProgress(env, dependencies, admission),
   );
 }
 
 async function sweepAdmittedEventProgress(
   env: Env,
   dependencies: EventProgressSweepDependencies,
+  admission: EventWriteAdmission,
 ): Promise<void> {
   const repository =
     dependencies.repository || createEventGameplayRepository(env);
@@ -605,7 +663,13 @@ async function sweepAdmittedEventProgress(
     ),
   ]);
   const reconciliationResults = await Promise.allSettled([
-    reconcileScheduledEvents(env, repository, now),
+    reconcileScheduledEvents(
+      env,
+      repository,
+      dependencies.scheduledRecovery ||
+        createEventScheduledRecoveryStore(env.EVENT_DB, admission),
+      now,
+    ),
     ...(ratingRepository
       ? [recoverRatingEventProgress(env, repository, ratingRepository, now)]
       : []),

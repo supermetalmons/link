@@ -110,7 +110,6 @@ async function seedOutbox(): Promise<{
     plan,
     repository: {
       readEvent: client.readEvent,
-      listEventsByStatus: client.listEventsByStatus,
       getStatePath: client.getPath,
       patchStateRoot: client.patchRoot,
     },

@@ -75,6 +75,7 @@ function setup({
   caller?: string;
 } = {}) {
   const calls = {
+    sources: 0,
     reads: 0,
     auth: 0,
     rates: [] as string[],
@@ -91,6 +92,7 @@ function setup({
       },
     } as Env,
     (inviteId) => {
+      calls.sources++;
       assert.equal(inviteId, snapshot.inviteId);
       return { hostId: snapshot.hostId, guestId: snapshot.guestId };
     },
@@ -159,6 +161,18 @@ test("metadata preflight and routing precede auth and storage", async () => {
   assert.equal(response.status, 204);
   assert.equal(state.calls.reads, 0);
   assert.equal(state.calls.auth, 0);
+  const invalidPreflight = await handleInviteMetadataRoute(
+    request({
+      method: "OPTIONS",
+      path: "/invites/invite-one/metadata?extra=1",
+    }),
+    state.env,
+    ctx,
+    state.dependencies,
+  );
+  assert.equal(invalidPreflight.status, 400);
+  assert.equal(state.calls.sources, 0);
+  assert.equal(state.calls.rates.length, 0);
   assert.equal(
     (
       await handleInviteMetadataRoute(
@@ -333,7 +347,12 @@ test("metadata upgrade strips credentials and binds admission to authorized snap
       socket: true,
       authenticated: true,
       headers: {
+        Authorization: `Bearer ${token}`,
+        Cookie: "private-session",
         "X-Mons-Metadata-Role": "spectator",
+        "X-Mons-Metadata-Actor": "intruder",
+        "X-Mons-Metadata-Revision": "999",
+        "X-Mons-Metadata-Protected": "0",
         "X-Mons-Session-Id": "untrusted",
         "X-Mons-Session-Expires-At": "9999999999999",
       },
@@ -344,39 +363,129 @@ test("metadata upgrade strips credentials and binds admission to authorized snap
   );
   assert.equal(response.status, 200);
   const forwarded = state.calls.sockets[0];
-  assert.equal(forwarded.headers.get("Authorization"), null);
-  assert.equal(
-    forwarded.headers.get("Sec-WebSocket-Protocol"),
-    INVITE_METADATA_SOCKET_PROTOCOL,
-  );
-  assert.equal(forwarded.headers.get("X-Mons-Metadata-Role"), "host");
-  assert.equal(forwarded.headers.get("X-Mons-Metadata-Actor"), "host-login");
-  assert.equal(forwarded.headers.get("X-Mons-Metadata-Authenticated"), "1");
-  assert.equal(forwarded.headers.get("X-Mons-Metadata-Revision"), "1");
-  assert.equal(forwarded.headers.get("X-Mons-Metadata-Protected"), "1");
-  assert.equal(forwarded.headers.get("X-Mons-Session-Id"), state.identity.sid);
-  assert.equal(
-    forwarded.headers.get("X-Mons-Session-Expires-At"),
-    String(state.identity.authExpiresAtMs),
-  );
+  assert.equal(forwarded.url, "https://reactions.internal/metadata/socket");
+  assert.deepEqual(Object.fromEntries(forwarded.headers), {
+    "sec-websocket-protocol": INVITE_METADATA_SOCKET_PROTOCOL,
+    upgrade: "websocket",
+    "x-mons-session-id": state.identity.sid,
+    "x-mons-session-expires-at": String(state.identity.authExpiresAtMs),
+    "x-mons-metadata-actor": "host-login",
+    "x-mons-metadata-authenticated": "1",
+    "x-mons-metadata-invite": "invite-one",
+    "x-mons-metadata-ip": "192.0.2.1",
+    "x-mons-metadata-protected": "1",
+    "x-mons-metadata-revision": "1",
+    "x-mons-metadata-role": "host",
+  });
 });
 
-test("changed admission rechecks source and access once, with a bounded failure", async () => {
-  const state = setup();
-  state.dependencies.room!.fetch = async () =>
-    new Response("changed", { status: 409 });
-  assert.equal(
-    (
-      await handleInviteMetadataRoute(
-        request({ socket: true }),
-        state.env,
-        ctx,
-        state.dependencies,
-      )
-    ).status,
-    503,
+test("metadata admission retries fresh revisions twice and cancels rejected bodies", async () => {
+  for (const finalStatus of [200, 409]) {
+    const snapshot = { ...initialSnapshot };
+    const state = setup({ snapshot });
+    let canceled = 0;
+    state.dependencies.room!.fetch = async (incoming) => {
+      state.calls.sockets.push(incoming);
+      const attempt = state.calls.sockets.length;
+      assert.equal(
+        incoming.headers.get("X-Mons-Metadata-Revision"),
+        String(attempt),
+      );
+      if (attempt === 2 && finalStatus === 200) return new Response("upgrade");
+      snapshot.revision++;
+      return new Response(
+        new ReadableStream({
+          cancel() {
+            canceled++;
+          },
+        }),
+        { status: 409 },
+      );
+    };
+    const response = await handleInviteMetadataRoute(
+      request({ socket: true, authenticated: true }),
+      state.env,
+      ctx,
+      state.dependencies,
+    );
+    assert.equal(response.status, finalStatus === 200 ? 200 : 503);
+    assert.equal(state.calls.auth, 1);
+    assert.equal(state.calls.sources, 1);
+    assert.deepEqual(state.calls.rates, [
+      "metadata:connect:identity:host-login",
+    ]);
+    assert.equal(state.calls.reads, 2);
+    assert.equal(state.calls.sockets.length, 2);
+    assert.equal(canceled, finalStatus === 200 ? 1 : 2);
+  }
+});
+
+test("metadata admission retry rechecks changed access before another upgrade", async () => {
+  const snapshot = { ...initialSnapshot };
+  const state = setup({
+    snapshot,
+    passwordProtected: true,
+    caller: "outsider",
+  });
+  state.dependencies.room!.fetch = async (incoming) => {
+    state.calls.sockets.push(incoming);
+    snapshot.guestId = null;
+    snapshot.revision++;
+    return new Response("changed", { status: 409 });
+  };
+  const response = await handleInviteMetadataRoute(
+    request({ socket: true, authenticated: true }),
+    state.env,
+    ctx,
+    state.dependencies,
   );
+  assert.equal(response.status, 403);
   assert.equal(state.calls.reads, 2);
+  assert.equal(state.calls.sockets.length, 1);
+});
+
+test("metadata checks forbidden access before validating the response snapshot", async () => {
+  for (const authenticated of [false, true]) {
+    const state = setup({
+      snapshot: { ...initialSnapshot, guestId: null, revision: -1 },
+      passwordProtected: true,
+      caller: "outsider",
+    });
+    const response = await handleInviteMetadataRoute(
+      request({ authenticated }),
+      state.env,
+      ctx,
+      state.dependencies,
+    );
+    assert.equal(response.status, 403);
+    assert.deepEqual(await response.json(), {
+      ok: false,
+      error: "permission-denied",
+      message: "permission-denied",
+    });
+    assert.equal(state.calls.sockets.length, 0);
+  }
+});
+
+test("metadata passes through non-conflict room responses without another read", async () => {
+  for (const status of [400, 401, 429, 503]) {
+    const state = setup();
+    const rejection = new Response("admission failed", {
+      status,
+      headers: { "Retry-After": "30" },
+    });
+    state.dependencies.room!.fetch = async () => rejection;
+    const response = await handleInviteMetadataRoute(
+      request({ socket: true }),
+      state.env,
+      ctx,
+      state.dependencies,
+    );
+    assert.equal(response, rejection);
+    assert.equal(response.headers.get("Retry-After"), "30");
+    assert.equal(await response.text(), "admission failed");
+    assert.equal(state.calls.reads, 1);
+  }
 });
 
 test("metadata rejects malformed paths, origins, protocols and credentials before reading", async () => {
