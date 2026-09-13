@@ -22,6 +22,8 @@ const EVENT_STATUSES = new Set(["scheduled", "active", "ended", "dismissed"]);
 const UTF8_ENCODER = new TextEncoder();
 
 export type EventD1Connection = Pick<D1Database, "batch" | "prepare">;
+export type ConditionalSnapshot<T> =
+  { notModified: true; revision: number } | { notModified: false; snapshot: T };
 export type EventStorageMode = "frozen" | "d1";
 
 export type EventRuntimeControl = {
@@ -95,7 +97,7 @@ export class EventWritesDisabled extends EventD1Failure {
 type EventRow = {
   event_id: string;
   pending_transition_id: string | null;
-  record_json: string;
+  record_json: string | null;
   revision: number;
   start_at_ms: number;
   status: string;
@@ -455,41 +457,73 @@ export async function readEventSnapshot(
   db: EventD1Connection,
   eventId: string,
 ): Promise<EventSnapshot> {
+  const result = await readEventSnapshotIfChanged(db, eventId);
+  if (result.notModified) throw new EventD1Failure();
+  return result.snapshot;
+}
+
+export async function readEventSnapshotIfChanged(
+  db: EventD1Connection,
+  eventId: string,
+  knownRevision: number | null = null,
+): Promise<ConditionalSnapshot<EventSnapshot>> {
   const normalizedEventId = exactKey(eventId);
   if (!normalizedEventId) throw new EventD1Failure("invalid-event-id");
+  if (knownRevision !== null) safeInteger(knownRevision);
   const results = await db.batch([
     db
       .prepare(
         `SELECT event_id, status, start_at_ms, updated_at_ms, revision,
-                pending_transition_id, record_json
+                pending_transition_id,
+                CASE WHEN revision = ? THEN NULL ELSE record_json END AS record_json
          FROM event_records WHERE event_id = ?`,
       )
-      .bind(normalizedEventId),
+      .bind(knownRevision, normalizedEventId),
     db
       .prepare(
         `SELECT profile_id, prize_id FROM event_prize_selections
-         WHERE event_id = ? ORDER BY profile_id`,
+         WHERE event_id = CASE WHEN EXISTS (
+           SELECT 1 FROM event_records WHERE event_id = ? AND revision = ?
+         ) THEN NULL ELSE ? END ORDER BY profile_id`,
       )
-      .bind(normalizedEventId),
+      .bind(normalizedEventId, knownRevision, normalizedEventId),
   ]);
   const row = results[0].results[0] as EventRow | undefined;
   if (!row) {
+    if (knownRevision === 0) return { notModified: true, revision: 0 };
     return {
-      event: null,
-      eventId: normalizedEventId,
-      prizeSelections: {},
-      revision: 0,
+      notModified: false,
+      snapshot: {
+        event: null,
+        eventId: normalizedEventId,
+        prizeSelections: {},
+        revision: 0,
+      },
     };
+  }
+  if (knownRevision !== null && row.revision === knownRevision) {
+    if (
+      exactKey(row.event_id) !== normalizedEventId ||
+      !EVENT_STATUSES.has(row.status)
+    ) {
+      throw new EventD1Failure("event-row-mismatch");
+    }
+    safeInteger(row.start_at_ms);
+    safeInteger(row.updated_at_ms);
+    return { notModified: true, revision: safeInteger(row.revision, 1) };
   }
   const state = parseEventRow(row);
   return {
-    event: state.current!,
-    eventId: normalizedEventId,
-    prizeSelections: selectionsFromRows(
-      normalizedEventId,
-      results[1].results as Array<{ prize_id: string; profile_id: string }>,
-    ),
-    revision: state.revision,
+    notModified: false,
+    snapshot: {
+      event: state.current!,
+      eventId: normalizedEventId,
+      prizeSelections: selectionsFromRows(
+        normalizedEventId,
+        results[1].results as Array<{ prize_id: string; profile_id: string }>,
+      ),
+      revision: state.revision,
+    },
   };
 }
 
@@ -528,16 +562,30 @@ export async function readProfileEventPrizes(
   db: EventD1Connection,
   profileId: string,
 ): Promise<ProfileEventPrizeSnapshot> {
+  const result = await readProfileEventPrizesIfChanged(db, profileId);
+  if (result.notModified) throw new EventD1Failure();
+  return result.snapshot;
+}
+
+export async function readProfileEventPrizesIfChanged(
+  db: EventD1Connection,
+  profileId: string,
+  knownRevision: number | null = null,
+): Promise<ConditionalSnapshot<ProfileEventPrizeSnapshot>> {
   const normalizedProfileId = exactKey(profileId);
   if (!normalizedProfileId) throw new EventD1Failure("invalid-profile-id");
+  if (knownRevision !== null) safeInteger(knownRevision);
   const results = await db.batch([
     db
       .prepare(
         `SELECT profile_id, event_id, assignment_json
          FROM profile_event_prizes
-         WHERE profile_id = ? ORDER BY event_id`,
+         WHERE profile_id = CASE WHEN EXISTS (
+           SELECT 1 FROM profile_event_prize_revisions
+           WHERE profile_id = ? AND revision = ?
+         ) THEN NULL ELSE ? END ORDER BY event_id`,
       )
-      .bind(normalizedProfileId),
+      .bind(normalizedProfileId, knownRevision, normalizedProfileId),
     db
       .prepare(
         `SELECT revision FROM profile_event_prize_revisions
@@ -545,6 +593,11 @@ export async function readProfileEventPrizes(
       )
       .bind(normalizedProfileId),
   ]);
+  const revisionRow = results[1].results[0] as { revision: number } | undefined;
+  const revision = revisionRow ? safeInteger(revisionRow.revision, 1) : 0;
+  if (revisionRow && knownRevision === revision) {
+    return { notModified: true, revision };
+  }
   const prizes: Record<string, EventPrizeAssignmentRecord> = {};
   for (const row of results[0].results as AssignmentRow[]) {
     prizes[row.event_id] = parseStoredEventPrizeAssignment(
@@ -553,11 +606,10 @@ export async function readProfileEventPrizes(
       decodeJson(row.assignment_json),
     );
   }
-  const revisionRow = results[1].results[0] as { revision: number } | undefined;
+  if (knownRevision === revision) return { notModified: true, revision };
   return {
-    prizes,
-    profileId: normalizedProfileId,
-    revision: revisionRow ? safeInteger(revisionRow.revision, 1) : 0,
+    notModified: false,
+    snapshot: { prizes, profileId: normalizedProfileId, revision },
   };
 }
 

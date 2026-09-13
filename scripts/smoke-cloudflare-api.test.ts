@@ -196,6 +196,8 @@ const SMOKE_EVENTS = {
   endedId: "FRkdorMWaYW",
   selectionPrizeId: "1092",
 };
+const EVENT_SMOKE_BOOKMARK =
+  "mons-d1-v1:00000000-0000-4000-8000-000000000001:bookmark";
 const EVENT_READ_CORS_HEADERS = {
   "Access-Control-Allow-Headers":
     "Authorization, Content-Type, If-None-Match, X-D1-Bookmark",
@@ -860,7 +862,7 @@ test("smokes public, unauthenticated, and internal routes", async (t) => {
           headers: {
             ...EVENT_READ_CORS_HEADERS,
             ETag: 'W/"event-snapshot"',
-            "X-D1-Bookmark": "bookmark",
+            "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
             "Cache-Control": "no-store",
           },
         });
@@ -905,7 +907,7 @@ test("smokes public, unauthenticated, and internal routes", async (t) => {
         {
           ...EVENT_READ_CORS_HEADERS,
           ETag: 'W/"event-snapshot"',
-          "X-D1-Bookmark": "bookmark",
+          "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
         },
       );
     }
@@ -916,7 +918,7 @@ test("smokes public, unauthenticated, and internal routes", async (t) => {
           headers: {
             ...EVENT_READ_CORS_HEADERS,
             ETag: 'W/"profile-prizes"',
-            "X-D1-Bookmark": "bookmark",
+            "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
             "Cache-Control": "no-store",
           },
         });
@@ -947,7 +949,7 @@ test("smokes public, unauthenticated, and internal routes", async (t) => {
         {
           ...EVENT_READ_CORS_HEADERS,
           ETag: 'W/"profile-prizes"',
-          "X-D1-Bookmark": "bookmark",
+          "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
         },
       );
     }
@@ -1497,7 +1499,7 @@ test("requires conditional event snapshots to return cache metadata", async () =
       {
         ...EVENT_READ_CORS_HEADERS,
         ETag: 'W/"event"',
-        "X-D1-Bookmark": "bookmark",
+        "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
       },
     ),
     new Response(null, {
@@ -1531,7 +1533,7 @@ test("allows live prize changes but requires a stable cutover prize read", async
   const headers = {
     ...EVENT_READ_CORS_HEADERS,
     ETag: 'W/"event"',
-    "X-D1-Bookmark": "bookmark",
+    "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
   };
   const createFetch = (): typeof fetch => async (input, init) => {
     const url = String(input);
@@ -1622,8 +1624,13 @@ test("verifies an ended selection while still requiring a current snapshot", asy
   const headers = {
     ...EVENT_READ_CORS_HEADERS,
     ETag: 'W/"event"',
-    "X-D1-Bookmark": "bookmark",
+    "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
     "Cache-Control": "no-store",
+  };
+  const endedHeaders = {
+    ...headers,
+    ETag: 'W/"ended-event"',
+    "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK + "-ended",
   };
   for (const scenario of [
     {
@@ -1640,6 +1647,7 @@ test("verifies an ended selection while still requiring a current snapshot", asy
     },
   ]) {
     const requestedEvents: string[] = [];
+    let conditionalEndedReads = 0;
     const smoke = smokeEventReads(
       "https://api.mons.link",
       AUTH_TOKEN,
@@ -1650,10 +1658,35 @@ test("verifies an ended selection while still requiring a current snapshot", asy
           if (init?.method === "OPTIONS") {
             return new Response(null, { status: 204, headers });
           }
-          if (new Headers(init?.headers).has("If-None-Match")) {
+          const requestHeaders = new Headers(init?.headers);
+          const url = new URL(String(input));
+          if (requestHeaders.has("If-None-Match")) {
+            if (url.searchParams.get("eventId") === events.endedId) {
+              conditionalEndedReads++;
+              assert.equal(init?.method, "GET");
+              assert.equal(
+                requestHeaders.get("Authorization"),
+                `Bearer ${AUTH_TOKEN}`,
+              );
+              assert.equal(requestHeaders.get("Origin"), "https://mons.link");
+              assert.equal(
+                requestHeaders.get("If-None-Match"),
+                endedHeaders.ETag,
+              );
+              assert.equal(
+                requestHeaders.get("X-D1-Bookmark"),
+                endedHeaders["X-D1-Bookmark"],
+              );
+              return new Response(null, {
+                status: 304,
+                headers: {
+                  ...endedHeaders,
+                  "X-D1-Bookmark": endedHeaders["X-D1-Bookmark"] + "-advanced",
+                },
+              });
+            }
             return new Response(null, { status: 304, headers });
           }
-          const url = new URL(String(input));
           if (url.pathname === "/events/prizes") {
             return json(
               {
@@ -1690,7 +1723,7 @@ test("verifies an ended selection while still requiring a current snapshot", asy
                   : {},
             },
             200,
-            headers,
+            eventId === events.endedId ? endedHeaders : headers,
           );
         },
         randomState: () => "abcdefghijklmnopqrstuvwx",
@@ -1699,6 +1732,7 @@ test("verifies an ended selection while still requiring a current snapshot", asy
     );
     if (scenario.valid) {
       await smoke;
+      assert.equal(conditionalEndedReads, 1);
       assert.deepEqual(requestedEvents.slice(-2), [
         events.currentId,
         events.endedId,
@@ -1708,7 +1742,135 @@ test("verifies an ended selection while still requiring a current snapshot", asy
         smoke,
         /Required event snapshot smoke response was invalid/,
       );
+      assert.equal(conditionalEndedReads, 0);
     }
+  }
+});
+
+test("rejects invalid conditional reads of the required ended event", async () => {
+  const headers = {
+    ...EVENT_READ_CORS_HEADERS,
+    ETag: 'W/"event"',
+    "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
+    "Cache-Control": "no-store",
+  };
+  const assignment = {
+    eventId: SMOKE_EVENTS.endedId,
+    profileId: SMOKE_PROFILE.profileId,
+    place: 1,
+    prizeId: SMOKE_EVENTS.assignedPrizeId,
+    assignedAtMs: 1,
+  };
+  const invalidResponses = [
+    { headers, status: 200, pattern: /returned 200/ },
+    {
+      headers,
+      body: "unexpected",
+      pattern: /Required conditional event snapshot smoke response was invalid/,
+    },
+    ...[
+      { ETag: 'W/"different-event"' },
+      { ETag: "" },
+      { "X-D1-Bookmark": "" },
+      { "X-D1-Bookmark": "unscoped-bookmark" },
+      {
+        "X-D1-Bookmark":
+          "mons-d1-v1:00000000-0000-4000-8000-000000000002:bookmark",
+      },
+      {
+        "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK.replace(
+          ":bookmark",
+          ":first-primary",
+        ),
+      },
+    ].map((overrides) => ({
+      headers: { ...headers, ...overrides },
+      pattern: /Required conditional event snapshot smoke response was invalid/,
+    })),
+    ...[
+      { "Access-Control-Allow-Origin": "" },
+      { "Access-Control-Expose-Headers": "ETag" },
+    ].map((overrides) => ({
+      headers: { ...headers, ...overrides },
+      pattern: /Event CORS smoke failed/,
+    })),
+  ];
+  for (const invalid of invalidResponses) {
+    let conditionalEndedReads = 0;
+    await assert.rejects(
+      smokeEventReads(
+        "https://api.mons.link",
+        AUTH_TOKEN,
+        SMOKE_PROFILE.profileId,
+        SMOKE_EVENTS,
+        {
+          fetch: async (input, init) => {
+            if (init?.method === "OPTIONS") {
+              return new Response(null, { status: 204, headers });
+            }
+            const url = new URL(String(input));
+            const eventId = url.searchParams.get("eventId") || "";
+            if (new Headers(init?.headers).has("If-None-Match")) {
+              if (eventId !== SMOKE_EVENTS.endedId) {
+                return new Response(null, { status: 304, headers });
+              }
+              conditionalEndedReads++;
+              const body = "body" in invalid ? invalid.body : null;
+              const response = new Response(body, {
+                status: body || "status" in invalid ? 200 : 304,
+                headers: invalid.headers,
+              });
+              if (body)
+                Object.defineProperty(response, "status", { value: 304 });
+              return response;
+            }
+            if (url.pathname === "/events/prizes") {
+              return json(
+                {
+                  ok: true,
+                  profileId: SMOKE_PROFILE.profileId,
+                  revision: 1,
+                  prizes: { [SMOKE_EVENTS.endedId]: assignment },
+                },
+                200,
+                headers,
+              );
+            }
+            const event =
+              eventId === SMOKE_EVENTS.currentId
+                ? { eventId, status: "active" }
+                : eventId === SMOKE_EVENTS.endedId
+                  ? {
+                      eventId,
+                      status: "ended",
+                      prizeAssignments: { 1: assignment },
+                    }
+                  : null;
+            return json(
+              {
+                ok: true,
+                eventId,
+                revision: event ? 1 : 0,
+                event,
+                prizeSelections:
+                  eventId === SMOKE_EVENTS.currentId
+                    ? {
+                        [SMOKE_PROFILE.profileId]:
+                          SMOKE_EVENTS.selectionPrizeId,
+                      }
+                    : {},
+              },
+              200,
+              headers,
+            );
+          },
+          randomState: () => "abcdefghijklmnopqrstuvwx",
+          log: () => undefined,
+        },
+      ),
+      invalid.pattern,
+    );
+    assert.equal(conditionalEndedReads, 1);
   }
 });
 
@@ -1716,7 +1878,7 @@ test("requires the ended event aggregate to contain the profile prize", async ()
   const eventHeaders = {
     ...EVENT_READ_CORS_HEADERS,
     ETag: 'W/"event"',
-    "X-D1-Bookmark": "bookmark",
+    "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
   };
   const missingEventId = "smoke-abcdefghijklmnopqrstuvwx";
   const responses = [
@@ -2223,7 +2385,7 @@ test("accepts an empty authenticated navigation projection", async () => {
               headers: {
                 ...EVENT_READ_CORS_HEADERS,
                 ETag: 'W/"event-snapshot"',
-                "X-D1-Bookmark": "bookmark",
+                "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
                 "Cache-Control": "no-store",
               },
             });
@@ -2240,7 +2402,7 @@ test("accepts an empty authenticated navigation projection", async () => {
             {
               ...EVENT_READ_CORS_HEADERS,
               ETag: 'W/"event-snapshot"',
-              "X-D1-Bookmark": "bookmark",
+              "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
             },
           );
         }
@@ -2251,7 +2413,7 @@ test("accepts an empty authenticated navigation projection", async () => {
               headers: {
                 ...EVENT_READ_CORS_HEADERS,
                 ETag: 'W/"profile-prizes"',
-                "X-D1-Bookmark": "bookmark",
+                "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
                 "Cache-Control": "no-store",
               },
             });
@@ -2267,7 +2429,7 @@ test("accepts an empty authenticated navigation projection", async () => {
             {
               ...EVENT_READ_CORS_HEADERS,
               ETag: 'W/"profile-prizes"',
-              "X-D1-Bookmark": "bookmark",
+              "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
             },
           );
         }

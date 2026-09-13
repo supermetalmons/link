@@ -17,8 +17,9 @@ import {
 } from "./authHttp.ts";
 import {
   readEventRuntimeControl,
-  readEventSnapshot,
-  readProfileEventPrizes,
+  readEventSnapshotIfChanged,
+  readProfileEventPrizesIfChanged,
+  type ConditionalSnapshot,
 } from "./eventD1.ts";
 import {
   verifySessionRequest,
@@ -67,6 +68,20 @@ function etag(
   return `W/"${kind}-${encodeURIComponent(id || "none")}-${revision}"`;
 }
 
+function knownRevision(
+  header: string | null,
+  kind: "event-snapshot" | "profile-event-prizes",
+  id: string,
+): number | null {
+  const value = header?.trim() || "";
+  const match = /-(0|[1-9][0-9]*)"$/.exec(value);
+  if (!match) return null;
+  const revision = Number(match[1]);
+  return Number.isSafeInteger(revision) && etag(kind, id, revision) === value
+    ? revision
+    : null;
+}
+
 function readHeaders(
   corsHeaders: Record<string, string>,
   valueEtag: string,
@@ -110,33 +125,48 @@ async function callerProfileId(
 async function readEventResponse(
   session: D1DatabaseSession,
   eventId: string,
-): Promise<EventSnapshotResponse> {
+  revision: number | null,
+): Promise<ConditionalSnapshot<EventSnapshotResponse>> {
+  const result = await readEventSnapshotIfChanged(session, eventId, revision);
+  if (result.notModified) return result;
   const candidate: unknown = {
     ok: true,
-    ...(await readEventSnapshot(session, eventId)),
+    ...result.snapshot,
   };
   if (!isEventSnapshotResponse(candidate)) {
     throw new AuthApiFailure(503, "unavailable", "event-data-invalid");
   }
-  return candidate;
+  return { notModified: false, snapshot: candidate };
 }
 
 async function readPrizeResponse(
   session: D1DatabaseSession,
   profileId: string | null,
-): Promise<ProfileEventPrizesResponse> {
+  revision: number | null,
+): Promise<ConditionalSnapshot<ProfileEventPrizesResponse>> {
   if (!profileId) {
     await readEventRuntimeControl(session);
-    return { ok: true, profileId: null, revision: 0, prizes: {} };
+    return revision === 0
+      ? { notModified: true, revision: 0 }
+      : {
+          notModified: false,
+          snapshot: { ok: true, profileId: null, revision: 0, prizes: {} },
+        };
   }
+  const result = await readProfileEventPrizesIfChanged(
+    session,
+    profileId,
+    revision,
+  );
+  if (result.notModified) return result;
   const candidate: unknown = {
     ok: true,
-    ...(await readProfileEventPrizes(session, profileId)),
+    ...result.snapshot,
   };
   if (!isProfileEventPrizesResponse(candidate)) {
     throw new AuthApiFailure(503, "unavailable", "event-prizes-invalid");
   }
-  return candidate;
+  return { notModified: false, snapshot: candidate };
 }
 
 export async function handleEventReadRoute(
@@ -173,33 +203,52 @@ export async function handleEventReadRoute(
         bookmarkEpoch,
       ),
     );
-    let body: EventSnapshotResponse | ProfileEventPrizesResponse;
+    let result: ConditionalSnapshot<
+      EventSnapshotResponse | ProfileEventPrizesResponse
+    >;
     let valueEtag: string;
+    const conditionalHeader = request.headers.get("If-None-Match");
     if (url.pathname === EVENT_SNAPSHOT_PATH) {
       const eventId = safeKey(url.searchParams.get("eventId") || "");
       if (!eventId) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-event-id");
       }
-      body = await readEventResponse(session, eventId);
-      valueEtag = etag("event-snapshot", eventId, body.revision);
+      result = await readEventResponse(
+        session,
+        eventId,
+        knownRevision(conditionalHeader, "event-snapshot", eventId),
+      );
+      valueEtag = etag(
+        "event-snapshot",
+        eventId,
+        result.notModified ? result.revision : result.snapshot.revision,
+      );
     } else if (url.pathname === PROFILE_EVENT_PRIZES_PATH) {
       const profileId = await callerProfileId(repository, identity);
-      body = await readPrizeResponse(session, profileId);
+      result = await readPrizeResponse(
+        session,
+        profileId,
+        knownRevision(
+          conditionalHeader,
+          "profile-event-prizes",
+          profileId || "none",
+        ),
+      );
       valueEtag = etag(
         "profile-event-prizes",
-        "profileId" in body ? body.profileId || "none" : "none",
-        body.revision,
+        profileId || "none",
+        result.notModified ? result.revision : result.snapshot.revision,
       );
     } else {
       throw new AuthApiFailure(404, "not-found", "not-found");
     }
-    assertBounded(body);
+    if (!result.notModified) assertBounded(result.snapshot);
     const bookmark = scopeEventBookmark(session.getBookmark(), bookmarkEpoch);
     const headers = readHeaders(corsHeaders, valueEtag, bookmark);
-    if (request.headers.get("If-None-Match")?.trim() === valueEtag) {
+    if (result.notModified) {
       return notModified(headers);
     }
-    return authJsonResponse(body, 200, headers);
+    return authJsonResponse(result.snapshot, 200, headers);
   } catch (error) {
     const failure =
       error instanceof AuthApiFailure

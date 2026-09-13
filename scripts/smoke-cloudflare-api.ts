@@ -551,6 +551,17 @@ function assertEventReadCors(response: Response): void {
   }
 }
 
+function eventBookmarkScope(value: string | null): string | null {
+  const match = value?.match(
+    /^(mons-d1-v1:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}:)([A-Za-z0-9._~+/=-]+)$/i,
+  );
+  return match &&
+    match[2] !== "first-primary" &&
+    match[2] !== "first-unconstrained"
+    ? match[1]
+    : null;
+}
+
 async function smokeEventReadPreflight(
   url: string,
   dependencies: Dependencies,
@@ -840,6 +851,38 @@ async function smokeEventReads(
       !result.response.headers.get(EVENT_BOOKMARK_HEADER)
     ) {
       throw new Error("Required event snapshot smoke response was invalid.");
+    }
+    if (expectedStatus === "ended") {
+      const fixtureEtag = result.response.headers.get("ETag") || "";
+      const fixtureBookmark =
+        result.response.headers.get(EVENT_BOOKMARK_HEADER) || "";
+      const conditional = await request(
+        fixtureUrl.href,
+        {
+          method: "GET",
+          headers: {
+            ...headers,
+            "If-None-Match": fixtureEtag,
+            [EVENT_BOOKMARK_HEADER]: fixtureBookmark,
+          },
+        },
+        304,
+        dependencies,
+      );
+      assertEventReadCors(conditional.response);
+      const scope = eventBookmarkScope(fixtureBookmark);
+      if (
+        conditional.body !== "" ||
+        conditional.response.headers.get("ETag") !== fixtureEtag ||
+        !scope ||
+        eventBookmarkScope(
+          conditional.response.headers.get(EVENT_BOOKMARK_HEADER),
+        ) !== scope
+      ) {
+        throw new Error(
+          "Required conditional event snapshot smoke response was invalid.",
+        );
+      }
     }
   }
 }

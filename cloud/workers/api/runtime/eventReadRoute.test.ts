@@ -58,6 +58,78 @@ function snapshotDependencies() {
   };
 }
 
+function prizeDependencies(canonicalProfileId: string | null = profileId) {
+  return {
+    ...snapshotDependencies(),
+    repository: {
+      getStatePath: async () => null,
+      async readProfileOwnershipSnapshot() {
+        return {
+          loginOwnerByUid: new Map([
+            [
+              "login-one",
+              canonicalProfileId
+                ? { profileId: canonicalProfileId, revision: 1 }
+                : null,
+            ],
+          ]),
+          canonicalProfileIdByProfileId: new Map(),
+          loginUidsByProfileId: new Map(
+            canonicalProfileId ? [[canonicalProfileId, ["login-one"]]] : [],
+          ),
+          profileById: new Map(
+            canonicalProfileId
+              ? [
+                  [
+                    canonicalProfileId,
+                    {
+                      revision: 1,
+                      profile: {
+                        profileId: canonicalProfileId,
+                        aura: "",
+                        emoji: 1,
+                        eth: "",
+                        rating: 1_500,
+                        sol: "",
+                        username: "ivan",
+                      },
+                    },
+                  ],
+                ]
+              : [],
+          ),
+        };
+      },
+    },
+  };
+}
+
+function readRoute(
+  path: string,
+  headers: Record<string, string> = {},
+  dependencies: Parameters<
+    typeof handleEventReadRoute
+  >[3] = snapshotDependencies(),
+) {
+  return handleEventReadRoute(
+    new Request(`https://api.mons.link${path}`, {
+      headers: { Origin: "https://mons.link", ...headers },
+    }),
+    testEnv,
+    { waitUntil() {} },
+    dependencies,
+  );
+}
+
+async function updateEventState(updates: Record<string, unknown>) {
+  const admission = await acquireEventWriteAdmission(testEnv.EVENT_DB);
+  try {
+    await patchEventOwnedPaths(testEnv.EVENT_DB, updates, { admission });
+  } finally {
+    await releaseEventWriteAdmission(testEnv.EVENT_DB, admission);
+  }
+}
+
 function eventRecord() {
   return {
     schemaVersion: 2,
@@ -170,6 +242,179 @@ describe("event read route", () => {
     expect(conditional.status).toBe(304);
     expect(await conditional.text()).toBe("");
   });
+
+  it.each([`/events/snapshot?eventId=${eventId}`, "/events/prizes"])(
+    "only accepts the exact resource ETag for %s",
+    async (path) => {
+      const dependencies = prizeDependencies();
+      const initial = await readRoute(path, {}, dependencies);
+      expect(initial.status).toBe(200);
+      const valueEtag = initial.headers.get("ETag")!;
+      const body = await initial.text();
+      const invalidEtags = [
+        "*",
+        valueEtag.slice(2),
+        `${valueEtag}, ${valueEtag}`,
+        valueEtag.replace(/-1"$/, '-01"'),
+        valueEtag.replace(/-1"$/, '-1.0"'),
+        valueEtag.replace(/-1"$/, '-9007199254740992"'),
+        valueEtag.replace(/-1"$/, '--1"'),
+        valueEtag
+          .replace("event-snapshot", "profile-event-prizes")
+          .replace("profile-one", "other-profile")
+          .replace(eventId, "other-event"),
+      ];
+      for (const conditional of invalidEtags) {
+        const response = await readRoute(
+          path,
+          { "If-None-Match": conditional },
+          dependencies,
+        );
+        expect(response.status, conditional).toBe(200);
+        expect(response.headers.get("ETag")).toBe(valueEtag);
+        expect(await response.text()).toBe(body);
+      }
+      const unchanged = await readRoute(
+        path,
+        { "If-None-Match": ` ${valueEtag} ` },
+        dependencies,
+      );
+      expect(unchanged.status).toBe(304);
+      expect(unchanged.headers.get("ETag")).toBe(valueEtag);
+      expect(unchanged.headers.get("X-D1-Bookmark")).toBeTruthy();
+      expect(await unchanged.text()).toBe("");
+    },
+  );
+
+  it("returns updated snapshots after event and selection mutations", async () => {
+    const path = `/events/snapshot?eventId=${eventId}`;
+    let previous = await readRoute(path);
+    expect(previous.status).toBe(200);
+    for (const [updates, expected] of [
+      [
+        { [`events/${eventId}/startAtMs`]: 2_000 },
+        { event: { startAtMs: 2_000 }, revision: 2 },
+      ],
+      [
+        { [`eventPrizeSelections/${eventId}/${profileId}`]: null },
+        { prizeSelections: {}, revision: 3 },
+      ],
+    ] as const) {
+      await updateEventState(updates);
+      const response = await readRoute(path, {
+        "If-None-Match": previous.headers.get("ETag")!,
+        "X-D1-Bookmark": previous.headers.get("X-D1-Bookmark")!,
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("ETag")).not.toBe(
+        previous.headers.get("ETag"),
+      );
+      expect(await response.json()).toMatchObject(expected);
+      previous = response;
+    }
+  });
+
+  it("returns updated prizes after assignment changes and deletion", async () => {
+    const dependencies = prizeDependencies();
+    let previous = await readRoute("/events/prizes", {}, dependencies);
+    expect(previous.status).toBe(200);
+    for (const [updates, expected] of [
+      [
+        {
+          [`profileEventPrizes/${profileId}/${eventId}`]: {
+            eventId,
+            profileId,
+            place: 1,
+            prizeId: "1092",
+            assignedAtMs: 3_000,
+            futureMetadata: { edition: 2 },
+          },
+        },
+        { prizes: { [eventId]: { assignedAtMs: 3_000 } }, revision: 2 },
+      ],
+      [
+        { [`profileEventPrizes/${profileId}/${eventId}`]: null },
+        { prizes: {}, revision: 3 },
+      ],
+    ] as const) {
+      await updateEventState(updates);
+      const response = await readRoute(
+        "/events/prizes",
+        {
+          "If-None-Match": previous.headers.get("ETag")!,
+          "X-D1-Bookmark": previous.headers.get("X-D1-Bookmark")!,
+        },
+        dependencies,
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get("ETag")).not.toBe(
+        previous.headers.get("ETag"),
+      );
+      expect(await response.json()).toMatchObject(expected);
+      previous = response;
+    }
+  });
+
+  it.each([
+    ["/events/snapshot?eventId=absent-event", snapshotDependencies()],
+    ["/events/prizes", prizeDependencies("profile-without-prizes")],
+    ["/events/prizes", prizeDependencies(null)],
+  ])(
+    "preserves revision-zero conditional reads for %s",
+    async (path, dependencies) => {
+      const initial = await readRoute(path, {}, dependencies);
+      expect(initial.status).toBe(200);
+      expect(await initial.json()).toMatchObject({ revision: 0 });
+      const response = await readRoute(
+        path,
+        {
+          "If-None-Match": initial.headers.get("ETag")!,
+          "X-D1-Bookmark": initial.headers.get("X-D1-Bookmark")!,
+        },
+        dependencies,
+      );
+      expect(response.status).toBe(304);
+      expect(response.headers.get("ETag")).toBe(initial.headers.get("ETag"));
+      expect(response.headers.get("X-D1-Bookmark")).toBeTruthy();
+      expect(await response.text()).toBe("");
+    },
+  );
+
+  it("resolves ownership before evaluating a prize ETag", async () => {
+    const initial = await readRoute("/events/prizes", {}, prizeDependencies());
+    expect(initial.status).toBe(200);
+    const response = await readRoute(
+      "/events/prizes",
+      { "If-None-Match": initial.headers.get("ETag")! },
+      prizeDependencies("new-profile-owner"),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      profileId: "new-profile-owner",
+      revision: 0,
+      prizes: {},
+    });
+  });
+
+  it.each([`/events/snapshot?eventId=${eventId}`, "/events/prizes"])(
+    "authenticates matching conditional requests for %s",
+    async (path) => {
+      const initial = await readRoute(path, {}, prizeDependencies());
+      expect(initial.status).toBe(200);
+      const response = await readRoute(
+        path,
+        { "If-None-Match": initial.headers.get("ETag")! },
+        {
+          ...prizeDependencies(),
+          verifyIdentity: async () => {
+            throw new AuthApiFailure(401, "unauthenticated", "unauthenticated");
+          },
+        },
+      );
+      expect(response.status).toBe(401);
+    },
+  );
 
   it("serves conditional-read CORS preflight without authentication", async () => {
     const response = await handleEventReadRoute(

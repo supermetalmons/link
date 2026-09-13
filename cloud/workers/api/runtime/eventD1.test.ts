@@ -21,8 +21,10 @@ import {
   readEventPrizeSelections,
   readEventRuntimeControl,
   readEventSnapshot,
+  readEventSnapshotIfChanged,
   readEventTelegramProjectionState,
   readProfileEventPrizes,
+  readProfileEventPrizesIfChanged,
   readProfileEventPrizeAssignment,
   releaseEventWriteAdmission,
   transactEventOwnedPath as transactEventOwnedPathRaw,
@@ -68,6 +70,20 @@ function assignment(targetProfileId = profileId) {
     prizeId,
     assignedAtMs: 2_000,
   };
+}
+
+function observeSnapshotReads() {
+  const session = testEnv.EVENT_DB.withSession("first-primary");
+  const batches: D1Result<unknown>[][] = [];
+  const db: EventD1Connection = {
+    prepare: (query) => session.prepare(query),
+    async batch<T>(statements: D1PreparedStatement[]) {
+      const results = await session.batch<T>(statements);
+      batches.push(results);
+      return results;
+    },
+  };
+  return { db, batches, session };
 }
 
 async function readPrizeStorage() {
@@ -275,6 +291,363 @@ describe("event D1 store", () => {
     expect(queries).toHaveLength(1);
     expect(session.getBookmark()).toBeTypeOf("string");
   });
+
+  it("suppresses unchanged event payloads in one batch without adding a miss roundtrip", async () => {
+    await patchEventOwnedPaths(testEnv.EVENT_DB, {
+      [`events/${eventId}`]: eventRecord(),
+      [`eventPrizeSelections/${eventId}/${profileId}`]: prizeId,
+    });
+    for (const knownRevision of [null, 0, 1, 2]) {
+      const { db, batches, session } = observeSnapshotReads();
+      const result = await readEventSnapshotIfChanged(
+        db,
+        eventId,
+        knownRevision,
+      );
+      expect(batches).toHaveLength(1);
+      expect(batches[0]).toHaveLength(2);
+      expect(session.getBookmark()).toBeTypeOf("string");
+      if (knownRevision === 1) {
+        expect(result).toEqual({ notModified: true, revision: 1 });
+        expect(batches[0][0].results).toEqual([
+          expect.objectContaining({ revision: 1, record_json: null }),
+        ]);
+        expect(batches[0][1].results).toEqual([]);
+      } else {
+        expect(result).toEqual({
+          notModified: false,
+          snapshot: {
+            event: eventRecord(),
+            eventId,
+            prizeSelections: { [profileId]: prizeId },
+            revision: 1,
+          },
+        });
+        expect(batches[0][0].results).toEqual([
+          expect.objectContaining({ record_json: expect.any(String) }),
+        ]);
+        expect(batches[0][1].results).toHaveLength(1);
+      }
+    }
+  });
+
+  it("suppresses unchanged prize payloads in one batch without adding a miss roundtrip", async () => {
+    await patchEventOwnedPaths(testEnv.EVENT_DB, {
+      [`events/${eventId}`]: eventRecord(),
+      [`profileEventPrizes/${profileId}/${eventId}`]: assignment(),
+    });
+    for (const knownRevision of [null, 0, 1, 2]) {
+      const { db, batches, session } = observeSnapshotReads();
+      const result = await readProfileEventPrizesIfChanged(
+        db,
+        profileId,
+        knownRevision,
+      );
+      expect(batches).toHaveLength(1);
+      expect(batches[0]).toHaveLength(2);
+      expect(batches[0][1].results).toEqual([{ revision: 1 }]);
+      expect(session.getBookmark()).toBeTypeOf("string");
+      if (knownRevision === 1) {
+        expect(result).toEqual({ notModified: true, revision: 1 });
+        expect(batches[0][0].results).toEqual([]);
+      } else {
+        expect(result).toEqual({
+          notModified: false,
+          snapshot: {
+            prizes: { [eventId]: assignment() },
+            profileId,
+            revision: 1,
+          },
+        });
+        expect(batches[0][0].results).toEqual([
+          expect.objectContaining({ assignment_json: expect.any(String) }),
+        ]);
+      }
+    }
+  });
+
+  it.each(["event", "prizes"] as const)(
+    "keeps unchanged %s reads bounded as child rows grow",
+    async (kind) => {
+      await patchEventOwnedPaths(testEnv.EVENT_DB, {
+        [`events/${eventId}`]: eventRecord(),
+        [`eventPrizeSelections/${eventId}/${profileId}`]: prizeId,
+        [`profileEventPrizes/${profileId}/${eventId}`]: assignment(),
+      });
+      const read =
+        kind === "event"
+          ? readEventSnapshotIfChanged
+          : readProfileEventPrizesIfChanged;
+      const resourceId = kind === "event" ? eventId : profileId;
+      const childResultIndex = kind === "event" ? 1 : 0;
+      const baseline = observeSnapshotReads();
+      await expect(read(baseline.db, resourceId, 1)).resolves.toEqual({
+        notModified: true,
+        revision: 1,
+      });
+      const baselineRowsRead = baseline.batches[0].reduce(
+        (total, result) => total + result.meta.rows_read,
+        0,
+      );
+      expect(baselineRowsRead).toBeGreaterThan(0);
+
+      await testEnv.EVENT_DB.batch([
+        testEnv.EVENT_DB.prepare(
+          `WITH RECURSIVE entries(n) AS (
+             SELECT 1 UNION ALL SELECT n + 1 FROM entries WHERE n < 127
+           )
+           INSERT INTO event_records (
+             event_id, status, start_at_ms, updated_at_ms, revision, record_json
+           )
+           SELECT 'poll-event-' || n, status, start_at_ms, updated_at_ms, 1,
+                  json_set(record_json, '$.eventId', 'poll-event-' || n)
+           FROM entries CROSS JOIN event_records WHERE event_id = ?`,
+        ).bind(eventId),
+        testEnv.EVENT_DB.prepare(
+          `INSERT INTO event_prize_selections (
+             event_id, profile_id, prize_id, updated_at_ms
+           )
+           SELECT ?, event_id, ?, updated_at_ms FROM event_records
+           WHERE event_id LIKE 'poll-event-%'`,
+        ).bind(eventId, prizeId),
+        testEnv.EVENT_DB.prepare(
+          `INSERT INTO profile_event_prizes (
+             profile_id, event_id, assignment_json, updated_at_ms
+           )
+           SELECT ?, event_id, json_set(?, '$.eventId', event_id), updated_at_ms
+           FROM event_records WHERE event_id LIKE 'poll-event-%'`,
+        ).bind(profileId, JSON.stringify(assignment())),
+        testEnv.EVENT_DB.prepare(
+          "UPDATE event_records SET revision = 2 WHERE event_id = ?",
+        ).bind(eventId),
+        testEnv.EVENT_DB.prepare(
+          "UPDATE profile_event_prize_revisions SET revision = 2 WHERE profile_id = ?",
+        ).bind(profileId),
+      ]);
+
+      for (const knownRevision of [2, 1, null]) {
+        const { db, batches } = observeSnapshotReads();
+        const result = await read(db, resourceId, knownRevision);
+        expect(batches).toHaveLength(1);
+        expect(batches[0]).toHaveLength(2);
+        const rowsRead = batches[0].reduce(
+          (total, row) => total + row.meta.rows_read,
+          0,
+        );
+        if (knownRevision === 2) {
+          expect(result).toEqual({ notModified: true, revision: 2 });
+          expect(batches[0][childResultIndex].results).toEqual([]);
+          expect(rowsRead).toBeLessThanOrEqual(baselineRowsRead);
+        } else {
+          expect(result.notModified).toBe(false);
+          expect(batches[0][childResultIndex].results).toHaveLength(128);
+          expect(rowsRead).toBeGreaterThan(baselineRowsRead);
+        }
+      }
+    },
+  );
+
+  it("invalidates conditional reads for event, selection, assignment and cascade changes", async () => {
+    await patchEventOwnedPaths(testEnv.EVENT_DB, {
+      [`events/${eventId}`]: eventRecord(),
+      [`eventPrizeSelections/${eventId}/${profileId}`]: prizeId,
+      [`profileEventPrizes/${profileId}/${eventId}`]: assignment(),
+    });
+    await patchEventOwnedPaths(testEnv.EVENT_DB, {
+      [`eventPrizeSelections/${eventId}/${profileId}`]: "1111",
+    });
+    await expect(
+      readEventSnapshotIfChanged(testEnv.EVENT_DB, eventId, 1),
+    ).resolves.toMatchObject({
+      notModified: false,
+      snapshot: { revision: 2, prizeSelections: { [profileId]: "1111" } },
+    });
+    await patchEventOwnedPaths(testEnv.EVENT_DB, {
+      [`events/${eventId}/status`]: "active",
+    });
+    await expect(
+      readEventSnapshotIfChanged(testEnv.EVENT_DB, eventId, 2),
+    ).resolves.toMatchObject({
+      notModified: false,
+      snapshot: { revision: 3, event: { status: "active" } },
+    });
+    await patchEventOwnedPaths(testEnv.EVENT_DB, {
+      [`profileEventPrizes/${profileId}/${eventId}`]: {
+        ...assignment(),
+        assignedAtMs: 3_000,
+      },
+    });
+    await expect(
+      readProfileEventPrizesIfChanged(testEnv.EVENT_DB, profileId, 1),
+    ).resolves.toMatchObject({
+      notModified: false,
+      snapshot: {
+        revision: 2,
+        prizes: { [eventId]: { assignedAtMs: 3_000 } },
+      },
+    });
+    await patchEventOwnedPaths(testEnv.EVENT_DB, {
+      [`profileEventPrizes/${profileId}/${eventId}`]: null,
+    });
+    await expect(
+      readProfileEventPrizesIfChanged(testEnv.EVENT_DB, profileId, 2),
+    ).resolves.toEqual({
+      notModified: false,
+      snapshot: { profileId, revision: 3, prizes: {} },
+    });
+    await patchEventOwnedPaths(testEnv.EVENT_DB, {
+      [`profileEventPrizes/${profileId}/${eventId}`]: assignment(),
+    });
+    await testEnv.EVENT_DB.prepare(
+      "DELETE FROM event_records WHERE event_id = ?",
+    )
+      .bind(eventId)
+      .run();
+    await expect(
+      readProfileEventPrizesIfChanged(testEnv.EVENT_DB, profileId, 4),
+    ).resolves.toEqual({
+      notModified: false,
+      snapshot: { profileId, revision: 5, prizes: {} },
+    });
+    await expect(
+      readEventSnapshotIfChanged(testEnv.EVENT_DB, eventId, 3),
+    ).resolves.toEqual({
+      notModified: false,
+      snapshot: { eventId, revision: 0, event: null, prizeSelections: {} },
+    });
+  });
+
+  it("supports conditional revision zero for missing events and empty prizes", async () => {
+    for (const knownRevision of [null, 0, 1]) {
+      await expect(
+        readEventSnapshotIfChanged(testEnv.EVENT_DB, eventId, knownRevision),
+      ).resolves.toEqual(
+        knownRevision === 0
+          ? { notModified: true, revision: 0 }
+          : {
+              notModified: false,
+              snapshot: {
+                eventId,
+                revision: 0,
+                event: null,
+                prizeSelections: {},
+              },
+            },
+      );
+      await expect(
+        readProfileEventPrizesIfChanged(
+          testEnv.EVENT_DB,
+          profileId,
+          knownRevision,
+        ),
+      ).resolves.toEqual(
+        knownRevision === 0
+          ? { notModified: true, revision: 0 }
+          : {
+              notModified: false,
+              snapshot: { profileId, revision: 0, prizes: {} },
+            },
+      );
+    }
+  });
+
+  it("still loads and validates assignments when a matching zero has no stored revision", async () => {
+    await patchEventOwnedPaths(testEnv.EVENT_DB, {
+      [`events/${eventId}`]: eventRecord(),
+      [`profileEventPrizes/${profileId}/${eventId}`]: assignment(),
+    });
+    await testEnv.EVENT_DB.prepare(
+      "DELETE FROM profile_event_prize_revisions WHERE profile_id = ?",
+    )
+      .bind(profileId)
+      .run();
+    const { db, batches } = observeSnapshotReads();
+    await expect(
+      readProfileEventPrizesIfChanged(db, profileId, 0),
+    ).resolves.toEqual({
+      notModified: true,
+      revision: 0,
+    });
+    expect(batches).toHaveLength(1);
+    expect(batches[0][0].results).toHaveLength(1);
+    expect(batches[0][1].results).toEqual([]);
+    await testEnv.EVENT_DB.prepare(
+      "UPDATE profile_event_prizes SET assignment_json = '{}' WHERE profile_id = ?",
+    )
+      .bind(profileId)
+      .run();
+    await expect(
+      readProfileEventPrizesIfChanged(testEnv.EVENT_DB, profileId, 0),
+    ).rejects.toThrow("invalid-event-prize-assignment");
+  });
+
+  it("keeps payload validation on misses and full reads while trusting matching revisions", async () => {
+    await patchEventOwnedPaths(testEnv.EVENT_DB, {
+      [`events/${eventId}`]: eventRecord(),
+      [`profileEventPrizes/${profileId}/${eventId}`]: assignment(),
+    });
+    await testEnv.EVENT_DB.batch([
+      testEnv.EVENT_DB.prepare(
+        "UPDATE event_records SET record_json = '{}' WHERE event_id = ?",
+      ).bind(eventId),
+      testEnv.EVENT_DB.prepare(
+        "UPDATE profile_event_prizes SET assignment_json = '{}' WHERE profile_id = ?",
+      ).bind(profileId),
+    ]);
+    await expect(
+      readEventSnapshotIfChanged(testEnv.EVENT_DB, eventId, 1),
+    ).resolves.toEqual({ notModified: true, revision: 1 });
+    await expect(
+      readProfileEventPrizesIfChanged(testEnv.EVENT_DB, profileId, 1),
+    ).resolves.toEqual({ notModified: true, revision: 1 });
+    await expect(
+      readEventSnapshotIfChanged(testEnv.EVENT_DB, eventId, 0),
+    ).rejects.toThrow("invalid-event-record");
+    await expect(
+      readProfileEventPrizesIfChanged(testEnv.EVENT_DB, profileId, 0),
+    ).rejects.toThrow("invalid-event-prize-assignment");
+    await expect(readEventSnapshot(testEnv.EVENT_DB, eventId)).rejects.toThrow(
+      "invalid-event-record",
+    );
+    await expect(
+      readProfileEventPrizes(testEnv.EVENT_DB, profileId),
+    ).rejects.toThrow("invalid-event-prize-assignment");
+  });
+
+  it("rejects unsafe stored revisions instead of returning unchanged", async () => {
+    await patchEventOwnedPaths(testEnv.EVENT_DB, {
+      [`events/${eventId}`]: eventRecord(),
+      [`profileEventPrizes/${profileId}/${eventId}`]: assignment(),
+    });
+    await testEnv.EVENT_DB.batch([
+      testEnv.EVENT_DB.prepare(
+        "UPDATE event_records SET revision = 9007199254740992 WHERE event_id = ?",
+      ).bind(eventId),
+      testEnv.EVENT_DB.prepare(
+        "UPDATE profile_event_prize_revisions SET revision = 9007199254740992 WHERE profile_id = ?",
+      ).bind(profileId),
+    ]);
+    await expect(
+      readEventSnapshotIfChanged(testEnv.EVENT_DB, eventId, 1),
+    ).rejects.toThrow("invalid-event-integer");
+    await expect(
+      readProfileEventPrizesIfChanged(testEnv.EVENT_DB, profileId, 1),
+    ).rejects.toThrow("invalid-event-integer");
+  });
+
+  it.each([-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects invalid known revision %s before querying",
+    async (knownRevision) => {
+      const { db, batches } = observeSnapshotReads();
+      await expect(
+        readEventSnapshotIfChanged(db, eventId, knownRevision),
+      ).rejects.toThrow("invalid-event-integer");
+      await expect(
+        readProfileEventPrizesIfChanged(db, profileId, knownRevision),
+      ).rejects.toThrow("invalid-event-integer");
+      expect(batches).toEqual([]);
+    },
+  );
 
   it("returns empty typed reads for missing records and rejects invalid IDs", async () => {
     await expect(readEvent(testEnv.EVENT_DB, eventId)).resolves.toBeNull();
