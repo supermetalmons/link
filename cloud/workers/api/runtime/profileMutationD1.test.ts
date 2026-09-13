@@ -11,6 +11,7 @@ import {
 } from "../src/profileCanonicalD1.ts";
 import {
   readCanonicalProfileMutationByLogin,
+  readCanonicalRatingProfiles,
   type CanonicalProfileMutationSnapshot,
 } from "../src/profileMutationD1.ts";
 import { createProfileCustomizationRepository } from "../src/profileCustomizationRepository.ts";
@@ -86,6 +87,10 @@ function observeDatabase(
   options: {
     beforeFirstBatch?: () => Promise<void>;
     afterFirstBatch?: () => Promise<void>;
+    forbidStandaloneReads?: boolean;
+    mapBatchResults?: (
+      results: D1Result<Record<string, unknown>>[],
+    ) => D1Result<Record<string, unknown>>[];
     mapMutationRow?: (row: Record<string, unknown>) => Record<string, unknown>;
   } = {},
 ) {
@@ -101,6 +106,14 @@ function observeDatabase(
       get(target, property) {
         if (property === "bind") {
           return (...values: unknown[]) => wrap(target.bind(...values), query);
+        }
+        if (
+          options.forbidStandaloneReads &&
+          ["first", "all", "run", "raw"].includes(String(property))
+        ) {
+          return () => {
+            throw new Error("rating-read-outside-batch");
+          };
         }
         if (property === "first") {
           return async () => {
@@ -134,13 +147,13 @@ function observeDatabase(
             ),
           );
           if (batchQueries.length === 1) await options.beforeFirstBatch?.();
-          const results = await target.batch(
+          const results = await target.batch<Record<string, unknown>>(
             statements.map(
               (statement) => nativeStatements.get(statement) || statement,
             ),
           );
           if (batchQueries.length === 1) await options.afterFirstBatch?.();
-          return results;
+          return options.mapBatchResults?.(results) || results;
         };
       }
       const member = Reflect.get(target, property, target);
@@ -194,6 +207,25 @@ async function mergeOwner(
   });
 }
 
+async function addFebruaryOpponents(
+  profileId: string,
+  opponentProfileIds: string[],
+): Promise<void> {
+  await commitCanonicalPlan(db, {
+    expectations: opponentProfileIds.map((opponentProfileId) => ({
+      kind: "february-opponent-absent",
+      profileId,
+      opponentProfileId,
+    })),
+    mutations: opponentProfileIds.map((opponentProfileId) => ({
+      kind: "insert-february-opponent",
+      profileId,
+      opponentProfileId,
+      recordedAtMs: 2_000,
+    })),
+  });
+}
+
 describe("canonical profile mutation reads", () => {
   beforeAll(async () => {
     await applyRetiredProfileMigrations(
@@ -201,6 +233,246 @@ describe("canonical profile mutation reads", () => {
       testEnv.TEST_PROFILE_D1_MIGRATIONS,
       "c".repeat(64),
     );
+  });
+
+  describe("paired rating reads", () => {
+    it("reads both complete profiles and sorted opponents in one four-query batch", async () => {
+      const player = await createProfile(
+        { rating: 0, nonce: 0, totalManaPoints: 0, emoji: 0 },
+        { gameplayEmoji: 0 },
+      );
+      const opponent = await createProfile(
+        {},
+        {
+          legacyFields: {
+            imported: { missingRating: true },
+            custom: [1, null],
+          },
+          emojiPresent: false,
+          gameplayEmoji: "legacy-emoji",
+          winPresent: false,
+          sortPresence: { rating: false, nonce: false, mp: true, gum: false },
+          sortValues: { mp: null, gum: null },
+        },
+      );
+      await addFebruaryOpponents(player.profile.profileId, ["zulu", "alpha"]);
+      await addFebruaryOpponents(opponent.profile.profileId, ["other"]);
+      const observed = observeDatabase({ forbidStandaloneReads: true });
+      await expect(
+        readCanonicalRatingProfiles(observed.database, {
+          playerLoginUid: player.owner.loginUid,
+          opponentLoginUid: opponent.owner.loginUid,
+        }),
+      ).resolves.toEqual({
+        player: { ...player, februaryOpponentProfileIds: ["alpha", "zulu"] },
+        opponent: { ...opponent, februaryOpponentProfileIds: ["other"] },
+      });
+      expect(observed.firstQueries).toHaveLength(0);
+      expect(observed.batchQueries.map((queries) => queries.length)).toEqual([
+        4,
+      ]);
+      expect(observed.batchQueries[0].join("\n")).not.toMatch(
+        /profile_auth_methods|profile_auth_recovery_jobs|FROM profile_login_owners\s+WHERE profile_id/,
+      );
+    });
+
+    it.each([
+      ["player", true, false],
+      ["opponent", false, true],
+      ["both", true, true],
+    ])(
+      "returns null for missing %s logins",
+      async (_label, missingPlayer, missingOpponent) => {
+        const existing = await createProfile();
+        const observed = observeDatabase({ forbidStandaloneReads: true });
+        const snapshot = { ...existing, februaryOpponentProfileIds: [] };
+        await expect(
+          readCanonicalRatingProfiles(observed.database, {
+            playerLoginUid: missingPlayer
+              ? "missing-rating-player"
+              : existing.owner.loginUid,
+            opponentLoginUid: missingOpponent
+              ? "missing-rating-opponent"
+              : existing.owner.loginUid,
+          }),
+        ).resolves.toEqual({
+          player: missingPlayer ? null : snapshot,
+          opponent: missingOpponent ? null : snapshot,
+        });
+        expect(observed.batchQueries.map((queries) => queries.length)).toEqual([
+          4,
+        ]);
+      },
+    );
+
+    it("keeps both roles when logins share a canonical profile", async () => {
+      const source = await createProfile();
+      const target = await createProfile();
+      await addFebruaryOpponents(target.profile.profileId, ["shared-opponent"]);
+      await mergeOwner(source, target);
+      const observed = observeDatabase({ forbidStandaloneReads: true });
+      for (const playerLoginUid of [
+        source.owner.loginUid,
+        target.owner.loginUid,
+      ]) {
+        const result = await readCanonicalRatingProfiles(observed.database, {
+          playerLoginUid,
+          opponentLoginUid: target.owner.loginUid,
+        });
+        expect(result.player?.owner.loginUid).toBe(playerLoginUid);
+        expect(result.opponent?.owner).toEqual(target.owner);
+        expect(result.player?.profile).toEqual(target.profile);
+        expect(result.opponent?.profile).toEqual(target.profile);
+        expect(result.player?.februaryOpponentProfileIds).toEqual([
+          "shared-opponent",
+        ]);
+        expect(result.opponent?.februaryOpponentProfileIds).toEqual([
+          "shared-opponent",
+        ]);
+      }
+      expect(observed.batchQueries.map((queries) => queries.length)).toEqual([
+        4, 4,
+      ]);
+    });
+
+    it.each(["before", "after"] as const)(
+      "keeps owner, profile and opponents coherent when a merge occurs %s the batch",
+      async (timing) => {
+        const source = await createProfile({ rating: 1200 });
+        const target = await createProfile({ rating: 1800 });
+        await addFebruaryOpponents(source.profile.profileId, ["old-opponent"]);
+        await addFebruaryOpponents(target.profile.profileId, ["new-opponent"]);
+        const merge = () => mergeOwner(source, target);
+        const observed = observeDatabase({
+          forbidStandaloneReads: true,
+          ...(timing === "before"
+            ? { beforeFirstBatch: merge }
+            : { afterFirstBatch: merge }),
+        });
+        const result = await readCanonicalRatingProfiles(observed.database, {
+          playerLoginUid: source.owner.loginUid,
+          opponentLoginUid: target.owner.loginUid,
+        });
+        expect(result.opponent).toEqual({
+          ...target,
+          februaryOpponentProfileIds: ["new-opponent"],
+        });
+        expect(result.player).toEqual(
+          timing === "before"
+            ? {
+                owner: {
+                  ...source.owner,
+                  profileId: target.profile.profileId,
+                  revision: 2,
+                  updatedAtMs: 3_000,
+                },
+                profile: target.profile,
+                februaryOpponentProfileIds: ["new-opponent"],
+              }
+            : { ...source, februaryOpponentProfileIds: ["old-opponent"] },
+        );
+        expect(observed.batchQueries.map((queries) => queries.length)).toEqual([
+          4,
+        ]);
+      },
+    );
+
+    it.each([
+      ["dangling player owner", 0, { profile_id: null, payload_json: null }],
+      [
+        "player login mismatch",
+        0,
+        { mutation_owner_login_uid: "another-login" },
+      ],
+      [
+        "opponent profile mismatch",
+        2,
+        { mutation_owner_profile_id: "another-profile" },
+      ],
+      ["invalid player owner", 0, { mutation_owner_revision: 0 }],
+      ["invalid opponent profile", 2, { revision: 0 }],
+      ["invalid player payload", 0, { payload_json: "{}" }],
+      ["invalid opponent legacy fields", 2, { legacy_fields_json: "[]" }],
+      [
+        "retiring player",
+        0,
+        { state: "retiring", merged_into_profile_id: "target" },
+      ],
+      [
+        "active opponent redirect",
+        2,
+        { mutation_merge_source_profile_id: "source" },
+      ],
+    ] as const)("rejects a corrupt %s", async (_label, index, changes) => {
+      const initial = await createProfile();
+      const observed = observeDatabase({
+        forbidStandaloneReads: true,
+        mapBatchResults: (results) =>
+          results.map((result, resultIndex) =>
+            resultIndex === index
+              ? {
+                  ...result,
+                  results: result.results.map((row) => ({
+                    ...row,
+                    ...changes,
+                  })),
+                }
+              : result,
+          ),
+      });
+      await expect(
+        readCanonicalRatingProfiles(observed.database, {
+          playerLoginUid: initial.owner.loginUid,
+          opponentLoginUid: initial.owner.loginUid,
+        }),
+      ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+    });
+
+    it.each(["", null, 7, false, {}])(
+      "rejects malformed opponent ID %j",
+      async (opponentProfileId) => {
+        const initial = await createProfile();
+        for (const index of [1, 3]) {
+          const observed = observeDatabase({
+            forbidStandaloneReads: true,
+            mapBatchResults: (results) =>
+              results.map((result, resultIndex) =>
+                resultIndex === index
+                  ? {
+                      ...result,
+                      results: [{ opponent_profile_id: opponentProfileId }],
+                    }
+                  : result,
+              ),
+          });
+          await expect(
+            readCanonicalRatingProfiles(observed.database, {
+              playerLoginUid: initial.owner.loginUid,
+              opponentLoginUid: initial.owner.loginUid,
+            }),
+          ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+        }
+      },
+    );
+
+    it("preserves D1 read failures", async () => {
+      const failure = new Error("rating-d1-read-failed");
+      const observed = observeDatabase({
+        forbidStandaloneReads: true,
+        beforeFirstBatch: async () => {
+          throw failure;
+        },
+      });
+      await expect(
+        readCanonicalRatingProfiles(observed.database, {
+          playerLoginUid: "player",
+          opponentLoginUid: "opponent",
+        }),
+      ).rejects.toBe(failure);
+      expect(observed.batchQueries.map((queries) => queries.length)).toEqual([
+        4,
+      ]);
+    });
   });
 
   it("reads the owner and complete mutable profile in one query", async () => {

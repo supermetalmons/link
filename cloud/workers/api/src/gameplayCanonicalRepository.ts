@@ -14,12 +14,9 @@ import {
   readCanonicalProfileOwnershipSnapshot,
   readCanonicalRatingUpdate,
   readCanonicalProfileAggregateSnapshot,
-  readCanonicalProfileAggregateByLogin,
   readCanonicalWagerSettlement,
   resolveCanonicalProfile,
   CanonicalProfileConflict,
-  type CanonicalLoginOwnerSnapshot,
-  type CanonicalProfileAggregateSnapshot,
   type CanonicalProfileOwnershipProfileSnapshot,
   type CanonicalProfileOwnershipSnapshot,
   type CanonicalProfileSnapshot,
@@ -31,7 +28,11 @@ import {
   type CanonicalSortKey,
   type CanonicalWagerSettlement,
 } from "./profileCanonicalD1.ts";
-import { materializeCanonicalProfileUpdate } from "./profileMutationD1.ts";
+import {
+  materializeCanonicalProfileUpdate,
+  readCanonicalRatingProfiles,
+  type CanonicalRatingProfileSnapshot,
+} from "./profileMutationD1.ts";
 import type { StateRepository } from "./stateRepositoryTypes.ts";
 import {
   deleteD1NavigationGame,
@@ -218,30 +219,17 @@ function gameplayOwnershipSnapshot(
   });
 }
 
-type LoginAggregate = {
-  aggregate: CanonicalProfileAggregateSnapshot | null;
-  owner: CanonicalLoginOwnerSnapshot | null;
-};
-
-async function aggregateByLogin(
-  db: D1Database,
-  loginUid: string,
-): Promise<LoginAggregate> {
-  const resolved = await readCanonicalProfileAggregateByLogin(db, loginUid);
-  return resolved || { aggregate: null, owner: null };
-}
-
-function ratingProfileFromAggregate(
-  aggregate: CanonicalProfileAggregateSnapshot | null,
+function ratingProfileFromSnapshot(
+  value: CanonicalRatingProfileSnapshot | null,
 ): RatingProfile | null {
-  const snapshot = aggregate?.profile;
-  if (!snapshot) return null;
+  if (!value) return null;
+  const snapshot = value.profile;
   const profile = snapshot.profile;
   return {
     aura: profile.aura || "",
     emoji: snapshot.gameplayEmoji,
     eth: profile.eth || "",
-    feb2026UniqueOpponents: aggregate.februaryOpponentProfileIds,
+    feb2026UniqueOpponents: value.februaryOpponentProfileIds,
     nonce: snapshot.sortPresence.nonce ? (snapshot.sortValues.nonce ?? 0) : -1,
     profileId: profile.id,
     rating:
@@ -923,21 +911,20 @@ export function createCanonicalRatingRepository(
         ) {
           return { status: "lost" };
         }
-        let playerSnapshot: LoginAggregate;
-        let opponentSnapshot: LoginAggregate;
+        let playerSnapshot: CanonicalRatingProfileSnapshot | null;
+        let opponentSnapshot: CanonicalRatingProfileSnapshot | null;
         try {
-          [playerSnapshot, opponentSnapshot] = await Promise.all([
-            aggregateByLogin(db, input.playerId),
-            aggregateByLogin(db, input.opponentId),
-          ]);
+          ({ player: playerSnapshot, opponent: opponentSnapshot } =
+            await readCanonicalRatingProfiles(db, {
+              playerLoginUid: input.playerId,
+              opponentLoginUid: input.opponentId,
+            }));
         } catch (error) {
           if (error instanceof CanonicalProfileConflict) continue;
           mapFailure(error, options.createFailure);
         }
-        const playerAggregate = playerSnapshot.aggregate;
-        const opponentAggregate = opponentSnapshot.aggregate;
-        const player = ratingProfileFromAggregate(playerAggregate);
-        const opponent = ratingProfileFromAggregate(opponentAggregate);
+        const player = ratingProfileFromSnapshot(playerSnapshot);
+        const opponent = ratingProfileFromSnapshot(opponentSnapshot);
         const plan = buildPlan(player, opponent);
         const expectations: CanonicalExpectation[] = [
           {
@@ -951,7 +938,7 @@ export function createCanonicalRatingRepository(
           [input.opponentId, opponentSnapshot],
         ] as const) {
           expectations.push(
-            snapshot.owner
+            snapshot
               ? {
                   kind: "login-owner-revision",
                   loginUid,
@@ -960,11 +947,11 @@ export function createCanonicalRatingRepository(
                 }
               : { kind: "login-owner-absent", loginUid },
           );
-          if (snapshot.aggregate?.profile) {
+          if (snapshot) {
             expectations.push({
               kind: "profile-revision",
-              profileId: snapshot.aggregate.profile.profileId,
-              revision: snapshot.aggregate.profile.revision,
+              profileId: snapshot.profile.profileId,
+              revision: snapshot.profile.revision,
             });
           }
         }
@@ -973,18 +960,18 @@ export function createCanonicalRatingRepository(
           string,
           { snapshot: CanonicalProfileSnapshot; patch: Record<string, unknown> }
         >();
-        if (playerAggregate?.profile && plan.playerUpdate) {
-          profileWrites.set(playerAggregate.profile.profileId, {
-            snapshot: playerAggregate.profile,
+        if (playerSnapshot && plan.playerUpdate) {
+          profileWrites.set(playerSnapshot.profile.profileId, {
+            snapshot: playerSnapshot.profile,
             patch: plan.playerUpdate,
           });
         }
-        if (opponentAggregate?.profile && plan.opponentUpdate) {
+        if (opponentSnapshot && plan.opponentUpdate) {
           const existing = profileWrites.get(
-            opponentAggregate.profile.profileId,
+            opponentSnapshot.profile.profileId,
           );
-          profileWrites.set(opponentAggregate.profile.profileId, {
-            snapshot: opponentAggregate.profile,
+          profileWrites.set(opponentSnapshot.profile.profileId, {
+            snapshot: opponentSnapshot.profile,
             patch: { ...(existing?.patch || {}), ...plan.opponentUpdate },
           });
         }

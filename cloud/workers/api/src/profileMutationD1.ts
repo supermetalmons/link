@@ -16,6 +16,11 @@ export type CanonicalProfileMutationSnapshot = {
   profile: CanonicalProfileSnapshot;
 };
 
+export type CanonicalRatingProfileSnapshot =
+  CanonicalProfileMutationSnapshot & {
+    februaryOpponentProfileIds: string[];
+  };
+
 export function materializeCanonicalProfileUpdate(
   snapshot: CanonicalProfileSnapshot,
   profile: CanonicalProfileSnapshot["profile"],
@@ -86,11 +91,11 @@ export function commitCanonicalProfileUpdate(
   });
 }
 
-export async function readCanonicalProfileMutationByLogin(
+function canonicalProfileMutationStatement(
   db: D1Database,
   loginUid: string,
-): Promise<CanonicalProfileMutationSnapshot | null> {
-  const row = await db
+): D1PreparedStatement {
+  return db
     .prepare(
       `SELECT profile.*,
               owner.login_uid AS mutation_owner_login_uid,
@@ -106,8 +111,13 @@ export async function readCanonicalProfileMutationByLogin(
          ON mapping.source_profile_id = owner.profile_id
        WHERE owner.login_uid = ?`,
     )
-    .bind(loginUid)
-    .first<Record<string, unknown>>();
+    .bind(loginUid);
+}
+
+function parseCanonicalProfileMutationRow(
+  row: Record<string, unknown> | null | undefined,
+  loginUid: string,
+): CanonicalProfileMutationSnapshot | null {
   if (!row) return null;
   const owner = parseCanonicalLoginOwnerRow({
     login_uid: row.mutation_owner_login_uid,
@@ -126,4 +136,68 @@ export async function readCanonicalProfileMutationByLogin(
     throw new CanonicalProfileCorruption();
   }
   return { owner, profile };
+}
+
+export async function readCanonicalProfileMutationByLogin(
+  db: D1Database,
+  loginUid: string,
+): Promise<CanonicalProfileMutationSnapshot | null> {
+  const row = await canonicalProfileMutationStatement(db, loginUid).first<
+    Record<string, unknown>
+  >();
+  return parseCanonicalProfileMutationRow(row, loginUid);
+}
+
+function parseCanonicalRatingProfile(
+  row: Record<string, unknown> | undefined,
+  opponents: readonly Record<string, unknown>[],
+  loginUid: string,
+): CanonicalRatingProfileSnapshot | null {
+  const snapshot = parseCanonicalProfileMutationRow(row, loginUid);
+  if (!snapshot) return null;
+  const februaryOpponentProfileIds = opponents.map((opponent) => {
+    const profileId = opponent?.opponent_profile_id;
+    if (typeof profileId !== "string" || profileId === "") {
+      throw new CanonicalProfileCorruption();
+    }
+    return profileId;
+  });
+  return { ...snapshot, februaryOpponentProfileIds };
+}
+
+export async function readCanonicalRatingProfiles(
+  db: D1Database,
+  {
+    playerLoginUid,
+    opponentLoginUid,
+  }: { playerLoginUid: string; opponentLoginUid: string },
+): Promise<{
+  player: CanonicalRatingProfileSnapshot | null;
+  opponent: CanonicalRatingProfileSnapshot | null;
+}> {
+  const statements = [playerLoginUid, opponentLoginUid].flatMap((loginUid) => [
+    canonicalProfileMutationStatement(db, loginUid),
+    db
+      .prepare(
+        `SELECT opponent_profile_id FROM profile_february_opponents
+         WHERE profile_id = (
+           SELECT profile_id FROM profile_login_owners WHERE login_uid = ?
+         ) ORDER BY opponent_profile_id ASC`,
+      )
+      .bind(loginUid),
+  ]);
+  const [player, playerOpponents, opponent, opponentOpponents] =
+    await db.batch<Record<string, unknown>>(statements);
+  return {
+    player: parseCanonicalRatingProfile(
+      player.results[0],
+      playerOpponents.results,
+      playerLoginUid,
+    ),
+    opponent: parseCanonicalRatingProfile(
+      opponent.results[0],
+      opponentOpponents.results,
+      opponentLoginUid,
+    ),
+  };
 }

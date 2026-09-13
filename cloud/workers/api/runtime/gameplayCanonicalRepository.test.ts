@@ -86,6 +86,7 @@ function beforeMatchingBatch(
   database: D1Database,
   matches: (queries: readonly string[]) => boolean,
   action: () => Promise<void>,
+  onPrepare?: (query: string) => void,
 ): D1Database {
   const nativeStatements = new WeakMap<object, D1PreparedStatement>();
   const statementQueries = new WeakMap<object, string>();
@@ -108,7 +109,10 @@ function beforeMatchingBatch(
     return wrapped;
   };
   return {
-    prepare: (query) => wrap(database.prepare(query), query),
+    prepare: (query) => {
+      onPrepare?.(query);
+      return wrap(database.prepare(query), query);
+    },
     async batch<T = unknown>(statements: D1PreparedStatement[]) {
       const queries = statements.map(
         (statement) => statementQueries.get(statement) || "",
@@ -934,9 +938,27 @@ describe("canonical gameplay repositories", () => {
     const gameplay = createGameplayRepository(testEnv, {
       stateClient: state,
     });
-    const rating = createRatingRepository(testEnv, gameplay, {
-      now: () => 2_000,
-    });
+    let observeFinalization = false;
+    const preparedQueries: string[] = [];
+    const batchQueries: string[][] = [];
+    const observedDb = beforeMatchingBatch(
+      testEnv.PROFILE_DB,
+      (queries) => {
+        if (observeFinalization) batchQueries.push([...queries]);
+        return false;
+      },
+      async () => {},
+      (query) => {
+        if (observeFinalization) preparedQueries.push(query);
+      },
+    );
+    const rating = createRatingRepository(
+      { ...testEnv, PROFILE_DB: observedDb },
+      gameplay,
+      {
+        now: () => 2_000,
+      },
+    );
     const identity = {
       inviteId: "d1-rating-invite",
       matchId: "d1-rating-match",
@@ -961,6 +983,7 @@ describe("canonical gameplay repositories", () => {
       }),
     ).resolves.toMatchObject({ status: "busy" });
 
+    observeFinalization = true;
     await expect(
       rating.finalizeRatingUpdate(
         { ...identity, operationId, ownerToken: "d1-owner" },
@@ -1004,6 +1027,21 @@ describe("canonical gameplay repositories", () => {
         }),
       ),
     ).resolves.toMatchObject({ status: "committed" });
+    observeFinalization = false;
+    const snapshotBatches = batchQueries.filter((queries) =>
+      queries.every((query) => /^\s*SELECT\b/i.test(query)),
+    );
+    expect(snapshotBatches).toHaveLength(1);
+    expect(snapshotBatches[0]).toHaveLength(4);
+    expect(
+      preparedQueries.filter(
+        (query) =>
+          /^\s*SELECT\b/i.test(query) && !query.includes("rating_updates"),
+      ),
+    ).toEqual(snapshotBatches[0]);
+    expect(snapshotBatches[0].join("\n")).not.toMatch(
+      /profile_auth_|profile_recovery_|profile_wallet_/,
+    );
     expect(
       await readCanonicalProfile(testEnv.PROFILE_DB, "d1-rating-player"),
     ).toMatchObject({
@@ -1295,6 +1333,264 @@ describe("canonical gameplay repositories", () => {
     expect(payload.eventProgressUpdatedAtMs).toBe(3_000);
     expect(row?.event_progress_state).toBe("done");
     expect(row?.event_progress_updated_at_ms).toBe(3_000);
+  });
+
+  it("rebuilds a rating plan after a profile edit and preserves sparse legacy fields", async () => {
+    const profileId = "d1-edit-player";
+    await insertProfile(
+      profileId,
+      "d1-edit-player-login",
+      {},
+      { nonce: false, mp: false, dust: false, slime: false },
+      false,
+      false,
+      "",
+    );
+    await insertProfile("d1-edit-opponent", "d1-edit-opponent-login");
+    const gameplay = createGameplayRepository(testEnv, {
+      stateClient: state,
+    });
+    const identity = {
+      inviteId: "d1-edit-invite",
+      matchId: "d1-edit-match",
+      playerId: "d1-edit-player-login",
+      opponentId: "d1-edit-opponent-login",
+    };
+    const operationId = `${identity.inviteId}__${identity.matchId}`;
+    const baseRating = createRatingRepository(testEnv, gameplay, {
+      now: () => 3_000,
+    });
+    await baseRating.tryAcquireRatingLease({
+      ...identity,
+      ownerUid: identity.playerId,
+      ownerToken: "d1-edit-owner",
+      leaseMs: 30_000,
+    });
+    const racedDb = beforeMatchingBatch(
+      testEnv.PROFILE_DB,
+      (queries) =>
+        queries.some((query) => query.includes("UPDATE rating_updates")),
+      async () => {
+        const current = await readCanonicalProfile(
+          testEnv.PROFILE_DB,
+          profileId,
+        );
+        if (!current) throw new Error("missing-edited-profile");
+        await commitCanonicalPlan(testEnv.PROFILE_DB, {
+          expectations: [
+            {
+              kind: "profile-revision",
+              profileId,
+              revision: current.revision,
+            },
+          ],
+          mutations: [
+            {
+              kind: "update-active-profile",
+              value: materializeCanonicalProfile({
+                ...current,
+                profile: {
+                  ...current.profile,
+                  rating: 1700,
+                  username: "EditedName",
+                  completedProblemIds: ["edited-problem"],
+                  mining: {
+                    lastRockDate: "2026-08-29",
+                    materials: {
+                      dust: 0,
+                      slime: 0,
+                      gum: 33,
+                      metal: 34,
+                      ice: 35,
+                    },
+                  },
+                },
+                updatedAtMs: 2_500,
+                legacyFields: { imported: { untouched: [1, "two", null] } },
+                sortValues: {
+                  ...current.sortValues,
+                  rating: 1700,
+                  gum: 33,
+                  metal: 34,
+                  ice: 35,
+                },
+              }),
+            },
+          ],
+        });
+      },
+    );
+    const rating = createCanonicalRatingRepository(racedDb, gameplay, {
+      createFailure: () => new Error("rating-unavailable"),
+      maxAttempts: 5,
+      now: () => 3_000,
+    });
+    const seenRatings: number[] = [];
+    await expect(
+      rating.finalizeRatingUpdate(
+        { ...identity, operationId, ownerToken: "d1-edit-owner" },
+        (playerValue, opponentValue) => {
+          if (!playerValue || !opponentValue)
+            throw new Error("missing-rating-player");
+          seenRatings.push(playerValue.rating);
+          return {
+            playerUpdate: { rating: playerValue.rating + 1 },
+            opponentUpdate: null,
+            repairData: {
+              playerProfileId: playerValue.profileId,
+              opponentProfileId: opponentValue.profileId,
+              shouldUpdateFebruaryChallenge: false,
+            },
+            ratingUpdate: {
+              status: "done",
+              playerProfileId: playerValue.profileId,
+              opponentProfileId: opponentValue.profileId,
+              shouldUpdateFebruaryChallenge: false,
+              completedAtMs: 3_000,
+              updatedAtMs: 3_000,
+              leaseExpiresAtMs: 3_000,
+            },
+          };
+        },
+      ),
+    ).resolves.toMatchObject({ status: "committed" });
+    expect(seenRatings).toEqual([1500, 1700]);
+    expect(
+      await readCanonicalProfile(testEnv.PROFILE_DB, profileId),
+    ).toMatchObject({
+      revision: 3,
+      createdAtMs: 1_000,
+      updatedAtMs: 3_000,
+      profile: {
+        rating: 1701,
+        username: "EditedName",
+        completedProblemIds: ["edited-problem"],
+        mining: {
+          lastRockDate: "2026-08-29",
+          materials: { dust: 0, slime: 0, gum: 33, metal: 34, ice: 35 },
+        },
+      },
+      sortPresence: {
+        rating: true,
+        nonce: false,
+        mp: false,
+        dust: false,
+        slime: false,
+      },
+      sortValues: {
+        rating: 1701,
+        nonce: null,
+        mp: null,
+        dust: null,
+        slime: null,
+      },
+      winPresent: false,
+      emojiPresent: false,
+      gameplayEmoji: "",
+      legacyFields: { imported: { untouched: [1, "two", null] } },
+    });
+  });
+
+  it("combines rating patches into one write when both logins share a profile", async () => {
+    const profileId = "d1-shared-profile";
+    const identity = {
+      inviteId: "d1-shared-invite",
+      matchId: "d1-shared-match",
+      playerId: "d1-shared-player-login",
+      opponentId: "d1-shared-opponent-login",
+    };
+    await insertProfile(profileId, identity.playerId);
+    await commitCanonicalPlan(testEnv.PROFILE_DB, {
+      expectations: [
+        { kind: "login-owner-absent", loginUid: identity.opponentId },
+      ],
+      mutations: [
+        {
+          kind: "insert-login-owner",
+          value: {
+            loginUid: identity.opponentId,
+            profileId,
+            createdAtMs: 1_000,
+            updatedAtMs: 1_000,
+          },
+        },
+      ],
+    });
+    const gameplay = createGameplayRepository(testEnv, { stateClient: state });
+    const baseRating = createRatingRepository(testEnv, gameplay, {
+      now: () => 2_000,
+    });
+    await baseRating.tryAcquireRatingLease({
+      ...identity,
+      ownerUid: identity.playerId,
+      ownerToken: "d1-shared-owner",
+      leaseMs: 30_000,
+    });
+    const profileWrites: string[] = [];
+    const observedDb = beforeMatchingBatch(
+      testEnv.PROFILE_DB,
+      (queries) => {
+        profileWrites.push(
+          ...queries.filter((query) =>
+            /UPDATE profile_records\s+SET/.test(query),
+          ),
+        );
+        return false;
+      },
+      async () => {},
+    );
+    const rating = createCanonicalRatingRepository(observedDb, gameplay, {
+      createFailure: () => new Error("rating-unavailable"),
+      maxAttempts: 5,
+      now: () => 2_000,
+    });
+    let plans = 0;
+    await expect(
+      rating.finalizeRatingUpdate(
+        {
+          ...identity,
+          operationId: `${identity.inviteId}__${identity.matchId}`,
+          ownerToken: "d1-shared-owner",
+        },
+        (playerValue, opponentValue) => {
+          plans++;
+          expect(playerValue).toMatchObject({
+            profileId,
+            rating: 1500,
+            nonce: 1,
+            totalManaPoints: 5,
+          });
+          expect(opponentValue).toEqual(playerValue);
+          return {
+            playerUpdate: { rating: 1510, nonce: 2, totalManaPoints: 8 },
+            opponentUpdate: { rating: 1490, win: false },
+            repairData: {
+              playerProfileId: profileId,
+              opponentProfileId: profileId,
+              shouldUpdateFebruaryChallenge: false,
+            },
+            ratingUpdate: {
+              status: "done",
+              playerProfileId: profileId,
+              opponentProfileId: profileId,
+              shouldUpdateFebruaryChallenge: false,
+              completedAtMs: 2_000,
+              updatedAtMs: 2_000,
+              leaseExpiresAtMs: 2_000,
+            },
+          };
+        },
+      ),
+    ).resolves.toMatchObject({ status: "committed" });
+    expect(plans).toBe(1);
+    expect(profileWrites).toHaveLength(1);
+    expect(
+      await readCanonicalProfile(testEnv.PROFILE_DB, profileId),
+    ).toMatchObject({
+      revision: 2,
+      profile: { rating: 1490, nonce: 2, totalManaPoints: 8, win: false },
+      sortValues: { rating: 1490, nonce: 2, mp: 8 },
+    });
   });
 
   it("retries rating finalization when a missing login is created", async () => {
