@@ -396,6 +396,36 @@ export async function getProfileGameProjection(
     : null;
 }
 
+export async function getProfileGameProjections(
+  db: D1Database,
+  profileId: string,
+  projectionIds: readonly string[],
+): Promise<Map<string, { data: Record<string, unknown>; updateTime: string }>> {
+  if (projectionIds.length === 0) return new Map();
+  const result = await db
+    .prepare(
+      `SELECT projection_id, payload_json, version
+       FROM profile_game_projections
+       WHERE profile_id = ?
+         AND projection_id IN (SELECT value FROM json_each(?))`,
+    )
+    .bind(profileId, JSON.stringify([...new Set(projectionIds)]))
+    .all<{
+      projection_id: string;
+      payload_json: string;
+      version: number;
+    }>();
+  return new Map(
+    result.results.map((row) => [
+      row.projection_id,
+      {
+        data: parseProjectionPayload(row.payload_json),
+        updateTime: String(row.version),
+      },
+    ]),
+  );
+}
+
 export async function listProfileGameProjectionPage(
   db: D1Database,
   profileId: string,

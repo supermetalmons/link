@@ -19,7 +19,7 @@ import {
 import type { ProfileLinkProfileGameProjectionTask } from "./profileGameProjectionTasks.ts";
 import {
   commitProfileGameProjectionWrites,
-  getProfileGameProjection,
+  getProfileGameProjections,
   listProfileGameProjectionPage,
 } from "./profileGamesD1.ts";
 import {
@@ -547,17 +547,13 @@ function createCanonicalAuthRecoveryService(
       sourceProfileId,
     );
     if (sourcePage.length > 0) {
-      const targets = await Promise.all(
-        sourcePage.map((game) =>
-          getProfileGameProjection(
-            profileGamesDb,
-            job.profileId,
-            game.projectionId,
-          ),
-        ),
+      const targets = await getProfileGameProjections(
+        profileGamesDb,
+        job.profileId,
+        sourcePage.map((game) => game.projectionId),
       );
-      const writes = sourcePage.flatMap((game, index) => {
-        const current = targets[index];
+      const writes = sourcePage.flatMap((game) => {
+        const current = targets.get(game.projectionId);
         const copy =
           !current || mergeFreshness(game.data) >= mergeFreshness(current.data)
             ? [

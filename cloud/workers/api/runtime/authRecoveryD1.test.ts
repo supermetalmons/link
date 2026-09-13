@@ -21,6 +21,11 @@ import { createD1EventPrizeWithdrawalStore } from "../src/eventPrizeWithdrawalD1
 import { readEventRuntimeControl } from "../src/eventD1.ts";
 import { CanonicalProfileConflict } from "../src/profileCanonicalD1.ts";
 import { createProfileLinkCatchupStore } from "../src/profileLinkCatchupD1.ts";
+import {
+  commitProfileGameProjectionWrites,
+  getProfileGameProjection,
+  listProfileGameProjectionPage,
+} from "../src/profileGamesD1.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 import {
   applyEventTestMigrations,
@@ -28,6 +33,7 @@ import {
 } from "./eventTestMigrations.ts";
 
 const testEnv = env as Env & {
+  TEST_D1_MIGRATIONS: D1Migration[];
   TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
   TEST_EVENT_D1_MIGRATIONS: D1Migration[];
   TEST_EVENT_PRIZE_WITHDRAWAL_D1_MIGRATIONS: D1Migration[];
@@ -59,6 +65,79 @@ const d1Env = new Proxy(testEnv, {
 });
 const logger = { error() {}, info() {} };
 let fixtureSequence = 0;
+
+function gameData(projectionId: string, ownerProfileId: string) {
+  return {
+    entityType: "game",
+    inviteId: projectionId,
+    kind: "direct",
+    status: "waiting",
+    sortBucket: 30,
+    listSortAt: 2_000,
+    updatedAt: 3_000,
+    ownerProfileId,
+    hostLoginId: "host",
+    guestLoginId: null,
+    opponentProfileId: null,
+    opponentName: null,
+    opponentEmoji: null,
+    automatchStateHint: null,
+    isPendingAutomatch: false,
+  };
+}
+
+function observeTargetReads(
+  database: D1Database,
+  profileId: string,
+  onRead: () => void,
+): D1Database {
+  const nativeStatements = new WeakMap<object, D1PreparedStatement>();
+  const wrap = (
+    statement: D1PreparedStatement,
+    query: string,
+    bindings: unknown[] = [],
+  ): D1PreparedStatement => {
+    const wrapped = new Proxy(statement, {
+      get(target, property) {
+        if (property === "bind") {
+          return (...values: unknown[]) =>
+            wrap(target.bind(...values), query, values);
+        }
+        const member = Reflect.get(target, property, target);
+        if (
+          (property === "all" || property === "first") &&
+          query.includes("profile_game_projections") &&
+          bindings[0] === profileId
+        ) {
+          return (...args: unknown[]) => {
+            onRead();
+            return Reflect.apply(member, target, args);
+          };
+        }
+        return typeof member === "function" ? member.bind(target) : member;
+      },
+    });
+    nativeStatements.set(wrapped, statement);
+    return wrapped;
+  };
+  return new Proxy(database, {
+    get(target, property) {
+      if (property === "prepare") {
+        return (query: string) => wrap(target.prepare(query), query);
+      }
+      if (property === "batch") {
+        return (statements: D1PreparedStatement[]) =>
+          target.batch(
+            statements.map(
+              (statement) => nativeStatements.get(statement) || statement,
+            ),
+          );
+      }
+      const member = Reflect.get(target, property, target);
+      return typeof member === "function" ? member.bind(target) : member;
+    },
+  });
+}
 
 async function fixture(prizeId = "retired-prize") {
   fixtureSequence++;
@@ -143,11 +222,21 @@ async function fixture(prizeId = "retired-prize") {
       )
         .bind(target.profileId)
         .run(),
+    startGamePhase: () =>
+      testEnv.PROFILE_DB.prepare(
+        "UPDATE profile_auth_recovery_jobs SET source_phase = 'games' WHERE profile_id = ?",
+      )
+        .bind(target.profileId)
+        .run(),
   };
 }
 
-describe("canonical auth recovery with D1 prize storage", () => {
+describe("canonical auth recovery with D1 storage", () => {
   beforeAll(async () => {
+    await applyD1Migrations(
+      testEnv.PROFILE_GAMES_DB,
+      testEnv.TEST_D1_MIGRATIONS,
+    );
     await applyRetiredProfileMigrations(
       testEnv.PROFILE_DB,
       testEnv.TEST_PROFILE_D1_MIGRATIONS,
@@ -167,6 +256,9 @@ describe("canonical auth recovery with D1 prize storage", () => {
     credentialReads.length = 0;
     outboundFetch.mockClear();
     vi.stubGlobal("fetch", outboundFetch);
+    await testEnv.PROFILE_GAMES_DB.prepare(
+      "DELETE FROM profile_game_projections",
+    ).run();
     await testEnv.EVENT_DB.batch([
       testEnv.EVENT_DB.prepare("DELETE FROM event_leases"),
       testEnv.EVENT_DB.prepare("DELETE FROM event_write_admissions"),
@@ -195,6 +287,263 @@ describe("canonical auth recovery with D1 prize storage", () => {
     expect(outboundFetch).not.toHaveBeenCalled();
     expect(credentialReads).toEqual([]);
   });
+
+  it("recovers bounded game pages with one target read and preserves fresher targets", async () => {
+    const f = await fixture();
+    await f.startGamePhase();
+    const projectionIds = Array.from(
+      { length: 101 },
+      (_, index) => `game-${String(index).padStart(3, "0")}`,
+    );
+    await commitProfileGameProjectionWrites(
+      testEnv.PROFILE_GAMES_DB,
+      projectionIds.map((projectionId) => ({
+        type: "merge" as const,
+        profileId: sourceProfileId,
+        projectionId,
+        data: gameData(projectionId, sourceProfileId),
+      })),
+    );
+    await commitProfileGameProjectionWrites(
+      testEnv.PROFILE_GAMES_DB,
+      [1_000, 3_000, 4_000].map((listSortAt, index) => ({
+        type: "merge" as const,
+        profileId: f.targetProfileId,
+        projectionId: projectionIds[index + 1],
+        data: {
+          ...gameData(projectionIds[index + 1], f.targetProfileId),
+          listSortAt,
+          updatedAt: 1_000,
+        },
+      })),
+    );
+    const newerTarget = await getProfileGameProjection(
+      testEnv.PROFILE_GAMES_DB,
+      f.targetProfileId,
+      projectionIds[3],
+    );
+    const targetRead = vi.fn();
+    const service = createAuthRecoveryService(d1Env, {
+      d1: observeTargetReads(
+        testEnv.PROFILE_GAMES_DB,
+        f.targetProfileId,
+        targetRead,
+      ),
+      logger,
+    });
+
+    await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(
+      false,
+    );
+    expect(targetRead).toHaveBeenCalledTimes(1);
+    expect(
+      (
+        await listProfileGameProjectionPage(
+          testEnv.PROFILE_GAMES_DB,
+          sourceProfileId,
+        )
+      ).map((game) => game.projectionId),
+    ).toEqual([projectionIds[100]]);
+    for (const projectionId of projectionIds.slice(0, 3)) {
+      expect(
+        await getProfileGameProjection(
+          testEnv.PROFILE_GAMES_DB,
+          f.targetProfileId,
+          projectionId,
+        ),
+      ).toMatchObject({ data: gameData(projectionId, f.targetProfileId) });
+    }
+    expect(
+      await getProfileGameProjection(
+        testEnv.PROFILE_GAMES_DB,
+        f.targetProfileId,
+        projectionIds[3],
+      ),
+    ).toEqual(newerTarget);
+    expect(
+      await getProfileGameProjection(
+        testEnv.PROFILE_GAMES_DB,
+        f.targetProfileId,
+        projectionIds[100],
+      ),
+    ).toBeNull();
+    expect(await f.readJob()).toMatchObject({ source_phase: "games" });
+
+    await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(
+      false,
+    );
+    expect(targetRead).toHaveBeenCalledTimes(2);
+    expect(
+      await listProfileGameProjectionPage(
+        testEnv.PROFILE_GAMES_DB,
+        sourceProfileId,
+      ),
+    ).toEqual([]);
+    expect(
+      await getProfileGameProjection(
+        testEnv.PROFILE_GAMES_DB,
+        f.targetProfileId,
+        projectionIds[100],
+      ),
+    ).toMatchObject({ data: gameData(projectionIds[100], f.targetProfileId) });
+  });
+
+  it.each(["target-created", "target-updated", "source-updated"] as const)(
+    "rolls back the recovery page when a projection is %s before the commit",
+    async (race) => {
+      const f = await fixture();
+      await f.startGamePhase();
+      const projectionId = "game-z-raced";
+      const siblingId = "game-a-sibling";
+      await commitProfileGameProjectionWrites(
+        testEnv.PROFILE_GAMES_DB,
+        [siblingId, projectionId].map((id) => ({
+          type: "merge" as const,
+          profileId: sourceProfileId,
+          projectionId: id,
+          data: gameData(id, sourceProfileId),
+        })),
+      );
+      if (race === "target-updated") {
+        await commitProfileGameProjectionWrites(testEnv.PROFILE_GAMES_DB, [
+          {
+            type: "merge",
+            profileId: f.targetProfileId,
+            projectionId,
+            data: {
+              ...gameData(projectionId, f.targetProfileId),
+              listSortAt: 1_000,
+              updatedAt: 1_000,
+            },
+          },
+        ]);
+      }
+      const before = await f.readJob();
+      const racedProfileId =
+        race === "source-updated" ? sourceProfileId : f.targetProfileId;
+      const successorData = {
+        ...gameData(projectionId, racedProfileId),
+        listSortAt: 9_000,
+        updatedAt: 9_000,
+      };
+      let races = 0;
+      const d1 = new Proxy(testEnv.PROFILE_GAMES_DB, {
+        get(target, property) {
+          if (property === "batch") {
+            return async (statements: D1PreparedStatement[]) => {
+              if (races === 0) {
+                races++;
+                await commitProfileGameProjectionWrites(target, [
+                  {
+                    type: "merge",
+                    profileId: racedProfileId,
+                    projectionId,
+                    data: successorData,
+                  },
+                ]);
+              }
+              return target.batch(statements);
+            };
+          }
+          const member = Reflect.get(target, property, target);
+          return typeof member === "function" ? member.bind(target) : member;
+        },
+      });
+
+      await expect(
+        createAuthRecoveryService(d1Env, { d1, logger }).recoverProfile(
+          f.targetProfileId,
+        ),
+      ).resolves.toBe(false);
+      expect(races).toBe(1);
+      expect(await f.readJob()).toEqual(before);
+      expect(
+        await getProfileGameProjection(
+          testEnv.PROFILE_GAMES_DB,
+          racedProfileId,
+          projectionId,
+        ),
+      ).toMatchObject({ data: successorData });
+      expect(
+        (
+          await listProfileGameProjectionPage(
+            testEnv.PROFILE_GAMES_DB,
+            sourceProfileId,
+          )
+        ).map((game) => game.projectionId),
+      ).toEqual([siblingId, projectionId]);
+      expect(
+        await getProfileGameProjection(
+          testEnv.PROFILE_GAMES_DB,
+          f.targetProfileId,
+          siblingId,
+        ),
+      ).toBeNull();
+      if (race === "source-updated") {
+        expect(
+          await getProfileGameProjection(
+            testEnv.PROFILE_GAMES_DB,
+            f.targetProfileId,
+            projectionId,
+          ),
+        ).toBeNull();
+      }
+    },
+  );
+
+  it.each(["malformed-target", "target-read-failed"])(
+    "keeps game recovery pending after %s",
+    async (failure) => {
+      const f = await fixture();
+      await f.startGamePhase();
+      const projectionId = "game-unavailable";
+      await commitProfileGameProjectionWrites(testEnv.PROFILE_GAMES_DB, [
+        {
+          type: "merge",
+          profileId: sourceProfileId,
+          projectionId,
+          data: gameData(projectionId, sourceProfileId),
+        },
+        {
+          type: "merge",
+          profileId: f.targetProfileId,
+          projectionId,
+          data: gameData(projectionId, f.targetProfileId),
+        },
+      ]);
+      if (failure === "malformed-target") {
+        await testEnv.PROFILE_GAMES_DB.prepare(
+          "UPDATE profile_game_projections SET payload_json = '[]' WHERE profile_id = ? AND projection_id = ?",
+        )
+          .bind(f.targetProfileId, projectionId)
+          .run();
+      }
+      const before = await f.readJob();
+      const readRows = () =>
+        testEnv.PROFILE_GAMES_DB.prepare(
+          "SELECT * FROM profile_game_projections ORDER BY profile_id, projection_id",
+        ).all();
+      const rowsBefore = (await readRows()).results;
+      const targetRead = vi.fn(() => {
+        if (failure === "target-read-failed") {
+          throw new Error("simulated-target-read-failure");
+        }
+      });
+      await expect(
+        createAuthRecoveryService(d1Env, {
+          d1: observeTargetReads(
+            testEnv.PROFILE_GAMES_DB,
+            f.targetProfileId,
+            targetRead,
+          ),
+          logger,
+        }).recoverProfile(f.targetProfileId),
+      ).resolves.toBe(false);
+      expect(targetRead).toHaveBeenCalledTimes(1);
+      expect(await f.readJob()).toEqual(before);
+      expect((await readRows()).results).toEqual(rowsBefore);
+    },
+  );
 
   it("reports completion when the recovery job is deleted during login processing", async () => {
     const f = await fixture();

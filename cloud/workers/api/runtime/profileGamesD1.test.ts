@@ -6,6 +6,7 @@ import {
   deleteD1NavigationGame,
   encodeProfileGameProjection,
   getProfileGameProjection,
+  getProfileGameProjections,
   readProfileGamesPage,
   reserveEventProfileGameProjectionFence,
 } from "../src/profileGamesD1.ts";
@@ -16,6 +17,39 @@ import {
 } from "../src/historicalMatchesD1.ts";
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
+
+function observeProjectionReads() {
+  const reads: Array<{ query: string; values: unknown[] }> = [];
+  const wrap = (
+    statement: D1PreparedStatement,
+    query: string,
+    values: unknown[] = [],
+  ): D1PreparedStatement =>
+    new Proxy(statement, {
+      get(target, property) {
+        if (property === "bind") {
+          return (...bound: unknown[]) =>
+            wrap(target.bind(...bound), query, bound);
+        }
+        if (property === "all") {
+          return async () => {
+            reads.push({ query: query.replace(/\s+/g, " ").trim(), values });
+            return target.all();
+          };
+        }
+        throw new Error("unexpected-projection-statement-operation");
+      },
+    });
+  const database = new Proxy(env.PROFILE_GAMES_DB, {
+    get(target, property) {
+      if (property === "prepare") {
+        return (query: string) => wrap(target.prepare(query), query);
+      }
+      throw new Error("unexpected-projection-database-operation");
+    },
+  });
+  return { database, reads };
+}
 
 function gameData(
   inviteId: string,
@@ -263,6 +297,131 @@ describe("profile game projection D1 repository", () => {
       }),
     ).toThrow("invalid-profile-game-projection-list-sort");
   });
+
+  it("reads 100 projections with one query and two bound values", async () => {
+    const projectionIds = Array.from(
+      { length: 100 },
+      (_, index) => `invite-${index}`,
+    );
+    await commitProfileGameProjectionWrites(
+      env.PROFILE_GAMES_DB,
+      projectionIds.map((projectionId) => ({
+        type: "merge" as const,
+        profileId: "profile-1",
+        projectionId,
+        data: gameData(projectionId, 1_000),
+      })),
+    );
+    const observed = observeProjectionReads();
+    const projections = await getProfileGameProjections(
+      observed.database,
+      "profile-1",
+      projectionIds,
+    );
+    expect(projections).toEqual(
+      new Map(
+        projectionIds.map((projectionId) => [
+          projectionId,
+          { data: gameData(projectionId, 1_000), updateTime: "1" },
+        ]),
+      ),
+    );
+    expect(observed.reads).toHaveLength(1);
+    expect(observed.reads[0].query).toContain("FROM profile_game_projections");
+    expect(observed.reads[0].values).toEqual([
+      "profile-1",
+      JSON.stringify(projectionIds),
+    ]);
+  });
+
+  it("deduplicates requested projections and preserves versions within the requested profile", async () => {
+    await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
+      {
+        type: "merge",
+        profileId: "profile-1",
+        projectionId: "invite-1",
+        data: gameData("invite-1", 1_000),
+      },
+      {
+        type: "merge",
+        profileId: "profile-1",
+        projectionId: "unrequested",
+        data: gameData("unrequested", 1_000),
+      },
+      {
+        type: "merge",
+        profileId: "profile-2",
+        projectionId: "invite-1",
+        data: gameData("invite-1", 9_000),
+      },
+      {
+        type: "merge",
+        profileId: "profile-2",
+        projectionId: "other-profile-only",
+        data: gameData("other-profile-only", 9_000),
+      },
+    ]);
+    await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
+      {
+        type: "merge",
+        profileId: "profile-1",
+        projectionId: "invite-1",
+        data: gameData("invite-1", 2_000, "active"),
+      },
+    ]);
+    const observed = observeProjectionReads();
+    const projections = await getProfileGameProjections(
+      observed.database,
+      "profile-1",
+      ["invite-1", "missing", "invite-1", "other-profile-only"],
+    );
+    expect(projections).toEqual(
+      new Map([
+        [
+          "invite-1",
+          { data: gameData("invite-1", 2_000, "active"), updateTime: "2" },
+        ],
+      ]),
+    );
+    expect(observed.reads).toHaveLength(1);
+    expect(observed.reads[0].values).toEqual([
+      "profile-1",
+      JSON.stringify(["invite-1", "missing", "other-profile-only"]),
+    ]);
+  });
+
+  it("skips database reads when no projections are requested", async () => {
+    const observed = observeProjectionReads();
+    await expect(
+      getProfileGameProjections(observed.database, "profile-1", []),
+    ).resolves.toEqual(new Map());
+    expect(observed.reads).toEqual([]);
+  });
+
+  it.each(["[]", "null"])(
+    "rejects a stored projection payload of %s",
+    async (payloadJson) => {
+      await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
+        {
+          type: "merge",
+          profileId: "profile-1",
+          projectionId: "invite-1",
+          data: gameData("invite-1", 1_000),
+        },
+      ]);
+      await env.PROFILE_GAMES_DB.prepare(
+        `UPDATE profile_game_projections SET payload_json = ?
+         WHERE profile_id = ? AND projection_id = ?`,
+      )
+        .bind(payloadJson, "profile-1", "invite-1")
+        .run();
+      await expect(
+        getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
+          "invite-1",
+        ]),
+      ).rejects.toThrow("invalid-profile-game-projection-json");
+    },
+  );
 
   it("uses stable keyset pagination for equal timestamps", async () => {
     await commitProfileGameProjectionWrites(
