@@ -121,6 +121,11 @@ async function fixture(failCompletedWrite = false) {
           : null,
       };
     },
+    async readMatchPairs(inputs, signal) {
+      return Promise.all(
+        inputs.map((input) => memoryState.readMatchPair(input, signal)),
+      );
+    },
     async createMatchRecords() {
       sourceWrites++;
       throw new Error("unexpected-source-write");

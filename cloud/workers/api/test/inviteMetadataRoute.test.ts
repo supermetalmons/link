@@ -105,6 +105,9 @@ function setup({
       readMatchPair: async () => {
         throw new Error("unexpected-source-read");
       },
+      readMatchPairs: async () => {
+        throw new Error("unexpected-source-read");
+      },
       createMatchRecords: async () => {
         throw new Error("unexpected-write");
       },

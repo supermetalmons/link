@@ -31,6 +31,10 @@ export type StateRepository = {
     input: Omit<MatchStatePairRequest, "epoch">,
     signal?: AbortSignal,
   ) => Promise<MatchStatePair>;
+  readMatchPairs?: (
+    inputs: readonly Omit<MatchStatePairRequest, "epoch">[],
+    signal?: AbortSignal,
+  ) => Promise<MatchStatePair[]>;
   createMatchRecords?: (
     input: {
       inviteId: string;

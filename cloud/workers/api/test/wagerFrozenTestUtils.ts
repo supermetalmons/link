@@ -196,6 +196,8 @@ export function attachMemoryWagerFrozenStore(
         )) as import("../src/matchStateTypes.ts").MatchStateRecord | null)
       : null,
   });
+  repository.readMatchPairs ??= (inputs, signal) =>
+    Promise.all(inputs.map((input) => repository.readMatchPair(input, signal)));
   repository.wagerFrozen ??= createMemoryWagerFrozenStore({
     read: (playerUid) => repository.readState(`reservations/${playerUid}`),
     transact: (playerUid, update, signal) =>

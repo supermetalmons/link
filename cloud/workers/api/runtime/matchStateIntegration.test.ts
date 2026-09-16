@@ -100,6 +100,150 @@ afterEach(async () => {
 });
 
 describe("canonical match room integration", () => {
+  it.each([false, true])(
+    "keeps event receipts compatible when deferred notifications are %s",
+    async (deferNotifications) => {
+      const { room, rpc, inviteId, input } = await fixture();
+      await createMatches(input);
+      const notify = vi.fn(async () => {});
+      await runInDurableObject(room, (instance) => {
+        const target = instance as unknown as {
+          matchSync: { notify: typeof notify };
+        };
+        target.matchSync.notify = notify;
+      });
+      const effect = {
+        inviteId,
+        epoch: 2,
+        operationId: "compatible-event-effect",
+        terminalTimers: [{ matchId: inviteId, playerId: "host-login" }],
+      };
+      const applied = unwrapMatchStateRpc(
+        await (deferNotifications
+          ? rpc.applyCanonicalMatchEventEffects(effect, {
+              deferNotifications: true,
+            })
+          : rpc.applyCanonicalMatchEventEffects(effect)),
+      );
+      expect(applied.changedMatchIds).toEqual([inviteId]);
+      expect(notify).toHaveBeenCalledTimes(deferNotifications ? 0 : 1);
+      const receipt = await runInDurableObject(
+        room,
+        (_instance, state) =>
+          state.storage.sql
+            .exec<{ payload_json: string }>(
+              "SELECT payload_json FROM match_state_event_receipts WHERE operation_id = ?",
+              effect.operationId,
+            )
+            .one().payload_json,
+      );
+      expect(JSON.parse(receipt)).toEqual(effect);
+      expect(
+        unwrapMatchStateRpc(
+          await rpc.applyCanonicalMatchEventEffects(effect, {
+            deferNotifications: !deferNotifications,
+          }),
+        ).changedMatchIds,
+      ).toEqual([]);
+      expect(
+        await runInDurableObject(
+          room,
+          (_instance, state) =>
+            state.storage.sql
+              .exec<{ payload_json: string }>(
+                "SELECT payload_json FROM match_state_event_receipts WHERE operation_id = ?",
+                effect.operationId,
+              )
+              .one().payload_json,
+        ),
+      ).toBe(receipt);
+      expect(
+        unwrapMatchStateRpc(
+          await rpc.readCanonicalMatchPair({
+            inviteId,
+            epoch: 2,
+            matchId: inviteId,
+            playerId: "host-login",
+            opponentId: "guest-login",
+          }),
+        ).playerMatch?.timer,
+      ).toBe(MATCH_TIMER_TERMINAL);
+    },
+  );
+
+  it("repairs deferred event effects when the post-commit notification is lost", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
+    const { room, rpc, inviteId, input } = await fixture();
+    await createMatches(input);
+    const initial = await room.readMatches(inviteId, inviteId);
+    if (initial.status !== "ok") throw new Error("missing-fixture");
+    const response = await room.fetch(
+      new Request("https://room.internal/matches/socket", {
+        headers: {
+          Upgrade: "websocket",
+          "Sec-WebSocket-Protocol": MATCH_SYNC_SOCKET_PROTOCOL,
+          "X-Mons-Match-Invite": inviteId,
+          "X-Mons-Match-Match": inviteId,
+          "X-Mons-Match-Role": "host",
+          "X-Mons-Match-Actor": "host-login",
+          "X-Mons-Match-IP": "192.0.2.1",
+          "X-Mons-Match-Revision": String(initial.snapshot.revision),
+          "X-Mons-Match-Protected": "0",
+          "X-Mons-Match-Authenticated": "1",
+          ...socketTestSessionHeaders(),
+        },
+      }),
+    );
+    expect(response.status).toBe(101);
+    const socket = response.webSocket!;
+    sockets.push(socket);
+    const messages: unknown[] = [];
+    let received!: (value: unknown) => void;
+    const update = new Promise((resolve) => {
+      received = resolve;
+    });
+    socket.addEventListener("message", ({ data }) => {
+      const message: unknown = JSON.parse(String(data));
+      messages.push(message);
+      received(message);
+    });
+    socket.accept();
+    expect(await update).toMatchObject({
+      type: "snapshot",
+      snapshot: { revision: initial.snapshot.revision },
+    });
+    messages.length = 0;
+    const repaired = new Promise((resolve) => {
+      received = resolve;
+    });
+    unwrapMatchStateRpc(
+      await rpc.applyCanonicalMatchEventEffects(
+        {
+          inviteId,
+          epoch: 2,
+          operationId: "lost-event-notification",
+          terminalTimers: [{ matchId: inviteId, playerId: "host-login" }],
+        },
+        { deferNotifications: true },
+      ),
+    );
+    expect(messages).toEqual([]);
+    const alarm = await runInDurableObject(room, (_instance, state) =>
+      state.storage.getAlarm(),
+    );
+    expect(alarm).not.toBeNull();
+    clock.mockReturnValue(alarm!);
+    await runDurableObjectAlarm(room);
+    expect(await repaired).toMatchObject({
+      type: "snapshot",
+      snapshot: {
+        revision: initial.snapshot.revision + 1,
+        hostMatch: { timer: MATCH_TIMER_TERMINAL },
+      },
+    });
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+  });
+
   it("merges transactional effect and room alarms without delaying the earlier work", async () => {
     const { room } = await fixture();
     await runInDurableObject(room, async (instance, state) => {

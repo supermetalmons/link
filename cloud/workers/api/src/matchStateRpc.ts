@@ -54,6 +54,7 @@ export type MatchStateRpc = {
   ): Promise<MatchStateRpcResult<ClaimMatchVictoryByTimerResponse>>;
   applyCanonicalMatchEventEffects(
     input: MatchStateEventEffectsRequest,
+    options?: { deferNotifications?: boolean },
   ): Promise<MatchStateRpcResult<MatchStateCreateResult>>;
 };
 

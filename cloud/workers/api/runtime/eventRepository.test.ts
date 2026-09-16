@@ -28,6 +28,7 @@ import {
   createD1AuthRecoveryPrizeStore,
   createEventGameplayRepository,
   createEventStateRepository,
+  recoverEventTransitionIntents,
 } from "../src/eventRepository.ts";
 import { prepareInviteEventIntent } from "../src/inviteEventEffects.ts";
 import {
@@ -48,6 +49,29 @@ const testEnv = env as Env & {
   TEST_EVENT_D1_MIGRATIONS: D1Migration[];
 };
 const eventId = "NN3eRzoZo80";
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function notificationEnv(
+  notify: (inviteId: string, matchIds?: string[]) => Promise<void>,
+) {
+  return {
+    ...testEnv,
+    INVITE_REACTIONS: {
+      getByName: () => ({
+        notifyMatchesChanged: notify,
+        notifyMetadataChanged: notify,
+        notifyWagersChanged: notify,
+      }),
+    } as unknown as Env["INVITE_REACTIONS"],
+  };
+}
 
 function eventRecord(status = "scheduled", recordEventId = eventId) {
   return {
@@ -773,6 +797,242 @@ describe("typed event repository", () => {
     expect(await listPendingEventTransitionIntents(testEnv.EVENT_DB)).toEqual(
       [],
     );
+  });
+
+  it.each(["scheduled", "awaited", "recovery"] as const)(
+    "commits and releases transition admissions before %s notifications",
+    async (mode) => {
+      const started = deferred();
+      const blocked = deferred();
+      const notify = vi.fn(async () => {
+        started.resolve();
+        await blocked.promise;
+      });
+      const scopedEnv = notificationEnv(notify);
+      const f = eventTransitionFixture(scopedEnv);
+      const scheduled: Promise<void>[] = [];
+      const client = createEventStateRepository(
+        scopedEnv,
+        f.raw,
+        f.raw,
+        undefined,
+        mode === "scheduled"
+          ? { schedule: (work) => scheduled.push(work) }
+          : {},
+      );
+      await client.commitEventPlan([
+        { kind: "event", eventId, value: eventRecord() },
+      ]);
+      const updates = {
+        [`events/${eventId}/status`]: "active",
+        "players/login-one/matches/event-match/timer": "gg",
+      };
+      if (mode === "recovery") {
+        await createPendingIntent({
+          schemaVersion: 1,
+          transitionId: "post-commit-recovery",
+          eventId,
+          expectedRevision: 1,
+          canonicalUpdates: { [`events/${eventId}/status`]: "active" },
+          rtdbEffects: { "players/login-one/matches/event-match/timer": "gg" },
+          createdAtMs: 200,
+          updatedAtMs: 200,
+        });
+      }
+      let completed = false;
+      const work = (
+        mode === "recovery"
+          ? recoverEventTransitionIntents(scopedEnv, 100, f.raw)
+          : client.commitEventPlan(decodeEventUpdates(updates))
+      ).then(() => {
+        completed = true;
+      });
+      try {
+        await started.promise;
+        expect(
+          await readEventSnapshot(testEnv.EVENT_DB, eventId),
+        ).toMatchObject({
+          event: { status: "active" },
+          revision: 2,
+        });
+        expect(
+          await listPendingEventTransitionIntents(testEnv.EVENT_DB),
+        ).toEqual([]);
+        for (const table of ["event_write_admissions", "event_leases"]) {
+          expect(
+            await testEnv.EVENT_DB.prepare(
+              `SELECT COUNT(*) AS count FROM ${table}`,
+            ).first<number>("count"),
+          ).toBe(0);
+        }
+        expect(
+          await testEnv.PROFILE_GAMES_DB.prepare(
+            "SELECT COUNT(*) AS count FROM invite_source_write_admissions",
+          ).first<number>("count"),
+        ).toBe(0);
+        expect(
+          f.values.get("players/login-one/matches/event-match/timer"),
+        ).toBe("gg");
+        if (mode === "scheduled") {
+          await work;
+          expect(scheduled).toHaveLength(1);
+        } else {
+          expect(completed).toBe(false);
+          expect(scheduled).toEqual([]);
+        }
+      } finally {
+        blocked.resolve();
+        await work;
+        await Promise.all(scheduled);
+      }
+      expect(notify).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(["effects", "commit"] as const)(
+    "retains pending recovery without notifying when %s fail",
+    async (failure) => {
+      const notify = vi.fn(async () => {});
+      const scopedEnv = notificationEnv(notify);
+      const f = eventTransitionFixture(scopedEnv);
+      await f.client.commitEventPlan([
+        { kind: "event", eventId, value: eventRecord() },
+      ]);
+      if (failure === "effects") {
+        f.hooks.beforePatch = async () => {
+          throw new Error("required-effects-failed");
+        };
+      } else {
+        await testEnv.EVENT_DB.prepare(
+          `CREATE TRIGGER event_notification_test_commit_failure
+          BEFORE UPDATE ON event_records WHEN NEW.revision > OLD.revision
+          BEGIN SELECT RAISE(ABORT, 'canonical-commit-failed'); END`,
+        ).run();
+      }
+      try {
+        await expect(
+          f.client.commitEventPlan(
+            decodeEventUpdates({
+              [`events/${eventId}/status`]: "active",
+              "players/login-one/matches/event-match/timer": "gg",
+            }),
+          ),
+        ).rejects.toThrow();
+        expect(notify).not.toHaveBeenCalled();
+        expect(
+          await readEventSnapshot(testEnv.EVENT_DB, eventId),
+        ).toMatchObject({
+          event: { status: "scheduled" },
+          revision: 1,
+        });
+        expect(
+          await listPendingEventTransitionIntents(testEnv.EVENT_DB),
+        ).toHaveLength(1);
+      } finally {
+        f.hooks.beforePatch = undefined;
+        if (failure === "commit")
+          await testEnv.EVENT_DB.prepare(
+            "DROP TRIGGER event_notification_test_commit_failure",
+          ).run();
+      }
+      await expect(
+        recoverEventTransitionIntents(scopedEnv, 100, f.raw),
+      ).resolves.toBe(1);
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(await listPendingEventTransitionIntents(testEnv.EVENT_DB)).toEqual(
+        [],
+      );
+    },
+  );
+
+  it.each(["failure", "timeout", "scheduler"] as const)(
+    "preserves a successful mutation through notification %s",
+    async (failure) => {
+      const blocked = deferred();
+      const notify = vi.fn(async () => {
+        if (failure === "timeout") await blocked.promise;
+        else throw new Error("notification-unavailable");
+      });
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      const scopedEnv = notificationEnv(notify);
+      const f = eventTransitionFixture(scopedEnv);
+      const scheduled: Promise<void>[] = [];
+      const client = createEventStateRepository(
+        scopedEnv,
+        f.raw,
+        f.raw,
+        undefined,
+        {
+          ...(failure === "scheduler"
+            ? {
+                schedule: (work: Promise<void>) => {
+                  scheduled.push(work);
+                  throw new Error("scheduler-unavailable");
+                },
+              }
+            : {}),
+        },
+      );
+      try {
+        await client.commitEventPlan([
+          { kind: "event", eventId, value: eventRecord() },
+        ]);
+        await expect(
+          client.commitEventPlan(
+            decodeEventUpdates({
+              [`events/${eventId}/status`]: "active",
+              "players/login-one/matches/event-match/timer": "gg",
+            }),
+          ),
+        ).resolves.toBeUndefined();
+        await Promise.all(scheduled);
+        expect(
+          await readEventSnapshot(testEnv.EVENT_DB, eventId),
+        ).toMatchObject({
+          event: { status: "active" },
+          revision: 2,
+        });
+        expect(
+          await listPendingEventTransitionIntents(testEnv.EVENT_DB),
+        ).toEqual([]);
+        expect(f.patches).toHaveLength(1);
+        expect(notify).toHaveBeenCalledTimes(1);
+      } finally {
+        blocked.resolve();
+        errors.mockRestore();
+      }
+    },
+  );
+
+  it("notifies timer claims using the invite route stored in the transition", async () => {
+    const notify = vi.fn(async (_inviteId: string, _matchIds?: string[]) => {});
+    const scopedEnv = notificationEnv(notify);
+    const f = eventTransitionFixture(scopedEnv);
+    await f.client.commitEventPlan([
+      { kind: "event", eventId, value: eventRecord() },
+    ]);
+    const claim = {
+      inviteId: "claim-invite",
+      playerId: "login-one",
+      opponentId: "login-two",
+      status: "claimed",
+      claimedAtMs: 200,
+    };
+    await createPendingIntent({
+      schemaVersion: 1,
+      transitionId: "claim-notification",
+      eventId,
+      expectedRevision: 1,
+      canonicalUpdates: { [`events/${eventId}/status`]: "active" },
+      rtdbEffects: { "matchTimerClaims/claim-match": claim },
+      createdAtMs: 200,
+      updatedAtMs: 200,
+    });
+    await expect(
+      recoverEventTransitionIntents(scopedEnv, 100, f.raw),
+    ).resolves.toBe(1);
+    expect(notify).toHaveBeenCalledWith("claim-invite");
+    expect(f.values.get("matchTimerClaims/claim-match")).toEqual(claim);
   });
 
   it("preserves advanced matches after an ambiguous creation commit", async () => {

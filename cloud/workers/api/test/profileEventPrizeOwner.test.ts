@@ -81,6 +81,9 @@ test("reconciles canonical prize projections without changing event history", as
     readMatchPair: async () => {
       throw new Error("unexpected-match-pair-read");
     },
+    readMatchPairs: async () => {
+      throw new Error("unexpected-match-pair-read");
+    },
     state: createState(values),
     readEventPrizeWithdrawals: async () => ({}),
   });
@@ -140,6 +143,9 @@ test("uses injected canonical withdrawals when filtering prize projections", asy
     readMatchPair: async () => {
       throw new Error("unexpected-match-pair-read");
     },
+    readMatchPairs: async () => {
+      throw new Error("unexpected-match-pair-read");
+    },
     state: createState(values),
     readEventPrizeWithdrawals: async () => ({
       [prizeId]: {
@@ -187,6 +193,9 @@ test("does not overwrite a canonical prize assignment inserted concurrently", as
     readMatchPair: async () => {
       throw new Error("unexpected-match-pair-read");
     },
+    readMatchPairs: async () => {
+      throw new Error("unexpected-match-pair-read");
+    },
     state: createState(values, (path, currentValues) => {
       if (path === targetPath && !inserted) {
         currentValues.set(path, conflictingAssignment);
@@ -219,6 +228,9 @@ test("rejects two awards that collapse to one canonical profile", async () => {
   const eventId = "NN3eRzoZo80";
   const runtime = createEventBracketRuntime({
     readMatchPair: async () => {
+      throw new Error("unexpected-match-pair-read");
+    },
+    readMatchPairs: async () => {
       throw new Error("unexpected-match-pair-read");
     },
     state: createState(new Map()),

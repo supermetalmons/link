@@ -1,4 +1,5 @@
 import type { EventRuntimeStore } from "./eventCommands.js";
+import type { EventMatchPairRequest } from "./events/bracket.js";
 export type EventRuntimeCode =
   | "aborted"
   | "failed-precondition"
@@ -51,12 +52,10 @@ export type EventRuntime = {
 };
 
 export function createEventRuntime(dependencies: {
-  readMatchPair: (input: {
-    inviteId: string;
-    matchId: string;
-    playerId: string;
-    opponentId: string;
-  }) => Promise<[unknown, unknown]>;
+  readMatchPair: (input: EventMatchPairRequest) => Promise<[unknown, unknown]>;
+  readMatchPairs: (
+    inputs: EventMatchPairRequest[],
+  ) => Promise<Array<[unknown, unknown]>>;
   state: EventRuntimeStore;
   enqueueEventProgressTask(input: {
     eventId: string;

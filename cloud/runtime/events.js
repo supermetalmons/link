@@ -75,6 +75,7 @@ const createEventRuntime = (dependencies) => {
     state,
     readEventPrizeWithdrawals,
     readMatchPair: dependencies.readMatchPair,
+    readMatchPairs: dependencies.readMatchPairs,
   });
   const HttpsError = EventRuntimeError;
   const EVENT_SYNC_THROTTLE_WINDOW_MS = 500;

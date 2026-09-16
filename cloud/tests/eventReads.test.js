@@ -13,6 +13,8 @@ function createRuntime({
   lockedEvent,
   prizeSelections = {},
   lockOwned = true,
+  readMatchPairs = () => assert.fail("unexpected match batch read"),
+  readProfileOwnershipSnapshot = () => assert.fail("unexpected ownership read"),
 }) {
   const calls = [];
   let event = { status: "scheduled", startAtMs: 10_000 };
@@ -61,8 +63,9 @@ function createRuntime({
       },
       startEventLockHeartbeat: () => () => {},
     },
-    readProfileOwnershipSnapshot: () =>
-      assert.fail("unexpected ownership read"),
+    readMatchPair: () => assert.fail("unexpected single match read"),
+    readMatchPairs,
+    readProfileOwnershipSnapshot,
     readEventPrizeWithdrawals: () => assert.fail("unexpected withdrawal read"),
     enqueueEventProgressTask: () => assert.fail("unexpected progress task"),
     now: () => 1_000,
@@ -116,3 +119,53 @@ test("sync discards a stale planned transition when the event lock is lost", asy
   assert.deepEqual(patches, []);
   assert.deepEqual(calls, ["read", "lock", "snapshot", "read", "release"]);
 });
+
+for (const status of ["active", "ended"]) {
+  test(`${status} sync does not commit when a round batch read fails`, async () => {
+    const failure = new Error("match-state-source-changed");
+    let batches = 0;
+    const { runtime, calls, patches } = createRuntime({
+      lockedEvent: {
+        status,
+        participants: {},
+        rounds: {
+          0: {
+            matches: {
+              "0_0": {
+                status: "active",
+                inviteId: "event-match",
+                hostLoginUid: "host-login",
+                guestLoginUid: "guest-login",
+              },
+            },
+          },
+        },
+      },
+      readProfileOwnershipSnapshot: async () => ({
+        canonicalProfileIdByProfileId: new Map(),
+        loginOwnerByUid: new Map(),
+        loginUidsByProfileId: new Map(),
+        profileById: new Map(),
+      }),
+      readMatchPairs: async (inputs) => {
+        batches += 1;
+        assert.equal(inputs.length, 1);
+        throw failure;
+      },
+    });
+
+    await assert.rejects(
+      runtime.runEventSyncState({
+        eventId,
+        requesterUid: "worker",
+        enforceParticipantGate: false,
+        enforceThrottle: false,
+        syncLog: {},
+      }),
+      failure,
+    );
+    assert.equal(batches, 1);
+    assert.deepEqual(patches, []);
+    assert.deepEqual(calls, ["read", "lock", "snapshot", "release"]);
+  });
+}

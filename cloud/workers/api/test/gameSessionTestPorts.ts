@@ -103,6 +103,11 @@ export function matchTestPort(
         claim: null,
       };
     },
+    async readMatchPairs(inputs, signal) {
+      return Promise.all(
+        inputs.map((input) => this.readMatchPair(input, signal)),
+      );
+    },
     async createMatchRecords(input, signal) {
       for (const record of input.records)
         await state.transactPath(

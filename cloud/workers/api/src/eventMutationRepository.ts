@@ -23,7 +23,9 @@ export function createEventMutationRepository(
 ): EventGameplayRepository {
   const eventRepository =
     options.eventRepository ||
-    createEventGameplayRepository(env, options.baseRepository);
+    createEventGameplayRepository(env, options.baseRepository, {
+      schedule: options.schedule,
+    });
   return {
     ...eventRepository,
     async commitEventPlan(updates, signal) {

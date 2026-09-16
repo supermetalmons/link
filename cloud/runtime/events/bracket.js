@@ -625,7 +625,22 @@ const createEventBracketRuntime = (dependencies = {}) => {
     };
   };
 
-  const resolveRoundMatchState = async (matchRecord) => {
+  const getRoundMatchRead = (matchRecord) => {
+    if (!matchRecord || typeof matchRecord !== "object") return null;
+    if (
+      ["bye", "host", "guest"].includes(normalizeString(matchRecord.status))
+    ) {
+      return null;
+    }
+    const playerId = normalizeString(matchRecord.hostLoginUid);
+    const opponentId = normalizeString(matchRecord.guestLoginUid);
+    const inviteId = normalizeString(matchRecord.inviteId);
+    return playerId && opponentId && inviteId
+      ? { inviteId, matchId: inviteId, playerId, opponentId }
+      : null;
+  };
+
+  const resolveRoundMatchState = async (matchRecord, matchPair) => {
     if (!matchRecord || typeof matchRecord !== "object") {
       return null;
     }
@@ -664,19 +679,13 @@ const createEventBracketRuntime = (dependencies = {}) => {
       };
     }
 
-    const hostLoginUid = normalizeString(matchRecord.hostLoginUid);
-    const guestLoginUid = normalizeString(matchRecord.guestLoginUid);
-    const inviteId = normalizeString(matchRecord.inviteId);
-    if (!hostLoginUid || !guestLoginUid || !inviteId) {
+    const input = getRoundMatchRead(matchRecord);
+    if (!input) {
       return null;
     }
 
-    const [hostMatch, guestMatch] = await dependencies.readMatchPair({
-      inviteId,
-      matchId: inviteId,
-      playerId: hostLoginUid,
-      opponentId: guestLoginUid,
-    });
+    const [hostMatch, guestMatch] =
+      matchPair || (await dependencies.readMatchPair(input));
     const outcome = await resolveMatchWinner(hostMatch, guestMatch);
     if (outcome.winner === "player") {
       return {
@@ -701,6 +710,30 @@ const createEventBracketRuntime = (dependencies = {}) => {
       return [];
     }
 
+    const reads = entries.flatMap(([, matchRecord], index) => {
+      const input = getRoundMatchRead(matchRecord);
+      return input ? [{ index, input }] : [];
+    });
+    const pairsByIndex = new Map();
+    if (reads.length) {
+      const pairs = await dependencies.readMatchPairs(
+        reads.map(({ input }) => input),
+      );
+      if (
+        !Array.isArray(pairs) ||
+        pairs.length !== reads.length ||
+        reads.some(
+          (_, index) =>
+            !Array.isArray(pairs[index]) || pairs[index].length !== 2,
+        )
+      ) {
+        throw new Error("event-match-batch-invalid");
+      }
+      reads.forEach(({ index }, offset) =>
+        pairsByIndex.set(index, pairs[offset]),
+      );
+    }
+
     const results = new Array(entries.length);
     const concurrency = Math.max(
       1,
@@ -716,7 +749,10 @@ const createEventBracketRuntime = (dependencies = {}) => {
           return;
         }
         const [matchKey, matchRecord] = entries[index];
-        const resolved = await resolveRoundMatchState(matchRecord);
+        const resolved = await resolveRoundMatchState(
+          matchRecord,
+          pairsByIndex.get(index),
+        );
         results[index] = {
           matchKey,
           matchRecord,

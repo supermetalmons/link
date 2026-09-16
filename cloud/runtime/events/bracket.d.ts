@@ -2,6 +2,13 @@ import type { EventOwnershipSnapshot } from "./ownership.js";
 
 import type { EventRuntimeStore, EventCommitPlan } from "../eventCommands.js";
 
+export type EventMatchPairRequest = {
+  inviteId: string;
+  matchId: string;
+  playerId: string;
+  opponentId: string;
+};
+
 export type EventBracketRuntime = {
   addEventPrizeAssignmentUpdates(input: {
     updates: EventCommitPlan;
@@ -65,12 +72,10 @@ export type EventBracketRuntime = {
 };
 
 export function createEventBracketRuntime(dependencies: {
-  readMatchPair: (input: {
-    inviteId: string;
-    matchId: string;
-    playerId: string;
-    opponentId: string;
-  }) => Promise<[unknown, unknown]>;
+  readMatchPair: (input: EventMatchPairRequest) => Promise<[unknown, unknown]>;
+  readMatchPairs: (
+    inputs: EventMatchPairRequest[],
+  ) => Promise<Array<[unknown, unknown]>>;
   state: Pick<EventRuntimeStore, "transactProfileEventPrize">;
   buildRandomGameSeed?: (random?: () => number) => Promise<unknown>;
   resolveMatchWinner?: (

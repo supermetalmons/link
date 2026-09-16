@@ -59,6 +59,9 @@ const EVENT_TRANSITION_APPLICATION_LOCK_OWNER = "event-transition-applier";
 export const EVENT_TRANSITION_RECEIPT_ROOT = "eventTransitionReceipts";
 export type EventGameplayRepository = GameplayRepository & EventStore;
 export type EventStateRepository = MatchStatePort & EventStore;
+type EventRepositoryOptions = {
+  schedule?: (work: Promise<void>) => void;
+};
 export type AuthRecoveryPrizeStore = Pick<
   EventStore,
   | "readProfileEventPrizeAssignment"
@@ -256,10 +259,9 @@ async function applyIntent(
   intent: EventTransitionIntent,
   admission: EventWriteAdmission,
   raw: MatchStatePort,
-  onCommitted: (intent: EventTransitionIntent) => Promise<void>,
   prepareMatchPresentations: PrepareMatchPresentations,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<EventTransitionIntent | undefined> {
   let lock: eventD1.EventLeaseRecord | null = null;
   try {
     lock = await acquireTransitionApplicationLock(db, intent, admission);
@@ -277,6 +279,7 @@ async function applyIntent(
     const canonicalChanges = decodeCanonicalEventUpdates(
       currentIntent.canonicalUpdates,
     );
+    const effectsStartedAt = Date.now();
     await withInviteEffectsAdmission(discoveryDb, async () => {
       await applyInviteEventEffects(
         discoveryDb,
@@ -286,7 +289,8 @@ async function applyIntent(
         prepareMatchPresentations,
       );
     });
-    await onCommitted(currentIntent);
+    logTransitionTiming(currentIntent, "effects", effectsStartedAt);
+    const commitStartedAt = Date.now();
     await commitEventMutations(db, canonicalChanges, {
       admission,
       expectedEventRevisions: {
@@ -297,6 +301,8 @@ async function applyIntent(
         transitionId: currentIntent.transitionId,
       },
     });
+    logTransitionTiming(currentIntent, "commit", commitStartedAt);
+    return currentIntent;
   } catch (error) {
     await recordEventTransitionAttempt(db, {
       error: error instanceof Error ? error.message : "event-transition-failed",
@@ -317,10 +323,9 @@ async function commitD1EventPlan(
   plan: readonly EventCommand[],
   admission: EventWriteAdmission,
   raw: MatchStatePort,
-  onCommitted: (intent: EventTransitionIntent) => Promise<void>,
   prepareMatchPresentations: PrepareMatchPresentations,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<EventTransitionIntent | undefined> {
   const canonical = plan.filter(isEventMutation);
   const effects = plan.filter((command) => !isEventMutation(command));
   if (
@@ -346,7 +351,7 @@ async function commitD1EventPlan(
   ];
   if (eventIds.length !== 1)
     throw new Error("event-transition-must-target-one-event");
-  await withInviteEffectsAdmission(discoveryDb, async () => {
+  return withInviteEffectsAdmission(discoveryDb, async () => {
     const eventId = eventIds[0];
     const revision = (await readEventSnapshot(db, eventId)).revision;
     if (revision < 1)
@@ -381,13 +386,12 @@ async function commitD1EventPlan(
       existing || (await prepareInviteEventIntent(discoveryDb, intent, signal));
     if (!existing)
       await createEventTransitionIntent(db, activeIntent, { admission });
-    await applyIntent(
+    return applyIntent(
       db,
       discoveryDb,
       activeIntent,
       admission,
       raw,
-      onCommitted,
       prepareMatchPresentations,
       signal,
     );
@@ -403,6 +407,7 @@ async function notifyEventInviteEffects(
   intent: EventTransitionIntent,
 ): Promise<void> {
   if (intent.schemaVersion !== 2) return;
+  const effects = decodeEventUpdates(intent[STATE_EFFECTS_FIELD]);
   await Promise.all([
     notifyInviteSourceChanged(env, {
       metadataInviteIds: intent.inviteMutations.map(
@@ -412,13 +417,19 @@ async function notifyEventInviteEffects(
         ({ current }) => current.inviteId,
       ),
     }),
-    notifyMatchSyncInvites(
-      env,
-      intent.inviteMutations.map(({ current }) => current.inviteId),
-    ),
+    notifyMatchSyncInvites(env, [
+      ...intent.inviteMutations.map(({ current }) => current.inviteId),
+      ...effects.flatMap((command) =>
+        command.kind === "match-timer-claim" &&
+        isRecord(command.value) &&
+        typeof command.value.inviteId === "string"
+          ? [command.value.inviteId]
+          : [],
+      ),
+    ]),
     notifyMatchSyncChanged(
       env,
-      decodeEventUpdates(intent[STATE_EFFECTS_FIELD]).flatMap((command) =>
+      effects.flatMap((command) =>
         command.kind === "match-creation" ||
         command.kind === "match-terminal-timer"
           ? [{ playerId: command.playerId, matchId: command.matchId }]
@@ -426,6 +437,55 @@ async function notifyEventInviteEffects(
       ),
     ),
   ]);
+}
+
+function logTransitionTiming(
+  intent: EventTransitionIntent,
+  phase: "effects" | "commit" | "notifications",
+  startedAt: number,
+): void {
+  try {
+    console.log(
+      JSON.stringify({
+        event: "event_transition_timing",
+        eventId: intent.eventId,
+        transitionId: intent.transitionId,
+        phase,
+        durationMs: Date.now() - startedAt,
+      }),
+    );
+  } catch {}
+}
+
+async function dispatchCommittedNotifications(
+  env: Env,
+  intent: EventTransitionIntent | undefined,
+  schedule?: EventRepositoryOptions["schedule"],
+): Promise<void> {
+  if (!intent) return;
+  const startedAt = Date.now();
+  const logFailure = (error: unknown) => {
+    console.error(
+      JSON.stringify({
+        event: "event_transition_notification_failed",
+        eventId: intent.eventId,
+        transitionId: intent.transitionId,
+        kind: error instanceof Error ? error.name : typeof error,
+      }),
+    );
+  };
+  const work = notifyEventInviteEffects(env, intent)
+    .catch(logFailure)
+    .finally(() => logTransitionTiming(intent, "notifications", startedAt));
+  if (schedule) {
+    try {
+      schedule(work);
+      return;
+    } catch (error) {
+      logFailure(error);
+    }
+  }
+  await work;
 }
 
 export async function recoverEventTransitionIntents(
@@ -442,21 +502,21 @@ export async function recoverEventTransitionIntents(
   let processed = 0;
   for (const intent of intents) {
     try {
-      await withEventWriteAdmission(
+      const committed = await withEventWriteAdmission(
         env.EVENT_DB,
         "transition-recovery",
         async (admission) => {
-          await applyIntent(
+          return applyIntent(
             env.EVENT_DB,
             env.PROFILE_GAMES_DB,
             intent,
             admission,
             raw,
-            (committed) => notifyEventInviteEffects(env, committed),
             prepareMatchPresentations,
           );
         },
       );
+      await dispatchCommittedNotifications(env, committed);
       processed += 1;
     } catch (error) {
       if (error instanceof EventWritesDisabled) break;
@@ -474,8 +534,12 @@ export async function recoverEventTransitionIntents(
 export function createEventGameplayRepository(
   env: Env,
   base: GameplayRepository = createGameplayRepository(env),
+  options: EventRepositoryOptions = {},
 ): EventGameplayRepository {
-  return { ...base, ...createEventStateRepository(env, base) };
+  return {
+    ...base,
+    ...createEventStateRepository(env, base, base, undefined, options),
+  };
 }
 function leaseStorageKey(key: EventLeaseKey): string {
   switch (key.kind) {
@@ -630,22 +694,26 @@ export function createEventStateRepository(
   raw: MatchStatePort = base,
   prepareMatchPresentations: PrepareMatchPresentations = (creations) =>
     prepareCreatedMatchPresentations(env, creations),
+  options: EventRepositoryOptions = {},
 ): EventStateRepository {
   return {
     ...base,
-    ...createEventStore(env.EVENT_DB, (plan, signal) =>
-      withEventWriteAdmission(env.EVENT_DB, "event-root-patch", (admission) =>
-        commitD1EventPlan(
-          env.EVENT_DB,
-          env.PROFILE_GAMES_DB,
-          plan,
-          admission,
-          raw,
-          (intent) => notifyEventInviteEffects(env, intent),
-          prepareMatchPresentations,
-          signal,
-        ),
-      ),
-    ),
+    ...createEventStore(env.EVENT_DB, async (plan, signal) => {
+      const committed = await withEventWriteAdmission(
+        env.EVENT_DB,
+        "event-root-patch",
+        (admission) =>
+          commitD1EventPlan(
+            env.EVENT_DB,
+            env.PROFILE_GAMES_DB,
+            plan,
+            admission,
+            raw,
+            prepareMatchPresentations,
+            signal,
+          ),
+      );
+      await dispatchCommittedNotifications(env, committed, options.schedule);
+    }),
   };
 }

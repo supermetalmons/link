@@ -465,11 +465,18 @@ export class InviteReactions
     });
   }
 
-  async applyCanonicalMatchEventEffects(input: MatchStateEventEffectsRequest) {
+  async applyCanonicalMatchEventEffects(
+    input: MatchStateEventEffectsRequest,
+    options: { deferNotifications?: boolean } = {},
+  ) {
     return captureMatchStateRpc(async () => {
       this.inviteChannels.pinInvite(input.inviteId);
       const result = await this.matchState.applyEventEffects(input);
-      await this.notifyCanonicalMatches(input.inviteId, result.changedMatchIds);
+      if (!options.deferNotifications)
+        await this.notifyCanonicalMatches(
+          input.inviteId,
+          result.changedMatchIds,
+        );
       return result;
     });
   }

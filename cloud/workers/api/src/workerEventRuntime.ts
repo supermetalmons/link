@@ -3,7 +3,10 @@ import { createEventRuntime } from "../../../runtime/events.js";
 import { createEventLockManagerCore } from "../../../runtime/events/lockManagerCore.js";
 import { createD1EventPrizeWithdrawalReader } from "./eventPrizeWithdrawalD1.ts";
 import type { EventGameplayRepository } from "./eventRepository.ts";
-import { readGameplayMatchPair } from "./gameplayMatchReads.ts";
+import {
+  readGameplayMatchPair,
+  readGameplayMatchPairs,
+} from "./gameplayMatchReads.ts";
 import { requireProfileOwnershipSnapshot } from "./profileOwnership.ts";
 
 type RuntimeDependencies = Parameters<typeof createEventRuntime>[0];
@@ -74,6 +77,8 @@ export function createWorkerEventRuntime({
   return createEventRuntime({
     state: createEventRuntimeStore(repository, signal),
     readMatchPair: (input) => readGameplayMatchPair(repository, input, signal),
+    readMatchPairs: (inputs) =>
+      readGameplayMatchPairs(repository, inputs, signal),
     enqueueEventProgressTask,
     eventLockManager: lockManager,
     readProfileOwnershipSnapshot: (query) =>

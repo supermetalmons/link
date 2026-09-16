@@ -1,6 +1,7 @@
 import type { StateQuery } from "../test/stateRepositoryTestTypes.ts";
 import { encodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
 import type { EventStore } from "../src/eventStoreContracts.ts";
+import type { MatchStatePort } from "../src/repositoryContracts.ts";
 import type { EventLeaseKey } from "../../../runtime/eventLeases.js";
 import type {
   TransactionDecision,
@@ -188,5 +189,19 @@ export function attachEventTestPorts<T>(
         epoch: 1,
         revision: 1,
       }));
+  if (typeof source.readMatchPairs !== "function")
+    (source as EventTestSource).readMatchPairs = (
+      inputs: Parameters<MatchStatePort["readMatchPairs"]>[0],
+      signal?: AbortSignal,
+    ) =>
+      Promise.all(
+        inputs.map((input) =>
+          (source.readMatchPair as MatchStatePort["readMatchPair"]).call(
+            source,
+            input,
+            signal,
+          ),
+        ),
+      );
   return Object.assign(source, ports) as T & EventStore;
 }
