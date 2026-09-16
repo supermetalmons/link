@@ -5,6 +5,7 @@ import {
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  AUTOMATCH_TOTAL_TIMEOUT_MS,
   cancelQueuedAutomatch as cancelQueuedAutomatchImpl,
   emptyAutomatchProfile,
   findOwnedQueuedAutomatch,
@@ -348,6 +349,78 @@ function repository(
   });
   return result as GameplayRepository & LegacyGameplayTestMethods;
 }
+
+test("reselects and rereads ownership after a named journal selection conflict", async () => {
+  const repo = repository();
+  const commit = repo.commitSessionChanges;
+  const readOwnership = repo.readProfileOwnershipSnapshot;
+  let attempts = 0;
+  let ownershipReads = 0;
+  const delays: number[] = [];
+  repo.readProfileOwnershipSnapshot = async (query) => {
+    ownershipReads++;
+    return readOwnership(query);
+  };
+  repo.commitSessionChanges = async (changes, signal) => {
+    attempts++;
+    if (attempts === 1) throw new Error("D1_ERROR: automatch-selection-stale");
+    return commit(changes, signal);
+  };
+  const result = await startAutomatch(identity, request(), repo, {
+    wait: async (milliseconds) => {
+      delays.push(milliseconds);
+    },
+    random: () => 0,
+  });
+  assert.equal(result.ok && result.mode, "pending");
+  assert.equal(attempts, 2);
+  assert.equal(ownershipReads, 2);
+  assert.equal(delays.length, 1);
+  assert.ok(delays[0] >= 1 && delays[0] <= 5);
+});
+
+test("bounds repeated journal selection conflicts without retrying an ambiguous committed write", async () => {
+  const repo = repository();
+  let attempts = 0;
+  const delays: number[] = [];
+  repo.commitSessionChanges = async () => {
+    attempts++;
+    throw new Error("D1_ERROR: automatch-selection-stale");
+  };
+  await assert.rejects(
+    startAutomatch(identity, request(), repo, {
+      wait: async (milliseconds) => {
+        delays.push(milliseconds);
+      },
+      random: () => 0,
+    }),
+    /automatch-selection-stale/,
+  );
+  assert.equal(attempts, 32);
+  assert.equal(delays.length, 31);
+  assert.ok(delays.every((delay) => delay >= 1 && delay <= 50));
+});
+
+test("selection retries keep the original cancellation signal", async () => {
+  const repo = repository();
+  const controller = new AbortController();
+  let attempts = 0;
+  repo.commitSessionChanges = async () => {
+    attempts++;
+    throw new Error("D1_ERROR: automatch-selection-stale");
+  };
+  await assert.rejects(
+    startAutomatch(identity, request(), repo, {
+      signal: controller.signal,
+      wait: async () => {
+        controller.abort(new Error("original-deadline"));
+      },
+      random: () => 0,
+    }),
+    /original-deadline/,
+  );
+  assert.equal(attempts, 1);
+});
 
 test("requires canonical persistence for owner lookup without reading a Firebase queue", async () => {
   const source = repository({
@@ -2429,6 +2502,113 @@ test("backs off boundedly while the profile queue lock is busy", async () => {
   assert.ok(delays[0] >= 25);
   assert.ok(delays.at(-1)! >= 1_000);
   assert.ok(delays.every((delay) => delay <= 1_250));
+});
+
+test("retries a busy selected invite within the original owner deadline", async (t) => {
+  for (const { name, releaseAtMs } of [
+    {
+      name: "matches after three seconds of invite contention",
+      releaseAtMs: 3_000,
+    },
+    { name: "bounds persistent invite contention", releaseAtMs: Infinity },
+  ]) {
+    await t.test(name, async () => {
+      const inviteId = "auto_busy";
+      const queued = {
+        uid: "host-uid",
+        timestamp: 1,
+        hostColor: "white",
+        password: "password",
+        gameVariant: "Classic",
+      };
+      let nowMs = 0;
+      let writes = 0;
+      let inviteAttempts = 0;
+      let ownerAcquisitions = 0;
+      let requesterReads = 0;
+      const delays: number[] = [];
+      const busyLockIds: string[] = [];
+      const ownerLockId = await automatchOwnerLockId(
+        `profile:${profile.profileId}`,
+      );
+      const value = repository({
+        readProfileOwnershipSnapshot: async (query) => {
+          if (query.loginUids.length === 1) requesterReads++;
+          return ownershipSnapshot(query);
+        },
+        getStatePath: async (path, query) => {
+          if (path === "automatch") {
+            return query?.orderBy === "uid" && query.equalTo !== queued.uid
+              ? null
+              : { [inviteId]: queued };
+          }
+          if (path === `automatch/${inviteId}`) return queued;
+          if (path === `invites/${inviteId}`)
+            return { hostId: queued.uid, guestId: null };
+          assert.fail(`unexpected path ${path}`);
+        },
+        patchStateRoot: async (updates) => {
+          writes++;
+          assert.equal(updates[`automatch/${inviteId}`], null);
+          assert.equal(
+            (updates[`invites/${inviteId}`] as Record<string, unknown>).guestId,
+            identity.uid,
+          );
+        },
+      });
+      const stores = coordinationFor(value);
+      const acquire = stores.mutationLocks.acquire;
+      stores.mutationLocks.acquire = async (lock, ownerId) => {
+        if (lock.lockId === ownerLockId) ownerAcquisitions++;
+        if (lock.lockId === inviteId) {
+          inviteAttempts++;
+          if (nowMs < releaseAtMs) {
+            busyLockIds.push(lock.lockId);
+            throw new GameSessionMutationLockFailure("busy");
+          }
+        }
+        await acquire(lock, ownerId, nowMs);
+      };
+      const result = startAutomatch(identity, request(), value, {
+        now: () => nowMs,
+        wait: async (milliseconds) => {
+          delays.push(milliseconds);
+          nowMs += milliseconds;
+        },
+      });
+      if (Number.isFinite(releaseAtMs)) {
+        assert.deepEqual(await result, {
+          ok: true,
+          inviteId,
+          mode: "matched",
+          matchedImmediately: true,
+        });
+        assert.equal(writes, 1);
+        assert.ok(nowMs >= releaseAtMs);
+        assert.ok(nowMs < AUTOMATCH_TOTAL_TIMEOUT_MS);
+      } else {
+        await assert.rejects(
+          result,
+          (error) =>
+            error instanceof AuthApiFailure &&
+            error.status === 409 &&
+            error.message === "invite-busy",
+        );
+        assert.equal(writes, 0);
+        assert.ok(nowMs >= AUTOMATCH_TOTAL_TIMEOUT_MS - 1_000);
+        assert.ok(nowMs < AUTOMATCH_TOTAL_TIMEOUT_MS + 250);
+      }
+      assert.equal(requesterReads, 1);
+      assert.equal(ownerAcquisitions, inviteAttempts);
+      assert.ok(busyLockIds.length > 1);
+      assert.ok(busyLockIds.every((lockId) => lockId === inviteId));
+      assert.ok(delays.length < 30);
+      assert.ok(delays[0] >= 25);
+      assert.ok(delays.at(-1)! >= 1_000);
+      assert.ok(delays.every((delay) => delay <= 1_250));
+      assert.equal(stores.lockRows.size, 0);
+    });
+  }
 });
 
 test("replays a null-projection receipt before an ownership outage", async () => {

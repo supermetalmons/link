@@ -1,4 +1,11 @@
 const { isAutoInviteId } = require("./ids");
+const {
+  GAME_BOOTSTRAP_MAX_RESPONSE_BYTES,
+  isReadGameBootstrapResponse,
+} = require("./game-bootstrap");
+
+const AUTOMATCH_API_MAX_RESPONSE_BYTES =
+  GAME_BOOTSTRAP_MAX_RESPONSE_BYTES + 1024;
 
 const NAVIGATION_SORT_BUCKETS = Object.freeze({
   pending: 20,
@@ -354,6 +361,24 @@ const isStartAutomatchResponse = (value) => {
   return value.matchedImmediately === (value.mode === "matched");
 };
 
+const parseStartAutomatchApiResponse = (value) => {
+  if (!isRecord(value)) return null;
+  const { bootstrap, ...response } = value;
+  if (!isStartAutomatchResponse(response)) return null;
+  if (
+    response.ok &&
+    response.mode === "matched" &&
+    isReadGameBootstrapResponse(bootstrap) &&
+    bootstrap.metadata.inviteId === response.inviteId &&
+    bootstrap.metadata.automatchStateHint === "matched" &&
+    bootstrap.viewer.role !== "watch" &&
+    bootstrap.match.hostMatch !== null &&
+    bootstrap.match.guestMatch !== null
+  )
+    return { ...response, bootstrap };
+  return response;
+};
+
 const isCancelAutomatchResponse = (value) =>
   isRecord(value) &&
   Object.keys(value).length === 1 &&
@@ -399,6 +424,7 @@ const isRemoveNavigationGameResponse = (value) => {
 };
 
 module.exports = {
+  AUTOMATCH_API_MAX_RESPONSE_BYTES,
   NAVIGATION_SORT_BUCKETS,
   normalizeAutomatchStateHint,
   normalizeStrictAutomatchStateHint,
@@ -413,6 +439,7 @@ module.exports = {
   isReadNavigationGamesResponse,
   isStartAutomatchRequest,
   isStartAutomatchResponse,
+  parseStartAutomatchApiResponse,
   isCancelAutomatchResponse,
   isRemoveNavigationGameRequest,
   isRemoveNavigationGameResponse,

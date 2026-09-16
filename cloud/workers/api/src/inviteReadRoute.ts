@@ -29,6 +29,7 @@ import {
   type WorkerExecutionContext,
 } from "./sessionAuth.ts";
 import { socketSessionHeaders } from "./socketSession.ts";
+import type { RequestIdentity } from "./requestIdentity.ts";
 
 type InviteReadChannel = "metadata" | "wagers";
 
@@ -57,7 +58,7 @@ export type InviteReadRouteDependencies = {
 
 type InviteReadAccess = {
   inviteId: string;
-  identity: SessionIdentity | null;
+  identity: RequestIdentity | null;
   repository: GameplayRepository;
 };
 

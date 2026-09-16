@@ -106,6 +106,10 @@ export class MatchSyncRoom {
     return state;
   }
 
+  hasSubscribers(): boolean {
+    return this.sockets().length > 0;
+  }
+
   private close(matchId: string, code: number, reason: string): void {
     for (const socket of this.sockets(matchId)) socket.close(code, reason);
     this.ctx.storage.sql.exec(
@@ -315,6 +319,26 @@ export class MatchSyncRoom {
       subscribed = true;
     }
     if (subscribed) await this.dependencies.scheduleAlarm(now);
+  }
+
+  async refreshSubscribed(inviteId: string): Promise<void> {
+    const matchIds = [
+      ...new Set(
+        this.sockets().map(
+          (socket) =>
+            (socket.deserializeAttachment() as MatchSocketAttachment).matchId,
+        ),
+      ),
+    ];
+    let cursor = 0;
+    const refresh = async () => {
+      while (cursor < matchIds.length) {
+        await this.read(inviteId, matchIds[cursor++], true);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(4, matchIds.length) }, refresh),
+    );
   }
 
   async fetch(request: Request): Promise<Response> {

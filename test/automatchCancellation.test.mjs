@@ -258,6 +258,7 @@ function harness(invite, onMatchRead = () => {}) {
     refreshRematchEndDeliveries: noop,
     maybeRefreshContextAfterRematchMetadata: noop,
     observeWagers: noop,
+    ensureMatchSyncSubscription: noop,
     observeMatch: (uid) => events.matches.push(uid),
   });
   instance.observerRegistry = new Registry(noop);

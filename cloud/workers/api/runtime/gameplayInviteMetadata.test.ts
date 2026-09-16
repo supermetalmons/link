@@ -78,34 +78,17 @@ async function reserveInvite() {
 }
 
 function afterSourceRead(after: () => Promise<void> | void): D1Database {
-  const wrapStatement = (statement: D1PreparedStatement): D1PreparedStatement =>
-    new Proxy(statement, {
-      get(target, property) {
-        if (property === "bind")
-          return (...values: unknown[]) =>
-            wrapStatement(target.bind(...values));
-        if (property === "first")
-          return async (...args: Parameters<D1PreparedStatement["first"]>) => {
-            const value = await target.first(...args);
-            await after();
-            return value;
-          };
-        const value = Reflect.get(target, property, target);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    });
   return new Proxy(db, {
     get(target, property) {
       if (property === "withSession")
         return (constraint?: D1SessionConstraint | D1SessionBookmark) =>
           new Proxy(target.withSession(constraint), {
             get(session, key) {
-              if (key === "prepare")
-                return (query: string) => {
-                  const statement = session.prepare(query);
-                  return query.includes("FROM invite_sources")
-                    ? wrapStatement(statement)
-                    : statement;
+              if (key === "batch")
+                return async (statements: D1PreparedStatement[]) => {
+                  const results = await session.batch(statements);
+                  await after();
+                  return results;
                 };
               const value = Reflect.get(session, key, session);
               return typeof value === "function" ? value.bind(session) : value;
@@ -253,7 +236,7 @@ describe("gameplay invite metadata reads", () => {
     },
   );
 
-  it("rejects an invite with a pending transition before reading the source", async () => {
+  it("rejects a pending transition in the same atomic snapshot as the source", async () => {
     await insertSource();
     await reserveInvite();
     let reads = 0;
@@ -265,13 +248,14 @@ describe("gameplay invite metadata reads", () => {
     await expect(gameplay.readInviteMetadata(inviteId)).rejects.toThrow(
       "resource-pending",
     );
-    expect(reads).toBe(0);
+    expect(reads).toBe(1);
   });
 
-  it("rejects a transition that starts while reading the source", async () => {
+  it("returns the committed snapshot before a later transition and fences the next read", async () => {
     await insertSource();
     const gameplay = repository(afterSourceRead(reserveInvite));
-    await expect(gameplay.readInviteMetadata(inviteId)).rejects.toThrow(
+    expect(await gameplay.readInviteMetadata(inviteId)).toEqual(source);
+    await expect(repository().readInviteMetadata(inviteId)).rejects.toThrow(
       "resource-pending",
     );
   });

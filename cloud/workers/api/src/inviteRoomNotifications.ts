@@ -6,7 +6,8 @@ export type InviteRoomNotificationOptions = {
 export async function notifyInviteRooms(
   env: Env,
   inviteIds: string[],
-  method: "notifyMetadataChanged" | "notifyWagersChanged",
+  method:
+    "notifyMetadataChanged" | "notifyWagersChanged" | "notifySessionCommitted",
   failureEvent: string,
   {
     timeoutMs = 1_000,

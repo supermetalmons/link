@@ -311,7 +311,7 @@ describe("automatch lifecycle through D1 persistence", () => {
     );
     await db.batch([
       db.prepare(
-        "UPDATE automatch_runtime_control SET backend = 'd1', state = 'active' WHERE singleton = 1",
+        "UPDATE automatch_runtime_control SET backend = 'd1', state = 'active', metadata_json = NULL WHERE singleton = 1",
       ),
       db.prepare(
         "UPDATE invite_source_control SET backend = 'd1', state = 'active', epoch = 1, freeze_generation = 0, verified_at_ms = 1, activated_at_ms = 1 WHERE singleton = 1",
@@ -519,6 +519,161 @@ describe("automatch lifecycle through D1 persistence", () => {
       ),
     ).toMatchObject({ lifecycle: "matched", generation: 2 });
     expect(guest.queued).toHaveLength(2);
+    await assertSettled();
+  });
+
+  it("pairs simultaneous FIFO starts instead of leaving two waiting entries", async () => {
+    await db
+      .prepare(
+        `UPDATE automatch_runtime_control SET metadata_json = '{"queueSelection":"fifo"}' WHERE singleton = 1`,
+      )
+      .run();
+    const memoryState = new MemoryMatchState();
+    const first = client(memoryState, "first");
+    const second = client(memoryState, "second");
+    const operations = [crypto.randomUUID(), crypto.randomUUID()];
+    const results = await Promise.all([
+      start(first, operations[0]),
+      start(second, operations[1]),
+    ]);
+    expect(results.map((result) => result.ok && result.mode).sort()).toEqual([
+      "matched",
+      "pending",
+    ]);
+    expect(
+      results[0].ok &&
+        results[1].ok &&
+        results[0].inviteId === results[1].inviteId,
+    ).toBe(true);
+    expect(await createAutomatchD1Store(db).list("automatch")).toHaveLength(0);
+    expect(
+      await db
+        .prepare("SELECT count(*) AS count FROM automatch_pending_enqueues")
+        .first("count"),
+    ).toBe(0);
+    expect(await start(client(memoryState, "first"), operations[0])).toEqual(
+      results[0],
+    );
+    expect(await start(client(memoryState, "second"), operations[1])).toEqual(
+      results[1],
+    );
+    await assertSettled();
+  });
+
+  it("selects the oldest ready FIFO ticket after activating over legacy queued entries", async () => {
+    const memoryState = new MemoryMatchState();
+    const first = client(memoryState, "first");
+    first.repository.readFirstAutomatchEntry = async () => null;
+    const second = client(memoryState, "second");
+    second.repository.readFirstAutomatchEntry = async () => null;
+    const pendingFirst = await start(first, crypto.randomUUID());
+    const pendingSecond = await start(second, crypto.randomUUID());
+    if (!pendingFirst.ok || !pendingSecond.ok)
+      throw new Error("expected pending starts");
+    await db.batch([
+      db
+        .prepare(
+          "UPDATE automatch_entries SET payload_json = json_set(payload_json, '$.timestamp', ?), revision = revision + 1 WHERE record_key = ?",
+        )
+        .bind(20, pendingFirst.inviteId),
+      db
+        .prepare(
+          "UPDATE automatch_entries SET payload_json = json_set(payload_json, '$.timestamp', ?), revision = revision + 1 WHERE record_key = ?",
+        )
+        .bind(10, pendingSecond.inviteId),
+      db.prepare(
+        `UPDATE automatch_runtime_control SET metadata_json = '{"queueSelection":"fifo"}' WHERE singleton = 1`,
+      ),
+    ]);
+    expect(
+      await start(client(memoryState, "guest"), crypto.randomUUID()),
+    ).toMatchObject({
+      ok: true,
+      mode: "matched",
+      inviteId: pendingSecond.inviteId,
+    });
+    expect(
+      await createAutomatchD1Store(db).getPath(
+        `automatch/${pendingFirst.inviteId}`,
+      ),
+    ).not.toBeNull();
+    await assertSettled();
+  });
+
+  it("recovers a FIFO pending enqueue after ambiguous creation before admitting another player", async () => {
+    await db
+      .prepare(
+        `UPDATE automatch_runtime_control SET metadata_json = '{"queueSelection":"fifo"}' WHERE singleton = 1`,
+      )
+      .run();
+    const memoryState = new MemoryMatchState();
+    memoryState.failAfterNextMatch = true;
+    await expect(
+      start(client(memoryState, "host"), crypto.randomUUID()),
+    ).rejects.toThrow();
+    expect(
+      await db
+        .prepare("SELECT count(*) AS count FROM automatch_pending_enqueues")
+        .first("count"),
+    ).toBe(1);
+    memoryState.failWrites = false;
+    const result = await start(
+      client(memoryState, "guest"),
+      crypto.randomUUID(),
+    );
+    expect(result).toMatchObject({ ok: true, mode: "matched" });
+    expect(await createAutomatchD1Store(db).list("automatch")).toHaveLength(0);
+    expect(
+      await db
+        .prepare("SELECT count(*) AS count FROM automatch_pending_enqueues")
+        .first("count"),
+    ).toBe(0);
+    await assertSettled();
+  });
+
+  it("recovers an owned-ticket receipt reservation instead of enqueueing a second waiting host", async () => {
+    await db
+      .prepare(
+        `UPDATE automatch_runtime_control SET metadata_json = '{"queueSelection":"fifo"}' WHERE singleton = 1`,
+      )
+      .run();
+    const memoryState = new MemoryMatchState();
+    const pending = await start(
+      client(memoryState, "host"),
+      crypto.randomUUID(),
+    );
+    if (!pending.ok) throw new Error("expected pending start");
+    const prepared = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const owned = client(memoryState, "host", db, async (creations) => {
+      prepared.resolve();
+      await release.promise;
+      return prepareCreatedMatchPresentations(env, creations);
+    });
+    const replay = start(owned, crypto.randomUUID());
+    await prepared.promise;
+    const guest = client(memoryState, "guest");
+    const selected = Promise.withResolvers<void>();
+    const readHead = guest.repository.readFirstAutomatchEntry;
+    guest.repository.readFirstAutomatchEntry = async (signal) => {
+      const value = await readHead(signal);
+      selected.resolve();
+      return value;
+    };
+    const matched = start(guest, crypto.randomUUID());
+    await selected.promise;
+    release.resolve();
+    expect(await replay).toMatchObject({
+      ok: true,
+      mode: "pending",
+      inviteId: pending.inviteId,
+    });
+    expect(await matched).toMatchObject({
+      ok: true,
+      mode: "matched",
+      inviteId: pending.inviteId,
+    });
+    expect(await createAutomatchD1Store(db).list("automatch")).toHaveLength(0);
     await assertSettled();
   });
 

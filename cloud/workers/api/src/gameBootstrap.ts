@@ -17,6 +17,7 @@ import {
 } from "./inviteMetadata.ts";
 import { resolveInviteReadRole } from "./inviteReadRoute.ts";
 import type { MatchSyncReadResult } from "./matchSync.ts";
+import type { RequestIdentity } from "./requestIdentity.ts";
 import type { SessionIdentity } from "./sessionAuth.ts";
 
 export type GameBootstrapMeasure = <T>(
@@ -82,7 +83,7 @@ export async function readAuthenticatedGameBootstrap(
     identity,
     signal,
   }: SessionBootstrapTarget & {
-    identity: SessionIdentity;
+    identity: RequestIdentity | SessionIdentity;
     signal: AbortSignal;
   },
   env: Env,

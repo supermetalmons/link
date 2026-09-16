@@ -1,14 +1,16 @@
 import { AuthApiFailure } from "./authErrors.ts";
 import {
-  acquireAutomatchWriteAdmission,
   automatchAdmissionGuardStatements,
   createAutomatchD1Store,
+  parseAutomatchRuntimeControlRow,
+  prepareAutomatchRuntimeControlRead,
   readAutomatchRuntimeControl,
-  releaseAutomatchWriteAdmission,
+  type AutomatchRoot,
   type AutomatchWriteAdmission,
 } from "./automatchD1.ts";
 import {
   createGameSessionTransitions,
+  assertNoGameSessionResourceTransition,
   gameSessionResourceGuardStatements,
   type GameSessionLeaseProof,
 } from "./gameSessionTransitions.ts";
@@ -20,13 +22,27 @@ import type {
 import type { GameSessionPort } from "./gameSessionContracts.ts";
 import type { PrepareMatchPresentations } from "./matchPresentationRegistry.ts";
 import {
-  acquireInviteSourceAdmission,
-  createInviteSourceD1Store,
   InviteSourceFailure,
-  readInviteSourceControl,
-  releaseInviteSourceAdmission,
+  parseInviteSourceControlRow,
+  prepareInviteSourceControlRead,
   type InviteSourceAdmission,
 } from "./inviteSourceD1.ts";
+import {
+  acquireAutomatchAdmissions,
+  releaseAutomatchAdmissions,
+} from "./automatchAdmissions.ts";
+import {
+  assertAutomatchBackend,
+  readAutomatchResourceSnapshot,
+} from "./automatchReadD1.ts";
+import {
+  isFifoAutomatchQueue,
+  readAutomatchQueueHead,
+} from "./automatchQueueD1.ts";
+import {
+  markAutomatchOutcome,
+  measureAutomatchPhase,
+} from "./automatchTelemetry.ts";
 
 export class AutomatchPersistenceFrozen extends AuthApiFailure {
   constructor() {
@@ -67,25 +83,9 @@ export function createAutomatchPersistence(
     await flushNotifications();
   };
   const store = createAutomatchD1Store(db, { now });
-  const inviteStore = createInviteSourceD1Store(db, { now });
-  const reader = createGameSessionTransitions({
-    db,
-    state: raw,
-    store,
-    now,
-    onCommitted: notifyCommitted,
-    prepareMatchPresentations,
-  });
-
   const control = async () => {
     const value = await readAutomatchRuntimeControl(db);
-    if (value.backend !== "d1") {
-      throw new AuthApiFailure(
-        503,
-        "unavailable",
-        "automatch-persistence-backend-retired",
-      );
-    }
+    assertAutomatchBackend(value);
     return value;
   };
 
@@ -96,35 +96,21 @@ export function createAutomatchPersistence(
       inviteAdmission: InviteSourceAdmission,
     ) => Promise<T>,
   ): Promise<T> => {
-    if ((await control()).state === "frozen") {
-      throw new AutomatchPersistenceFrozen();
-    }
-    const admission = await acquireAutomatchWriteAdmission(db, kind, {
-      now,
-    }).catch((error: unknown) => {
-      if (
-        error instanceof Error &&
-        error.message === "automatch-writes-frozen"
-      ) {
-        throw new AutomatchPersistenceFrozen();
-      }
-      throw error;
-    });
-    let inviteAdmission: InviteSourceAdmission | undefined;
-    try {
-      inviteAdmission = await acquireInviteSourceAdmission(db, kind, { now });
-      if (inviteAdmission.backend !== "d1") {
-        throw new InviteSourceFailure("invite-source-backend-retired");
-      }
-      return await work(admission, inviteAdmission);
-    } finally {
-      try {
-        if (inviteAdmission) {
-          await releaseInviteSourceAdmission(db, inviteAdmission);
+    const admissions = await acquireAutomatchAdmissions(db, kind, now).catch(
+      (error: unknown) => {
+        if (
+          error instanceof Error &&
+          error.message === "automatch-writes-frozen"
+        ) {
+          throw new AutomatchPersistenceFrozen();
         }
-      } finally {
-        await releaseAutomatchWriteAdmission(db, admission);
-      }
+        throw error;
+      },
+    );
+    try {
+      return await work(admissions.automatch, admissions.invite);
+    } finally {
+      await releaseAutomatchAdmissions(db, admissions);
     }
   };
 
@@ -132,19 +118,25 @@ export function createAutomatchPersistence(
     keys: readonly string[],
     signal?: AbortSignal,
   ) => {
-    await control();
     signal?.throwIfAborted();
-    const pending = await db
-      .withSession("first-primary")
-      .prepare(
-        `SELECT MIN(resource_key) AS resource_key
+    const session = db.withSession("first-primary");
+    const [modeRows, pending] = await session.batch<{ resource_key: string }>([
+      prepareAutomatchRuntimeControlRead(session),
+      session
+        .prepare(
+          `SELECT MIN(resource_key) AS resource_key
         FROM game_session_transition_resources
         WHERE resource_key IN (SELECT value FROM json_each(?))
         GROUP BY transition_id`,
-      )
-      .bind(JSON.stringify([...new Set(keys)]))
-      .all<{ resource_key: string }>();
+        )
+        .bind(JSON.stringify([...new Set(keys)])),
+    ]);
+    assertAutomatchBackend(
+      parseAutomatchRuntimeControlRow(modeRows.results[0]),
+    );
+    signal?.throwIfAborted();
     if (!pending.results.length) return false;
+    markAutomatchOutcome("recovery");
     return write(
       "session-transition-recovery",
       async (admission, inviteAdmission) => {
@@ -168,18 +160,33 @@ export function createAutomatchPersistence(
   const recover = (key: string, signal?: AbortSignal) =>
     recoverResources([key], signal);
 
-  const readResource = async <T>(
+  const readResource = async (
     key: string,
-    work: () => Promise<T>,
+    root: AutomatchRoot | "invite",
+    recordKey: string,
     signal?: AbortSignal,
     receipt = false,
-  ): Promise<T> => {
-    const mode = await control();
-    if (receipt && mode.state === "active") await recover(key, signal);
-    await reader.assertResourceAvailable(key);
-    const value = await work();
-    await reader.assertResourceAvailable(key);
-    return value;
+  ): Promise<unknown> => {
+    for (let attempt = 0; ; attempt++) {
+      const snapshot = await readAutomatchResourceSnapshot(
+        db,
+        key,
+        root,
+        recordKey,
+        signal,
+      );
+      if (
+        snapshot.pending &&
+        receipt &&
+        snapshot.mode.state === "active" &&
+        attempt < 2
+      ) {
+        await measureAutomatchPhase("recovery", () => recover(key, signal));
+        continue;
+      }
+      assertNoGameSessionResourceTransition(snapshot.pending);
+      return snapshot.value;
+    }
   };
   const transactProjection = (
     method:
@@ -201,53 +208,52 @@ export function createAutomatchPersistence(
       return guarded[method](inviteId, update, signal);
     });
   const client: GameSessionPort = {
-    readInviteMetadata: (inviteId, signal) =>
-      readResource(
-        inviteId,
-        async () => {
-          if ((await readInviteSourceControl(db)).backend !== "d1")
-            throw new InviteSourceFailure("invite-source-backend-retired");
-          return (await inviteStore.read(inviteId, signal)).value;
-        },
-        signal,
-      ),
+    readInviteMetadata: async (inviteId, signal) =>
+      (await readResource(inviteId, "invite", inviteId, signal)) as Record<
+        string,
+        unknown
+      > | null,
     readAutomatchEntry: (inviteId, signal) =>
-      readResource(
-        inviteId,
-        () => store.readAutomatchEntry(inviteId, signal),
-        signal,
-      ),
+      readResource(inviteId, "automatch", inviteId, signal),
     listAutomatchEntriesByLogin: async (uid, limit, signal) => {
       await control();
       return store.listAutomatchEntriesByLogin(uid, limit, signal);
     },
     readFirstAutomatchEntry: async (signal) => {
-      await control();
-      return store.readFirstAutomatchEntry(signal);
+      if (!isFifoAutomatchQueue(await control()))
+        return store.readFirstAutomatchEntry(signal);
+      while (true) {
+        signal?.throwIfAborted();
+        const head = await readAutomatchQueueHead(db, signal);
+        if (!head) return null;
+        if (head.kind === "ready") return { [head.inviteId]: head.value };
+        await measureAutomatchPhase("recovery", () =>
+          recover(head.inviteId, signal),
+        );
+      }
     },
     readMutationReceipt: (operationId, signal) =>
       readResource(
         `gameplay-operation:${operationId}`,
-        () => store.readMutationReceipt(operationId, signal),
+        "gameplayMutationReceipts",
+        operationId,
         signal,
         true,
       ),
     readAutomatchTelegramSource: (inviteId, signal) =>
-      readResource(
-        inviteId,
-        () => store.readAutomatchTelegramSource(inviteId, signal),
-        signal,
-      ),
+      readResource(inviteId, "telegramAutomatches", inviteId, signal),
     readAutomatchTelegramOutbox: (inviteId, signal) =>
       readResource(
         inviteId,
-        () => store.readAutomatchTelegramOutbox(inviteId, signal),
+        "telegramProjectionOutbox/automatch",
+        inviteId,
         signal,
       ),
     readAutomatchProfileOutbox: (inviteId, signal) =>
       readResource(
         inviteId,
-        () => store.readAutomatchProfileOutbox(inviteId, signal),
+        "profileGameProjectionOutbox/automatch",
+        inviteId,
         signal,
       ),
     transactAutomatchTelegramSource: (inviteId, update, signal) =>
@@ -353,13 +359,18 @@ export function createAutomatchPersistence(
       );
     },
     async writesEnabled() {
-      const inviteControl = await readInviteSourceControl(db);
+      const session = db.withSession("first-primary");
+      const [modeRows, inviteRows] = await session.batch([
+        prepareAutomatchRuntimeControlRead(session),
+        prepareInviteSourceControlRead(session),
+      ]);
+      const mode = parseAutomatchRuntimeControlRow(modeRows.results[0]);
+      assertAutomatchBackend(mode);
+      const inviteControl = parseInviteSourceControlRow(inviteRows.results[0]);
       if (inviteControl.backend !== "d1") {
         throw new InviteSourceFailure("invite-source-backend-retired");
       }
-      return (
-        (await control()).state === "active" && inviteControl.state === "active"
-      );
+      return mode.state === "active" && inviteControl.state === "active";
     },
     async readQueuedByLogins(
       loginUids: readonly string[],

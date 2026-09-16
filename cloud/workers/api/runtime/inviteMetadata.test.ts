@@ -16,6 +16,7 @@ import {
   REACTION_HEARTBEAT_RESPONSE,
   REACTION_SOCKET_PROTOCOL,
 } from "@mons/shared/reactions";
+import type { InviteChannelsRoom } from "../src/inviteChannelsRoom.ts";
 
 type Room = DurableObjectStub<
   import("../src/inviteReactions.ts").InviteReactions
@@ -257,6 +258,135 @@ describe("durable invite metadata", () => {
       guestRematches: "1",
     });
   });
+
+  it.each(["metadata", "wagers"] as const)(
+    "orders an older %s read before a commit refresh in the same invalidation generation",
+    async (channel) => {
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 24 * 60 * 60 * 1_000);
+      const { room, inviteId, source } = await fixture();
+      const client = acceptSocket(
+        await metadataResponse(room, inviteId, {
+          "X-Mons-Metadata-Role": "guest",
+          "X-Mons-Metadata-Actor": "guest-login",
+          "X-Mons-Metadata-Authenticated": "1",
+        }),
+      );
+      await client.read();
+      const results = await runInDurableObject(room, async (instance) => {
+        const mutable = instance as unknown as {
+          inviteChannels: Pick<
+            InviteChannelsRoom,
+            "readMetadata" | "invalidationGeneration"
+          > & {
+            refreshInvite: (
+              id: string,
+              needsWagers?: boolean,
+              metadataOnly?: boolean,
+            ) => Promise<unknown>;
+          };
+          matchSync: { notify: (id: string) => Promise<void> };
+          wagerReader: () => Promise<[]>;
+        };
+        const notifying = deferred();
+        const continueNotification = deferred();
+        const reading = deferred();
+        const continueRead = deferred();
+        const originalNotify = mutable.matchSync.notify.bind(mutable.matchSync);
+        const notify = vi
+          .spyOn(mutable.matchSync, "notify")
+          .mockImplementation(async (id) => {
+            await originalNotify(id);
+            notifying.resolve();
+            await continueNotification.promise;
+          });
+        mutable.wagerReader = async () => {
+          source.wagerReads++;
+          return [];
+        };
+        const committed = instance.notifySessionCommitted(inviteId);
+        await notifying.promise;
+        const generation = mutable.inviteChannels.invalidationGeneration();
+        const reads = source.reads;
+        source.value = { ...invite, hostRematches: "1" };
+        source.read = async () => {
+          const captured = source.value;
+          reading.resolve();
+          await continueRead.promise;
+          return captured;
+        };
+        const older =
+          channel === "metadata"
+            ? instance.readMetadata(inviteId)
+            : instance.readWagers(inviteId);
+        await reading.promise;
+        const refreshing = deferred();
+        const originalRefresh = mutable.inviteChannels.refreshInvite.bind(
+          mutable.inviteChannels,
+        );
+        const refresh = vi
+          .spyOn(mutable.inviteChannels, "refreshInvite")
+          .mockImplementation((...args) => {
+            const pending = originalRefresh(...args);
+            if (args[2]) refreshing.resolve();
+            return pending;
+          });
+        try {
+          source.value = { ...invite, hostRematches: "1;2" };
+          source.read = undefined;
+          continueNotification.resolve();
+          await refreshing.promise;
+          expect(source.reads - reads).toBe(1);
+          continueRead.resolve();
+          const original = await older;
+          await committed;
+          const cached = await mutable.inviteChannels.readMetadata(
+            inviteId,
+            true,
+          );
+          return {
+            original,
+            cached,
+            generation,
+            finalGeneration: mutable.inviteChannels.invalidationGeneration(),
+            reads: source.reads - reads,
+          };
+        } finally {
+          continueNotification.resolve();
+          continueRead.resolve();
+          notify.mockRestore();
+          refresh.mockRestore();
+          await Promise.allSettled([committed, older]);
+        }
+      });
+      const original = {
+        status: "ok",
+        snapshot: { hostRematches: "1", revision: 2 },
+      };
+      expect(results.original).toMatchObject(
+        channel === "metadata"
+          ? original
+          : { status: "ok", metadata: original },
+      );
+      expect(results.cached).toMatchObject({
+        status: "ok",
+        snapshot: { hostRematches: "1;2", revision: 3 },
+      });
+      expect(results.finalGeneration).toBe(results.generation);
+      expect(results.reads).toBe(2);
+      expect(source.wagerReads).toBe(channel === "wagers" ? 1 : 0);
+      expect(JSON.parse(await client.read()).snapshot).toMatchObject({
+        hostRematches: "1",
+        revision: 2,
+      });
+      expect(JSON.parse(await client.read()).snapshot).toMatchObject({
+        hostRematches: "1;2",
+        revision: 3,
+      });
+      client.socket.send(REACTION_HEARTBEAT_REQUEST);
+      expect(await client.read()).toBe(REACTION_HEARTBEAT_RESPONSE);
+      expect(client.socket.readyState).toBe(WebSocket.OPEN);
+    },
+  );
 
   it("shares a fresh canonical read across simultaneous socket admissions", async () => {
     const { room, inviteId, source } = await fixture();

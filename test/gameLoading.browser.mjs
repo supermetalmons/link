@@ -12,7 +12,8 @@ import { Game } from "mons-rules";
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.MONS_PLAYWRIGHT_PATH || "playwright");
 const repository = fileURLToPath(new URL("../", import.meta.url));
-const inviteId = "FastLoadingGame";
+const defaultInviteId = "FastLoadingGame";
+const inviteId = defaultInviteId;
 const hostId = "h".repeat(28);
 const guestId = "g".repeat(28);
 const fen = new Game({ variant: "Classic" }).toFen();
@@ -82,6 +83,7 @@ async function serve() {
     const server = await createViteServer({
       root: repository,
       logLevel: "error",
+      optimizeDeps: { force: true },
       server: {
         host: "127.0.0.1",
         port: 0,
@@ -128,6 +130,10 @@ async function serve() {
 async function fixture(
   run,
   {
+    inviteId = defaultInviteId,
+    startFromHome = false,
+    inlineAutomatchBootstrap = true,
+    holdMatchSnapshots = false,
     apiDelayMs = 0,
     holdAssets = false,
     holdBootstrap = false,
@@ -146,14 +152,21 @@ async function fixture(
 ) {
   const currentMetadata = {
     ...metadata,
+    inviteId,
     guestId: paired ? guestId : null,
     hostRematches: pendingRematch ? "1" : "",
+    automatchStateHint: inviteId.startsWith("auto_")
+      ? paired
+        ? "matched"
+        : "pending"
+      : null,
   };
   const currentViewer = spectator
     ? { role: "watch", actorUid: null, automatchOperationId: null }
-    : viewer;
+    : { ...viewer };
   const currentMatch = {
     ...match,
+    inviteId,
     matchId: pendingRematch ? `${inviteId}1` : inviteId,
     guestPlayerId: paired ? guestId : null,
     guestMatch: paired && !pendingRematch ? match.guestMatch : null,
@@ -170,6 +183,10 @@ async function fixture(
   });
   const assetsGate = deferred();
   const bootstrapGate = deferred();
+  const matchSnapshotGate = deferred();
+  const metadataSocketReady = deferred();
+  const matchSocketReady = deferred();
+  const coreSockets = new Map();
   const sessionBootstrapGate = holdSessionBootstrap
     ? deferred()
     : bootstrapGate;
@@ -187,6 +204,7 @@ async function fixture(
   let closed = false;
   if (!holdAssets) assetsGate.resolve();
   if (!holdBootstrap) bootstrapGate.resolve();
+  if (!holdMatchSnapshots) matchSnapshotGate.resolve();
   if (!holdExtras) extrasGate.resolve();
   try {
     await context.routeWebSocket(/wss:\/\/api\.mons\.link\/.*/, (socket) => {
@@ -202,6 +220,13 @@ async function fixture(
         socket.send(
           JSON.stringify({ schemaVersion: 1, type: "snapshot", snapshot }),
         );
+      if (pathname.endsWith("/metadata/socket")) {
+        coreSockets.set("metadata", socket);
+        metadataSocketReady.resolve();
+      } else if (pathname.endsWith(`/matches/${currentMatch.matchId}/socket`)) {
+        coreSockets.set("match", socket);
+        matchSocketReady.resolve();
+      }
       socket.onMessage((message) => {
         if (message === "ping") socket.send("pong");
       });
@@ -286,6 +311,27 @@ async function fixture(
               message: "Old session fixture failure",
             };
         }
+      } else if (url.pathname === "/automatch/start") {
+        assert.equal(url.searchParams.get("bootstrap"), "1");
+        currentViewer.automatchOperationId =
+          url.searchParams.get("operationId");
+        body = {
+          ok: true,
+          inviteId,
+          mode: paired ? "matched" : "pending",
+          matchedImmediately: paired,
+          ...(inlineAutomatchBootstrap && paired
+            ? {
+                bootstrap: {
+                  ...bootstrap,
+                  metadata: currentMetadata,
+                  viewer: currentViewer,
+                  match: currentMatch,
+                  hasPendingProposal: false,
+                },
+              }
+            : {}),
+        };
       } else if (url.pathname === `/invites/${inviteId}/bootstrap`) {
         bootstrapRequested.resolve();
         await bootstrapGate.promise;
@@ -312,6 +358,7 @@ async function fixture(
       } else if (
         url.pathname === `/invites/${inviteId}/matches/${inviteId}/snapshot`
       ) {
+        await matchSnapshotGate.promise;
         body = { ok: true, snapshot: currentMatch };
       } else {
         if (url.pathname.includes("/profiles/")) profilesRequested.resolve();
@@ -393,7 +440,9 @@ async function fixture(
       const cdp = await context.newCDPSession(page);
       await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
     }
-    await page.goto(`${server.origin}/${inviteId}`, { waitUntil: "commit" });
+    await page.goto(`${server.origin}/${startFromHome ? "" : inviteId}`, {
+      waitUntil: "commit",
+    });
     await run({
       page,
       context,
@@ -404,6 +453,30 @@ async function fixture(
       },
       requests,
       sockets,
+      coreSocketsReady: Promise.all([
+        metadataSocketReady.promise,
+        matchSocketReady.promise,
+      ]),
+      publishMetadata(update) {
+        Object.assign(currentMetadata, update);
+        coreSockets.get("metadata").send(
+          JSON.stringify({
+            schemaVersion: 1,
+            type: "snapshot",
+            snapshot: currentMetadata,
+          }),
+        );
+      },
+      publishMatch(update) {
+        Object.assign(currentMatch, update);
+        coreSockets.get("match").send(
+          JSON.stringify({
+            schemaVersion: 1,
+            type: "snapshot",
+            snapshot: currentMatch,
+          }),
+        );
+      },
       resources,
       assetsGate,
       bootstrapGate,
@@ -419,6 +492,7 @@ async function fixture(
     closed = true;
     assetsGate.resolve();
     bootstrapGate.resolve();
+    matchSnapshotGate.resolve();
     sessionBootstrapGate.resolve();
     extrasGate.resolve();
     await browser.close();
@@ -450,6 +524,19 @@ async function assertBoardAcceptsInput(page) {
   assert.equal(
     await page.evaluate(() => window.loadingProbe.trustedInput),
     true,
+  );
+}
+
+async function startAutomatchAndWaitForGame(page) {
+  const readyCount = await page.evaluate(
+    () => performance.getEntriesByName("main-game:interaction-ready").length,
+  );
+  await page.getByRole("button", { name: "Automatch", exact: true }).click();
+  await page.waitForFunction(
+    (count) =>
+      performance.getEntriesByName("main-game:interaction-ready").length >
+      count,
+    readyCount,
   );
 }
 
@@ -626,6 +713,152 @@ test(
     );
   },
 );
+
+test(
+  "an immediate automatch becomes playable from its response without a bootstrap GET",
+  { skip: benchmark, timeout: 60_000 },
+  async () => {
+    await fixture(
+      async ({ page, requests }) => {
+        await startAutomatchAndWaitForGame(page);
+        await assertBoardAcceptsInput(page);
+        assert.equal(
+          requests.filter(({ path }) => path === "/automatch/start").length,
+          1,
+        );
+        assert.equal(
+          requests.some(({ path }) => path.endsWith("/bootstrap")),
+          false,
+        );
+        assert.equal(
+          requests.some(({ path }) => path.endsWith("/snapshot")),
+          false,
+        );
+      },
+      {
+        inviteId: "auto_loading",
+        startFromHome: true,
+        holdBootstrap: true,
+        healthyCoreSockets: true,
+      },
+    );
+  },
+);
+
+test(
+  "a new automatch client still loads a legacy server response through bootstrap",
+  { skip: benchmark, timeout: 60_000 },
+  async () => {
+    await fixture(
+      async ({ page, requests }) => {
+        await startAutomatchAndWaitForGame(page);
+        await assertBoardAcceptsInput(page);
+        assert.equal(
+          requests.filter(({ path }) => path === "/automatch/start").length,
+          1,
+        );
+        assert.equal(
+          requests.filter(
+            ({ path }) => path === "/invites/auto_loading/bootstrap",
+          ).length,
+          1,
+        );
+      },
+      {
+        inviteId: "auto_loading",
+        startFromHome: true,
+        inlineAutomatchBootstrap: false,
+        healthyCoreSockets: true,
+      },
+    );
+  },
+);
+
+for (const metadataFirst of [false, true]) {
+  test(
+    `a waiting automatch host uses its existing match socket when ${metadataFirst ? "metadata" : "the pair"} arrives first`,
+    { skip: benchmark, timeout: 60_000 },
+    async () => {
+      await fixture(
+        async ({
+          page,
+          requests,
+          sockets,
+          coreSocketsReady,
+          publishMetadata,
+          publishMatch,
+        }) => {
+          await withinDeadline(coreSocketsReady);
+          await page.waitForFunction(
+            () =>
+              performance.getEntriesByName("main-game:initial-view-ready")
+                .length > 0,
+          );
+          assert.equal(
+            await page.evaluate(
+              () =>
+                performance.getEntriesByName("main-game:interaction-ready")
+                  .length,
+            ),
+            0,
+          );
+          const sendMetadata = () =>
+            publishMetadata({
+              revision: 2,
+              guestId,
+              automatchStateHint: "matched",
+            });
+          const sendMatch = () =>
+            publishMatch({
+              revision: 2,
+              guestPlayerId: guestId,
+              guestMatch: record("black"),
+            });
+          if (metadataFirst) sendMetadata();
+          else sendMatch();
+          await page.evaluate(
+            () =>
+              new Promise((resolve) =>
+                requestAnimationFrame(() => requestAnimationFrame(resolve)),
+              ),
+          );
+          assert.equal(
+            await page.evaluate(
+              () =>
+                performance.getEntriesByName("main-game:interaction-ready")
+                  .length,
+            ),
+            0,
+          );
+          if (metadataFirst) sendMatch();
+          else sendMetadata();
+          await assertBoardAcceptsInput(page);
+          assert.equal(
+            sockets.filter((url) =>
+              url.endsWith("/matches/auto_loading/socket"),
+            ).length,
+            1,
+          );
+          assert.equal(
+            requests.some(({ path }) => path.endsWith("/bootstrap")),
+            false,
+          );
+          if (!metadataFirst)
+            assert.equal(
+              requests.some(({ path }) => path.endsWith("/snapshot")),
+              false,
+            );
+        },
+        {
+          inviteId: "auto_loading",
+          paired: false,
+          healthyCoreSockets: true,
+          holdMatchSnapshots: true,
+        },
+      );
+    },
+  );
+}
 
 test(
   "an existing rematch proposal settles while the opponent response remains pending",

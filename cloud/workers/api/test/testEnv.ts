@@ -339,6 +339,7 @@ export const TELEGRAM_TEST_ENV = {
   APPLE_AUDIENCES: "link.mons",
   AUTH_MUTATIONS_DISABLED: "false",
   NEW_MATCH_TIMER_STORAGE: "d1" as Env["NEW_MATCH_TIMER_STORAGE"],
+  AUTOMATCH_DELIVERY_MODE: "legacy" as Env["AUTOMATCH_DELIVERY_MODE"],
   EVENT_DB_BOOKMARK_EPOCH:
     "11111111-1111-4111-8111-111111111111" as Env["EVENT_DB_BOOKMARK_EPOCH"],
   AUTH_RECOVERY_QUEUE: queue,
@@ -401,6 +402,19 @@ export function withInviteSourceReads(
   environment: Env,
   readSource: (inviteId: string) => unknown | Promise<unknown>,
 ): Env {
+  const batch: D1Database["batch"] = async <T>(
+    statements: D1PreparedStatement[],
+  ) =>
+    Promise.all(
+      statements.map(async (statement) => {
+        const value = await statement.first<T>();
+        return {
+          success: true,
+          results: value === null ? [] : [value],
+          meta: d1Meta,
+        };
+      }),
+    );
   const wrapPrepare =
     (prepare: D1Database["prepare"]): D1Database["prepare"] =>
     (query) => {
@@ -429,9 +443,7 @@ export function withInviteSourceReads(
       return statement();
     };
   const database: D1Database = {
-    batch: environment.PROFILE_GAMES_DB.batch.bind(
-      environment.PROFILE_GAMES_DB,
-    ),
+    batch,
     dump: environment.PROFILE_GAMES_DB.dump.bind(environment.PROFILE_GAMES_DB),
     exec: environment.PROFILE_GAMES_DB.exec.bind(environment.PROFILE_GAMES_DB),
     prepare: wrapPrepare(
@@ -440,7 +452,7 @@ export function withInviteSourceReads(
     withSession: (...args) => {
       const session = environment.PROFILE_GAMES_DB.withSession(...args);
       return {
-        batch: session.batch.bind(session),
+        batch,
         getBookmark: session.getBookmark.bind(session),
         prepare: wrapPrepare(session.prepare.bind(session)),
       };

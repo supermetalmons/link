@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
+import {
+  automatchBootstrap,
+  automatchOperationId,
+} from "./automatchBootstrapFixture.mjs";
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -35,6 +39,112 @@ const invite = (inviteId = "match-a") => ({
   snapshotId: null,
   eventId: null,
   autojoin: false,
+});
+
+function seedAutomatch(h, overrides = {}) {
+  const seed = {
+    inviteId: "auto_bootstrap",
+    operationId: automatchOperationId,
+    user: h.user,
+    bootstrap: automatchBootstrap({ hostId: h.user.uid }),
+    ...overrides,
+  };
+  h.bootstrap.seedAutomatch(seed);
+  return seed;
+}
+
+test("automatch adopts a matching in-memory seed once without another read", async () => {
+  const h = fixture({ mode: "home" });
+  h.start();
+  const seed = seedAutomatch(h);
+  h.navigate(invite(seed.inviteId));
+  const taken = h.bootstrap.take(
+    seed.inviteId,
+    h.user,
+    "current",
+    seed.operationId,
+  );
+  assert.ok(taken);
+  assert.deepEqual(await taken.promise, seed.bootstrap);
+  assert.equal(
+    h.bootstrap.take(seed.inviteId, h.user, "current", seed.operationId),
+    null,
+  );
+  assert.equal(h.requests.length, 0);
+  assert.equal(h.routeListeners.size, 0);
+  assert.equal(h.authListeners.size, 0);
+});
+
+test("automatch seeds are fenced by operation, invite, user, selection, and expiry", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000 });
+  for (const change of [
+    (h, seed) => {
+      seed.operationId = "00000000-0000-4000-8000-000000000002";
+    },
+    (h, seed) => {
+      seed.inviteId = "auto_other";
+    },
+    (h, seed) => {
+      h.changeUser({ ...h.user, generation: "other" });
+      seed.user = h.auth.currentUser;
+    },
+    (h) => h.setSelection("approved"),
+    () => t.mock.timers.tick(5_000),
+  ]) {
+    const h = fixture({ mode: "home" });
+    const seed = seedAutomatch(h);
+    h.navigate(invite(seed.inviteId));
+    change(h, seed);
+    assert.equal(
+      h.bootstrap.take(seed.inviteId, seed.user, "current", seed.operationId),
+      null,
+    );
+    assert.equal(h.requests.length, 0);
+    assert.equal(h.routeListeners.size, 0);
+    assert.equal(h.authListeners.size, 0);
+  }
+});
+
+test("leaving the target route and replacing a seed invalidate the previous automatch", async () => {
+  const h = fixture({ mode: "home" });
+  const first = seedAutomatch(h);
+  h.navigate(invite("different"));
+  h.navigate(invite(first.inviteId));
+  assert.equal(
+    h.bootstrap.take(first.inviteId, h.user, "current", first.operationId),
+    null,
+  );
+  seedAutomatch(h);
+  const next = seedAutomatch(h, {
+    inviteId: "auto_new",
+    bootstrap: automatchBootstrap({ inviteId: "auto_new", hostId: h.user.uid }),
+  });
+  h.navigate(invite(next.inviteId));
+  const taken = h.bootstrap.take(
+    next.inviteId,
+    h.user,
+    "current",
+    next.operationId,
+  );
+  assert.deepEqual(await taken.promise, next.bootstrap);
+  assert.equal(h.routeListeners.size, 0);
+});
+
+test("a seed cannot resolve across a session replacement or abort after adoption", async () => {
+  for (const abort of [false, true]) {
+    const h = fixture({ mode: "home" });
+    const seed = seedAutomatch(h);
+    h.navigate(invite(seed.inviteId));
+    const taken = h.bootstrap.take(
+      seed.inviteId,
+      h.user,
+      "current",
+      seed.operationId,
+    );
+    if (abort) taken.abort();
+    else h.changeUser({ ...h.user, sessionId: "replacement" });
+    await assert.rejects(taken.promise, (error) => error.code === "aborted");
+  }
 });
 
 function fixture({

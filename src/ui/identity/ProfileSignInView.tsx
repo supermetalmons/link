@@ -701,7 +701,14 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
   const closeProfilePopupInternal = useCallback(() => {
     logoutReturnFocusIdRef.current = null;
     settingsReturnFocusIdRef.current = null;
-    didDismissSomethingWithOutsideTapJustNow();
+    if (
+      isOpen ||
+      isEditingName ||
+      isLogoutConfirmOpen ||
+      isSettingsOpen ||
+      showsShinyCardSomewhere
+    )
+      didDismissSomethingWithOutsideTapJustNow();
     setIsOpen(false);
     setPopupMode("inline");
     setIsLogoutConfirmOpen(false);
@@ -709,7 +716,7 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
     setSettingsInlineMessage(null);
     setIsEditingName(false);
     hideShinyCard();
-  }, []);
+  }, [isOpen, isEditingName, isLogoutConfirmOpen, isSettingsOpen]);
 
   const handleLogoutRequestInternal = useCallback((returnFocusId?: string) => {
     logoutReturnFocusIdRef.current = returnFocusId ?? null;

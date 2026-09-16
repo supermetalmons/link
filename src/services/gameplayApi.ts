@@ -39,17 +39,18 @@ import {
   type SubmitMoveResponse,
 } from "@mons/shared/game-sessions";
 import {
+  AUTOMATCH_API_MAX_RESPONSE_BYTES,
   isCancelAutomatchResponse,
   isReadNavigationGamesResponse,
   isRemoveNavigationGameResponse,
-  isStartAutomatchResponse,
+  parseStartAutomatchApiResponse,
   type CancelAutomatchResponse,
   type ReadNavigationGamesRequest,
   type ReadNavigationGamesResponse,
   type RemoveNavigationGameRequest,
   type RemoveNavigationGameResponse,
   type StartAutomatchRequest,
-  type StartAutomatchResponse,
+  type StartAutomatchApiResponse,
 } from "@mons/shared/navigation";
 import {
   WAGER_FROZEN_READ_PATH,
@@ -418,6 +419,7 @@ async function retryGameSessionMutation<T>(
   tokenProvider: AuthTokenProvider,
   validate: (value: unknown) => value is T,
   retryUnavailable: boolean,
+  maxResponseBytes?: number,
 ): Promise<T> {
   const deadlineAt = Date.now() + GAMEPLAY_API_TIMEOUT_MS;
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -432,6 +434,7 @@ async function retryGameSessionMutation<T>(
         tokenProvider,
         validate,
         remainingMs,
+        { maxResponseBytes },
       );
     } catch (error) {
       const busy =
@@ -471,23 +474,36 @@ export function cancelAutomatchViaApi(
   );
 }
 
-export function startAutomatchViaApi(
+export async function startAutomatchViaApi(
   request: StartAutomatchRequest,
   tokenProvider: AuthTokenProvider,
   operationId: string,
-): Promise<StartAutomatchResponse> {
+): Promise<StartAutomatchApiResponse> {
   if (!GAME_SESSION_OPERATION_ID_PATTERN.test(operationId)) {
     return Promise.reject(
       new GameplayApiError("invalid-argument", "invalid-request"),
     );
   }
-  return retryGameSessionMutation(
-    `/automatch/start?operationId=${encodeURIComponent(operationId)}`,
+  const response = await retryGameSessionMutation(
+    `/automatch/start?operationId=${encodeURIComponent(operationId)}&bootstrap=1`,
     request,
     tokenProvider,
-    isStartAutomatchResponse,
+    (value): value is StartAutomatchApiResponse =>
+      parseStartAutomatchApiResponse(value) !== null,
     false,
+    AUTOMATCH_API_MAX_RESPONSE_BYTES,
   );
+  const parsed = parseStartAutomatchApiResponse(response)!;
+  if (
+    parsed.ok &&
+    parsed.mode === "matched" &&
+    parsed.bootstrap &&
+    parsed.bootstrap.viewer.automatchOperationId !== operationId
+  ) {
+    const { bootstrap: _bootstrap, ...legacy } = parsed;
+    return legacy;
+  }
+  return parsed;
 }
 
 export function createInviteViaApi(

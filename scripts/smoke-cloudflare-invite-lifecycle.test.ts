@@ -352,6 +352,30 @@ function harness(
         },
       });
     }
+    if (url.pathname === `/invites/${INVITE}/bootstrap`) {
+      assert.equal(method, "GET");
+      assert.ok(source);
+      return json(
+        {
+          ok: true,
+          schemaVersion: 1,
+          metadata: source,
+          viewer: {
+            role: uid === HOST ? "host" : "guest",
+            actorUid: uid,
+            automatchOperationId: null,
+          },
+          match: syncSnapshot(INVITE),
+          hasPendingProposal: false,
+        },
+        200,
+        {
+          "Server-Timing": "auth;dur=1.0, metadata;dur=2.0, total;dur=3.0",
+          "Access-Control-Expose-Headers": "Retry-After, Server-Timing",
+          "Timing-Allow-Origin": "https://mons.link",
+        },
+      );
+    }
     const syncPath = new RegExp(
       `^/invites/${INVITE}/matches/(${INVITE}1?)/snapshot$`,
     ).exec(url.pathname);
@@ -788,6 +812,36 @@ test("default smoke verifies only Worker snapshots, original timer deadlines and
     ),
   );
   assert.ok(report.checks.includes("terminal-replay-preserved-source"));
+  assert.ok(
+    report.checks.includes("authenticated-bootstrap-pair-roles-and-timing"),
+  );
+  const bootstrapRequests = state.requests.filter(
+    (request) => request.url.pathname === `/invites/${INVITE}/bootstrap`,
+  );
+  assert.equal(bootstrapRequests.length, 2);
+  assert.deepEqual(
+    bootstrapRequests.map((request) => [
+      request.method,
+      request.headers.get("Authorization"),
+    ]),
+    [
+      ["GET", `Bearer ${TOKENS.get(HOST)}`],
+      ["GET", `Bearer ${TOKENS.get(GUEST)}`],
+    ],
+  );
+  const firstMove = state.requests.findIndex(
+    (request) => request.url.pathname === "/matches/move",
+  );
+  assert.ok(
+    bootstrapRequests.every(
+      (request) => state.requests.indexOf(request) < firstMove,
+    ),
+  );
+  assert.ok(
+    state.requests.every(
+      (request) => !request.url.pathname.startsWith("/automatch/"),
+    ),
+  );
   const snapshots = state.requests.filter(
     (request) => request.url.pathname === "/matches/snapshot",
   );
@@ -823,6 +877,108 @@ test("default smoke verifies only Worker snapshots, original timer deadlines and
   assert.equal(state.source()?.hostRematches, "1x");
   for (const token of TOKENS.values())
     assert.ok(!state.logs.join("\n").includes(token));
+});
+
+test("bootstrap smoke rejects inconsistent participant roles, identities and incomplete pairs", async (t) => {
+  for (const [label, change] of [
+    [
+      "viewer role",
+      { viewer: { role: "guest", actorUid: HOST, automatchOperationId: null } },
+    ],
+    [
+      "viewer identity",
+      { viewer: { role: "host", actorUid: GUEST, automatchOperationId: null } },
+    ],
+    ["canonical invite", { match: { inviteId: "WrongInvite" } }],
+    ["canonical match", { match: { matchId: `${INVITE}1` } }],
+    ["incomplete pair", { match: { guestMatch: null } }],
+  ] as const) {
+    await t.test(label, async () => {
+      const state = harness({
+        intercept: async (request, response) => {
+          const result = response();
+          if (
+            request.url.pathname !== `/invites/${INVITE}/bootstrap` ||
+            request.headers.get("Authorization") !==
+              `Bearer ${TOKENS.get(HOST)}`
+          )
+            return result;
+          const payload = await result.json();
+          for (const [key, value] of Object.entries(change))
+            payload[key] = { ...payload[key], ...value };
+          return new Response(JSON.stringify(payload), {
+            status: 200,
+            headers: result.headers,
+          });
+        },
+      });
+      await assert.rejects(
+        runSmoke({ baseUrl: API }, state.dependencies),
+        /bootstrap metadata, match pair or participant identity was incorrect/,
+      );
+      assert.ok(state.source()?.hostRematches.endsWith("x"));
+      assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+      assert.equal(state.timers.size, 0);
+      assert.ok(
+        state.requests.every(
+          (request) => request.url.pathname !== "/matches/move",
+        ),
+      );
+    });
+  }
+});
+
+test("bootstrap smoke requires valid browser-visible server timing", async (t) => {
+  for (const headers of [
+    { "Server-Timing": "" },
+    { "Server-Timing": "total;dur=-1" },
+    { "Access-Control-Expose-Headers": "Retry-After" },
+    { "Timing-Allow-Origin": "https://other.example" },
+  ]) {
+    await t.test(JSON.stringify(headers), async () => {
+      const state = harness({
+        intercept: async (request, response) => {
+          const result = response();
+          if (request.url.pathname !== `/invites/${INVITE}/bootstrap`)
+            return result;
+          for (const [name, value] of Object.entries(headers))
+            result.headers.set(name, value);
+          return result;
+        },
+      });
+      await assert.rejects(
+        runSmoke({ baseUrl: API }, state.dependencies),
+        /bootstrap response lacked valid exposed server timing/,
+      );
+      assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+      assert.equal(state.timers.size, 0);
+    });
+  }
+});
+
+test("bootstrap smoke retries a temporary failure using the authenticated fixture", async () => {
+  let failed = false;
+  const state = harness({
+    intercept: (request, response) => {
+      if (request.url.pathname === `/invites/${INVITE}/bootstrap` && !failed) {
+        failed = true;
+        return json({ error: "unavailable" }, 503);
+      }
+      return response();
+    },
+  });
+  const report = await runSmoke({ baseUrl: API }, state.dependencies);
+  assert.ok(
+    report.checks.includes("authenticated-bootstrap-pair-roles-and-timing"),
+  );
+  assert.equal(
+    state.requests.filter(
+      (request) => request.url.pathname === `/invites/${INVITE}/bootstrap`,
+    ).length,
+    3,
+  );
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+  assert.equal(state.timers.size, 0);
 });
 
 test("durable smoke rejects changed timer deadlines and still ends the series and revokes sessions", async () => {
@@ -925,7 +1081,7 @@ test("runs the isolated lifecycle with API move and surrender replay", async () 
   const report = await runSmoke({ baseUrl: API }, state.dependencies);
   assert.equal(report.inviteId, INVITE);
   assert.deepEqual(report.matchIds, [INVITE, `${INVITE}1`]);
-  assert.equal(report.checks.length, 16);
+  assert.equal(report.checks.length, 17);
   assert.ok(report.checks.includes("pending-match-http-socket-and-heartbeat"));
   assert.ok(report.checks.includes("join-live-match-and-public-spectator"));
   assert.ok(
@@ -1609,7 +1765,7 @@ test("accepts unchanged or advancing reconnect revisions without changing match 
       });
       const report = await runSmoke({ baseUrl: API }, state.dependencies);
       assert.equal(reconnects, 2);
-      assert.equal(report.checks.length, 16);
+      assert.equal(report.checks.length, 17);
       assert.ok(state.source()?.hostRematches.endsWith("x"));
       assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
       assert.ok(state.sockets.every((socket) => socket.terminated));

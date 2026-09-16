@@ -30,6 +30,10 @@ import {
 } from "@mons/shared/game-sessions";
 import { INVITE_ID_RANDOM_LENGTH } from "@mons/shared/ids";
 import {
+  GAME_BOOTSTRAP_MAX_RESPONSE_BYTES,
+  isReadGameBootstrapResponse,
+} from "@mons/shared/game-bootstrap";
+import {
   INVITE_METADATA_MAX_MESSAGE_BYTES,
   INVITE_METADATA_SOCKET_PROTOCOL,
   isInviteMetadataMessage,
@@ -291,6 +295,7 @@ async function apiRequest(
   body: Record<string, unknown> | null,
   dependencies: Dependencies,
   maxBytes = INVITE_METADATA_MAX_MESSAGE_BYTES,
+  validateHeaders?: (headers: Headers) => void,
 ): Promise<unknown> {
   return retry(async () => {
     await refreshSession(options, session, dependencies);
@@ -319,6 +324,7 @@ async function apiRequest(
       throw new SmokeFailure(
         "Lifecycle API response lacked the expected cache or origin protection.",
       );
+    validateHeaders?.(result.headers);
     return result.payload;
   });
 }
@@ -906,6 +912,75 @@ async function readMetadata(
   return payload.snapshot;
 }
 
+async function verifyJoinedBootstrap(
+  options: Options,
+  inviteId: string,
+  host: Session,
+  guest: Session,
+  metadata: InviteMetadataSnapshot,
+  match: MatchSyncSnapshot,
+  dependencies: Dependencies,
+): Promise<void> {
+  const results = await Promise.allSettled(
+    (["host", "guest"] as const).map(async (role) => {
+      const session = role === "host" ? host : guest;
+      const payload = await apiRequest(
+        options,
+        `/invites/${inviteId}/bootstrap`,
+        session,
+        null,
+        dependencies,
+        GAME_BOOTSTRAP_MAX_RESPONSE_BYTES,
+        (headers) => {
+          const total = /(?:^|,)\s*total;dur=(\d+(?:\.\d+)?)\s*(?:,|$)/.exec(
+            headers.get("Server-Timing") || "",
+          );
+          if (
+            !total ||
+            !Number.isFinite(Number(total[1])) ||
+            !(headers.get("Access-Control-Expose-Headers") || "")
+              .split(",")
+              .some((name) => name.trim().toLowerCase() === "server-timing") ||
+            headers.get("Timing-Allow-Origin") !== ORIGIN
+          )
+            throw new SmokeFailure(
+              "Lifecycle bootstrap response lacked valid exposed server timing.",
+            );
+        },
+      );
+      if (
+        !isReadGameBootstrapResponse(payload) ||
+        payload.metadata.inviteId !== inviteId ||
+        payload.metadata.hostId !== host.uid ||
+        payload.metadata.guestId !== guest.uid ||
+        !isDeepStrictEqual(payload.metadata, metadata) ||
+        payload.viewer.role !== role ||
+        payload.viewer.actorUid !== session.uid ||
+        payload.viewer.automatchOperationId !== null ||
+        payload.match.inviteId !== inviteId ||
+        payload.match.matchId !== inviteId ||
+        payload.match.hostPlayerId !== host.uid ||
+        payload.match.guestPlayerId !== guest.uid ||
+        !payload.match.hostMatch ||
+        !payload.match.guestMatch ||
+        payload.match.revision < match.revision ||
+        !isDeepStrictEqual(
+          matchSyncState(payload.match),
+          matchSyncState(match),
+        ) ||
+        payload.hasPendingProposal
+      )
+        throw new SmokeFailure(
+          "Lifecycle bootstrap metadata, match pair or participant identity was incorrect.",
+        );
+    }),
+  );
+  const failed = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failed) throw failed.reason;
+}
+
 async function readMatch(
   uid: string,
   matchId: string,
@@ -1452,7 +1527,7 @@ async function runSmoke(
     );
     observeMatch(inviteId, guest);
     observeMatch(inviteId, null);
-    await verifyMatchChannels(
+    const joinedMatch = await verifyMatchChannels(
       validated,
       inviteId,
       inviteId,
@@ -1463,6 +1538,16 @@ async function runSmoke(
       dependencies,
     );
     report.checks.push("join-live-match-and-public-spectator");
+    await verifyJoinedBootstrap(
+      validated,
+      inviteId,
+      host,
+      guest,
+      snapshot,
+      joinedMatch,
+      dependencies,
+    );
+    report.checks.push("authenticated-bootstrap-pair-roles-and-timing");
     await verifyLiveMatch(
       validated,
       inviteId,

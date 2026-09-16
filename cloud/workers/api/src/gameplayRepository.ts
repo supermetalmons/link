@@ -1,11 +1,15 @@
 import type { WagerFrozenStore } from "./wagerFrozenStore.ts";
-import { notifyInviteSourceChanged } from "./inviteWagersNotifications.ts";
+import {
+  notifyInviteSessionCommitted,
+  notifyInviteSourceChanged,
+} from "./inviteWagersNotifications.ts";
 import {
   createAutomatchPersistence,
   type AutomatchPersistence,
 } from "./automatchPersistence.ts";
 import { notifyMatchSyncInvites } from "./matchSyncNotifications.ts";
 import { prepareCreatedMatchPresentations } from "./matchPresentationRegistry.ts";
+import { measureAutomatchPhase } from "./automatchTelemetry.ts";
 import {
   createWagerStateReader,
   type WagerReader,
@@ -302,15 +306,20 @@ export function createGameplayRepository(
     now,
     prepareMatchPresentations: (creations) =>
       prepareCreatedMatchPresentations(env, creations),
-    onCommitted: async (inviteId) => {
-      await Promise.all([
-        notifyInviteSourceChanged(env, {
-          metadataInviteIds: [inviteId],
-          wagerInviteIds: [inviteId],
-        }),
-        notifyMatchSyncInvites(env, [inviteId]),
-      ]);
-    },
+    onCommitted: (inviteId) =>
+      measureAutomatchPhase("notification", async () => {
+        if (env.AUTOMATCH_DELIVERY_MODE === "bootstrap") {
+          await notifyInviteSessionCommitted(env, [inviteId]);
+          return;
+        }
+        await Promise.all([
+          notifyInviteSourceChanged(env, {
+            metadataInviteIds: [inviteId],
+            wagerInviteIds: [inviteId],
+          }),
+          notifyMatchSyncInvites(env, [inviteId]),
+        ]);
+      }),
   });
   return {
     ...createCanonicalGameplayRepository(env.PROFILE_DB, d1, {

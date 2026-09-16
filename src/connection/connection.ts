@@ -233,7 +233,10 @@ import {
   GameBootstrapApiError,
   readGameBootstrapViaApi,
 } from "../services/gameBootstrapApi";
-import { takeInitialGameBootstrap } from "../services/initialGameBootstrap";
+import {
+  seedAutomatchGameBootstrap,
+  takeInitialGameBootstrap,
+} from "../services/initialGameBootstrap";
 import {
   createMatchSyncSocketProtocols,
   readMatchSyncViaApi,
@@ -426,6 +429,7 @@ class Connection {
     contextId: number;
     channel: MatchSyncChannel;
     players: Set<string>;
+    snapshot: MatchSyncSnapshot | null;
     stop: () => void;
   } | null = null;
   private observerRegistry = new ObserverRegistry((reason, contextId) => {
@@ -2615,7 +2619,19 @@ class Connection {
             resolvedInviteId: response.inviteId,
           });
         }
+        if (response.ok && response.mode === "matched" && response.bootstrap) {
+          seedAutomatchGameBootstrap({
+            inviteId: response.inviteId,
+            operationId: pendingRequest.operationId,
+            user,
+            bootstrap: response.bootstrap,
+          });
+        }
         this.notifyNavigationGamesChanged();
+        if (response.ok && response.mode === "matched") {
+          const { bootstrap: _bootstrap, ...result } = response;
+          return result;
+        }
         return response;
       });
     } catch (error) {
@@ -4812,7 +4828,12 @@ class Connection {
         ? "approved"
         : "current";
       const initial = firstRead
-        ? takeInitialGameBootstrap(inviteId, this.auth.currentUser!, selection)
+        ? takeInitialGameBootstrap(
+            inviteId,
+            this.auth.currentUser!,
+            selection,
+            storage.getPendingAutomatchOperation(uid)?.operationId,
+          )
         : null;
       firstRead = false;
       if (!initial)
@@ -4830,7 +4851,7 @@ class Connection {
             delivery.scope.inviteId === inviteId,
         );
         if (hasMoveRecovery) return readBootstrap();
-        reuseInitialIdentity = true;
+        reuseInitialIdentity = initial.reuseInitialIdentity !== false;
         return bootstrap;
       } catch (error) {
         if (
@@ -5237,6 +5258,14 @@ class Connection {
             );
           } else {
             didFindYourOwnInviteThatNobodyJoined(isAutoInviteId(inviteId));
+            if (isAutoInviteId(inviteId)) {
+              this.ensureMatchSyncSubscription(
+                nextContext,
+                [],
+                bootstrap.match,
+                isConnectActive,
+              );
+            }
           }
         } else {
           this.observeMatch(
@@ -5837,14 +5866,81 @@ class Connection {
       this.isContextActive(context.contextId, context.sessionEpoch) &&
       this.isCurrentAuthUser(context.loginUid);
     if (!isObserverActive()) return;
+    const subscription = this.matchSyncSubscription;
+    const observedPlayerIds = [
+      ...new Set([playerId, ...additionalPlayerIds]),
+    ].filter(
+      (uid) =>
+        subscription?.contextId !== context.contextId ||
+        !subscription.players.has(uid),
+    );
+    if (!observedPlayerIds.length) return;
+    this.ensureMatchSyncSubscription(
+      context,
+      observedPlayerIds,
+      initialSnapshot,
+      isInitialSnapshotActive,
+    );
+    if (
+      !isObserverActive() ||
+      (isInitialSnapshotActive && !isInitialSnapshotActive()) ||
+      this.matchSyncSubscription?.contextId !== context.contextId
+    )
+      return;
+    for (const observedPlayerId of observedPlayerIds) {
+      this.getPlayerProfileWithRetry(observedPlayerId, isObserverActive)
+        .then((profile) => {
+          if (!profile || !isObserverActive()) {
+            return;
+          }
+          didGetPlayerProfile(profile, observedPlayerId, false);
+        })
+        .catch((error) => {
+          if (!isObserverActive()) {
+            return;
+          }
+          console.error("Error getting player profile:", error);
+        });
+    }
+  }
+
+  private ensureMatchSyncSubscription(
+    context: MatchRuntimeContext,
+    playerIds: readonly string[],
+    initialSnapshot?: MatchSyncSnapshot,
+    isInitialSnapshotActive?: () => boolean,
+  ): void {
+    const matchId = context.matchId;
+    const isObserverActive = () =>
+      this.isContextActive(context.contextId, context.sessionEpoch) &&
+      this.isCurrentAuthUser(context.loginUid);
+    if (!isObserverActive()) return;
     let subscription = this.matchSyncSubscription;
     if (subscription?.contextId === context.contextId) {
-      if (subscription.players.has(playerId)) return;
-      subscription.players.add(playerId);
-      subscription.channel.refresh();
+      const addedPlayers = playerIds.filter(
+        (playerId) => !subscription!.players.has(playerId),
+      );
+      if (!addedPlayers.length) return;
+      for (const playerId of addedPlayers) subscription.players.add(playerId);
+      const snapshot = subscription.snapshot;
+      if (
+        snapshot &&
+        snapshot.hostPlayerId === this.latestInvite?.hostId &&
+        snapshot.guestPlayerId === (this.latestInvite?.guestId ?? null) &&
+        addedPlayers.every((playerId) =>
+          playerId === snapshot.hostPlayerId
+            ? snapshot.hostMatch !== null
+            : playerId === snapshot.guestPlayerId &&
+              snapshot.guestMatch !== null,
+        )
+      ) {
+        this.applyMatchSyncSnapshot(context, snapshot, subscription.players);
+      } else {
+        subscription.channel.refresh();
+      }
     } else {
       this.stopObservingAllMatches();
-      const players = new Set([playerId, ...additionalPlayerIds]);
+      const players = new Set(playerIds);
       const key = `match-sync:${matchId}`;
       const channel = new MatchSyncChannel({
         inviteId: context.inviteId,
@@ -5886,8 +5982,11 @@ class Connection {
             document.removeEventListener("visibilitychange", listener);
           };
         },
-        onSnapshot: (snapshot) =>
-          this.applyMatchSyncSnapshot(context, snapshot, players),
+        onSnapshot: (snapshot) => {
+          if (subscription?.contextId !== context.contextId) return;
+          subscription.snapshot = snapshot;
+          this.applyMatchSyncSnapshot(context, snapshot, players);
+        },
         onError: (error) => console.error("Error receiving matches:", error),
         setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
         clearTimer: (timer) => clearTimeout(timer),
@@ -5909,7 +6008,13 @@ class Connection {
         channel.stop();
         return;
       }
-      subscription = { contextId: context.contextId, channel, players, stop };
+      subscription = {
+        contextId: context.contextId,
+        channel,
+        players,
+        snapshot: initialSnapshot ?? null,
+        stop,
+      };
       this.matchSyncSubscription = subscription;
       incrementLifecycleCounter("connectionObservers");
       if (initialSnapshot) {
@@ -5921,22 +6026,6 @@ class Connection {
         );
         if (isInitialSnapshotActive && !isInitialSnapshotActive()) return;
       }
-    }
-
-    for (const observedPlayerId of [playerId, ...additionalPlayerIds]) {
-      this.getPlayerProfileWithRetry(observedPlayerId, isObserverActive)
-        .then((profile) => {
-          if (!profile || !isObserverActive()) {
-            return;
-          }
-          didGetPlayerProfile(profile, observedPlayerId, false);
-        })
-        .catch((error) => {
-          if (!isObserverActive()) {
-            return;
-          }
-          console.error("Error getting player profile:", error);
-        });
     }
   }
 
@@ -5953,7 +6042,9 @@ class Connection {
     if (
       !isActive() ||
       snapshot.inviteId !== context.inviteId ||
-      snapshot.matchId !== context.matchId
+      snapshot.matchId !== context.matchId ||
+      snapshot.hostPlayerId !== this.latestInvite?.hostId ||
+      snapshot.guestPlayerId !== (this.latestInvite?.guestId ?? null)
     )
       return;
     const matches = new Map<string, Match>();

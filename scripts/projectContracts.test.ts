@@ -122,6 +122,7 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   assert.deepEqual(Object.keys(config.vars || {}).sort(), [
     "APPLE_AUDIENCES",
     "AUTH_MUTATIONS_DISABLED",
+    "AUTOMATCH_DELIVERY_MODE",
     "EVENT_DB_BOOKMARK_EPOCH",
     "NEW_MATCH_TIMER_STORAGE",
   ]);
@@ -133,6 +134,10 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   assert.equal(config.vars?.APPLE_AUDIENCES, "link.mons");
   assert.match(config.vars?.AUTH_MUTATIONS_DISABLED || "", /^(?:true|false)$/);
   assert.match(config.vars?.NEW_MATCH_TIMER_STORAGE || "", /^(?:d1|local)$/);
+  assert.match(
+    config.vars?.AUTOMATCH_DELIVERY_MODE || "",
+    /^(?:legacy|bootstrap)$/,
+  );
   assert.equal(config.vars?.FIREBASE_RTDB_URL, undefined);
   assert.deepEqual(config.d1_databases, [
     {

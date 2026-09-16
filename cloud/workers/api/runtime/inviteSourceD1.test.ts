@@ -49,6 +49,10 @@ function interceptAdmissions(
   ) => Promise<unknown>,
 ): D1Database {
   const nativeStatements = new WeakMap<object, D1PreparedStatement>();
+  const statementQueries = new WeakMap<
+    object,
+    { query: string; bindings: unknown[]; primary: boolean }
+  >();
   const wrapStatement = (
     statement: D1PreparedStatement,
     query: string,
@@ -75,6 +79,7 @@ function interceptAdmissions(
       },
     });
     nativeStatements.set(wrapped, statement);
+    statementQueries.set(wrapped, { query, bindings, primary });
     return wrapped;
   };
   const wrapDatabase = <T extends D1Database | D1DatabaseSession>(
@@ -87,12 +92,31 @@ function interceptAdmissions(
           return (query: string) =>
             wrapStatement(target.prepare(query), query, primary);
         if (property === "batch")
-          return (statements: D1PreparedStatement[]) =>
-            target.batch(
-              statements.map(
-                (statement) => nativeStatements.get(statement) ?? statement,
-              ),
-            );
+          return (statements: D1PreparedStatement[]) => {
+            const execute = () =>
+              target.batch(
+                statements.map(
+                  (statement) => nativeStatements.get(statement) ?? statement,
+                ),
+              );
+            const observed = statements
+              .map((statement) => statementQueries.get(statement))
+              .find(
+                (entry) =>
+                  entry &&
+                  /^(INSERT INTO|DELETE FROM) invite_source_write_admissions|^SELECT[\s\S]*FROM invite_source_write_admissions/.test(
+                    entry.query.trimStart(),
+                  ),
+              );
+            return observed
+              ? intercept(
+                  observed.query,
+                  observed.bindings,
+                  observed.primary,
+                  execute,
+                )
+              : execute();
+          };
         if (property === "withSession")
           return (constraint?: D1SessionConstraint | D1SessionBookmark) =>
             wrapDatabase(

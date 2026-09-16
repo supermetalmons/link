@@ -100,7 +100,7 @@ type AdmissionRow = {
   created_at_ms: number;
 };
 
-type RecordRow = {
+export type RecordRow = {
   record_key: string;
   payload_json: string | null;
   revision: number;
@@ -336,7 +336,7 @@ function encodeValue(value: unknown): string | null {
   return value === null ? null : JSON.stringify(value);
 }
 
-function decodeSnapshot(
+export function decodeSnapshot(
   root: AutomatchRoot,
   row: RecordRow,
 ): AutomatchRecordSnapshot {

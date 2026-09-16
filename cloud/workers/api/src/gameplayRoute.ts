@@ -41,6 +41,10 @@ import {
   type GameplayRoute,
 } from "./gameplayRoutes/definition.ts";
 import type { GameplayRouteDependencies } from "./gameplayRoutes/runtime.ts";
+import {
+  measureAutomatchPhase,
+  withAutomatchTelemetry,
+} from "./automatchTelemetry.ts";
 
 export type { GameplayRouteDependencies } from "./gameplayRoutes/runtime.ts";
 export { cancelAutomatch } from "./gameplayRoutes/automatch.ts";
@@ -77,6 +81,22 @@ export async function readGameplayBody(
 }
 
 export async function handleGameplayRoute(
+  request: Request,
+  env: Env,
+  ctx: WorkerExecutionContext,
+  dependencies: GameplayRouteDependencies = {},
+): Promise<Response> {
+  if (
+    request.method === "POST" &&
+    new URL(request.url).pathname === "/automatch/start"
+  )
+    return withAutomatchTelemetry(env, (measuredEnv) =>
+      handleGameplayRouteInternal(request, measuredEnv, ctx, dependencies),
+    );
+  return handleGameplayRouteInternal(request, env, ctx, dependencies);
+}
+
+async function handleGameplayRouteInternal(
   request: Request,
   env: Env,
   ctx: WorkerExecutionContext,
@@ -130,9 +150,9 @@ async function handleGameplayRequest(
     if (!route) {
       throw new AuthApiFailure(404, "not-found", "not-found");
     }
-    const identity = await (
-      dependencies.verifyIdentity || verifySessionRequest
-    )(request, env, ctx);
+    const identity = await measureAutomatchPhase("auth", () =>
+      (dependencies.verifyIdentity || verifySessionRequest)(request, env, ctx),
+    );
     const repository =
       dependencies.repository || createEventGameplayRepository(env);
     const isWagerMutation =

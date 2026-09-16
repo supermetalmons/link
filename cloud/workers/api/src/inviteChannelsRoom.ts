@@ -102,6 +102,7 @@ type InviteChannelsDependencies = {
 
 export class InviteChannelsRoom {
   private inviteSequence: Promise<void> = Promise.resolve();
+  private metadataSequence: Promise<void> = Promise.resolve();
   private queuedInviteRead: Promise<InviteReadResult> | null = null;
   private queuedInviteNeedsWagers = false;
   private pendingWagerAdmissions = 0;
@@ -192,6 +193,15 @@ export class InviteChannelsRoom {
   private serializeInvite<T>(work: () => Promise<T>): Promise<T> {
     const pending = this.inviteSequence.then(work);
     this.inviteSequence = pending.then(
+      () => undefined,
+      () => undefined,
+    );
+    return pending;
+  }
+
+  private serializeMetadata<T>(work: () => Promise<T>): Promise<T> {
+    const pending = this.metadataSequence.then(work);
+    this.metadataSequence = pending.then(
       () => undefined,
       () => undefined,
     );
@@ -319,10 +329,10 @@ export class InviteChannelsRoom {
   private async refreshInvite(
     inviteId: string,
     needsWagers = false,
+    metadataOnly = false,
   ): Promise<InviteReadResult> {
     this.pinInvite(inviteId);
-    needsWagers ||= this.pendingWagerAdmissions > 0;
-    const generation = ++this.inviteRefreshGeneration;
+    needsWagers ||= !metadataOnly && this.pendingWagerAdmissions > 0;
     this.inviteResult = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       const invalidationGeneration = this.inviteInvalidationGeneration;
@@ -334,45 +344,51 @@ export class InviteChannelsRoom {
           logWagersRefreshFailure(inviteId, error);
         }
       }
-      const value = await this.dependencies.readInvite(inviteId);
-      const metadataSource = normalizeInviteMetadata(inviteId, value);
-      let wagerSource: InviteWagersSourceResult | undefined;
-      if (needsWagers) {
-        try {
-          wagerSource =
-            wagerStates === undefined
-              ? {
-                  status:
-                    metadataSource.status === "missing" ? "missing" : "invalid",
-                }
-              : await normalizeInviteWagers(
-                  inviteId,
-                  composeInviteWagerSource(value, wagerStates),
-                  metadataSource,
-                );
-        } catch (error) {
-          logWagersRefreshFailure(inviteId, error);
-          wagerSource = { status: "invalid" };
+      const result = await this.serializeMetadata(async () => {
+        const generation = ++this.inviteRefreshGeneration;
+        const value = await this.dependencies.readInvite(inviteId);
+        const metadataSource = normalizeInviteMetadata(inviteId, value);
+        let wagerSource: InviteWagersSourceResult | undefined;
+        if (needsWagers) {
+          try {
+            wagerSource =
+              wagerStates === undefined
+                ? {
+                    status:
+                      metadataSource.status === "missing"
+                        ? "missing"
+                        : "invalid",
+                  }
+                : await normalizeInviteWagers(
+                    inviteId,
+                    composeInviteWagerSource(value, wagerStates),
+                    metadataSource,
+                  );
+          } catch (error) {
+            logWagersRefreshFailure(inviteId, error);
+            wagerSource = { status: "invalid" };
+          }
         }
-      }
-      if (invalidationGeneration !== this.inviteInvalidationGeneration)
-        continue;
-      const metadata = this.applyMetadata(inviteId, metadataSource);
-      this.revalidateWagerAccess(metadata);
-      const result: InviteReadResult = { metadata };
-      if (wagerSource) {
-        try {
-          result.wagers = this.applyWagers(wagerSource, metadata);
-        } catch (error) {
-          logWagersRefreshFailure(inviteId, error);
-          result.wagers = { status: "invalid" };
+        if (invalidationGeneration !== this.inviteInvalidationGeneration)
+          return null;
+        const metadata = this.applyMetadata(inviteId, metadataSource);
+        this.revalidateWagerAccess(metadata);
+        const result: InviteReadResult = { metadata };
+        if (wagerSource) {
+          try {
+            result.wagers = this.applyWagers(wagerSource, metadata);
+          } catch (error) {
+            logWagersRefreshFailure(inviteId, error);
+            result.wagers = { status: "invalid" };
+          }
         }
-      }
-      this.inviteResult = result;
-      this.inviteCheckedAt = Date.now();
-      this.inviteResultGeneration = generation;
-      this.inviteResultInvalidationGeneration = invalidationGeneration;
-      return result;
+        this.inviteResult = result;
+        this.inviteCheckedAt = Date.now();
+        this.inviteResultGeneration = generation;
+        this.inviteResultInvalidationGeneration = invalidationGeneration;
+        return result;
+      });
+      if (result) return result;
     }
     throw new Error("invite-source-kept-changing");
   }
@@ -407,6 +423,23 @@ export class InviteChannelsRoom {
     )
       return this.inviteResult.metadata;
     return (await this.readInvite(inviteId)).metadata;
+  }
+
+  async refreshCommittedMetadata(
+    inviteId: string,
+    matchesSubscribed: boolean,
+  ): Promise<void> {
+    this.pinInvite(inviteId);
+    const wagersSubscribed = this.inviteSockets("wagers", true).length > 0;
+    const channelsSubscribed =
+      wagersSubscribed || this.inviteSockets("metadata", true).length > 0;
+    if (channelsSubscribed) {
+      await this.scheduleInviteRefresh(
+        Date.now() + (wagersSubscribed ? 0 : INVITE_METADATA_REFRESH_MS),
+      );
+    }
+    if (!channelsSubscribed && !matchesSubscribed) return;
+    await this.refreshInvite(inviteId, false, true);
   }
 
   async readWagers(inviteId: string): Promise<InviteWagersReadResult> {

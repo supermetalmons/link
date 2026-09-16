@@ -75,6 +75,7 @@
     "latest:admin": "npx --yes npm-check-updates@latest -u --peer --packageFile cloud/admin/package.json && npm install --prefix cloud/admin",
     "latest": "npm run latest:root && npm run latest:runtime && npm run latest:admin",
     "manage:automatch-state": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-automatch-state.ts",
+    "manage:automatch-queue": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-automatch-queue.ts",
     "manage:login-match-discovery": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-login-match-discovery.ts",
     "manage:match-presentations": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-match-presentations.ts",
     "manage:invite-source": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-invite-source.ts",

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   notifyInviteWagersChanged,
   notifyInviteSourceChanged,
+  notifyInviteSessionCommitted,
 } from "../src/inviteWagersNotifications.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
@@ -104,4 +105,46 @@ test("failed or stuck room notifications are bounded and cannot reject committed
     }),
     { metadataInviteIds: [], wagerInviteIds: ["invite"] },
   );
+});
+
+test("session commits send one bounded notification per valid room", async () => {
+  const calls: string[] = [];
+  const env = {
+    ...TELEGRAM_TEST_ENV,
+    INVITE_REACTIONS: {
+      getByName: (inviteId: string) => ({
+        notifySessionCommitted: async (incoming: string) => {
+          assert.equal(incoming, inviteId);
+          calls.push(inviteId);
+        },
+      }),
+    },
+  } as unknown as Env;
+  await notifyInviteSessionCommitted(env, [
+    "invite",
+    "invite",
+    "second",
+    "invalid/key",
+    " padded ",
+  ]);
+  assert.deepEqual(calls, ["invite", "second"]);
+  for (const notify of [
+    async () => {
+      throw new Error("unavailable");
+    },
+    () => new Promise<void>(() => undefined),
+  ]) {
+    let failures = 0;
+    const unavailable = {
+      ...env,
+      INVITE_REACTIONS: {
+        getByName: () => ({ notifySessionCommitted: notify }),
+      },
+    } as unknown as Env;
+    await notifyInviteSessionCommitted(unavailable, ["invite"], {
+      timeoutMs: 1,
+      logFailure: () => failures++,
+    });
+    assert.equal(failures, 1);
+  }
 });

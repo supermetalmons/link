@@ -37,6 +37,43 @@ Rollback must retain code that reads the saved timer mode and the additive local
 
 Before an authorized promotion, validate mixed legacy/local matches, timer replay, takebacks, eviction, and rollback configuration in the local runtime suite. After promotion, run the standard API and affected invite-lifecycle smoke checks. Finish when the required checks pass; no additional observation window is needed.
 
+## FIFO automatch queue rollout
+
+Migration `0025_automatch_fifo_queue.sql` adds a live-ticket projection and pending-enqueue projection in `PROFILE_GAMES_DB`. Triggers maintain both from existing automatch records and unchanged v2 journals, including writes and recovery performed by the compatible bridge. Existing records, journal payloads, digests, receipts, and tombstone revisions remain authoritative. Queue selection stays in legacy mode until `automatch_runtime_control.metadata_json.queueSelection` is explicitly set to `fifo` by the queue operator.
+
+Validate the API, client, concurrency, migration, and queue operator tests before uploading the bridge and final candidates. The bridge contains the new conflict retry/recovery support while retaining the old response delivery mode:
+
+```sh
+npm run upload:api -- --var AUTOMATCH_DELIVERY_MODE:legacy
+```
+
+Record that explicit bridge Version ID as the compatible rollback target. Upload the final candidate with the checked-in default bootstrap delivery mode and record its separate Version ID. Promote and verify the bridge first so production understands queue-selection conflicts before enabling the guards. Use the standard API smoke and affected automatch lifecycle checks; no idle observation period is needed.
+
+Keep writes and Queue consumers active. Inspect pending migrations and apply only the reviewed queue migration, then inspect the new projections:
+
+```sh
+npx wrangler d1 migrations list PROFILE_GAMES_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler d1 migrations apply PROFILE_GAMES_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npm run manage:automatch-queue -- --inspect
+```
+
+The migration backfills current live entries and pending enqueue journals while installing maintenance triggers. Inspection must report a complete schema, matching projections, valid queue timestamps and login IDs, and an exact recovery resource for every pending enqueue. Resolve malformed or unrecoverable retained data before activation; do not delete evidence or rewrite old payload digests to pass the audit.
+
+Confirm the bridge API Version ID is serving 100% of traffic. Enable FIFO with that promoted compatible Version ID:
+
+```sh
+npm run manage:automatch-queue -- --activate --candidate-version-id <promoted-compatible-version-id>
+npm run manage:automatch-queue -- --inspect
+```
+
+Activation checks projection integrity again in the same SQL statement that changes the metadata flag. It preserves other metadata and requires active D1 authority with unchanged admission epochs. It does not require an empty queue or a writer freeze. The Version ID is recorded as release evidence; the operator does not itself verify the provider deployment, so verify that deployment before invoking activation.
+
+After activation, promote and verify the exact final API candidate, publish affected owned Workflow definitions, then promote the prepared frontend candidate. Run the API and isolated invite-lifecycle smoke checks, including authenticated bootstrap and live socket delivery. Inspect production queue integrity and its FIFO query plan read-only. Verify concurrent matching, replay, and cancellation with the deterministic local runtime suite; do not put smoke participants into the public matching queue.
+
+FIFO orders eligible waiting tickets by `(enqueued_at_ms, invite_id)`. A prepared match or cancellation removes its ticket from consideration; a receipt-only reservation causes targeted recovery before that ticket is selected. With no eligible ticket, a pending enqueue is recovered before another host can be queued.
+
+Rollback must retain a Worker with conflict retries, journal recovery, and the installed projection schema. The bridge is compatible with the FIFO flag and maintains the same canonical state while restoring legacy delivery. Never roll back to a pre-support binary, drop the new tables or triggers, reset the Durable Object namespace, purge Queues, or restore source tables independently. Use the routine promotion and affected verification path, with no write freeze or Queue pause.
+
 ## Canonical operators
 
 Status commands are read-only and use Cloudflare credentials. Completed migration phases and source-proof operations are retired and fail during argument validation.

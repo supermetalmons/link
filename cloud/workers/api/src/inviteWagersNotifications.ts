@@ -13,6 +13,20 @@ function validIds(ids: readonly string[]): string[] {
   return [...new Set(ids)].filter((id) => normalizeRecordKey(id) === id);
 }
 
+export function notifyInviteSessionCommitted(
+  env: Env,
+  inviteIds: readonly string[],
+  options: InviteRoomNotificationOptions = {},
+): Promise<void> {
+  return notifyInviteRooms(
+    env,
+    validIds(inviteIds),
+    "notifySessionCommitted",
+    "invite_session_notify_failed",
+    options,
+  );
+}
+
 export function notifyInviteWagersChanged(
   env: Env,
   inviteIds: readonly string[],

@@ -509,6 +509,17 @@ export class InviteReactions
     await this.inviteChannels.refreshIfSubscribed(inviteId);
   }
 
+  async notifySessionCommitted(inviteId: string): Promise<void> {
+    this.inviteChannels.pinInvite(inviteId);
+    this.inviteChannels.invalidate();
+    await this.matchSync.notify(inviteId);
+    await this.inviteChannels.refreshCommittedMetadata(
+      inviteId,
+      this.matchSync.hasSubscribers(),
+    );
+    await this.matchSync.refreshSubscribed(inviteId);
+  }
+
   async notifyWagersChanged(inviteId: string): Promise<void> {
     this.inviteChannels.invalidate();
     await this.inviteChannels.refreshIfSubscribed(inviteId, "wagers");

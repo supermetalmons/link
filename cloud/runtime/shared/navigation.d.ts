@@ -1,3 +1,5 @@
+import type { ReadGameBootstrapResponse } from "./game-bootstrap";
+
 export type NavigationStatus =
   "pending" | "waiting" | "active" | "ended" | "dismissed";
 
@@ -94,6 +96,18 @@ export type StartAutomatchResponse =
       matchedImmediately: false;
     }
   | { ok: false };
+
+export type StartAutomatchApiResponse =
+  | (Extract<StartAutomatchResponse, { mode: "matched" }> & {
+      bootstrap?: ReadGameBootstrapResponse;
+    })
+  | Exclude<StartAutomatchResponse, { mode: "matched" }>;
+
+export const AUTOMATCH_API_MAX_RESPONSE_BYTES: number;
+
+export function parseStartAutomatchApiResponse(
+  value: unknown,
+): StartAutomatchApiResponse | null;
 
 export type CancelAutomatchRequest = Record<string, never>;
 

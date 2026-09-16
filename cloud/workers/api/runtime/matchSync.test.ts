@@ -205,6 +205,166 @@ afterEach(async () => {
 });
 
 describe("live match snapshots", () => {
+  it("publishes committed metadata and matches inline while wager work is blocked", async () => {
+    const { room, inviteId, source } = await fixture(false);
+    const channel = await connect(room, inviteId);
+    await channel.snapshot();
+    const metadata = await room.readMetadata(inviteId);
+    if (metadata.status !== "ok") throw new Error("metadata-missing");
+    const metadataChannel = accept(
+      await room.fetch(
+        new Request("https://room.internal/metadata/socket", {
+          headers: {
+            Upgrade: "websocket",
+            "Sec-WebSocket-Protocol": INVITE_METADATA_SOCKET_PROTOCOL,
+            "X-Mons-Metadata-Invite": inviteId,
+            "X-Mons-Metadata-Role": "host",
+            "X-Mons-Metadata-Actor": "host-login",
+            "X-Mons-Metadata-IP": "192.0.2.1",
+            "X-Mons-Metadata-Revision": String(metadata.snapshot.revision),
+            "X-Mons-Metadata-Protected": "0",
+            "X-Mons-Metadata-Authenticated": "1",
+            ...socketTestSessionHeaders(),
+          },
+        }),
+      ),
+    );
+    await metadataChannel.read();
+    await runInDurableObject(room, async (instance) => {
+      let began!: () => void;
+      let release!: () => void;
+      const entered = new Promise<void>((resolve) => (began = resolve));
+      const blocked = new Promise<void>((resolve) => (release = resolve));
+      const mutable = instance as unknown as {
+        wagerReader: () => Promise<[]>;
+      };
+      mutable.wagerReader = async () => {
+        began();
+        await blocked;
+        return [];
+      };
+      const wagers = instance.readWagers(inviteId);
+      await entered;
+      try {
+        source.invite.guestId = "guest-login";
+        source.matches.set(`guest-login/${inviteId}`, {
+          ...match,
+          color: "black",
+        });
+        const reads = source.metadataReads;
+        await instance.notifySessionCommitted(inviteId);
+        expect(source.metadataReads).toBe(reads + 1);
+      } finally {
+        release();
+        await wagers;
+      }
+    });
+    expect(JSON.parse(await metadataChannel.read()).snapshot).toMatchObject({
+      guestId: "guest-login",
+      revision: 2,
+    });
+    expect(await channel.snapshot()).toMatchObject({
+      guestPlayerId: "guest-login",
+      guestMatch: { color: "black" },
+      revision: 2,
+    });
+  });
+
+  it("discards metadata read before a consolidated commit notification", async () => {
+    const { room, inviteId, source } = await fixture(false);
+    const channel = await connect(room, inviteId);
+    await channel.snapshot();
+    const results = await runInDurableObject(room, async (instance) => {
+      let began!: () => void;
+      let release!: () => void;
+      const entered = new Promise<void>((resolve) => (began = resolve));
+      const blocked = new Promise<void>((resolve) => (release = resolve));
+      const mutable = instance as unknown as {
+        inviteReader: () => Promise<unknown>;
+      };
+      let first = true;
+      mutable.inviteReader = async () => {
+        const captured = structuredClone(source.invite);
+        if (first) {
+          first = false;
+          began();
+          await blocked;
+        }
+        return captured;
+      };
+      const older = instance.readMetadata(inviteId);
+      await entered;
+      try {
+        source.invite.guestId = "guest-login";
+        const notification = instance.notifySessionCommitted(inviteId);
+        release();
+        await notification;
+      } finally {
+        release();
+      }
+      return [await older, await instance.readMetadata(inviteId)];
+    });
+    for (const result of results) {
+      expect(result).toMatchObject({
+        status: "ok",
+        snapshot: { guestId: "guest-login", revision: 2 },
+      });
+    }
+  });
+
+  it("invalidates an unsubscribed room without an unnecessary source read", async () => {
+    const { room, inviteId, source } = await fixture(false);
+    await room.readMatches(inviteId, inviteId);
+    const reads = source.metadataReads;
+    source.invite.guestId = "guest-login";
+    await room.notifySessionCommitted(inviteId);
+    expect(source.metadataReads).toBe(reads);
+    expect(await room.readMatches(inviteId, inviteId)).toMatchObject({
+      status: "ok",
+      snapshot: { guestPlayerId: "guest-login" },
+    });
+    expect(source.metadataReads).toBe(reads + 1);
+  });
+
+  it("repairs a failed inline commit refresh with the persisted alarm", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
+    const { room, inviteId, source } = await fixture(false);
+    const channel = await connect(room, inviteId);
+    await channel.snapshot();
+    source.invite.guestId = "guest-login";
+    source.matches.set(`guest-login/${inviteId}`, { ...match, color: "black" });
+    await runInDurableObject(room, (instance) => {
+      const mutable = instance as unknown as {
+        inviteReader: () => Promise<unknown>;
+      };
+      mutable.inviteReader = async () => {
+        throw new Error("source-offline");
+      };
+    });
+    const failure = await runInDurableObject(room, async (instance) => {
+      try {
+        await instance.notifySessionCommitted(inviteId);
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : "unknown";
+      }
+    });
+    expect(failure).toBe("source-offline");
+    expect(channel.socket.readyState).toBe(WebSocket.OPEN);
+    expect(
+      await runInDurableObject(room, (_instance, state) =>
+        state.storage.getAlarm(),
+      ),
+    ).toBe(Date.now());
+    await install(room, source);
+    expect(await runNextAlarm(room)).toBe(true);
+    expect(await channel.snapshot()).toMatchObject({
+      guestPlayerId: "guest-login",
+      guestMatch: { color: "black" },
+      revision: 2,
+    });
+  });
+
   it("refreshes match metadata without reading wagers", async () => {
     const { room, inviteId, source } = await fixture();
     expect(await room.readMatches(inviteId, inviteId)).toMatchObject({

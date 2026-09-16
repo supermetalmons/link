@@ -22,6 +22,7 @@ const connectionClass = source.statements.find(
 );
 const methods = [
   "observeMatch",
+  "ensureMatchSyncSubscription",
   "applyMatchSyncSnapshot",
   "stopObservingAllMatches",
   "getCachedHistoricalMatchPair",
@@ -379,6 +380,48 @@ test("a late guest joins the existing spectator channel and requests current HTT
   assert.deepEqual(h.deliveries.at(-1).cached.guestMatch, match("black"));
 });
 
+test("a waiting host buffers the paired snapshot until the guest metadata agrees", async () => {
+  const h = harness({ participant: true, paired: false });
+  h.connection.ensureMatchSyncSubscription(
+    h.context,
+    [],
+    snapshot({ guestPlayerId: null, guestMatch: null }),
+  );
+  assert.equal(h.channels.length, 1);
+  h.channels[0].emit(snapshot({ revision: 2 }));
+  assert.equal(h.deliveries.length, 0);
+  assert.equal(h.connection.observedMatchSnapshots.size, 0);
+  h.connection.latestInvite.guestId = "guest";
+  h.connection.observeMatch("guest", "invite");
+  assert.equal(h.channels.length, 1);
+  assert.equal(h.channels[0].refreshes, 0);
+  assert.equal(h.deliveries.length, 1);
+  assert.equal(h.deliveries[0].playerId, "guest");
+  assert.deepEqual(h.deliveries[0].cached.guestMatch, match("black"));
+  await flush();
+  assert.deepEqual(
+    h.profileReads.map(({ uid }) => uid),
+    ["guest"],
+  );
+});
+
+test("a waiting host retains its socket and recovery read when metadata arrives first", () => {
+  const h = harness({ participant: true, paired: false });
+  h.connection.ensureMatchSyncSubscription(
+    h.context,
+    [],
+    snapshot({ guestPlayerId: null, guestMatch: null }),
+  );
+  h.connection.latestInvite.guestId = "guest";
+  h.connection.observeMatch("guest", "invite");
+  assert.equal(h.channels.length, 1);
+  assert.equal(h.channels[0].refreshes, 1);
+  assert.equal(h.deliveries.length, 0);
+  h.channels[0].emit(snapshot({ revision: 2 }));
+  assert.equal(h.deliveries.length, 1);
+  assert.deepEqual(h.deliveries[0].cached.guestMatch, match("black"));
+});
+
 test("spectator rematch navigation replaces the channel and ignores all old match callbacks", () => {
   const h = harness();
   h.connection.observeMatch("host", "invite");
@@ -446,6 +489,8 @@ test("mismatched invite, match or session epochs cannot update the active match 
   h.connection.observeMatch("host", "invite");
   h.channels[0].emit(snapshot({ inviteId: "other" }));
   h.channels[0].emit(snapshot({ matchId: "invite1" }));
+  h.channels[0].emit(snapshot({ hostPlayerId: "other" }));
+  h.channels[0].emit(snapshot({ guestPlayerId: "other" }));
   h.connection.sessionEpoch++;
   h.channels[0].emit(snapshot());
   assert.equal(h.connection.observedMatchSnapshots.size, 0);

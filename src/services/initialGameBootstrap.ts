@@ -1,4 +1,5 @@
 import type { ReadGameBootstrapResponse } from "@mons/shared/game-bootstrap";
+import { parseStartAutomatchApiResponse } from "@mons/shared/navigation";
 import { readPendingRematchEnd } from "../connection/rematchEndDelivery";
 import { subscribeToNavigationState } from "../navigation/appNavigation";
 import {
@@ -21,6 +22,13 @@ type Selection = "current" | "approved";
 type InitialGameBootstrap = {
   promise: Promise<ReadGameBootstrapResponse>;
   abort: () => void;
+  reuseInitialIdentity?: boolean;
+};
+type AutomatchGameBootstrapSeed = {
+  inviteId: string;
+  operationId: string;
+  user: SessionUser;
+  bootstrap: ReadGameBootstrapResponse;
 };
 type Dependencies = {
   auth: Pick<
@@ -35,6 +43,7 @@ type Dependencies = {
   route: () => RouteState;
   subscribeRoute: (listener: (route: RouteState) => void) => () => void;
   selection: (inviteId: string, user: Pick<SessionUser, "uid">) => Selection;
+  now?: () => number;
 };
 
 export function createInitialGameBootstrap(dependencies: Dependencies) {
@@ -48,6 +57,13 @@ export function createInitialGameBootstrap(dependencies: Dependencies) {
       })
     | null = null;
   let started = false;
+  let automatchSeed:
+    | (AutomatchGameBootstrapSeed & {
+        expiresAtMs: number;
+        cancel: () => void;
+      })
+    | null = null;
+  const now = dependencies.now ?? Date.now;
 
   const ensureUser = async () => {
     await dependencies.auth.authStateReady();
@@ -60,6 +76,51 @@ export function createInitialGameBootstrap(dependencies: Dependencies) {
   };
 
   return {
+    seedAutomatch(seed: AutomatchGameBootstrapSeed): void {
+      automatchSeed?.cancel();
+      const response = parseStartAutomatchApiResponse({
+        ok: true,
+        inviteId: seed.inviteId,
+        mode: "matched",
+        matchedImmediately: true,
+        bootstrap: seed.bootstrap,
+      });
+      if (
+        dependencies.auth.currentUser !== seed.user ||
+        !response?.ok ||
+        response.mode !== "matched" ||
+        !response.bootstrap ||
+        response.bootstrap.viewer.automatchOperationId !== seed.operationId
+      )
+        return;
+      let unsubscribeAuth = () => {};
+      let unsubscribeRoute = () => {};
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const pending = {
+        ...seed,
+        expiresAtMs: now() + 5_000,
+        cancel: () => {
+          unsubscribeAuth();
+          unsubscribeRoute();
+          if (timer !== undefined) clearTimeout(timer);
+          if (automatchSeed === pending) automatchSeed = null;
+        },
+      };
+      automatchSeed = pending;
+      unsubscribeAuth = dependencies.auth.onAuthStateChanged((user) => {
+        if (user !== seed.user) pending.cancel();
+      });
+      let installing = true;
+      unsubscribeRoute = dependencies.subscribeRoute((route) => {
+        if (
+          !installing &&
+          (route.mode !== "invite" || route.inviteId !== seed.inviteId)
+        )
+          pending.cancel();
+      });
+      installing = false;
+      timer = setTimeout(pending.cancel, 5_000);
+    },
     start(route: RouteState): void {
       if (started) return;
       started = true;
@@ -165,7 +226,37 @@ export function createInitialGameBootstrap(dependencies: Dependencies) {
       inviteId: string,
       user: SessionUser,
       selection: Selection = "current",
+      operationId?: string,
     ): InitialGameBootstrap | null {
+      const seed = automatchSeed;
+      if (seed) {
+        seed.cancel();
+        if (
+          seed.inviteId === inviteId &&
+          seed.operationId === operationId &&
+          seed.user === user &&
+          dependencies.auth.currentUser === user &&
+          selection === "current" &&
+          dependencies.selection(inviteId, user) === selection &&
+          dependencies.route().mode === "invite" &&
+          dependencies.route().inviteId === inviteId &&
+          now() < seed.expiresAtMs
+        ) {
+          initial?.abort();
+          let aborted = false;
+          return {
+            reuseInitialIdentity: false,
+            abort: () => {
+              aborted = true;
+            },
+            promise: Promise.resolve().then(() => {
+              if (aborted || dependencies.auth.currentUser !== user)
+                throw new GameBootstrapApiError("aborted");
+              return seed.bootstrap;
+            }),
+          };
+        }
+      }
       const request = initial;
       if (!request) return null;
       const selected =
@@ -227,3 +318,4 @@ const initialGameBootstrap = createInitialGameBootstrap({
 
 export const startInitialGameBootstrap = initialGameBootstrap.start;
 export const takeInitialGameBootstrap = initialGameBootstrap.take;
+export const seedAutomatchGameBootstrap = initialGameBootstrap.seedAutomatch;

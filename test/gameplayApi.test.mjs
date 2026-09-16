@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
+import { automatchBootstrap } from "./automatchBootstrapFixture.mjs";
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -80,6 +81,7 @@ const { MAX_MATCH_FEN_BYTES, MAX_MATCH_HISTORY_BYTES } =
 const { isRatingUpdateRequest, isRatingUpdateResponse } =
   await import("@mons/shared/ratings");
 const {
+  AUTOMATCH_API_MAX_RESPONSE_BYTES,
   isCancelAutomatchResponse,
   isRemoveNavigationGameRequest,
   isRemoveNavigationGameResponse,
@@ -87,6 +89,7 @@ const {
   isReadNavigationGamesResponse,
   isStartAutomatchRequest,
   isStartAutomatchResponse,
+  parseStartAutomatchApiResponse,
 } = await import("@mons/shared/navigation");
 const {
   isClaimMatchVictoryByTimerRequest,
@@ -2766,7 +2769,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
   assert.deepEqual(
     calls.map((call) => call.input),
     [
-      `https://api.mons.link/automatch/start?operationId=${AUTOMATCH_OPERATION_ID}`,
+      `https://api.mons.link/automatch/start?operationId=${AUTOMATCH_OPERATION_ID}&bootstrap=1`,
       "https://api.mons.link/automatch/cancel",
       "https://api.mons.link/navigation/games/remove",
       "https://api.mons.link/navigation/games/read",
@@ -3273,6 +3276,138 @@ test("rejects malformed and oversized gameplay responses", async () => {
       GameplayApiError,
     );
   }
+});
+
+test("automatch opts into a fresh bootstrap while keeping legacy receipts exact", async () => {
+  const bootstrap = automatchBootstrap();
+  const legacy = {
+    ok: true,
+    inviteId: bootstrap.metadata.inviteId,
+    mode: "matched",
+    matchedImmediately: true,
+  };
+  const enriched = { ...legacy, bootstrap };
+  assert.equal(isStartAutomatchResponse(legacy), true);
+  assert.equal(isStartAutomatchResponse(enriched), false);
+  for (const payload of [legacy, enriched]) {
+    globalThis.fetch = async (url, init) => {
+      assert.equal(new URL(url).searchParams.get("bootstrap"), "1");
+      assert.equal(
+        new URL(url).searchParams.get("operationId"),
+        AUTOMATCH_OPERATION_ID,
+      );
+      assert.deepEqual(JSON.parse(init.body), { emojiId: 1, aura: "" });
+      return jsonResponse(payload);
+    };
+    assert.deepEqual(
+      await startAutomatchViaApi(
+        { emojiId: 1, aura: "" },
+        async () => "token",
+        AUTOMATCH_OPERATION_ID,
+      ),
+      payload,
+    );
+  }
+});
+
+test("invalid optional automatch bootstraps preserve successful mutations", async () => {
+  const bootstrap = automatchBootstrap();
+  const legacy = {
+    ok: true,
+    inviteId: bootstrap.metadata.inviteId,
+    mode: "matched",
+    matchedImmediately: true,
+  };
+  const invalid = [
+    null,
+    {},
+    { ...bootstrap, metadata: { ...bootstrap.metadata, inviteId: "other" } },
+    { ...bootstrap, match: { ...bootstrap.match, guestMatch: null } },
+    {
+      ...bootstrap,
+      viewer: { ...bootstrap.viewer, role: "watch", actorUid: null },
+    },
+    {
+      ...bootstrap,
+      viewer: {
+        ...bootstrap.viewer,
+        automatchOperationId: "00000000-0000-4000-8000-000000000002",
+      },
+    },
+  ];
+  for (const value of invalid) {
+    let requests = 0;
+    globalThis.fetch = async () => {
+      requests++;
+      return jsonResponse({ ...legacy, bootstrap: value });
+    };
+    assert.deepEqual(
+      await startAutomatchViaApi(
+        { emojiId: 1, aura: "" },
+        async () => "token",
+        AUTOMATCH_OPERATION_ID,
+      ),
+      legacy,
+    );
+    assert.equal(requests, 1);
+  }
+  assert.equal(
+    parseStartAutomatchApiResponse({ ...legacy, unexpected: true }),
+    null,
+  );
+  const pending = { ...legacy, mode: "pending", matchedImmediately: false };
+  assert.deepEqual(
+    parseStartAutomatchApiResponse({ ...pending, bootstrap }),
+    pending,
+  );
+});
+
+test("only automatch uses the larger bootstrap response budget", async () => {
+  const bootstrap = automatchBootstrap();
+  const legacy = {
+    ok: true,
+    inviteId: bootstrap.metadata.inviteId,
+    mode: "matched",
+    matchedImmediately: true,
+  };
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ ...legacy, bootstrap }), {
+      headers: {
+        "Content-Length": String(MAX_GAME_SESSION_RESPONSE_BYTES + 1),
+      },
+    });
+  assert.deepEqual(
+    await startAutomatchViaApi(
+      { emojiId: 1, aura: "" },
+      async () => "token",
+      AUTOMATCH_OPERATION_ID,
+    ),
+    { ...legacy, bootstrap },
+  );
+  globalThis.fetch = async () =>
+    new Response("{}", {
+      headers: {
+        "Content-Length": String(AUTOMATCH_API_MAX_RESPONSE_BYTES + 1),
+      },
+    });
+  await assert.rejects(
+    startAutomatchViaApi(
+      { emojiId: 1, aura: "" },
+      async () => "token",
+      AUTOMATCH_OPERATION_ID,
+    ),
+    GameplayApiError,
+  );
+  globalThis.fetch = async () =>
+    new Response('{"ok":true}', {
+      headers: {
+        "Content-Length": String(MAX_GAME_SESSION_RESPONSE_BYTES + 1),
+      },
+    });
+  await assert.rejects(
+    cancelAutomatchViaApi(async () => "token"),
+    GameplayApiError,
+  );
 });
 
 test("applies one deadline to token acquisition and response reading", async (t) => {

@@ -1,5 +1,6 @@
 import { normalizeHistoricalMatchRecord } from "@mons/shared/game-sessions";
 import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
+import { measureAutomatchPhase } from "./automatchTelemetry.ts";
 import {
   createAutomatchD1Store,
   isAutomatchRevisionConflict,
@@ -292,13 +293,15 @@ export function createGameSessionTransitions({
     if (payload.inviteSourceEpoch !== operation.control.epoch)
       fail("invite-source-backend-conflict");
     if (payload.creations.length) {
-      await state.createMatchRecords(
-        {
-          inviteId: payload.inviteId,
-          transitionId: payload.transitionId,
-          records: payload.creations.map(decodeSessionMatchCreation),
-        },
-        signal,
+      await measureAutomatchPhase("creation", () =>
+        state.createMatchRecords(
+          {
+            inviteId: payload.inviteId,
+            transitionId: payload.transitionId,
+            records: payload.creations.map(decodeSessionMatchCreation),
+          },
+          signal,
+        ),
       );
     }
     signal?.throwIfAborted();
@@ -400,7 +403,7 @@ export function createGameSessionTransitions({
           .bind(payload.transitionId),
       ];
       try {
-        await db.batch(statements);
+        await measureAutomatchPhase("finalize", () => db.batch(statements));
       } catch (error) {
         const latest = await read(payload.transitionId);
         if (latest?.status === "completed") return;
@@ -622,7 +625,7 @@ export function createGameSessionTransitions({
         ),
       ];
       try {
-        await db.batch(statements);
+        await measureAutomatchPhase("prepare", () => db.batch(statements));
       } catch (error) {
         const existing = await read(transitionId);
         if (!existing) {

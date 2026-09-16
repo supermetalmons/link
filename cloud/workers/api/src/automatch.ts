@@ -28,6 +28,11 @@ import {
   getTelegramEmojiTag,
 } from "../../../runtime/telegramDisplay.js";
 import { AuthApiFailure } from "./authErrors.ts";
+import { isAutomatchQueueSelectionConflict } from "./automatchQueueD1.ts";
+import {
+  markAutomatchOutcome,
+  measureAutomatchPhase,
+} from "./automatchTelemetry.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 import {
   STATE_SERVER_TIMESTAMP,
@@ -64,6 +69,7 @@ import {
 } from "./profileOwnership.ts";
 
 const MAX_AUTOMATCH_RETRY_COUNT = 3;
+const MAX_AUTOMATCH_SELECTION_ATTEMPTS = 32;
 export const AUTOMATCH_TOTAL_TIMEOUT_MS = 20_000;
 const AUTOMATCH_PASSWORD_LENGTH = 15;
 const AUTOMATCH_OWNER_LOCK_MIN_RETRY_MS = 25;
@@ -234,9 +240,8 @@ async function readAutomatchReceipt(
   repository: GameplayRepository,
   signal?: AbortSignal,
 ): Promise<AutomatchReceipt | null> {
-  const rawReceipt = await repository.readMutationReceipt(
-    request.operationId,
-    signal,
+  const rawReceipt = await measureAutomatchPhase("receipt", () =>
+    repository.readMutationReceipt(request.operationId, signal),
   );
   if (rawReceipt === null || rawReceipt === undefined) return null;
   const receipt = parseAutomatchReceipt(rawReceipt);
@@ -369,10 +374,12 @@ export async function readAutomatchRequesterSnapshot(
 ): Promise<AutomatchRequesterSnapshot> {
   let ownership: ProfileOwnershipSnapshot;
   try {
-    ownership = await requireProfileOwnershipSnapshot(repository, {
-      loginUids: [uid],
-      profileIds: [],
-    });
+    ownership = await measureAutomatchPhase("ownership", () =>
+      requireProfileOwnershipSnapshot(repository, {
+        loginUids: [uid],
+        profileIds: [],
+      }),
+    );
   } catch (error) {
     logFailure();
     throw error;
@@ -502,6 +509,7 @@ async function replayAutomatchReceipt(
   receipt: AutomatchReceipt,
   dependencies: AutomatchDependencies,
 ): Promise<StartAutomatchResponse> {
+  markAutomatchOutcome("replay");
   if (receipt.profileProjectionRequestId) {
     await enqueueAutomatchProjections(
       receipt.telegramProjection
@@ -1093,15 +1101,19 @@ async function attemptAutomatch(
   }
 
   const queued = getFirstQueuedAutomatch(
-    await repository.readFirstAutomatchEntry(signal),
+    await measureAutomatchPhase("selection", () =>
+      repository.readFirstAutomatchEntry(signal),
+    ),
   );
   let profile = profileOrFallback(requester.profile, request);
   const existingUid = queued ? normalizeString(queued.data.uid) : "";
   if (queued && existingUid !== identity.uid) {
-    const pairOwnership = await requireProfileOwnershipSnapshot(repository, {
-      loginUids: [identity.uid, existingUid],
-      profileIds: [],
-    });
+    const pairOwnership = await measureAutomatchPhase("ownership", () =>
+      requireProfileOwnershipSnapshot(repository, {
+        loginUids: [identity.uid, existingUid],
+        profileIds: [],
+      }),
+    );
     const existingProfileId = getLoginProfileId(pairOwnership, existingUid);
     const existingLoginUids = existingProfileId
       ? getProfileLoginUids(pairOwnership, existingProfileId)
@@ -1294,6 +1306,7 @@ async function attemptAutomatch(
         },
       );
     } catch (error) {
+      if (isAutomatchQueueSelectionConflict(error)) throw error;
       const didCommit =
         (error instanceof GameSessionMutationLeaseReleaseFailure &&
           error.workCompleted) ||
@@ -1312,6 +1325,7 @@ async function attemptAutomatch(
         profileGameProjectionTask,
         dependencies,
       );
+      markAutomatchOutcome("pending");
       return response;
     }
     await enqueueAutomatchProjections(
@@ -1319,6 +1333,7 @@ async function attemptAutomatch(
       profileGameProjectionTask,
       dependencies,
     );
+    markAutomatchOutcome("pending");
     return response;
   }
 
@@ -1474,6 +1489,7 @@ async function attemptAutomatch(
       },
     );
   } catch (patchFailure) {
+    if (isAutomatchQueueSelectionConflict(patchFailure)) throw patchFailure;
     if (!patchAttempted) {
       throw patchFailure;
     }
@@ -1509,6 +1525,7 @@ async function attemptAutomatch(
     profileGameProjectionTask,
     dependencies,
   );
+  markAutomatchOutcome("matched");
   return matchedResponse;
 }
 
@@ -1603,22 +1620,50 @@ export async function startAutomatch(
       request.operationId,
       dependencies.mutationLocks,
       async () => {
-        const receipt = await readAutomatchReceipt(
-          identity.uid,
-          request,
-          repository,
-          signal,
-        );
-        completedResponse = receipt
-          ? await replayAutomatchReceipt(receipt, dependencies)
-          : await startAutomatchForCurrentOwner(
-              identity,
+        for (
+          let attempt = 0;
+          attempt < MAX_AUTOMATCH_SELECTION_ATTEMPTS;
+          attempt++
+        ) {
+          signal.throwIfAborted();
+          try {
+            const receipt = await readAutomatchReceipt(
+              identity.uid,
               request,
               repository,
               signal,
-              dependencies,
             );
-        return completedResponse;
+            completedResponse = receipt
+              ? await replayAutomatchReceipt(receipt, dependencies)
+              : await startAutomatchForCurrentOwner(
+                  identity,
+                  request,
+                  repository,
+                  signal,
+                  dependencies,
+                );
+            if (completedResponse.ok)
+              markAutomatchOutcome(completedResponse.mode);
+            return completedResponse;
+          } catch (error) {
+            if (
+              !isAutomatchQueueSelectionConflict(error) ||
+              attempt + 1 === MAX_AUTOMATCH_SELECTION_ATTEMPTS
+            )
+              throw error;
+            signal.throwIfAborted();
+            const delay = Math.max(
+              1,
+              Math.floor(
+                Math.min(5 * 2 ** attempt, 50) * (0.5 + secureRandom() / 2),
+              ),
+            );
+            await (dependencies.wait
+              ? dependencies.wait(delay, signal)
+              : scheduler.wait(delay, { signal }));
+          }
+        }
+        throw new Error("automatch-selection-attempts-exhausted");
       },
     );
   } catch (error) {
