@@ -1,4 +1,5 @@
-export const MAX_EVENT_BOOKMARK_LENGTH = 2_048;
+import { MAX_EVENT_BOOKMARK_LENGTH } from "@mons/shared/events";
+export { MAX_EVENT_BOOKMARK_LENGTH } from "@mons/shared/events";
 
 const PREFIX = "mons-d1-v1:";
 const EPOCH = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;

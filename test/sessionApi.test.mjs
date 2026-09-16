@@ -19,7 +19,9 @@ const { sessionApi, SessionApiError } =
 const {
   SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES,
   SESSION_BOOTSTRAP_REQUEST_TIMEOUT_MS,
+  SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES,
 } = await import("@mons/shared/session-bootstrap");
+const { eventSnapshotEtag } = await import("@mons/shared/events");
 const originalFetch = globalThis.fetch;
 const originalDateNow = Date.now;
 test.afterEach(() => {
@@ -156,6 +158,112 @@ test("missing or malformed optional games preserve valid tokens while legacy val
   await assert.rejects(sessionApi.refresh(session, target), {
     code: "unavailable",
   });
+});
+
+const eventSeed = (eventId = "event-a") => ({
+  snapshot: {
+    ok: true,
+    eventId,
+    revision: 1,
+    event: { eventId, status: "scheduled" },
+    prizeSelections: {},
+  },
+  etag: eventSnapshotEtag(eventId, 1),
+  bookmark: "mons-d1-v1:11111111-1111-4111-8111-111111111111:bookmark-1",
+});
+
+test("event-only bootstrap keeps session capabilities out of its query and validates its seed", async () => {
+  const target = { eventId: "event-a" };
+  const eventBootstrap = { ...target, result: eventSeed() };
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return json({ ...response(), eventBootstrap });
+  };
+  for (const operation of [sessionApi.create, sessionApi.refresh]) {
+    const result = await operation(session, target);
+    assert.deepEqual(result.eventBootstrap, eventBootstrap);
+    assert.equal(result.gameBootstrap, undefined);
+    assert.equal(result.uid, response().uid);
+  }
+  for (const { url } of calls)
+    assert.equal(new URL(url).search, "?bootstrapEventId=event-a");
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    sessionId: session.sessionId,
+    refreshSecret: session.refreshSecret,
+    revokeSecret: session.revokeSecret,
+  });
+  for (const invalid of [
+    { eventId: "bad/event" },
+    { ...target, inviteId: "game-a", selection: "current" },
+  ])
+    await assert.rejects(sessionApi.create(session, invalid), {
+      code: "unavailable",
+    });
+  assert.equal(calls.length, 2);
+});
+
+test("event enrichment failures and malformed optional data preserve the session token", async () => {
+  const target = { eventId: "event-a" };
+  for (const eventBootstrap of [
+    undefined,
+    null,
+    {},
+    { eventId: "other", result: eventSeed("other") },
+    { ...target, result: { ...eventSeed(), etag: "wrong" } },
+    { ...target, result: { ...eventSeed(), bookmark: "unscoped" } },
+  ]) {
+    globalThis.fetch = async () =>
+      json({
+        ...response(),
+        ...(eventBootstrap === undefined ? {} : { eventBootstrap }),
+      });
+    const result = await sessionApi.refresh(session, target);
+    assert.equal(result.eventBootstrap, undefined);
+    assert.equal(result.uid, response().uid);
+  }
+  const eventBootstrap = { ...target, result: { ok: false, status: 503 } };
+  globalThis.fetch = async () => json({ ...response(), eventBootstrap });
+  assert.deepEqual(
+    (await sessionApi.refresh(session, target)).eventBootstrap,
+    eventBootstrap,
+  );
+  await assert.rejects(sessionApi.refresh(session), { code: "unavailable" });
+  globalThis.fetch = async () =>
+    json({ ...response(), eventBootstrap, gameBootstrap: null });
+  await assert.rejects(sessionApi.refresh(session, target), {
+    code: "unavailable",
+  });
+});
+
+test("event bootstrap has a separate bounded response budget", async () => {
+  const target = { eventId: "event-a" };
+  const seed = eventSeed();
+  seed.snapshot.event.description = "a".repeat(64 * 1024);
+  globalThis.fetch = async () =>
+    json({ ...response(), eventBootstrap: { ...target, result: seed } });
+  assert.deepEqual(
+    (await sessionApi.refresh(session, target)).eventBootstrap.result,
+    seed,
+  );
+  let canceled = false;
+  globalThis.fetch = async () =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            new Uint8Array(SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES + 1),
+          );
+        },
+        cancel() {
+          canceled = true;
+        },
+      }),
+    );
+  await assert.rejects(sessionApi.refresh(session, target), {
+    code: "unavailable",
+  });
+  assert.equal(canceled, true);
 });
 
 test("combined responses accept a validated game larger than the legacy token response cap", async () => {

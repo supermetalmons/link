@@ -7,10 +7,16 @@ const {
 } = require("./game-bootstrap");
 const { selectInviteMatch } = require("./rematches");
 const { isSessionTokenResponse } = require("./session-auth");
+const {
+  isEventSnapshotSeed,
+  MAX_EVENT_READ_RESPONSE_BYTES,
+} = require("./events");
 
 const SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES =
   GAME_BOOTSTRAP_MAX_RESPONSE_BYTES + 16_384;
 const SESSION_BOOTSTRAP_REQUEST_TIMEOUT_MS = 25_000;
+const SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES =
+  MAX_EVENT_READ_RESPONSE_BYTES + 16_384;
 
 const record = (value) =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -78,11 +84,43 @@ function isSessionBootstrapResponse(value) {
   return isSessionTokenResponse(session) && isSessionBootstrap(gameBootstrap);
 }
 
+function isSessionEventBootstrapTarget(value) {
+  return (
+    record(value) &&
+    exactKeys(value, ["eventId"]) &&
+    typeof value.eventId === "string" &&
+    normalizeRecordKey(value.eventId) === value.eventId
+  );
+}
+
+function isSessionEventBootstrap(value) {
+  return (
+    record(value) &&
+    exactKeys(value, ["eventId", "result"]) &&
+    isSessionEventBootstrapTarget({ eventId: value.eventId }) &&
+    (isSessionBootstrapFailure(value.result) ||
+      (isEventSnapshotSeed(value.result) &&
+        value.result.snapshot.eventId === value.eventId))
+  );
+}
+
+function isSessionEventBootstrapResponse(value) {
+  if (!record(value)) return false;
+  const { eventBootstrap, ...session } = value;
+  return (
+    isSessionTokenResponse(session) && isSessionEventBootstrap(eventBootstrap)
+  );
+}
+
 module.exports = {
   SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES,
   SESSION_BOOTSTRAP_REQUEST_TIMEOUT_MS,
+  SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES,
   isSessionBootstrapTarget,
   isSessionBootstrapFailure,
   isSessionBootstrap,
   isSessionBootstrapResponse,
+  isSessionEventBootstrapTarget,
+  isSessionEventBootstrap,
+  isSessionEventBootstrapResponse,
 };

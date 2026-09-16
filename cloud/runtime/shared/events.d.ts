@@ -22,6 +22,9 @@ export const SCHEDULED_TIMEZONE_LOCAL: "local";
 export const EVENT_BOOKMARK_HEADER: "X-D1-Bookmark";
 export const EVENT_ETAG_HEADER: "ETag";
 export const MAX_EVENT_READ_RESPONSE_BYTES: number;
+export const MAX_EVENT_BOOKMARK_LENGTH: 2048;
+export function eventSnapshotEtag(eventId: string, revision: number): string;
+export function eventBookmarkEpoch(value: unknown): string | null;
 
 export type EventScheduleTimezone = "local" | "ET" | "PT" | "CT";
 export type EventCreateDateTimePayload = {
@@ -82,6 +85,12 @@ export type EventSnapshotResponse = {
   event: EventApiRecord | null;
   prizeSelections: Record<string, string>;
 };
+export type EventSnapshotSeed = {
+  snapshot: EventSnapshotResponse;
+  etag: string;
+  bookmark: string;
+};
+export function isEventSnapshotSeed(value: unknown): value is EventSnapshotSeed;
 export type PostponeEventStartResponse = CreateEventResponse & {
   postponeByMinutes: EventPostponeMinutes;
   startAtMs: number;

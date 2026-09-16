@@ -1,5 +1,6 @@
 import type { ReadGameBootstrapResponse } from "./game-bootstrap";
 import type { SessionTokenResponse } from "./session-auth";
+import type { EventSnapshotSeed } from "./events";
 
 export type SessionBootstrapTarget = {
   inviteId: string;
@@ -22,9 +23,26 @@ export type SessionBootstrap = SessionBootstrapTarget & {
 export type SessionBootstrapResponse = SessionTokenResponse & {
   gameBootstrap: SessionBootstrap;
 };
+export type SessionEventBootstrapTarget = { eventId: string };
+export type SessionEventBootstrap = SessionEventBootstrapTarget & {
+  result: EventSnapshotSeed | SessionBootstrapFailure;
+};
+export type SessionEventBootstrapResponse = SessionTokenResponse & {
+  eventBootstrap: SessionEventBootstrap;
+};
 
 export const SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES: number;
 export const SESSION_BOOTSTRAP_REQUEST_TIMEOUT_MS: 25000;
+export const SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES: number;
+export function isSessionEventBootstrapTarget(
+  value: unknown,
+): value is SessionEventBootstrapTarget;
+export function isSessionEventBootstrap(
+  value: unknown,
+): value is SessionEventBootstrap;
+export function isSessionEventBootstrapResponse(
+  value: unknown,
+): value is SessionEventBootstrapResponse;
 export function isSessionBootstrapTarget(
   value: unknown,
 ): value is SessionBootstrapTarget;

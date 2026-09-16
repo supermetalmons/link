@@ -250,8 +250,9 @@ export const getThirdPlaceMatch = (
 export const getEventAutoRecoveryReason = (
   event: EventRecord | null,
   nowMs: number,
+  isFresh = true,
 ): EventAutoRecoveryReason | null => {
-  if (!event) {
+  if (!event || !isFresh) {
     return null;
   }
 

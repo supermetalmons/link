@@ -2,7 +2,7 @@ import {
   EVENT_BOOKMARK_HEADER,
   EVENT_ETAG_HEADER,
   MAX_EVENT_READ_RESPONSE_BYTES,
-  isEventSnapshotResponse,
+  eventSnapshotEtag,
   type EventSnapshotResponse,
 } from "@mons/shared/events";
 import {
@@ -17,7 +17,6 @@ import {
 } from "./authHttp.ts";
 import {
   readEventRuntimeControl,
-  readEventSnapshotIfChanged,
   readProfileEventPrizesIfChanged,
   type ConditionalSnapshot,
 } from "./eventD1.ts";
@@ -40,6 +39,7 @@ import {
   requireEventBookmarkEpoch,
   scopeEventBookmark,
 } from "./eventBookmarks.ts";
+import { readEventSnapshotResponse } from "./eventSnapshotResponse.ts";
 
 export const EVENT_SNAPSHOT_PATH = "/events/snapshot";
 export const PROFILE_EVENT_PRIZES_PATH = "/events/prizes";
@@ -62,6 +62,7 @@ function etag(
   id: string,
   revision: number,
 ): string {
+  if (kind === "event-snapshot") return eventSnapshotEtag(id, revision);
   return `W/"${kind}-${encodeURIComponent(id || "none")}-${revision}"`;
 }
 
@@ -88,7 +89,7 @@ function readHeaders(
     ...corsHeaders,
     [EVENT_ETAG_HEADER]: valueEtag,
     [EVENT_BOOKMARK_HEADER]: bookmark,
-    "Access-Control-Expose-Headers": `${EVENT_ETAG_HEADER}, ${EVENT_BOOKMARK_HEADER}`,
+    "Access-Control-Expose-Headers": `${EVENT_ETAG_HEADER}, ${EVENT_BOOKMARK_HEADER}, Server-Timing`,
   };
 }
 
@@ -117,23 +118,6 @@ async function callerProfileId(
     profileIds: [],
   });
   return getLoginProfileId(ownership, identity.uid);
-}
-
-async function readEventResponse(
-  session: D1DatabaseSession,
-  eventId: string,
-  revision: number | null,
-): Promise<ConditionalSnapshot<EventSnapshotResponse>> {
-  const result = await readEventSnapshotIfChanged(session, eventId, revision);
-  if (result.notModified) return result;
-  const candidate: unknown = {
-    ok: true,
-    ...result.snapshot,
-  };
-  if (!isEventSnapshotResponse(candidate)) {
-    throw new AuthApiFailure(503, "unavailable", "event-data-invalid");
-  }
-  return { notModified: false, snapshot: candidate };
 }
 
 async function readPrizeResponse(
@@ -172,6 +156,7 @@ export async function handleEventReadRoute(
   ctx: WorkerExecutionContext,
   dependencies: ReadDependencies = {},
 ): Promise<Response> {
+  const startedAt = Date.now();
   let corsHeaders: Record<string, string> = { Vary: "Origin" };
   try {
     corsHeaders = {
@@ -189,6 +174,7 @@ export async function handleEventReadRoute(
     const identity = await (
       dependencies.verifyIdentity || verifySessionRequest
     )(request, env, ctx);
+    const authenticatedAt = Date.now();
     const url = new URL(request.url);
     const repository = dependencies.repository || createGameplayRepository(env);
     const bookmarkEpoch = requireEventBookmarkEpoch(
@@ -205,12 +191,13 @@ export async function handleEventReadRoute(
     >;
     let valueEtag: string;
     const conditionalHeader = request.headers.get("If-None-Match");
+    const readStartedAt = Date.now();
     if (url.pathname === EVENT_SNAPSHOT_PATH) {
       const eventId = safeKey(url.searchParams.get("eventId") || "");
       if (!eventId) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-event-id");
       }
-      result = await readEventResponse(
+      result = await readEventSnapshotResponse(
         session,
         eventId,
         knownRevision(conditionalHeader, "event-snapshot", eventId),
@@ -231,6 +218,7 @@ export async function handleEventReadRoute(
           profileId || "none",
         ),
       );
+      if (!result.notModified) assertBounded(result.snapshot);
       valueEtag = etag(
         "profile-event-prizes",
         profileId || "none",
@@ -239,9 +227,12 @@ export async function handleEventReadRoute(
     } else {
       throw new AuthApiFailure(404, "not-found", "not-found");
     }
-    if (!result.notModified) assertBounded(result.snapshot);
     const bookmark = scopeEventBookmark(session.getBookmark(), bookmarkEpoch);
     const headers = readHeaders(corsHeaders, valueEtag, bookmark);
+    headers["Server-Timing"] =
+      `auth;dur=${authenticatedAt - startedAt}, event_snapshot;dur=${Date.now() - readStartedAt}, total;dur=${Date.now() - startedAt}`;
+    const origin = headers["Access-Control-Allow-Origin"];
+    if (origin) headers["Timing-Allow-Origin"] = origin;
     if (result.notModified) {
       return notModified(headers);
     }

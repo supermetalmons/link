@@ -7,9 +7,12 @@ import {
 } from "../services/sessionApi";
 import {
   isSessionBootstrapTarget,
+  isSessionEventBootstrapTarget,
   type SessionBootstrap,
   type SessionBootstrapResult,
   type SessionBootstrapTarget,
+  type SessionEventBootstrap,
+  type SessionEventBootstrapTarget,
 } from "@mons/shared/session-bootstrap";
 import { storage } from "../utils/storage";
 import {
@@ -56,6 +59,22 @@ export type InitialGameSession = {
   bootstrap: SessionBootstrapResult | null;
 };
 
+type InitialEventIntent = {
+  eventId: string;
+  signal: AbortSignal;
+  onSessionBound?: (owner: InitialGameSessionOwner) => void;
+  target: SessionEventBootstrapTarget | null;
+  generation: string | null;
+  sessionId: string | null;
+  result: SessionEventBootstrap | null;
+  user: SessionUser | null;
+};
+
+export type InitialEventSession = {
+  user: SessionUser;
+  bootstrap: SessionEventBootstrap["result"] | null;
+};
+
 export type SessionAuthDependencies = {
   store: SessionStore;
   logoutIntents?: SessionLogoutIntents;
@@ -79,6 +98,7 @@ export class SessionAuth {
   private revoking: Promise<void> | null = null;
   private access: SessionTokenResult | null = null;
   private initialGameIntent: InitialGameIntent | null = null;
+  private initialEventIntent: InitialEventIntent | null = null;
   private stopped = false;
   private ready = false;
   private storeQueue: Promise<void> = Promise.resolve();
@@ -363,11 +383,12 @@ export class SessionAuth {
     return intent;
   }
 
-  private retainInitialGameResult(
+  private retainInitialBootstrapResult(
     intent: InitialGameIntent | null,
     response: SessionTokenReadResult,
+    eventIntent: InitialEventIntent | null,
   ): SessionTokenResult {
-    const { gameBootstrap, ...token } = response;
+    const { gameBootstrap, eventBootstrap, ...token } = response;
     const user = this.currentUser;
     if (
       intent &&
@@ -379,7 +400,118 @@ export class SessionAuth {
       intent.user = user;
       intent.result = gameBootstrap ?? null;
     }
+    if (
+      eventIntent &&
+      this.initialEventIntent === eventIntent &&
+      !eventIntent.signal.aborted &&
+      user?.generation === eventIntent.generation &&
+      user?.sessionId === eventIntent.sessionId
+    ) {
+      eventIntent.user = user;
+      eventIntent.result = eventBootstrap ?? null;
+    }
     return token;
+  }
+
+  prepareInitialEvent(
+    eventId: string,
+    options: {
+      signal: AbortSignal;
+      onSessionBound?: InitialEventIntent["onSessionBound"];
+    },
+  ): Promise<InitialEventSession> {
+    const intent: InitialEventIntent = {
+      eventId,
+      ...options,
+      target: null,
+      generation: null,
+      sessionId: null,
+      result: null,
+      user: null,
+    };
+    if (options.signal.aborted)
+      return Promise.reject(new Error("initial-event-bootstrap-canceled"));
+    this.initialEventIntent = intent;
+    let rejectCanceled: (error: Error) => void = () => {};
+    const canceled = new Promise<never>((_resolve, reject) => {
+      rejectCanceled = reject;
+    });
+    const cancel = () => {
+      if (this.initialEventIntent === intent) this.initialEventIntent = null;
+      intent.result = null;
+      rejectCanceled(new Error("initial-event-bootstrap-canceled"));
+    };
+    options.signal.addEventListener("abort", cancel, { once: true });
+    const run = async (): Promise<InitialEventSession> => {
+      await this.authStateReady();
+      if (
+        this.state?.session &&
+        !this.bindInitialEventSession(
+          intent,
+          this.state.session,
+          this.state.generation,
+        )
+      )
+        throw this.changed();
+      if (!this.currentUser) await this.signInAnonymously();
+      const user = this.currentUser;
+      if (!user || !this.bindInitialEventSession(intent, user, user.generation))
+        throw this.changed();
+      await user.getIdToken();
+      this.assertUser(user);
+      if (options.signal.aborted)
+        throw new Error("initial-event-bootstrap-canceled");
+      if (
+        intent.sessionId !== user.sessionId ||
+        intent.generation !== user.generation ||
+        (intent.user && intent.user !== user)
+      )
+        throw this.changed();
+      return { user, bootstrap: intent.result?.result ?? null };
+    };
+    return Promise.race([run(), canceled]).finally(() => {
+      options.signal.removeEventListener("abort", cancel);
+      if (this.initialEventIntent === intent) this.initialEventIntent = null;
+      intent.result = null;
+    });
+  }
+
+  private bindInitialEventSession(
+    intent: InitialEventIntent,
+    session: Pick<StoredSession, "sessionId">,
+    generation: string,
+  ): boolean {
+    if (this.initialEventIntent !== intent || intent.signal.aborted)
+      return false;
+    if (intent.sessionId !== null)
+      return (
+        intent.sessionId === session.sessionId &&
+        intent.generation === generation
+      );
+    intent.sessionId = session.sessionId;
+    intent.generation = generation;
+    intent.onSessionBound?.({ sessionId: session.sessionId, generation });
+    return this.initialEventIntent === intent && !intent.signal.aborted;
+  }
+
+  private claimInitialEvent(
+    session: StoredSession,
+    generation: string,
+  ): InitialEventIntent | null {
+    const intent = this.initialEventIntent;
+    if (
+      !intent ||
+      !this.bindInitialEventSession(intent, session, generation) ||
+      intent.target ||
+      (this.access &&
+        this.access.accessDeadlineMs >
+          this.dependencies.now() + REFRESH_MARGIN_MS)
+    )
+      return null;
+    const target = { eventId: intent.eventId };
+    if (!isSessionEventBootstrapTarget(target)) return null;
+    intent.target = target;
+    return intent;
   }
 
   signInAnonymously(): Promise<void> {
@@ -409,11 +541,14 @@ export class SessionAuth {
     if (!session) throw this.changed();
     if (session.uid) return;
     const initialGame = this.claimInitialGame(session, state.generation);
+    const initialEvent = initialGame
+      ? null
+      : this.claimInitialEvent(session, state.generation);
     let response: SessionTokenReadResult;
     try {
       response = await this.dependencies.api.create(
         session,
-        initialGame?.target ?? undefined,
+        initialGame?.target ?? initialEvent?.target ?? undefined,
       );
     } catch (error) {
       if (
@@ -446,7 +581,11 @@ export class SessionAuth {
       committed.session?.sessionId !== session.sessionId
     )
       throw this.changed();
-    this.access = this.retainInitialGameResult(initialGame, response);
+    this.access = this.retainInitialBootstrapResult(
+      initialGame,
+      response,
+      initialEvent,
+    );
     this.dependencies.notify?.();
   }
 
@@ -513,16 +652,23 @@ export class SessionAuth {
     const session = this.state?.session;
     if (!session || session.sessionId !== user.sessionId) throw this.changed();
     const initialGame = this.claimInitialGame(session, user.generation);
+    const initialEvent = initialGame
+      ? null
+      : this.claimInitialEvent(session, user.generation);
     try {
       const response = await this.dependencies.api.refresh(
         session,
-        initialGame?.target ?? undefined,
+        initialGame?.target ?? initialEvent?.target ?? undefined,
       );
       await this.reconcile();
       this.assertUser(user);
       if (response.uid !== user.uid || response.sessionId !== user.sessionId)
         throw new Error("session-identity-conflict");
-      this.access = this.retainInitialGameResult(initialGame, response);
+      this.access = this.retainInitialBootstrapResult(
+        initialGame,
+        response,
+        initialEvent,
+      );
       return response.accessToken;
     } catch (error) {
       if (

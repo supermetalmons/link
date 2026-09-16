@@ -43,6 +43,11 @@ import {
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 import { authenticatedPost } from "./authenticatedPost.ts";
+import {
+  isBoundedEventResponse,
+  readOptionalEventSnapshotSeed,
+  type EventSnapshotSeedDependencies,
+} from "./eventSnapshotResponse.ts";
 
 export const EVENT_PATHS = new Set([
   "/events/create",
@@ -54,7 +59,7 @@ export const EVENT_PATHS = new Set([
   "/events/state/sync",
 ]);
 
-export type EventRouteDependencies = {
+export type EventRouteDependencies = EventSnapshotSeedDependencies & {
   assertEventWrites?: () => Promise<void>;
   control?: EventControlDependencies;
   participation?: EventParticipationDependencies;
@@ -282,6 +287,34 @@ async function handleEventRequest(
         });
       }
       const response = await operation;
+      const value = toRecord(response);
+      const params = new URL(request.url).searchParams;
+      if (
+        !isParticipationPath &&
+        params.getAll("eventSnapshot").length === 1 &&
+        params.get("eventSnapshot") === "v1" &&
+        value?.ok === true &&
+        value.skipped !== true &&
+        typeof value.eventId === "string"
+      ) {
+        const enrichmentStartedAt = Date.now();
+        const eventSnapshot = await readOptionalEventSnapshotSeed(
+          env,
+          value.eventId,
+          AbortSignal.any([signal, request.signal]),
+          dependencies,
+        );
+        corsHeaders["Server-Timing"] =
+          `event_snapshot;dur=${Date.now() - enrichmentStartedAt}`;
+        corsHeaders["Access-Control-Expose-Headers"] = "Server-Timing";
+        const origin = corsHeaders["Access-Control-Allow-Origin"];
+        if (origin) corsHeaders["Timing-Allow-Origin"] = origin;
+        if (eventSnapshot) {
+          const enriched = { ...value, eventSnapshot };
+          if (isBoundedEventResponse(enriched))
+            return authJsonResponse(enriched, 200, corsHeaders);
+        }
+      }
       return authJsonResponse(response, 200, corsHeaders);
     },
   );

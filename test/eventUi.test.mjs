@@ -174,6 +174,16 @@ test("preserves event recovery reasons and retry timing", () => {
     p1: participant("p1", 1),
     p2: participant("p2", 2),
   };
+  for (const status of ["scheduled", "active", "ended"]) {
+    assert.equal(
+      getEventAutoRecoveryReason(
+        eventRecord({ status, startAtMs: 100, participants }),
+        100,
+        false,
+      ),
+      null,
+    );
+  }
   assert.equal(
     getEventAutoRecoveryReason(
       eventRecord({ startAtMs: 100, participants }),

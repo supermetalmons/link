@@ -43,6 +43,27 @@ const MAX_EVENT_PARTICIPANT_TEXT_BYTES = 256;
 const EVENT_BOOKMARK_HEADER = "X-D1-Bookmark";
 const EVENT_ETAG_HEADER = "ETag";
 const MAX_EVENT_READ_RESPONSE_BYTES = 640 * 1024;
+const MAX_EVENT_BOOKMARK_LENGTH = 2048;
+
+function eventSnapshotEtag(eventId, revision) {
+  return `W/"event-snapshot-${encodeURIComponent(eventId)}-${revision}"`;
+}
+
+function eventBookmarkEpoch(value) {
+  if (typeof value !== "string" || value.length > MAX_EVENT_BOOKMARK_LENGTH)
+    return null;
+  const match =
+    /^mons-d1-v1:([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}):([A-Za-z0-9._~+/=-]+)$/i.exec(
+      value,
+    );
+  if (
+    !match ||
+    match[2] === "first-primary" ||
+    match[2] === "first-unconstrained"
+  )
+    return null;
+  return match[1].toLowerCase();
+}
 
 const isExactSafeRecordKey = (value) =>
   typeof value === "string" && value.trim() === value && isSafeRecordKey(value);
@@ -358,6 +379,16 @@ function isEventSnapshotResponse(value) {
   );
 }
 
+function isEventSnapshotSeed(value) {
+  return (
+    isExactRecord(value, ["snapshot", "etag", "bookmark"]) &&
+    isEventSnapshotResponse(value.snapshot) &&
+    value.etag ===
+      eventSnapshotEtag(value.snapshot.eventId, value.snapshot.revision) &&
+    eventBookmarkEpoch(value.bookmark) !== null
+  );
+}
+
 function isPostponeEventStartResponse(value) {
   return (
     isExactRecord(value, [
@@ -437,6 +468,10 @@ module.exports = {
   MAX_EVENT_PARTICIPANTS,
   MAX_EVENT_PARTICIPANT_TEXT_BYTES,
   MAX_EVENT_READ_RESPONSE_BYTES,
+  MAX_EVENT_BOOKMARK_LENGTH,
+  eventSnapshotEtag,
+  eventBookmarkEpoch,
+  isEventSnapshotSeed,
   MAX_STARTS_IN_DAYS,
   MAX_STARTS_IN_MINUTES,
   MIN_STARTS_IN_MINUTES,

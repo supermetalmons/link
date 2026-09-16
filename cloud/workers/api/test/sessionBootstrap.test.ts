@@ -6,8 +6,10 @@ import {
 } from "@mons/shared/session-auth";
 import {
   isSessionBootstrapResponse,
+  isSessionEventBootstrapResponse,
   type SessionBootstrapResponse,
 } from "@mons/shared/session-bootstrap";
+import { eventSnapshotEtag, type EventSnapshotSeed } from "@mons/shared/events";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { normalizeInviteMetadata } from "../src/inviteMetadata.ts";
@@ -39,6 +41,17 @@ const match = {
   timer: "",
 };
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+const eventSeed: EventSnapshotSeed = {
+  snapshot: {
+    ok: true,
+    eventId: "event-one",
+    revision: 2,
+    event: { eventId: "event-one", status: "scheduled" },
+    prizeSelections: {},
+  },
+  etag: eventSnapshotEtag("event-one", 2),
+  bookmark: "mons-d1-v1:00000000-0000-4000-8000-000000000001:native",
+};
 
 function setup(source: Record<string, unknown> = {}) {
   const raw = { hostId: uid, guestId: "guest", hostColor: "white", ...source };
@@ -171,6 +184,83 @@ test("creation and refresh compose a bootstrap with independent limits and timin
     );
     assert.equal(response.headers.get("Cache-Control"), "no-store");
   }
+});
+
+test("event creation and refresh bootstrap snapshots without game reads", async () => {
+  for (const endpoint of ["anonymous", "refresh"]) {
+    const h = setup();
+    h.bootstrap.readEventSnapshotSeed = async (eventId) => {
+      assert.equal(eventId, "event-one");
+      assert.equal(h.calls.sessions, 1);
+      return eventSeed;
+    };
+    const response = await h.read(
+      h.request(endpoint, "bootstrapEventId=event-one"),
+    );
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.ok(isSessionEventBootstrapResponse(body));
+    assert.deepEqual(body.eventBootstrap.result, eventSeed);
+    assert.equal(h.calls.admission, 0);
+    assert.deepEqual(h.calls.pairs, []);
+    assert.match(
+      response.headers.get("Server-Timing") || "",
+      /event_snapshot;dur=/,
+    );
+  }
+});
+
+test("event bootstrap failures preserve valid issued tokens", async () => {
+  const h = setup();
+  h.bootstrap.readEventSnapshotSeed = async () => {
+    throw new Error("storage-down");
+  };
+  const response = await h.read(
+    h.request("anonymous", "bootstrapEventId=event-one"),
+  );
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.ok(isSessionEventBootstrapResponse(body));
+  assert.deepEqual(body.eventBootstrap, {
+    eventId: "event-one",
+    result: { ok: false, status: 503 },
+  });
+});
+
+test("event bootstrap rejects ambiguous targets before allocating a session", async () => {
+  for (const query of [
+    "bootstrapEventId=",
+    "bootstrapEventId=bad%2Fid",
+    "bootstrapEventId=%20event",
+    "bootstrapEventId=one&bootstrapEventId=two",
+    "bootstrapEventId=one&bootstrapInviteId=invite",
+    "bootstrapEventId=one&bootstrapSelection=current",
+    "bootstrapEventId=one&extra=true",
+  ]) {
+    const h = setup();
+    const response = await h.read(h.request("anonymous", query));
+    assert.equal(response.status, 400);
+    assert.equal(h.calls.sessions, 0);
+  }
+});
+
+test("event bootstrap timeout returns its already issued token", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = setup();
+  let started = false;
+  h.bootstrap.readEventSnapshotSeed = async () => {
+    started = true;
+    return new Promise(() => undefined);
+  };
+  const pending = h.read(h.request("anonymous", "bootstrapEventId=event-one"));
+  for (let attempt = 0; attempt < 20 && !started; attempt++) await flush();
+  assert.equal(started, true);
+  t.mock.timers.tick(1_000);
+  const response = await pending;
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.ok(isSessionEventBootstrapResponse(body));
+  assert.deepEqual(body.eventBootstrap.result, { ok: false, status: 503 });
 });
 
 test("session composition honors approved selection for pending rematches", async () => {

@@ -111,6 +111,7 @@ import {
   surrenderMatchViaApi,
   submitMoveViaApi,
   GameplayApiError,
+  GAMEPLAY_API_TIMEOUT_MS,
   syncEventStateViaApi,
   toggleEventPrizeSelectionViaApi,
   updateRatingsViaApi,
@@ -118,7 +119,10 @@ import {
   proposeRematchViaApi,
   readHistoricalMatchPairViaApi,
   readMatchSnapshotViaApi,
+  type ConditionalRead,
+  type ConditionalReadOptions,
 } from "../services/gameplayApi";
+import { takeInitialEventBootstrap } from "../services/initialEventBootstrap";
 import { resetNftCache } from "../services/nftCache";
 import { resetPlayerMetadataCaches } from "../utils/playerMetadataCache";
 import { resetLeaderboardCache } from "../ui/leaderboardCache";
@@ -152,6 +156,8 @@ import {
   resolveEventTelegramAnnouncements,
   type EventCreateOptions,
   type EventCreateDateTimePayload,
+  type EventSnapshotResponse,
+  type EventSnapshotSeed,
   type EventScheduleTimezone as SharedEventScheduleTimezone,
 } from "@mons/shared/events";
 import {
@@ -374,6 +380,7 @@ const summarizeWagerState = (state: MatchWagerState | null) => {
 class Connection {
   private auth = sessionAuth;
   private eventPollingRegistry: EventPollingRegistry;
+  private eventAuthUser = this.auth.currentUser;
 
   private inviteMetadataState: InviteMetadataState | null = null;
   private inviteMetadataViewer: InviteMetadataViewer | null = null;
@@ -834,12 +841,7 @@ class Connection {
       isVisible: () =>
         typeof document === "undefined" ||
         document.visibilityState !== "hidden",
-      loadEvent: (eventId, options) =>
-        readEventSnapshotViaApi(
-          eventId,
-          this.createPollingAuthTokenProvider(options.signal),
-          options,
-        ),
+      loadEvent: (eventId, options) => this.loadEventSnapshot(eventId, options),
       loadProfilePrizes: (profileId, options) =>
         readProfileEventPrizesViaApi(
           profileId,
@@ -849,6 +851,73 @@ class Connection {
       onEventIdle: (eventId) => this.clearEventSyncCacheForId(eventId),
       setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
     });
+    this.auth.onAuthStateChanged(() => this.synchronizeEventAuthOwner());
+  }
+
+  private synchronizeEventAuthOwner(): void {
+    if (this.eventAuthUser === this.auth.currentUser) return;
+    this.eventAuthUser = this.auth.currentUser;
+    this.clearEventSyncCaches();
+  }
+
+  private async loadEventSnapshot(
+    eventId: string,
+    options: ConditionalReadOptions,
+  ): Promise<ConditionalRead<EventSnapshotResponse>> {
+    const controller = new AbortController();
+    let rejectCanceled: (error: GameplayApiError) => void = () => undefined;
+    const canceled = new Promise<never>((_resolve, reject) => {
+      rejectCanceled = reject;
+    });
+    const cancel = (caller: boolean) => {
+      controller.abort();
+      rejectCanceled(
+        new GameplayApiError(
+          caller ? "aborted" : "unavailable",
+          caller ? "request-aborted" : "Gameplay request timed out.",
+        ),
+      );
+    };
+    const handleAbort = () => cancel(true);
+    options.signal?.addEventListener("abort", handleAbort, { once: true });
+    const timeout = setTimeout(() => cancel(false), GAMEPLAY_API_TIMEOUT_MS);
+    const run = async (): Promise<ConditionalRead<EventSnapshotResponse>> => {
+      if (options.signal?.aborted) handleAbort();
+      if (controller.signal.aborted)
+        throw new GameplayApiError("aborted", "request-aborted");
+      await this.ensureAuthenticated();
+      if (controller.signal.aborted)
+        throw new GameplayApiError("aborted", "request-aborted");
+      this.synchronizeEventAuthOwner();
+      const user = this.auth.currentUser;
+      if (!user || controller.signal.aborted)
+        throw new GameplayApiError("aborted", "request-aborted");
+      const initial = takeInitialEventBootstrap(eventId, user);
+      if (!initial) {
+        return readEventSnapshotViaApi(
+          eventId,
+          this.getUserBoundAuthTokenProvider(),
+          {
+            ...options,
+            signal: controller.signal,
+          },
+        );
+      }
+      controller.signal.addEventListener("abort", initial.abort, {
+        once: true,
+      });
+      try {
+        return await initial.promise;
+      } finally {
+        controller.signal.removeEventListener("abort", initial.abort);
+      }
+    };
+    try {
+      return await Promise.race([run(), canceled]);
+    } finally {
+      clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", handleAbort);
+    }
   }
 
   private cloneWagerState(
@@ -1335,7 +1404,7 @@ class Connection {
     this.didCreateNewGameInvite = false;
     this.newInviteId = "";
     this.optimisticResolvedMatchIds.clear();
-    this.clearEventSyncCaches();
+    this.clearEventSyncCaches(false);
     setCurrentWagerMatch(null);
   }
 
@@ -1693,7 +1762,6 @@ class Connection {
           this.wagerSnapshotGeneration += 1;
         }
         if (newUid !== this.currentUid) {
-          this.clearEventSyncCaches();
           if (this.miningFrozenPoller && newUid !== this.miningFrozenLoginUid) {
             this.setSameProfilePlayerUid(null);
           }
@@ -2593,6 +2661,9 @@ class Connection {
   ): Promise<{ ok: boolean; eventId?: string; event?: EventRecord | null }> {
     try {
       await this.ensureAuthenticated();
+      this.synchronizeEventAuthOwner();
+      const generation = this.eventPollingRegistry.getGeneration();
+      const tokenProvider = this.getUserBoundAuthTokenProvider();
       const requestPayloadBase =
         typeof schedule === "number"
           ? {
@@ -2615,15 +2686,20 @@ class Connection {
         isSundayMons: options.isSundayMons === true,
         telegramAnnouncements: resolveEventTelegramAnnouncements(options),
       };
-      const data = await createEventViaApi(
-        requestPayload,
-        this.getAuthApiToken,
+      const data = await createEventViaApi(requestPayload, tokenProvider);
+      const event = this.applyEventMutationSnapshot(
+        data.eventId,
+        data.eventSnapshot,
+        generation,
       );
       this.notifyNavigationGamesChanged();
       return {
         ok: data.ok,
         eventId: data.eventId,
-        event: this.mapDatabaseEventRecord(data.event, data.eventId),
+        event:
+          event === undefined
+            ? this.mapDatabaseEventRecord(data.event, data.eventId)
+            : event,
       };
     } catch (error) {
       console.error("Error creating event:", error);
@@ -2636,7 +2712,10 @@ class Connection {
   ): Promise<{ ok: boolean; eventId?: string }> {
     try {
       await this.ensureAuthenticated();
-      const data = await joinEventViaApi({ eventId }, this.getAuthApiToken);
+      const data = await joinEventViaApi(
+        { eventId },
+        this.getUserBoundAuthTokenProvider(),
+      );
       this.eventPollingRegistry.invalidateEvent(data.eventId);
       this.notifyNavigationGamesChanged();
       return {
@@ -2668,22 +2747,36 @@ class Connection {
       ) {
         throw new Error("Invalid event postponement interval.");
       }
-      const data = await postponeEventStartViaApi(
-        {
-          eventId,
-          postponeByMinutes,
+      this.synchronizeEventAuthOwner();
+      const generation = this.eventPollingRegistry.getGeneration();
+      return await this.eventPollingRegistry.withEventMutation(
+        eventId,
+        async (isCurrent) => {
+          const data = await postponeEventStartViaApi(
+            {
+              eventId,
+              postponeByMinutes,
+            },
+            this.getUserBoundAuthTokenProvider(),
+          );
+          const event = this.applyEventMutationSnapshot(
+            data.eventId,
+            isCurrent() ? data.eventSnapshot : undefined,
+            generation,
+          );
+          this.notifyNavigationGamesChanged();
+          return {
+            ok: data.ok,
+            eventId: data.eventId,
+            event:
+              event === undefined
+                ? this.mapDatabaseEventRecord(data.event, data.eventId)
+                : event,
+            postponeByMinutes: data.postponeByMinutes,
+            startAtMs: data.startAtMs,
+          };
         },
-        this.getAuthApiToken,
       );
-      this.eventPollingRegistry.invalidateEvent(data.eventId);
-      this.notifyNavigationGamesChanged();
-      return {
-        ok: data.ok,
-        eventId: data.eventId,
-        event: this.mapDatabaseEventRecord(data.event, data.eventId),
-        postponeByMinutes: data.postponeByMinutes,
-        startAtMs: data.startAtMs,
-      };
     } catch (error) {
       console.error("Error postponing event start:", error);
       throw error;
@@ -2702,7 +2795,7 @@ class Connection {
       await this.ensureAuthenticated();
       const data = await removeEventParticipantViaApi(
         { eventId, participantProfileId },
-        this.getAuthApiToken,
+        this.getUserBoundAuthTokenProvider(),
       );
       this.eventPollingRegistry.invalidateEvent(data.eventId);
       this.notifyNavigationGamesChanged();
@@ -2729,22 +2822,36 @@ class Connection {
   }> {
     try {
       await this.ensureAuthenticated();
-      const data = await disqualifyEventMatchWinnersViaApi(
-        { eventId, matchKey },
-        this.getAuthApiToken,
+      this.synchronizeEventAuthOwner();
+      const generation = this.eventPollingRegistry.getGeneration();
+      return await this.eventPollingRegistry.withEventMutation(
+        eventId,
+        async (isCurrent) => {
+          const data = await disqualifyEventMatchWinnersViaApi(
+            { eventId, matchKey },
+            this.getUserBoundAuthTokenProvider(),
+          );
+          const event = this.applyEventMutationSnapshot(
+            data.eventId,
+            isCurrent() ? data.eventSnapshot : undefined,
+            generation,
+          );
+          this.notifyNavigationGamesChanged();
+          return {
+            ok: data.ok,
+            eventId: data.eventId,
+            event:
+              event === undefined
+                ? this.mapDatabaseEventRecord(
+                    "event" in data ? data.event : null,
+                    data.eventId,
+                  )
+                : event,
+            didDisqualify: data.didDisqualify,
+            matchKey: data.matchKey,
+          };
+        },
       );
-      this.eventPollingRegistry.invalidateEvent(data.eventId);
-      this.notifyNavigationGamesChanged();
-      return {
-        ok: data.ok,
-        eventId: data.eventId,
-        event: this.mapDatabaseEventRecord(
-          "event" in data ? data.event : null,
-          data.eventId,
-        ),
-        didDisqualify: data.didDisqualify,
-        matchKey: data.matchKey,
-      };
     } catch (error) {
       console.error("Error disqualifying event match winners:", error);
       throw error;
@@ -2773,76 +2880,87 @@ class Connection {
       return existingSync;
     }
 
-    const syncPromise = (async () => {
-      try {
-        await this.ensureAuthenticated();
-        const isParticipant =
-          await this.isLocalProfileEventParticipant(normalizedEventId);
-        if (!isParticipant) {
+    const syncPromise = this.eventPollingRegistry.withEventMutation(
+      normalizedEventId,
+      async (isCurrent) => {
+        try {
+          await this.ensureAuthenticated();
+          this.synchronizeEventAuthOwner();
+          const generation = this.eventPollingRegistry.getGeneration();
+          const tokenProvider = this.getUserBoundAuthTokenProvider();
+          const isParticipant =
+            await this.isLocalProfileEventParticipant(normalizedEventId);
+          if (!isParticipant) {
+            return this.commitEventSyncResponse(
+              normalizedEventId,
+              {
+                ok: true,
+                skipped: true,
+                reason: "not-participant",
+                event:
+                  this.latestObservedEventById.get(normalizedEventId) ?? null,
+              },
+              subscriptionToken,
+            );
+          }
+
+          const maxRetries = EVENT_SYNC_RETRY_DELAYS_MS.length;
+          const maxAttempts = maxRetries + 1;
+          for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+            const data = await syncEventStateViaApi(
+              { eventId: normalizedEventId },
+              tokenProvider,
+            );
+            const isSkipped = "skipped" in data;
+            const reason = this.normalizeEventSyncSkipReason(
+              isSkipped ? data.reason : undefined,
+            );
+            const parsed = {
+              ok: data.ok,
+              didChange: isSkipped ? undefined : data.didChange,
+              skipped: isSkipped ? true : undefined,
+              reason,
+              event: this.mapDatabaseEventRecord(
+                "event" in data ? data.event : null,
+                normalizedEventId,
+              ),
+            };
+            if (
+              !parsed.skipped ||
+              !this.shouldRetryEventSync(parsed.reason) ||
+              attempt >= maxAttempts - 1
+            ) {
+              const event = this.applyEventMutationSnapshot(
+                normalizedEventId,
+                isCurrent() ? data.eventSnapshot : undefined,
+                generation,
+              );
+              if (event !== undefined) parsed.event = event;
+              const response = this.commitEventSyncResponse(
+                normalizedEventId,
+                parsed,
+                subscriptionToken,
+              );
+              return response;
+            }
+            await this.delay(EVENT_SYNC_RETRY_DELAYS_MS[attempt] || 300);
+          }
+
           return this.commitEventSyncResponse(
             normalizedEventId,
             {
-              ok: true,
+              ok: false,
               skipped: true,
-              reason: "not-participant",
-              event:
-                this.latestObservedEventById.get(normalizedEventId) ?? null,
+              event: null,
             },
             subscriptionToken,
           );
+        } catch (error) {
+          console.error("Error syncing event state:", error);
+          throw error;
         }
-
-        const maxRetries = EVENT_SYNC_RETRY_DELAYS_MS.length;
-        const maxAttempts = maxRetries + 1;
-        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-          const data = await syncEventStateViaApi(
-            { eventId: normalizedEventId },
-            this.getAuthApiToken,
-          );
-          const isSkipped = "skipped" in data;
-          const reason = this.normalizeEventSyncSkipReason(
-            isSkipped ? data.reason : undefined,
-          );
-          const parsed = {
-            ok: data.ok,
-            didChange: isSkipped ? undefined : data.didChange,
-            skipped: isSkipped ? true : undefined,
-            reason,
-            event: this.mapDatabaseEventRecord(
-              "event" in data ? data.event : null,
-              normalizedEventId,
-            ),
-          };
-          if (
-            !parsed.skipped ||
-            !this.shouldRetryEventSync(parsed.reason) ||
-            attempt >= maxAttempts - 1
-          ) {
-            const response = this.commitEventSyncResponse(
-              normalizedEventId,
-              parsed,
-              subscriptionToken,
-            );
-            this.eventPollingRegistry.invalidateEvent(normalizedEventId);
-            return response;
-          }
-          await this.delay(EVENT_SYNC_RETRY_DELAYS_MS[attempt] || 300);
-        }
-
-        return this.commitEventSyncResponse(
-          normalizedEventId,
-          {
-            ok: false,
-            skipped: true,
-            event: null,
-          },
-          subscriptionToken,
-        );
-      } catch (error) {
-        console.error("Error syncing event state:", error);
-        throw error;
-      }
-    })();
+      },
+    );
 
     this.inFlightEventSyncById.set(normalizedEventId, syncPromise);
     const releaseSync = () => {
@@ -2927,15 +3045,14 @@ class Connection {
     if (!cacheEntry) {
       return null;
     }
-    const eventRecord =
-      cacheEntry.response.event ??
-      this.latestObservedEventById.get(eventId) ??
-      null;
+    const eventRecord = this.latestObservedEventById.has(eventId)
+      ? (this.latestObservedEventById.get(eventId) ?? null)
+      : (cacheEntry.response.event ?? null);
     const cooldownMs = this.getEventSyncCooldownMs(eventRecord);
     if (nowMs - cacheEntry.responseAtMs >= cooldownMs) {
       return null;
     }
-    return cacheEntry.response;
+    return { ...cacheEntry.response, event: eventRecord };
   }
 
   private commitEventSyncResponse(
@@ -2955,9 +3072,6 @@ class Connection {
       responseAtMs: Date.now(),
       response,
     });
-    if (response.event !== undefined) {
-      this.latestObservedEventById.set(eventId, response.event ?? null);
-    }
     return response;
   }
 
@@ -2976,11 +3090,39 @@ class Connection {
     );
   }
 
-  private clearEventSyncCaches(): void {
+  private clearEventSyncCaches(resetSnapshots = true): void {
     this.inFlightEventSyncById.clear();
     this.eventSyncCooldownCacheById.clear();
     this.latestObservedEventById.clear();
-    this.eventPollingRegistry.reset();
+    if (resetSnapshots) this.eventPollingRegistry.reset();
+  }
+
+  private applyEventMutationSnapshot(
+    eventId: string,
+    seed: EventSnapshotSeed | undefined,
+    generation: number,
+  ): EventRecord | null | undefined {
+    this.synchronizeEventAuthOwner();
+    if (generation !== this.eventPollingRegistry.getGeneration()) return;
+    if (
+      seed &&
+      this.eventPollingRegistry.adoptEventSnapshot(eventId, seed, generation)
+    ) {
+      const snapshot = this.eventPollingRegistry.getEventSnapshot(eventId);
+      return this.mapDatabaseEventRecord(snapshot?.event ?? null, eventId);
+    }
+    this.eventPollingRegistry.invalidateEvent(eventId);
+  }
+
+  public subscribeToEventFreshness(
+    eventId: string,
+    onFreshness: (fresh: boolean) => void,
+  ): () => void {
+    this.synchronizeEventAuthOwner();
+    return this.eventPollingRegistry.subscribeToEventFreshness(
+      eventId.trim(),
+      onFreshness,
+    );
   }
 
   private clearEventSyncCacheForId(eventId: string): void {
@@ -2994,6 +3136,7 @@ class Connection {
     onUpdate: (selections: EventPrizeSelections) => void,
     onError?: (error: unknown) => void,
   ): () => void {
+    this.synchronizeEventAuthOwner();
     const normalizedEventId = typeof eventId === "string" ? eventId.trim() : "";
     if (!normalizedEventId) {
       onUpdate({});
@@ -3012,6 +3155,7 @@ class Connection {
     onUpdate: (prizes: ProfileEventPrizes) => void,
     onError?: (error: unknown) => void,
   ): () => void {
+    this.synchronizeEventAuthOwner();
     const normalizedProfileId =
       typeof profileId === "string" ? profileId.trim() : "";
     if (!normalizedProfileId) {
@@ -3081,6 +3225,7 @@ class Connection {
     onUpdate: (event: EventRecord | null) => void,
     onError?: (error: unknown) => void,
   ): () => void {
+    this.synchronizeEventAuthOwner();
     const normalizedEventId = typeof eventId === "string" ? eventId.trim() : "";
     if (!normalizedEventId) {
       onUpdate(null);

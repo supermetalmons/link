@@ -373,6 +373,179 @@ test("initial game intent joins anonymous creation without retaining game data i
   assert.equal(owners.length, 1);
 });
 
+const initialEventOptions = (
+  controller = new AbortController(),
+  onSessionBound,
+) => ({ signal: controller.signal, onSessionBound });
+const attachInitialEvent = (response, target) => ({
+  ...response,
+  ...(target
+    ? { eventBootstrap: { ...target, result: { ok: false, status: 503 } } }
+    : {}),
+});
+
+test("initial event intent enriches one anonymous creation without persisting event data", async () => {
+  const h = harness();
+  const auth = h.make();
+  const create = h.api.create;
+  const targets = [];
+  const owners = [];
+  h.api.create = async (session, target) => {
+    targets.push(target);
+    assert.deepEqual(owners, [
+      { sessionId: session.sessionId, generation: auth.generation },
+    ]);
+    return attachInitialEvent(await create(session), target);
+  };
+  const prepared = auth.prepareInitialEvent(
+    "event-a",
+    initialEventOptions(undefined, (owner) => owners.push(owner)),
+  );
+  await Promise.all([auth.signInAnonymously(), auth.signInAnonymously()]);
+  const result = await prepared;
+  assert.equal(result.user, auth.currentUser);
+  assert.deepEqual(result.bootstrap, { ok: false, status: 503 });
+  assert.deepEqual(targets, [{ eventId: "event-a" }]);
+  assert.equal(h.creates.length, 1);
+  assert.equal(h.refreshes.length, 0);
+  assert.equal("eventBootstrap" in auth.access, false);
+  assert.equal(
+    JSON.stringify(h.store.read()).includes("eventBootstrap"),
+    false,
+  );
+  assert.equal(auth.initialEventIntent, null);
+});
+
+test("initial event enriches a cold shared refresh even when another auth listener requests the token", async () => {
+  const h = harness();
+  await h.make().signInAnonymously();
+  const auth = h.make();
+  const refresh = h.api.refresh;
+  const targets = [];
+  const tokens = [];
+  h.api.refresh = async (session, target) => {
+    targets.push(target);
+    return attachInitialEvent(await refresh(session), target);
+  };
+  auth.onAuthStateChanged((user) => {
+    if (user) tokens.push(user.getIdToken(true), user.getIdToken());
+  });
+  const result = await auth.prepareInitialEvent(
+    "event-a",
+    initialEventOptions(),
+  );
+  await Promise.all(tokens);
+  assert.deepEqual(targets, [{ eventId: "event-a" }]);
+  assert.deepEqual(result.bootstrap, { ok: false, status: 503 });
+  assert.equal(h.refreshes.length, 1);
+  assert.equal("eventBootstrap" in auth.access, false);
+});
+
+test("valid memory tokens and already-dispatched refreshes do not force an event refresh", async () => {
+  const h = harness();
+  const warm = h.make();
+  await warm.signInAnonymously();
+  assert.equal(
+    (await warm.prepareInitialEvent("event-a", initialEventOptions()))
+      .bootstrap,
+    null,
+  );
+  assert.equal(h.refreshes.length, 0);
+  const cold = h.make();
+  await cold.authStateReady();
+  const gate = deferred();
+  const refresh = h.api.refresh;
+  const targets = [];
+  h.api.refresh = async (session, target) => {
+    targets.push(target);
+    await gate.promise;
+    return attachInitialEvent(await refresh(session), target);
+  };
+  const token = cold.currentUser.getIdToken();
+  await flush();
+  const prepared = cold.prepareInitialEvent("event-a", initialEventOptions());
+  await flush();
+  gate.resolve();
+  await token;
+  assert.equal((await prepared).bootstrap, null);
+  assert.deepEqual(targets, [undefined]);
+  assert.equal(h.refreshes.length, 1);
+});
+
+test("canceled event bootstrap drops its result while a shared session request still succeeds", async () => {
+  const h = harness();
+  await h.make().signInAnonymously();
+  const auth = h.make();
+  const gate = deferred();
+  const refresh = h.api.refresh;
+  h.api.refresh = async (session, target) => {
+    await gate.promise;
+    return attachInitialEvent(await refresh(session), target);
+  };
+  const controller = new AbortController();
+  const prepared = auth.prepareInitialEvent(
+    "event-a",
+    initialEventOptions(controller),
+  );
+  const rejected = assert.rejects(prepared, /initial-event-bootstrap-canceled/);
+  await flush();
+  const token = auth.currentUser.getIdToken();
+  controller.abort();
+  await rejected;
+  gate.resolve();
+  assert.equal(await token, auth.access.accessToken);
+  assert.equal(h.refreshes.length, 1);
+  assert.equal("eventBootstrap" in auth.access, false);
+  assert.equal(auth.initialEventIntent, null);
+});
+
+test("same-UID generation replacement rejects pending combined event data", async () => {
+  const h = harness();
+  await h.make().signInAnonymously();
+  const auth = h.make();
+  const gate = deferred();
+  const refresh = h.api.refresh;
+  h.api.refresh = async (session, target) => {
+    const result = await refresh(session);
+    await gate.promise;
+    return attachInitialEvent(result, target);
+  };
+  const prepared = auth.prepareInitialEvent("event-a", initialEventOptions());
+  const rejected = assert.rejects(prepared, /authentication-changed/);
+  await flush();
+  const previous = auth.currentUser;
+  await h.store.update((state) => ({
+    ...state,
+    generation: crypto.randomUUID(),
+    revision: state.revision + 1,
+  }));
+  await auth.reconcile();
+  assert.equal(auth.currentUser.uid, previous.uid);
+  assert.notEqual(auth.currentUser, previous);
+  gate.resolve();
+  await rejected;
+  assert.equal(auth.access, null);
+  assert.equal(auth.initialEventIntent, null);
+});
+
+test("a game intent wins over an event intent without mixing the session target", async () => {
+  const h = harness();
+  const auth = h.make();
+  const create = h.api.create;
+  const targets = [];
+  h.api.create = async (session, target) => {
+    targets.push(target);
+    return attachInitialGame(await create(session), target);
+  };
+  const event = auth.prepareInitialEvent("event-a", initialEventOptions());
+  const game = auth.prepareInitialGame("game-a", initialGameOptions());
+  const [eventResult, gameResult] = await Promise.all([event, game]);
+  assert.equal(eventResult.bootstrap, null);
+  assert.deepEqual(gameResult.bootstrap, { ok: false, status: 404 });
+  assert.deepEqual(targets, [{ inviteId: "game-a", selection: "current" }]);
+  assert.equal(h.creates.length, 1);
+});
+
 for (const phase of ["before allocation", "after dispatch"]) {
   test(`initial preparation binds an anonymous request joined ${phase}`, async () => {
     const h = harness();

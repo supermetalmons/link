@@ -593,10 +593,10 @@ test("sends exact authenticated event-control mutations", async () => {
   assert.deepEqual(
     calls.map((call) => call.input),
     [
-      "https://api.mons.link/events/create",
-      "https://api.mons.link/events/start/postpone",
-      "https://api.mons.link/events/matches/winners/disqualify",
-      "https://api.mons.link/events/state/sync",
+      "https://api.mons.link/events/create?eventSnapshot=v1",
+      "https://api.mons.link/events/start/postpone?eventSnapshot=v1",
+      "https://api.mons.link/events/matches/winners/disqualify?eventSnapshot=v1",
+      "https://api.mons.link/events/state/sync?eventSnapshot=v1",
     ],
   );
   assert.equal(
@@ -654,6 +654,119 @@ test("sends exact authenticated event-control mutations", async () => {
       reason: "locked",
     }),
     true,
+  );
+});
+
+test("event controls accept complete snapshot seeds without an additional request", async () => {
+  const event = { eventId: "event-1", status: "scheduled", startAtMs: 600_000 };
+  const eventSnapshot = {
+    snapshot: {
+      ok: true,
+      eventId: "event-1",
+      revision: 2,
+      event,
+      prizeSelections: {},
+    },
+    etag: 'W/"event-snapshot-event-1-2"',
+    bookmark: "mons-d1-v1:446cba4b-31c0-4c5e-8daa-af7d235fbe0f:revision-2",
+  };
+  const cases = [
+    [
+      createEventViaApi,
+      { startsInMinutes: 5 },
+      { ok: true, eventId: "event-1", event },
+    ],
+    [
+      postponeEventStartViaApi,
+      { eventId: "event-1", postponeByMinutes: 5 },
+      {
+        ok: true,
+        eventId: "event-1",
+        event,
+        postponeByMinutes: 5,
+        startAtMs: 600_000,
+      },
+    ],
+    [
+      disqualifyEventMatchWinnersViaApi,
+      { eventId: "event-1", matchKey: "0_0" },
+      {
+        ok: true,
+        eventId: "event-1",
+        event,
+        didChange: true,
+        didDisqualify: true,
+        matchKey: "0_0",
+      },
+    ],
+    [
+      syncEventStateViaApi,
+      { eventId: "event-1" },
+      { ok: true, eventId: "event-1", event, didChange: true },
+    ],
+  ];
+  for (const [mutate, request, base] of cases) {
+    let calls = 0;
+    globalThis.fetch = async (input, init) => {
+      calls += 1;
+      assert.equal(new URL(input).searchParams.get("eventSnapshot"), "v1");
+      assert.equal(init.method, "POST");
+      assert.deepEqual(JSON.parse(init.body), request);
+      return jsonResponse({ ...base, eventSnapshot });
+    };
+    assert.deepEqual(await mutate(request, async () => "token"), {
+      ...base,
+      eventSnapshot,
+    });
+    assert.equal(calls, 1);
+  }
+});
+
+test("invalid optional event seeds preserve mutation success without replaying POST", async () => {
+  const event = { eventId: "event-1", status: "scheduled" };
+  const base = {
+    ok: true,
+    eventId: "event-1",
+    event,
+    postponeByMinutes: 5,
+    startAtMs: 600_000,
+  };
+  const wrongEventSeed = {
+    snapshot: {
+      ok: true,
+      eventId: "other",
+      revision: 2,
+      event: { ...event, eventId: "other" },
+      prizeSelections: {},
+    },
+    etag: 'W/"event-snapshot-other-2"',
+    bookmark: "mons-d1-v1:446cba4b-31c0-4c5e-8daa-af7d235fbe0f:revision-2",
+  };
+  for (const eventSnapshot of [undefined, null, {}, wrongEventSeed]) {
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return jsonResponse({
+        ...base,
+        ...(eventSnapshot === undefined ? {} : { eventSnapshot }),
+      });
+    };
+    assert.deepEqual(
+      await postponeEventStartViaApi(
+        { eventId: "event-1", postponeByMinutes: 5 },
+        async () => "token",
+      ),
+      base,
+    );
+    assert.equal(calls, 1);
+  }
+  globalThis.fetch = async () => jsonResponse({ ...base, unexpected: true });
+  await assert.rejects(
+    postponeEventStartViaApi(
+      { eventId: "event-1", postponeByMinutes: 5 },
+      async () => "token",
+    ),
+    GameplayApiError,
   );
 });
 

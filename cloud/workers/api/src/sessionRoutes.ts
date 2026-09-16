@@ -9,7 +9,9 @@ import {
 } from "@mons/shared/session-auth";
 import {
   SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES,
+  SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES,
   type SessionBootstrapTarget,
+  type SessionEventBootstrapTarget,
 } from "@mons/shared/session-bootstrap";
 import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
 import {
@@ -26,6 +28,7 @@ import {
 import {
   readSessionBootstrap,
   readSessionBootstrapTarget,
+  readSessionEventBootstrap,
   type SessionBootstrapDependencies,
 } from "./sessionBootstrap.ts";
 
@@ -62,7 +65,8 @@ export async function handleSessionRoute(
   const now = dependencies.now || Date.now;
   const startedAt = now();
   const timings = new Map<string, number>();
-  let target: SessionBootstrapTarget | null = null;
+  let target: SessionBootstrapTarget | SessionEventBootstrapTarget | null =
+    null;
   let headers: Record<string, string> = { Vary: "Origin" };
   const measure = async <T>(
     name: string,
@@ -94,6 +98,25 @@ export async function handleSessionRoute(
     session: SessionTokenResponse,
   ): Promise<Response> => {
     if (!target) return authJsonResponse(session, 200, headers);
+    if ("eventId" in target) {
+      const eventTarget = target;
+      let eventBootstrap = await measure("event_snapshot", () =>
+        readSessionEventBootstrap(
+          request,
+          eventTarget,
+          env,
+          dependencies.bootstrap,
+        ),
+      );
+      if (
+        new TextEncoder().encode(JSON.stringify({ ...session, eventBootstrap }))
+          .byteLength > SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES
+      )
+        eventBootstrap = { ...eventTarget, result: { ok: false, status: 503 } };
+      return finish(
+        authJsonResponse({ ...session, eventBootstrap }, 200, headers),
+      );
+    }
     let gameBootstrap = await readSessionBootstrap(
       request,
       target,

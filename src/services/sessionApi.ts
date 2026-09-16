@@ -12,10 +12,15 @@ import {
 import {
   isSessionBootstrap,
   isSessionBootstrapTarget,
+  isSessionEventBootstrap,
+  isSessionEventBootstrapTarget,
   SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES,
+  SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES,
   SESSION_BOOTSTRAP_REQUEST_TIMEOUT_MS,
   type SessionBootstrap,
   type SessionBootstrapTarget,
+  type SessionEventBootstrap,
+  type SessionEventBootstrapTarget,
 } from "@mons/shared/session-bootstrap";
 
 export type { SessionTokenResponse } from "@mons/shared/session-auth";
@@ -24,7 +29,9 @@ export type SessionTokenResult = SessionTokenResponse & {
 };
 export type SessionTokenReadResult = SessionTokenResult & {
   gameBootstrap?: SessionBootstrap;
+  eventBootstrap?: SessionEventBootstrap;
 };
+type SessionReadTarget = SessionBootstrapTarget | SessionEventBootstrapTarget;
 
 export class SessionApiError extends Error {
   readonly code: string;
@@ -76,12 +83,16 @@ async function tokenResponse(
   response: Response,
   sessionId: string,
   startedAt: number,
-  target?: SessionBootstrapTarget,
+  target?: SessionReadTarget,
   signal?: AbortSignal,
   deadline?: number,
 ): Promise<SessionTokenReadResult> {
   try {
-    const maxBytes = target ? SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES : 16_384;
+    const maxBytes = target
+      ? "eventId" in target
+        ? SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES
+        : SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES
+      : 16_384;
     const assertActive = () => {
       if (
         signal?.aborted ||
@@ -119,23 +130,33 @@ async function tokenResponse(
       const value: unknown = JSON.parse(body + decoder.decode());
       let token = value;
       let gameBootstrap: SessionBootstrap | undefined;
+      let eventBootstrap: SessionEventBootstrap | undefined;
       if (
         target &&
         value &&
         typeof value === "object" &&
         !Array.isArray(value)
       ) {
-        const { gameBootstrap: optionalGame, ...tokenFields } = value as Record<
-          string,
-          unknown
-        >;
-        token = tokenFields;
-        if (
-          isSessionBootstrap(optionalGame) &&
-          optionalGame.inviteId === target.inviteId &&
-          optionalGame.selection === target.selection
-        )
-          gameBootstrap = optionalGame;
+        if ("eventId" in target) {
+          const { eventBootstrap: optionalEvent, ...tokenFields } =
+            value as Record<string, unknown>;
+          token = tokenFields;
+          if (
+            isSessionEventBootstrap(optionalEvent) &&
+            optionalEvent.eventId === target.eventId
+          )
+            eventBootstrap = optionalEvent;
+        } else {
+          const { gameBootstrap: optionalGame, ...tokenFields } =
+            value as Record<string, unknown>;
+          token = tokenFields;
+          if (
+            isSessionBootstrap(optionalGame) &&
+            optionalGame.inviteId === target.inviteId &&
+            optionalGame.selection === target.selection
+          )
+            gameBootstrap = optionalGame;
+        }
       }
       if (!isSessionTokenResponse(token) || token.sessionId !== sessionId)
         throw new Error();
@@ -166,6 +187,7 @@ async function tokenResponse(
         ...token,
         accessDeadlineMs,
         ...(gameBootstrap ? { gameBootstrap } : {}),
+        ...(eventBootstrap ? { eventBootstrap } : {}),
       };
     } finally {
       if (timer !== null) clearTimeout(timer);
@@ -186,17 +208,24 @@ async function requestToken(
   path: string,
   options: RequestInit,
   sessionId: string,
-  target?: SessionBootstrapTarget,
+  target?: SessionReadTarget,
 ): Promise<SessionTokenReadResult> {
   const startedAt = performance.now();
   if (!target)
     return tokenResponse(await request(path, options), sessionId, startedAt);
-  if (!isSessionBootstrapTarget(target))
-    throw new SessionApiError("unavailable", "Invalid initial game request.");
-  const query = new URLSearchParams({
-    bootstrapInviteId: target.inviteId,
-    bootstrapSelection: target.selection,
-  });
+  if (
+    !isSessionBootstrapTarget(target) &&
+    !isSessionEventBootstrapTarget(target)
+  )
+    throw new SessionApiError("unavailable", "Invalid initial data request.");
+  const query = new URLSearchParams(
+    "eventId" in target
+      ? { bootstrapEventId: target.eventId }
+      : {
+          bootstrapInviteId: target.inviteId,
+          bootstrapSelection: target.selection,
+        },
+  );
   const controller = new AbortController();
   const deadline = startedAt + SESSION_BOOTSTRAP_REQUEST_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout>;
@@ -243,7 +272,7 @@ async function requestToken(
 export const sessionApi = {
   create: async (
     session: StoredSession,
-    target?: SessionBootstrapTarget,
+    target?: SessionReadTarget,
   ): Promise<SessionTokenReadResult> => {
     return requestToken(
       SESSION_ANONYMOUS_PATH,
@@ -264,7 +293,7 @@ export const sessionApi = {
   },
   refresh: async (
     session: StoredSession,
-    target?: SessionBootstrapTarget,
+    target?: SessionReadTarget,
   ): Promise<SessionTokenReadResult> => {
     return requestToken(
       SESSION_REFRESH_PATH,

@@ -11,6 +11,8 @@ import {
 } from "@mons/shared/session-auth";
 import {
   isSessionBootstrapResponse,
+  isSessionEventBootstrapResponse,
+  type SessionEventBootstrapResponse,
   type SessionBootstrapResponse,
 } from "@mons/shared/session-bootstrap";
 import type { InviteReactions } from "../src/inviteReactions.ts";
@@ -18,11 +20,13 @@ import { getMatchStateRpc, unwrapMatchStateRpc } from "../src/matchStateRpc.ts";
 import { handleRequest } from "../src/router.ts";
 import { createSessionRepository } from "../src/sessionD1.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
+import { applyEventTestMigrations } from "./eventTestMigrations.ts";
 
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
   TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
   TEST_AUTH_STATE_D1_MIGRATIONS: D1Migration[];
+  TEST_EVENT_D1_MIGRATIONS: D1Migration[];
 };
 const environment: Env = {
   ...env,
@@ -93,6 +97,7 @@ afterEach(async () => {
 describe("composed session Worker with canonical D1 and Durable Object state", () => {
   beforeAll(async () => {
     await Promise.all([
+      applyEventTestMigrations(env.EVENT_DB, testEnv.TEST_EVENT_D1_MIGRATIONS),
       applyD1Migrations(env.PROFILE_GAMES_DB, testEnv.TEST_D1_MIGRATIONS),
       applyRetiredProfileMigrations(
         env.PROFILE_DB,
@@ -112,6 +117,77 @@ describe("composed session Worker with canonical D1 and Durable Object state", (
         "UPDATE invite_source_control SET backend = 'd1', state = 'active', epoch = 1, verified_at_ms = 1, activated_at_ms = 1 WHERE singleton = 1",
       ),
     ]);
+  });
+
+  it("returns a primary event snapshot with the issued session and reusable conditional headers", async () => {
+    const eventId = `session-event-${crypto.randomUUID()}`;
+    const event = {
+      eventId,
+      status: "scheduled",
+      startAtMs: 1000,
+      updatedAtMs: 1,
+      participants: {},
+      rounds: {},
+    };
+    await env.EVENT_DB.prepare(
+      "INSERT INTO event_records (event_id, status, start_at_ms, updated_at_ms, revision, record_json) VALUES (?, 'scheduled', 1000, 1, 7, ?)",
+    )
+      .bind(eventId, JSON.stringify(event))
+      .run();
+    const input: SessionCreateRequest = {
+      sessionId: crypto.randomUUID(),
+      refreshSecret: "A".repeat(43),
+      revokeSecret: `${"B".repeat(42)}A`,
+    };
+    const response = await handleRequest(
+      new Request(
+        `https://api.mons.link/auth/session/anonymous?bootstrapEventId=${eventId}`,
+        {
+          method: "POST",
+          headers: {
+            Origin: "https://mons.link",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(input),
+        },
+      ),
+      environment,
+      {},
+      ctx,
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json<SessionEventBootstrapResponse>();
+    expect(isSessionEventBootstrapResponse(body)).toBe(true);
+    const seed = body.eventBootstrap.result;
+    if (!("snapshot" in seed)) throw new Error("event-bootstrap-failed");
+    expect(seed.snapshot).toEqual({
+      ok: true,
+      eventId,
+      revision: 7,
+      event,
+      prizeSelections: {},
+    });
+    const revalidated = await handleRequest(
+      new Request(`https://api.mons.link/events/snapshot?eventId=${eventId}`, {
+        headers: {
+          Origin: "https://mons.link",
+          Authorization: `Bearer ${body.accessToken}`,
+          "If-None-Match": seed.etag,
+          "X-D1-Bookmark": seed.bookmark,
+        },
+      }),
+      environment,
+      {},
+      ctx,
+    );
+    expect(revalidated.status).toBe(304);
+    expect(revalidated.headers.get("ETag")).toBe(seed.etag);
+    expect(revalidated.headers.get("Server-Timing")).toContain(
+      "event_snapshot;dur=",
+    );
+    expect(revalidated.headers.get("Timing-Allow-Origin")).toBe(
+      "https://mons.link",
+    );
   });
 
   it.each(["anonymous", "refresh"])(

@@ -1,9 +1,12 @@
 import {
   isSessionBootstrap,
   isSessionBootstrapTarget,
+  isSessionEventBootstrapTarget,
   type SessionBootstrap,
   type SessionBootstrapFailure,
   type SessionBootstrapTarget,
+  type SessionEventBootstrap,
+  type SessionEventBootstrapTarget,
 } from "@mons/shared/session-bootstrap";
 import {
   SESSION_ANONYMOUS_PATH,
@@ -17,22 +20,43 @@ import {
   type GameBootstrapDependencies,
   type GameBootstrapMeasure,
 } from "./gameBootstrap.ts";
+import {
+  readOptionalEventSnapshotSeed,
+  type EventSnapshotSeedDependencies,
+} from "./eventSnapshotResponse.ts";
 
 export const GAME_BOOTSTRAP_ENRICHMENT_TIMEOUT_MS = 10_000;
 type Timer = ReturnType<typeof setTimeout> | number;
 
-export type SessionBootstrapDependencies = GameBootstrapDependencies & {
-  now?: () => number;
-  logFailure?: () => void;
-  setTimer?: (callback: () => void, delayMs: number) => Timer;
-  clearTimer?: (timer: Timer) => void;
-};
+export type SessionBootstrapDependencies = GameBootstrapDependencies &
+  EventSnapshotSeedDependencies & {
+    now?: () => number;
+    logFailure?: () => void;
+    setTimer?: (callback: () => void, delayMs: number) => Timer;
+    clearTimer?: (timer: Timer) => void;
+  };
 
 export function readSessionBootstrapTarget(
   request: Request,
-): SessionBootstrapTarget | null {
+): SessionBootstrapTarget | SessionEventBootstrapTarget | null {
   const url = new URL(request.url);
   const params = url.searchParams;
+  if (params.has("bootstrapEventId")) {
+    const target = { eventId: params.get("bootstrapEventId") };
+    if (
+      (url.pathname !== SESSION_ANONYMOUS_PATH &&
+        url.pathname !== SESSION_REFRESH_PATH) ||
+      params.getAll("bootstrapEventId").length !== 1 ||
+      [...params.keys()].some((key) => key !== "bootstrapEventId") ||
+      !isSessionEventBootstrapTarget(target)
+    )
+      throw new AuthApiFailure(
+        400,
+        "invalid-argument",
+        "invalid-bootstrap-request",
+      );
+    return target;
+  }
   if (!params.has("bootstrapInviteId") && !params.has("bootstrapSelection"))
     return null;
   const target = {
@@ -55,6 +79,21 @@ export function readSessionBootstrapTarget(
       "invalid-bootstrap-request",
     );
   return target;
+}
+
+export async function readSessionEventBootstrap(
+  request: Request,
+  target: SessionEventBootstrapTarget,
+  env: Env,
+  dependencies: EventSnapshotSeedDependencies = {},
+): Promise<SessionEventBootstrap> {
+  const seed = await readOptionalEventSnapshotSeed(
+    env,
+    target.eventId,
+    request.signal,
+    dependencies,
+  );
+  return { ...target, result: seed || { ok: false, status: 503 } };
 }
 
 function failure(error: unknown): SessionBootstrapFailure {

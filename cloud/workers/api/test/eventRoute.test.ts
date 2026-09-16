@@ -7,6 +7,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { EventLockManager } from "../../../runtime/events/lockManagerCore.js";
 import { LEGACY_CORE_PRIZES_EVENT_ID } from "@mons/shared/event-prizes";
+import {
+  eventSnapshotEtag,
+  isSyncEventStateResponse,
+  type EventSnapshotSeed,
+} from "@mons/shared/events";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { handleEventRoute } from "../src/eventRoute.ts";
 import { EVENT_CONTROL_TIMEOUT_MS } from "../src/eventOperations.ts";
@@ -497,5 +502,158 @@ test("rejects malformed event prize selections after authentication", async () =
       { verifyIdentity: async () => identity },
     );
     assert.equal(response.status, 400);
+  }
+});
+
+function snapshotSeed(): EventSnapshotSeed {
+  return {
+    snapshot: {
+      ok: true,
+      eventId: "event-1",
+      revision: 3,
+      event: { eventId: "event-1", status: "scheduled" },
+      prizeSelections: {},
+    },
+    etag: eventSnapshotEtag("event-1", 3),
+    bookmark: "mons-d1-v1:00000000-0000-4000-8000-000000000001:native",
+  };
+}
+
+function syncRouteFixture() {
+  const repository = createRepository();
+  const coordination = new Map<string, unknown>();
+  repository.transactStatePath = async (path, updater) => {
+    const current = coordination.get(path) ?? null;
+    const decision = updater(current);
+    assert.ok(decision && typeof decision === "object");
+    if ("commit" in decision) return { committed: false, value: current };
+    assert.ok("value" in decision);
+    coordination.set(path, decision.value);
+    return {
+      committed: true,
+      value: decision.value,
+      decision:
+        "decision" in decision && typeof decision.decision === "string"
+          ? decision.decision
+          : undefined,
+    };
+  };
+  const request = (query = "eventSnapshot=v1") =>
+    new Request(
+      `https://api.mons.link/events/state/sync${query ? `?${query}` : ""}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ eventId: "event-1" }),
+      },
+    );
+  const dependencies = {
+    verifyIdentity: async () => identity,
+    repository,
+    control: { now: () => 100, sleep: async () => undefined },
+  };
+  return { coordination, repository, request, dependencies };
+}
+
+test("opted-in event sync reads a full seed after operation and lock release", async () => {
+  const h = syncRouteFixture();
+  let reads = 0;
+  const response = await handleEventRoute(h.request(), TELEGRAM_TEST_ENV, ctx, {
+    ...h.dependencies,
+    readEventSnapshotSeed: async (eventId) => {
+      reads++;
+      assert.equal(eventId, "event-1");
+      assert.equal(h.coordination.get("eventLocks/event-1"), null);
+      return snapshotSeed();
+    },
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.ok(body && typeof body === "object" && "eventSnapshot" in body);
+  const { eventSnapshot, ...legacy } = body;
+  assert.equal(isSyncEventStateResponse(legacy), true);
+  assert.deepEqual(eventSnapshot, snapshotSeed());
+  assert.equal(reads, 1);
+  assert.match(
+    response.headers.get("Server-Timing") || "",
+    /event_snapshot;dur=/,
+  );
+});
+
+test("event sync keeps exact legacy responses without opt-in or when skipped", async () => {
+  for (const query of [
+    "",
+    "eventSnapshot=unknown",
+    "eventSnapshot=v1&eventSnapshot=v1",
+  ]) {
+    const h = syncRouteFixture();
+    let reads = 0;
+    const response = await handleEventRoute(
+      h.request(query),
+      TELEGRAM_TEST_ENV,
+      ctx,
+      {
+        ...h.dependencies,
+        readEventSnapshotSeed: async () => {
+          reads++;
+          return snapshotSeed();
+        },
+      },
+    );
+    assert.equal(response.status, 200);
+    assert.equal(isSyncEventStateResponse(await response.json()), true);
+    assert.equal(reads, 0);
+  }
+  const h = syncRouteFixture();
+  let reads = 0;
+  h.repository.transactStatePath = async () => ({
+    committed: false,
+    value: null,
+  });
+  const response = await handleEventRoute(h.request(), TELEGRAM_TEST_ENV, ctx, {
+    ...h.dependencies,
+    readEventSnapshotSeed: async () => {
+      reads++;
+      return snapshotSeed();
+    },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(reads, 0);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    eventId: "event-1",
+    skipped: true,
+    reason: "locked",
+  });
+});
+
+test("event sync enrichment failures and combined overflow preserve successful responses", async () => {
+  for (const overflow of [false, true]) {
+    const h = syncRouteFixture();
+    const originalRead = h.repository.readEvent;
+    if (overflow)
+      h.repository.readEvent = async (eventId, signal) => ({
+        ...(await originalRead(eventId, signal)),
+        padding: "x".repeat(350 * 1024),
+      });
+    const response = await handleEventRoute(
+      h.request(),
+      TELEGRAM_TEST_ENV,
+      ctx,
+      {
+        ...h.dependencies,
+        readEventSnapshotSeed: async () => {
+          if (!overflow) throw new Error("read-after-success-failed");
+          const seed = snapshotSeed();
+          seed.snapshot.event = {
+            ...seed.snapshot.event!,
+            padding: "x".repeat(350 * 1024),
+          };
+          return seed;
+        },
+      },
+    );
+    assert.equal(response.status, 200);
+    assert.equal(isSyncEventStateResponse(await response.json()), true);
   }
 });

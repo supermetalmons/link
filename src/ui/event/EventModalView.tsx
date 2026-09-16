@@ -383,6 +383,13 @@ const EventModal: React.FC = () => {
     DEV_STUB_DEFAULT_PLAYERS,
   );
   const [isLoading, setIsLoading] = useState(false);
+  const [isEventFresh, setIsEventFresh] = useState(false);
+  const loadTimingRef = useRef<{
+    eventId: string;
+    startedAt: number;
+    displayed: boolean;
+    fresh: boolean;
+  } | null>(null);
   const [isDisqualifying, setIsDisqualifying] = useState(false);
   const [isPostponing, setIsPostponing] = useState(false);
   const [isRemovingParticipant, setIsRemovingParticipant] = useState(false);
@@ -611,11 +618,13 @@ const EventModal: React.FC = () => {
   useEffect(() => {
     const eventId = modalState.eventId;
     if (!modalState.isOpen || !eventId) {
+      loadTimingRef.current = null;
       if (copyResetTimeoutRef.current !== null) {
         window.clearTimeout(copyResetTimeoutRef.current);
         copyResetTimeoutRef.current = null;
       }
       setEventRecord(null);
+      setIsEventFresh(false);
       setCopyState("idle");
       setIsLoading(false);
       setIsDisqualifying(false);
@@ -630,7 +639,26 @@ const EventModal: React.FC = () => {
     }
 
     setIsLoading(true);
-    return connection.subscribeToEvent(
+    loadTimingRef.current = {
+      eventId,
+      startedAt: performance.now(),
+      displayed: false,
+      fresh: false,
+    };
+    for (const name of [
+      "event:open",
+      "event:first-content",
+      "event:first-fresh-content",
+    ]) {
+      performance.clearMarks(name);
+      performance.clearMeasures(name);
+    }
+    performance.mark("event:open");
+    const unsubscribeFreshness = connection.subscribeToEventFreshness(
+      eventId,
+      setIsEventFresh,
+    );
+    const unsubscribeEvent = connection.subscribeToEvent(
       eventId,
       (nextEvent) => {
         setEventRecord(nextEvent);
@@ -638,7 +666,36 @@ const EventModal: React.FC = () => {
       },
       () => setIsLoading(false),
     );
+    return () => {
+      unsubscribeEvent();
+      unsubscribeFreshness();
+    };
   }, [modalState.eventId, modalState.isOpen]);
+
+  useLayoutEffect(() => {
+    const timing = loadTimingRef.current;
+    if (
+      !modalState.isOpen ||
+      !timing ||
+      eventRecord?.eventId !== timing.eventId
+    )
+      return;
+    const mark = (name: string) => {
+      performance.mark(name);
+      performance.measure(name, {
+        start: timing.startedAt,
+        end: performance.now(),
+      });
+    };
+    if (!timing.displayed) {
+      timing.displayed = true;
+      mark("event:first-content");
+    }
+    if (isEventFresh && !timing.fresh) {
+      timing.fresh = true;
+      mark("event:first-fresh-content");
+    }
+  }, [eventRecord, isEventFresh, modalState.isOpen]);
 
   useEffect(() => {
     return () => {
@@ -766,7 +823,11 @@ const EventModal: React.FC = () => {
     if (eventRecord.eventId !== modalState.eventId) {
       return;
     }
-    const autoRecoveryReason = getEventAutoRecoveryReason(eventRecord, nowMs);
+    const autoRecoveryReason = getEventAutoRecoveryReason(
+      eventRecord,
+      nowMs,
+      isEventFresh,
+    );
     if (!autoRecoveryReason) {
       if (eventAutoRecoveryTimeoutRef.current !== null) {
         window.clearTimeout(eventAutoRecoveryTimeoutRef.current);
@@ -836,6 +897,7 @@ const EventModal: React.FC = () => {
   }, [
     devStubRecord,
     eventRecord,
+    isEventFresh,
     modalState.eventId,
     modalState.isOpen,
     nowMs,

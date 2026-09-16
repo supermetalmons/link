@@ -1,18 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { eventSnapshotEtag } from "@mons/shared/events";
 
 import {
   EVENT_POLL_BACKOFF_MS,
   EVENT_POLL_INTERVAL_MS,
+  EVENT_SNAPSHOT_CACHE_CAPACITY,
+  EVENT_SNAPSHOT_CACHE_TTL_MS,
   EventPollingRegistry,
 } from "../src/connection/eventPollingRegistry.ts";
 import { createPollingAuthTokenProvider } from "../src/connection/pollingAuthTokenProvider.ts";
 
-const eventResponse = (revision = 1) => ({
+const eventResponse = (revision = 1, eventId = "event-1") => ({
   ok: true,
-  eventId: "event-1",
+  eventId,
   revision,
-  event: { eventId: "event-1", status: "scheduled", revision },
+  event: { eventId, status: "scheduled", revision },
   prizeSelections: { "profile-1": "1092" },
 });
 
@@ -23,11 +26,30 @@ const profileResponse = (revision = 1) => ({
   prizes: {},
 });
 
+const epoch = "12345678-1234-1234-1234-123456789abc";
+const nextEpoch = "87654321-1234-1234-1234-123456789abc";
+const bookmark = (revision, bookmarkEpoch = epoch) =>
+  `mons-d1-v1:${bookmarkEpoch}:bookmark-${revision}`;
+
+const seed = (revision = 1, eventId = "event-1", bookmarkEpoch = epoch) => ({
+  snapshot: eventResponse(revision, eventId),
+  etag: eventSnapshotEtag(eventId, revision),
+  bookmark: bookmark(revision, bookmarkEpoch),
+});
+
 const modified = (value, revision = 1) => ({
   kind: "modified",
   value,
-  etag: `etag-${revision}`,
-  bookmark: `bookmark-${revision}`,
+  etag: value.eventId
+    ? eventSnapshotEtag(value.eventId, value.revision)
+    : `etag-${revision}`,
+  bookmark: value.eventId ? bookmark(revision) : `bookmark-${revision}`,
+});
+
+const eventNotModified = (revision = 1) => ({
+  kind: "not-modified",
+  etag: eventSnapshotEtag("event-1", revision),
+  bookmark: bookmark(revision),
 });
 
 const notModified = (revision = 1) => ({
@@ -49,6 +71,7 @@ function harness({
   loadProfilePrizes = async () => modified(profileResponse()),
   onEventIdle = () => undefined,
 } = {}) {
+  let nowMs = 0;
   let nextTimerId = 1;
   let visible = true;
   let visibilityListener = () => undefined;
@@ -71,6 +94,7 @@ function harness({
     isVisible: () => visible,
     loadEvent,
     loadProfilePrizes,
+    now: () => nowMs,
     onEventIdle: (eventId) => {
       idleEventIds.push(eventId);
       onEventIdle(eventId);
@@ -85,6 +109,9 @@ function harness({
     registry,
     timers,
     idleEventIds,
+    advanceTime: (milliseconds) => {
+      nowMs += milliseconds;
+    },
     visibilityCounts: () => ({
       added: visibilityListenersAdded,
       removed: visibilityListenersRemoved,
@@ -103,6 +130,43 @@ function harness({
     },
   };
 }
+
+test("mutation guards follow only their event and are released when requests finish", async () => {
+  const { registry } = harness();
+  let isCurrent;
+  await registry.withEventMutation("event-1", async (current) => {
+    isCurrent = current;
+    registry.invalidateEvent("event-2");
+    assert.equal(current(), true);
+  });
+  registry.invalidateEvent("event-1");
+  assert.equal(isCurrent(), true);
+  await assert.rejects(
+    registry.withEventMutation("event-1", async (current) => {
+      isCurrent = current;
+      throw new Error("mutation-failed");
+    }),
+    /mutation-failed/,
+  );
+  registry.invalidateEvent("event-1");
+  assert.equal(isCurrent(), true);
+});
+
+test("reset and an old completion cannot remove a new mutation guard", async () => {
+  const { registry } = harness();
+  const pending = deferred();
+  const old = registry.withEventMutation("event-1", async (current) => {
+    await pending.promise;
+    assert.equal(current(), false);
+  });
+  registry.reset();
+  await registry.withEventMutation("event-1", async (current) => {
+    pending.resolve();
+    await old;
+    registry.invalidateEvent("event-1");
+    assert.equal(current(), false);
+  });
+});
 
 test("polling authentication binds lazily and stops after cancellation", async () => {
   const authentication = deferred();
@@ -177,7 +241,7 @@ test("polling authentication reuses one current-user-bound provider", async () =
 
 test("shares one event poll across event and selection subscribers", async () => {
   const loads = [];
-  const responses = [modified(eventResponse(1), 1), notModified(2)];
+  const responses = [modified(eventResponse(1), 1), eventNotModified(1)];
   const polling = harness({
     loadEvent: async (eventId, options) => {
       loads.push({ eventId, options });
@@ -211,8 +275,8 @@ test("shares one event poll across event and selection subscribers", async () =>
   assert.equal(polling.timers.size, 1);
   await polling.runNext();
   assert.equal(loads.length, 2);
-  assert.equal(loads[1].options.etag, "etag-1");
-  assert.equal(loads[1].options.bookmark, "bookmark-1");
+  assert.equal(loads[1].options.etag, eventSnapshotEtag("event-1", 1));
+  assert.equal(loads[1].options.bookmark, bookmark(1));
   assert.equal(events.length, 1);
   assert.equal(selections.length, 1);
 
@@ -500,8 +564,16 @@ test("reset preserves mounted subscribers and starts fresh reads", async () => {
   assert.equal(eventLoads[1].bookmark, null);
   assert.equal(profileLoads[1].etag, null);
   assert.equal(profileLoads[1].bookmark, null);
-  assert.equal(events.length, 2);
-  assert.equal(prizes.length, 2);
+  assert.deepEqual(events, [
+    eventResponse(1).event,
+    null,
+    eventResponse(2).event,
+  ]);
+  assert.deepEqual(prizes, [
+    profileResponse(1),
+    profileResponse(0),
+    profileResponse(2),
+  ]);
 });
 
 test("aborts while hidden and resumes immediately", async () => {
@@ -600,4 +672,387 @@ test("notifies idle once and fences a stale entry lifecycle", async () => {
   assert.deepEqual(freshUpdates, [eventResponse(2).event]);
   unsubscribeFresh();
   assert.deepEqual(polling.idleEventIds, ["event-1", "event-1"]);
+});
+
+test("reopens retained snapshots synchronously and revalidates before marking them fresh", async () => {
+  const loads = [];
+  const polling = harness({
+    loadEvent: async (_eventId, options) => {
+      loads.push(options);
+      return loads.length === 1
+        ? modified(eventResponse(1))
+        : eventNotModified(1);
+    },
+  });
+  const freshness = [];
+  const unsubscribeFreshness = polling.registry.subscribeToEventFreshness(
+    "event-1",
+    (value) => freshness.push(value),
+  );
+  const first = polling.registry.subscribeToEvent("event-1", () => undefined);
+  await polling.runNext();
+  first();
+  assert.deepEqual(freshness, [false, true, false]);
+  assert.equal(polling.timers.size, 0);
+  assert.deepEqual(polling.visibilityCounts(), { added: 1, removed: 1 });
+
+  const updates = [];
+  const second = polling.registry.subscribeToEvent("event-1", (value) =>
+    updates.push(value),
+  );
+  assert.deepEqual(updates, [eventResponse(1).event]);
+  assert.equal(loads.length, 1);
+  assert.equal([...polling.timers.values()][0].delayMs, 0);
+  await polling.runNext();
+  assert.equal(loads[1].etag, eventSnapshotEtag("event-1", 1));
+  assert.equal(loads[1].bookmark, bookmark(1));
+  assert.deepEqual(freshness, [false, true, false, true]);
+  assert.equal(updates.length, 1);
+  second();
+  unsubscribeFreshness();
+});
+
+test("retains at most eight inactive snapshots using close and adoption recency", () => {
+  const polling = harness();
+  for (let index = 1; index <= EVENT_SNAPSHOT_CACHE_CAPACITY; index += 1) {
+    polling.registry.adoptEventSnapshot(
+      `event-${index}`,
+      seed(1, `event-${index}`),
+    );
+  }
+  const touch = polling.registry.subscribeToEvent("event-1", () => undefined);
+  touch();
+  polling.registry.adoptEventSnapshot("event-9", seed(1, "event-9"));
+  const retained = [];
+  const evicted = [];
+  const closeRetained = polling.registry.subscribeToEvent("event-1", (value) =>
+    retained.push(value),
+  );
+  const closeEvicted = polling.registry.subscribeToEvent("event-2", (value) =>
+    evicted.push(value),
+  );
+  assert.equal(retained.length, 1);
+  assert.equal(evicted.length, 0);
+  closeRetained();
+  closeEvicted();
+});
+
+test("expires inactive snapshots after five minutes without expiring active subscriptions", async () => {
+  const polling = harness();
+  polling.registry.adoptEventSnapshot("event-1", seed());
+  const active = polling.registry.subscribeToEvent("event-1", () => undefined);
+  polling.registry.adoptEventSnapshot("event-2", seed(1, "event-2"));
+  polling.advanceTime(EVENT_SNAPSHOT_CACHE_TTL_MS);
+  const expired = [];
+  const stillActive = [];
+  const closeExpired = polling.registry.subscribeToEvent("event-2", (value) =>
+    expired.push(value),
+  );
+  const closeActive = polling.registry.subscribeToEvent("event-1", (value) =>
+    stillActive.push(value),
+  );
+  assert.deepEqual(expired, []);
+  assert.deepEqual(stillActive, [eventResponse().event]);
+  closeExpired();
+  closeActive();
+  active();
+});
+
+test("fresh seeds render before subscription and skip only the redundant initial read", async () => {
+  let calls = 0;
+  const polling = harness({
+    loadEvent: async () => {
+      calls += 1;
+      return eventNotModified(3);
+    },
+  });
+  assert.equal(polling.registry.adoptEventSnapshot("event-1", seed(3)), true);
+  assert.equal(polling.timers.size, 0);
+  const freshness = [];
+  polling.registry.subscribeToEventFreshness("event-1", (value) =>
+    freshness.push(value),
+  );
+  const updates = [];
+  const close = polling.registry.subscribeToEvent("event-1", (value) =>
+    updates.push(value),
+  );
+  assert.deepEqual(updates, [eventResponse(3).event]);
+  assert.deepEqual(freshness, [false, true]);
+  assert.equal(calls, 0);
+  assert.equal([...polling.timers.values()][0].delayMs, EVENT_POLL_INTERVAL_MS);
+  await polling.runNext();
+  assert.equal(calls, 1);
+  close();
+
+  polling.registry.adoptEventSnapshot("event-2", seed(1, "event-2"));
+  polling.advanceTime(EVENT_POLL_INTERVAL_MS);
+  const staleFreshness = [];
+  polling.registry.subscribeToEventFreshness("event-2", (value) =>
+    staleFreshness.push(value),
+  );
+  const closeStale = polling.registry.subscribeToEvent(
+    "event-2",
+    () => undefined,
+  );
+  assert.equal([...polling.timers.values()][0].delayMs, 0);
+  assert.deepEqual(staleFreshness, [false]);
+  closeStale();
+});
+
+for (const staleResult of [
+  modified(eventResponse(2), 2),
+  eventNotModified(1),
+]) {
+  test(`adoption fences an older in-flight ${staleResult.kind} response and its validators`, async () => {
+    const oldRead = deferred();
+    const loads = [];
+    const polling = harness({
+      loadEvent: async (_eventId, options) => {
+        loads.push(options);
+        if (loads.length === 1) return modified(eventResponse(1));
+        if (loads.length === 2) return oldRead.promise;
+        return eventNotModified(3);
+      },
+    });
+    const updates = [];
+    const close = polling.registry.subscribeToEvent("event-1", (value) =>
+      updates.push(value),
+    );
+    await polling.runNext();
+    await polling.runNext();
+    polling.registry.adoptEventSnapshot("event-1", seed(3));
+    assert.equal(loads[1].signal.aborted, true);
+    assert.deepEqual(updates, [eventResponse(1).event, eventResponse(3).event]);
+    oldRead.resolve(staleResult);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(
+      [...polling.timers.values()][0].delayMs,
+      EVENT_POLL_INTERVAL_MS,
+    );
+    await polling.runNext();
+    assert.equal(loads[2].etag, eventSnapshotEtag("event-1", 3));
+    assert.equal(loads[2].bookmark, bookmark(3));
+    assert.equal(updates.length, 2);
+    close();
+  });
+}
+
+test("snapshot revisions stay monotonic within an epoch and retired epochs cannot return", () => {
+  const polling = harness();
+  const generation = polling.registry.getGeneration();
+  polling.registry.adoptEventSnapshot("event-1", seed(7), generation);
+  assert.equal(
+    polling.registry.adoptEventSnapshot("event-1", seed(6), generation),
+    true,
+  );
+  const updates = [];
+  const close = polling.registry.subscribeToEvent("event-1", (value) =>
+    updates.push(value),
+  );
+  assert.deepEqual(updates, [eventResponse(7).event]);
+  assert.equal(polling.registry.adoptEventSnapshot("event-1", seed(6)), true);
+  assert.equal(
+    polling.registry.adoptEventSnapshot(
+      "event-1",
+      seed(1, "event-1", nextEpoch),
+    ),
+    true,
+  );
+  assert.equal(polling.registry.adoptEventSnapshot("event-1", seed(8)), true);
+  assert.deepEqual(updates, [eventResponse(7).event, eventResponse(1).event]);
+  close();
+  polling.registry.adoptEventSnapshot("event-1", seed(9));
+  const reopened = [];
+  polling.registry.subscribeToEvent("event-1", (value) =>
+    reopened.push(value),
+  )();
+  assert.deepEqual(reopened, [eventResponse(1).event]);
+});
+
+test("authoritative missing responses clear displayed data and are never retained", async () => {
+  const absent = {
+    ok: true,
+    eventId: "event-1",
+    revision: 0,
+    event: null,
+    prizeSelections: {},
+  };
+  const polling = harness({ loadEvent: async () => modified(absent, 0) });
+  polling.registry.adoptEventSnapshot("event-1", seed(4));
+  const events = [];
+  const selections = [];
+  const closeEvent = polling.registry.subscribeToEvent("event-1", (value) =>
+    events.push(value),
+  );
+  const closeSelections = polling.registry.subscribeToEventPrizeSelections(
+    "event-1",
+    (value) => selections.push(value),
+  );
+  await polling.runNext();
+  assert.deepEqual(events, [eventResponse(4).event, null]);
+  assert.deepEqual(selections, [eventResponse(4).prizeSelections, {}]);
+  closeEvent();
+  closeSelections();
+  const reopened = [];
+  polling.registry.subscribeToEvent("event-1", (value) =>
+    reopened.push(value),
+  )();
+  assert.deepEqual(reopened, []);
+});
+
+test("invalidation evicts inactive snapshots and marks active snapshots stale", () => {
+  const polling = harness();
+  polling.registry.adoptEventSnapshot("event-1", seed());
+  polling.registry.invalidateEvent("event-1");
+  const updates = [];
+  const close = polling.registry.subscribeToEvent("event-1", (value) =>
+    updates.push(value),
+  );
+  assert.deepEqual(updates, []);
+  const freshness = [];
+  polling.registry.subscribeToEventFreshness("event-1", (value) =>
+    freshness.push(value),
+  );
+  polling.registry.adoptEventSnapshot("event-1", seed());
+  polling.registry.invalidateEvent("event-1");
+  assert.deepEqual(freshness, [false, true, false]);
+  close();
+  const reopened = [];
+  polling.registry.subscribeToEvent("event-1", (value) =>
+    reopened.push(value),
+  )();
+  assert.deepEqual(reopened, []);
+});
+
+test("reset clears cached and displayed snapshots and rejects previous-generation work", async () => {
+  const oldRead = deferred();
+  const polling = harness({ loadEvent: async () => oldRead.promise });
+  const previousGeneration = polling.registry.getGeneration();
+  polling.registry.adoptEventSnapshot("event-1", seed());
+  polling.registry.adoptEventSnapshot("event-2", seed(1, "event-2"));
+  const updates = [];
+  const selections = [];
+  polling.registry.subscribeToEvent("event-1", (value) => updates.push(value));
+  polling.registry.subscribeToEventPrizeSelections("event-1", (value) =>
+    selections.push(value),
+  );
+  const freshness = [];
+  polling.registry.subscribeToEventFreshness("event-1", (value) =>
+    freshness.push(value),
+  );
+  await polling.runNext();
+  polling.registry.reset();
+  assert.deepEqual(updates, [eventResponse().event, null]);
+  assert.deepEqual(selections, [eventResponse().prizeSelections, {}]);
+  assert.deepEqual(freshness, [true, false]);
+  assert.equal(
+    polling.registry.adoptEventSnapshot("event-1", seed(9), previousGeneration),
+    false,
+  );
+  oldRead.resolve(modified(eventResponse(8), 8));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(updates, [eventResponse().event, null]);
+  const inactive = [];
+  polling.registry.subscribeToEvent("event-2", (value) =>
+    inactive.push(value),
+  )();
+  assert.deepEqual(inactive, []);
+});
+
+test("rejects invalid or mismatched seeds without disturbing the current snapshot", () => {
+  const polling = harness();
+  polling.registry.adoptEventSnapshot("event-1", seed(3));
+  for (const candidate of [
+    seed(4, "event-2"),
+    { ...seed(4), etag: "bad-etag" },
+    { ...seed(4), bookmark: "bad-bookmark" },
+  ]) {
+    assert.equal(
+      polling.registry.adoptEventSnapshot("event-1", candidate),
+      false,
+    );
+  }
+  const updates = [];
+  polling.registry.subscribeToEvent("event-1", (value) =>
+    updates.push(value),
+  )();
+  assert.deepEqual(updates, [eventResponse(3).event]);
+});
+
+test("an epoch-changing 304 forces a full read before cached data becomes fresh", async () => {
+  const loads = [];
+  const polling = harness({
+    loadEvent: async (_eventId, options) => {
+      loads.push(options);
+      return loads.length === 1
+        ? { ...eventNotModified(4), bookmark: bookmark(4, nextEpoch) }
+        : { ...modified(eventResponse(1)), bookmark: bookmark(1, nextEpoch) };
+    },
+  });
+  polling.registry.adoptEventSnapshot("event-1", seed(4));
+  polling.advanceTime(EVENT_POLL_INTERVAL_MS);
+  const updates = [];
+  const freshness = [];
+  polling.registry.subscribeToEventFreshness("event-1", (value) =>
+    freshness.push(value),
+  );
+  polling.registry.subscribeToEvent("event-1", (value) => updates.push(value));
+  await polling.runNext();
+  assert.deepEqual(freshness, [false]);
+  assert.equal([...polling.timers.values()][0].delayMs, 0);
+  await polling.runNext();
+  assert.equal(loads[1].etag, null);
+  assert.equal(loads[1].bookmark, null);
+  assert.deepEqual(updates, [eventResponse(4).event, eventResponse(1).event]);
+  assert.deepEqual(freshness, [false, true]);
+});
+
+test("opening and closing without validation cannot extend the snapshot age", async () => {
+  const polling = harness();
+  let close;
+  close = polling.registry.subscribeToEvent("event-1", () => close());
+  await polling.runNext();
+  polling.advanceTime(EVENT_SNAPSHOT_CACHE_TTL_MS - 1);
+  const cached = [];
+  polling.registry.subscribeToEvent("event-1", (value) => cached.push(value))();
+  assert.deepEqual(cached, [eventResponse().event]);
+  polling.advanceTime(1);
+  assert.equal(polling.registry.getEventSnapshot("event-1"), null);
+  const expired = [];
+  polling.registry.subscribeToEvent("event-1", (value) =>
+    expired.push(value),
+  )();
+  assert.deepEqual(expired, []);
+});
+
+test("a reentrant adoption cannot deliver the older outer snapshot to later subscribers", async () => {
+  const polling = harness();
+  polling.registry.subscribeToEvent("event-1", (value) => {
+    if (value?.revision === 1)
+      polling.registry.adoptEventSnapshot("event-1", seed(2));
+  });
+  const laterUpdates = [];
+  polling.registry.subscribeToEvent("event-1", (value) =>
+    laterUpdates.push(value),
+  );
+  await polling.runNext();
+  assert.deepEqual(laterUpdates, [eventResponse(2).event]);
+  assert.deepEqual(
+    polling.registry.getEventSnapshot("event-1"),
+    eventResponse(2),
+  );
+});
+
+test("a reentrant reset prevents later subscribers from receiving the previous owner's snapshot", async () => {
+  const polling = harness();
+  polling.registry.subscribeToEvent("event-1", (value) => {
+    if (value) polling.registry.reset();
+  });
+  const laterUpdates = [];
+  polling.registry.subscribeToEvent("event-1", (value) =>
+    laterUpdates.push(value),
+  );
+  await polling.runNext();
+  assert.deepEqual(laterUpdates, [null]);
+  assert.equal(polling.registry.getEventSnapshot("event-1"), null);
 });

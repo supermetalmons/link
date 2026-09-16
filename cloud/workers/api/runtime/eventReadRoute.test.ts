@@ -15,6 +15,8 @@ import {
   scopeEventBookmark,
 } from "../src/eventBookmarks.ts";
 import { handleEventRoute } from "../src/eventRoute.ts";
+import { readPrimaryEventSnapshotSeed } from "../src/eventSnapshotResponse.ts";
+import { isEventSnapshotSeed } from "@mons/shared/events";
 import {
   acquireEventWriteAdmission,
   assertEventWritesAllowed,
@@ -186,6 +188,23 @@ describe("event read route", () => {
     } finally {
       await releaseEventWriteAdmission(testEnv.EVENT_DB, admission);
     }
+  });
+
+  it("produces primary snapshot seeds that revalidate through the GET route", async () => {
+    const constraints: Array<string | undefined> = [];
+    const seed = await readPrimaryEventSnapshotSeed(
+      { ...testEnv, EVENT_DB: observedEventDatabase(constraints) },
+      eventId,
+    );
+    expect(constraints).toEqual(["first-primary"]);
+    expect(isEventSnapshotSeed(seed)).toBe(true);
+    expect(seed.snapshot.prizeSelections).toEqual({ [profileId]: "1092" });
+    const response = await readRoute(`/events/snapshot?eventId=${eventId}`, {
+      "If-None-Match": seed.etag,
+      "X-D1-Bookmark": seed.bookmark,
+    });
+    expect(response.status).toBe(304);
+    expect(response.headers.get("ETag")).toBe(seed.etag);
   });
 
   it("serves D1 snapshots with conditional headers", async () => {
