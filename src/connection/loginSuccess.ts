@@ -1,10 +1,7 @@
-import { storage } from "../utils/storage";
-import {
-  setupLoggedInPlayerProfile,
-  updateEmojiAndAuraIfNeeded,
-} from "../game/board";
+import { updateEmojiAndAuraIfNeeded } from "../game/board";
 import { connection } from "./connection";
-import { updateProfileDisplayName } from "../ui/identity/profileUiPort";
+import { applyVerifiedProfile } from "./verifiedProfile";
+import { invalidateInitialIdentity } from "../services/initialIdentityBootstrap";
 import {
   handleFreshlySignedInProfileInGameIfNeeded,
   isWatchOnly,
@@ -12,21 +9,17 @@ import {
 import { PlayerProfile } from "../connection/connectionModels";
 import type { AuthProfileResponse } from "@mons/shared/auth";
 import { isMiningSnapshot } from "@mons/shared/mining";
-import { syncTutorialProgress } from "../content/problems";
 import {
   clearPendingLogoutWipeAfterSignIn,
   enforcePendingLogoutWipeIfNeeded,
   notifyOtherTabsAboutSignIn,
 } from "../session/logoutOrchestrator";
-import {
-  flushPendingOwnProfileMiningState,
-  syncOwnProfileMiningState,
-} from "../services/ownProfileMiningHydration";
 
 export function handleLoginSuccess(res: AuthProfileResponse): boolean {
   if (!connection.isCurrentAuthUser(res.uid)) {
     return false;
   }
+  invalidateInitialIdentity();
   enforcePendingLogoutWipeIfNeeded();
   const { emoji, profileId } = res;
   const username = res.username ?? "";
@@ -68,48 +61,13 @@ export function handleLoginSuccess(res: AuthProfileResponse): boolean {
   if (typeof res.profileMons === "string")
     profile.profileMons = res.profileMons;
 
-  syncTutorialProgress(
-    Array.isArray(res.completedProblems)
-      ? res.completedProblems.filter(
-          (value): value is string => typeof value === "string",
-        )
-      : [],
-    res.tutorialCompleted === true,
-  );
-  const resolvedLoginUid = connection.getSameProfilePlayerUid() ?? res.uid;
-  setupLoggedInPlayerProfile(profile, resolvedLoginUid);
-
-  storage.setUsername(username);
-  storage.setProfileId(profileId);
-  storage.setPlayerEmojiId(emoji.toString());
-  storage.setPlayerEmojiAura(res.aura ?? "");
-  storage.setLoginId(res.uid);
-  storage.setEthAddress(resolvedEth ?? "");
-  storage.setSolAddress(resolvedSol ?? "");
-  syncOwnProfileMiningState(profile);
-  flushPendingOwnProfileMiningState();
-  updateProfileDisplayName(username, resolvedEth ?? null, resolvedSol ?? null);
-
-  storage.setPlayerRating(typeof res.rating === "number" ? res.rating : null);
-  storage.setPlayerNonce(typeof res.nonce === "number" ? res.nonce : null);
-  storage.setPlayerTotalManaPoints(
-    typeof res.totalManaPoints === "number" ? res.totalManaPoints : null,
-  );
-  storage.setCardBackgroundId(
-    typeof res.cardBackgroundId === "number" ? res.cardBackgroundId : null,
-  );
-  storage.setCardStickers(
-    typeof res.cardStickers === "string" ? res.cardStickers : null,
-  );
-  storage.setCardSubtitleId(
-    typeof res.cardSubtitleId === "number" ? res.cardSubtitleId : null,
-  );
-  storage.setProfileCounter(
-    typeof res.profileCounter === "string" ? res.profileCounter : null,
-  );
-  storage.setProfileMons(
-    typeof res.profileMons === "string" ? res.profileMons : null,
-  );
+  profile.completedProblemIds = Array.isArray(res.completedProblems)
+    ? res.completedProblems.filter(
+        (value): value is string => typeof value === "string",
+      )
+    : [];
+  profile.isTutorialCompleted = res.tutorialCompleted === true;
+  applyVerifiedProfile(profile, res.uid);
 
   notifyOtherTabsAboutSignIn(profileId, res.uid);
   clearPendingLogoutWipeAfterSignIn();

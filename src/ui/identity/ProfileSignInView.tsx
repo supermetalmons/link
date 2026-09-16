@@ -18,6 +18,7 @@ import {
 import { setAuthStatusGlobally } from "../../connection/authentication";
 import type { AuthState } from "../../connection/authModels";
 import { handleLoginSuccess } from "../../connection/loginSuccess";
+import { markAuthNameCommitted } from "../../session/authRestoreTiming";
 import {
   clearConsumedXRedirectResult,
   isXRedirectStartedError,
@@ -272,6 +273,7 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
     "click" | "close" | null
   >(null);
   const popoverRef = useRef<HTMLDivElement>(null);
+  const signInButtonRef = useRef<HTMLButtonElement>(null);
   const notificationTimeoutRef = useRef<number | null>(null);
   const pendingXSignInStaleTimeoutRef = useRef<number | null>(null);
   const xRedirectNavigationFallbackTimeoutRef = useRef<number | null>(null);
@@ -337,6 +339,22 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
     isPendingXSignInRedirect && !isPendingXSignInRedirectStale;
   const shouldLiftAboveEventModal = isOpen && popupMode === "event";
   const isEventSignInPopup = isOpen && popupMode === "event";
+
+  useLayoutEffect(() => {
+    if (authStatus !== "authenticated" || isEventSignInPopup) return;
+    const uid = storage.getLoginId("");
+    const profileId = authState.profileId;
+    const expectedName = profileDisplayName || "Connected";
+    return markAuthNameCommitted(() => {
+      const button = signInButtonRef.current;
+      return (
+        connection.isCurrentAuthUser(uid) &&
+        storage.getProfileId("") === profileId &&
+        button?.isConnected === true &&
+        button.textContent === expectedName
+      );
+    });
+  }, [authStatus, authState.profileId, profileDisplayName, isEventSignInPopup]);
 
   useEffect(() => {
     return subscribeToEventModalState((nextState) => {
@@ -1115,6 +1133,7 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
     >
       {!isEventSignInPopup && (
         <SignInButton
+          ref={signInButtonRef}
           disabled={isPendingXSignInRedirectBlockingUi}
           aria-busy={isPendingXSignInRedirectBlockingUi}
           onClick={!isMobile ? handleSignInClick : undefined}

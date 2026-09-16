@@ -9,6 +9,8 @@ const {
   isSessionBootstrapFailure,
   isSessionBootstrap,
   isSessionBootstrapResponse,
+  isSessionIdentityBootstrap,
+  SESSION_IDENTITY_BOOTSTRAP_MAX_RESPONSE_BYTES,
 } = require("../runtime/shared/session-bootstrap");
 const {
   GAME_BOOTSTRAP_MAX_RESPONSE_BYTES,
@@ -99,6 +101,47 @@ test("composed session responses keep legacy token validation strict", () => {
     GAME_BOOTSTRAP_MAX_RESPONSE_BYTES + 16_384,
   );
   assert.equal(SESSION_BOOTSTRAP_REQUEST_TIMEOUT_MS, 25_000);
+});
+
+test("identity seeds compose independently while preserving exact token and public profile schemas", () => {
+  assert.equal(SESSION_IDENTITY_BOOTSTRAP_MAX_RESPONSE_BYTES, 65_536);
+  for (const identityBootstrap of [
+    { ok: true, profile: null },
+    { ok: false, status: 409 },
+    { ok: false, status: 503 },
+  ]) {
+    assert.equal(isSessionIdentityBootstrap(identityBootstrap), true);
+    assert.equal(
+      isSessionTokenResponse({ ...session, identityBootstrap }),
+      false,
+    );
+    assert.equal(
+      isSessionBootstrapResponse({
+        ...session,
+        gameBootstrap: bootstrap(),
+        identityBootstrap,
+      }),
+      true,
+    );
+  }
+  for (const identityBootstrap of [
+    { ok: true },
+    { ok: true, profile: { id: "incomplete" } },
+    { ok: true, profile: null, appleSub: "private" },
+    { ok: false, status: 401 },
+    { ok: false, status: 503, message: "private" },
+    undefined,
+  ]) {
+    assert.equal(isSessionIdentityBootstrap(identityBootstrap), false);
+    assert.equal(
+      isSessionBootstrapResponse({
+        ...session,
+        gameBootstrap: bootstrap(),
+        identityBootstrap,
+      }),
+      false,
+    );
+  }
 });
 
 test("bootstrap validation rejects foreign data and an incorrect requested selection", () => {

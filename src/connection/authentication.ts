@@ -4,6 +4,13 @@ import { normalizeProfileEmojiId } from "@mons/shared/profiles";
 import type { PlayerProfile } from "./connectionModels";
 import { connection } from "./connection";
 import { handleLoginSuccess } from "./loginSuccess";
+import { applyVerifiedProfile } from "./verifiedProfile";
+import { AuthApiError } from "../services/authApi";
+import {
+  consumeInitialIdentity,
+  readInitialIdentity,
+  repairInitialIdentity,
+} from "../services/initialIdentityBootstrap";
 import {
   clearConsumedAppleRedirectResult,
   clearAppleSignInTransientState,
@@ -24,13 +31,11 @@ import {
   setSignInInlineAuthError,
   updateProfileDisplayName,
 } from "../ui/identity/profileUiPort";
-import {
-  flushPendingOwnProfileMiningState,
-  syncOwnProfileMiningState,
-} from "../services/ownProfileMiningHydration";
+import { flushPendingOwnProfileMiningState } from "../services/ownProfileMiningHydration";
 import type { AuthState, AuthStatus } from "./authModels";
 import { ProfileApiError } from "../services/profileApi";
 import { sessionAuth } from "../session/sessionAuth";
+import { markAuthIdentityReady } from "../session/authRestoreTiming";
 
 export type { AuthState, AuthStatus } from "./authModels";
 
@@ -387,17 +392,6 @@ export function useAuthStatus() {
         return;
       }
 
-      const storedLoginId = storage.getLoginId("");
-      const storedEthAddress = storage.getEthAddress("");
-      const storedSolAddress = storage.getSolAddress("");
-      const storedUsername = storage.getUsername("");
-      const profileId = storage.getProfileId("");
-      if (profileId === "" || storedLoginId !== uid) {
-        setAuthStatus("unauthenticated");
-        scheduleDidAttemptAuthentication();
-        return;
-      }
-
       const sessionGuard = connection.createSessionGuard();
       const retryCurrentUser = () => {
         if (
@@ -411,6 +405,63 @@ export function useAuthStatus() {
       void (async () => {
         const isStillValid = () =>
           !isCancelled && sessionGuard() && isCurrentAuthChange();
+        try {
+          let initialIdentity = await readInitialIdentity();
+          if (!isStillValid() || initialIdentity.user.uid !== uid) return;
+          let identity = initialIdentity.read();
+          if (!identity.ok && identity.status === 409) {
+            initialIdentity = await repairInitialIdentity(initialIdentity, () =>
+              connection.syncProfile(),
+            );
+            if (!isStillValid() || initialIdentity.user.uid !== uid) return;
+            identity = initialIdentity.read();
+          }
+          if (identity.ok) {
+            if (identity.profile) {
+              applyVerifiedProfile(identity.profile, uid);
+              setAuthStatus("authenticated");
+            } else {
+              setAuthStatus("unauthenticated");
+            }
+            consumeInitialIdentity(initialIdentity);
+            scheduleDidAttemptAuthentication();
+            return;
+          }
+          if (identity.status !== "legacy") {
+            throw new AuthApiError("unavailable", "Profile is unavailable.");
+          }
+        } catch (error) {
+          if (!isStillValid()) return;
+          if (
+            error instanceof AuthApiError &&
+            error.message === "authentication-changed"
+          ) {
+            scheduleRetry(retryCurrentUser);
+            return;
+          }
+          setAuthStatus("unauthenticated");
+          scheduleDidAttemptAuthentication();
+          if (
+            !(error instanceof AuthApiError) ||
+            ["unavailable", "resource-exhausted", "aborted"].includes(
+              error.code,
+            )
+          ) {
+            scheduleRetry(retryCurrentUser);
+          }
+          return;
+        }
+
+        const storedLoginId = storage.getLoginId("");
+        const storedEthAddress = storage.getEthAddress("");
+        const storedSolAddress = storage.getSolAddress("");
+        const storedUsername = storage.getUsername("");
+        const profileId = storage.getProfileId("");
+        if (profileId === "" || storedLoginId !== uid) {
+          setAuthStatus("unauthenticated");
+          scheduleDidAttemptAuthentication();
+          return;
+        }
         let resolvedProfileId = profileId;
         let resolvedUsername = storedUsername;
         let resolvedEthAddress = storedEthAddress;
@@ -427,6 +478,7 @@ export function useAuthStatus() {
         let isIdentityVerified = false;
         let shouldRetry = false;
         let didLoadAuthoritativeProfile = false;
+        let loadedProfile: PlayerProfile | null = null;
         const resetResolvedIdentityToFallback = (
           nextProfileId: string,
         ): void => {
@@ -468,18 +520,8 @@ export function useAuthStatus() {
               : resolvedEmoji;
           resolvedEmoji = authoritativeEmoji;
           resolvedAura = authoritativeProfile.aura ?? "";
-          storage.setProfileId(resolvedProfileId);
-          storage.setUsername(resolvedUsername);
-          storage.setEthAddress(resolvedEthAddress);
-          storage.setSolAddress(resolvedSolAddress);
-          storage.setPlayerEmojiId(resolvedEmoji.toString());
-          storage.setPlayerEmojiAura(resolvedAura);
           didLoadAuthoritativeProfile = true;
-          if (authoritativeProfile?.mining) {
-            syncOwnProfileMiningState(authoritativeProfile);
-          } else {
-            flushPendingOwnProfileMiningState();
-          }
+          loadedProfile = authoritativeProfile;
           return true;
         };
         const loadAuthoritativeProfile =
@@ -579,13 +621,18 @@ export function useAuthStatus() {
           completedProblemIds: undefined,
           isTutorialCompleted: undefined,
         };
-        updateProfileDisplayName(
-          resolvedUsername,
-          resolvedEthAddress,
-          resolvedSolAddress,
-        );
-        const resolvedLoginUid = connection.getSameProfilePlayerUid() ?? uid;
-        setupLoggedInPlayerProfile(profile, resolvedLoginUid);
+        markAuthIdentityReady();
+        if (loadedProfile) {
+          applyVerifiedProfile(loadedProfile, uid);
+        } else {
+          updateProfileDisplayName(
+            resolvedUsername,
+            resolvedEthAddress,
+            resolvedSolAddress,
+          );
+          const resolvedLoginUid = connection.getSameProfilePlayerUid() ?? uid;
+          setupLoggedInPlayerProfile(profile, resolvedLoginUid);
+        }
         setAuthStatus("authenticated");
         scheduleDidAttemptAuthentication();
       })().finally(() => {

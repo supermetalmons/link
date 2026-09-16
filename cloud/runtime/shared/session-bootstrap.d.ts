@@ -1,6 +1,15 @@
 import type { ReadGameBootstrapResponse } from "./game-bootstrap";
 import type { SessionTokenResponse } from "./session-auth";
 import type { EventSnapshotSeed } from "./events";
+import type { ProfileLookupResponse } from "./profiles";
+
+export type SessionIdentityBootstrap =
+  ProfileLookupResponse | { ok: false; status: 409 | 503 };
+
+export const SESSION_IDENTITY_BOOTSTRAP_MAX_RESPONSE_BYTES: 65536;
+export function isSessionIdentityBootstrap(
+  value: unknown,
+): value is SessionIdentityBootstrap;
 
 export type SessionBootstrapTarget = {
   inviteId: string;
@@ -22,6 +31,7 @@ export type SessionBootstrap = SessionBootstrapTarget & {
 
 export type SessionBootstrapResponse = SessionTokenResponse & {
   gameBootstrap: SessionBootstrap;
+  identityBootstrap?: SessionIdentityBootstrap;
 };
 export type SessionEventBootstrapTarget = { eventId: string };
 export type SessionEventBootstrap = SessionEventBootstrapTarget & {
@@ -29,6 +39,7 @@ export type SessionEventBootstrap = SessionEventBootstrapTarget & {
 };
 export type SessionEventBootstrapResponse = SessionTokenResponse & {
   eventBootstrap: SessionEventBootstrap;
+  identityBootstrap?: SessionIdentityBootstrap;
 };
 
 export const SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES: number;

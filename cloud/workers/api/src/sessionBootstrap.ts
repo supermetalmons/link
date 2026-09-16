@@ -2,6 +2,9 @@ import {
   isSessionBootstrap,
   isSessionBootstrapTarget,
   isSessionEventBootstrapTarget,
+  isSessionIdentityBootstrap,
+  SESSION_IDENTITY_BOOTSTRAP_MAX_RESPONSE_BYTES,
+  type SessionIdentityBootstrap,
   type SessionBootstrap,
   type SessionBootstrapFailure,
   type SessionBootstrapTarget,
@@ -14,6 +17,8 @@ import {
   type SessionTokenResponse,
 } from "@mons/shared/session-auth";
 import { AuthApiFailure } from "./authErrors.ts";
+import type { ProfileLookupResponse } from "@mons/shared/profiles";
+import { readAuthIdentityProfile } from "./authProfileRepository.ts";
 import {
   GameBootstrapRateLimitFailure,
   readAuthenticatedGameBootstrap,
@@ -27,6 +32,104 @@ import {
 
 export const GAME_BOOTSTRAP_ENRICHMENT_TIMEOUT_MS = 10_000;
 type Timer = ReturnType<typeof setTimeout> | number;
+
+export type SessionIdentityBootstrapDependencies = {
+  readIdentity?: (uid: string) => Promise<ProfileLookupResponse>;
+  now?: () => number;
+  setTimer?: (callback: () => void, delayMs: number) => Timer;
+  clearTimer?: (timer: Timer) => void;
+};
+
+export function readSessionIdentityBootstrapRequested(
+  request: Request,
+): boolean {
+  const url = new URL(request.url);
+  if (!url.searchParams.has("bootstrapIdentity")) return false;
+  if (
+    (url.pathname !== SESSION_ANONYMOUS_PATH &&
+      url.pathname !== SESSION_REFRESH_PATH) ||
+    url.searchParams.getAll("bootstrapIdentity").length !== 1 ||
+    url.searchParams.get("bootstrapIdentity") !== "1" ||
+    [...url.searchParams.keys()].some(
+      (key) =>
+        ![
+          "bootstrapIdentity",
+          "bootstrapInviteId",
+          "bootstrapSelection",
+          "bootstrapEventId",
+        ].includes(key),
+    )
+  ) {
+    throw new AuthApiFailure(
+      400,
+      "invalid-argument",
+      "invalid-bootstrap-request",
+    );
+  }
+  return true;
+}
+
+export async function readSessionIdentityBootstrap(
+  request: Request,
+  uid: string,
+  env: Env,
+  dependencies: SessionIdentityBootstrapDependencies = {},
+): Promise<SessionIdentityBootstrap> {
+  const now = dependencies.now || Date.now;
+  const deadline = now() + GAME_BOOTSTRAP_ENRICHMENT_TIMEOUT_MS;
+  const unavailable = (): SessionIdentityBootstrap => ({
+    ok: false,
+    status: 503,
+  });
+  let resolveCancellation: (value: SessionIdentityBootstrap) => void = () =>
+    undefined;
+  let canceled = false;
+  const cancellation = new Promise<SessionIdentityBootstrap>((resolve) => {
+    resolveCancellation = resolve;
+  });
+  const cancel = () => {
+    canceled = true;
+    resolveCancellation(unavailable());
+  };
+  const timer = (dependencies.setTimer || setTimeout)(
+    cancel,
+    GAME_BOOTSTRAP_ENRICHMENT_TIMEOUT_MS,
+  );
+  request.signal.addEventListener("abort", cancel, { once: true });
+  try {
+    if (request.signal.aborted) return unavailable();
+    const result = await Promise.race([
+      (
+        dependencies.readIdentity ||
+        ((uid) => readAuthIdentityProfile(env.PROFILE_DB, uid))
+      )(uid),
+      cancellation,
+    ]);
+    if (
+      canceled ||
+      request.signal.aborted ||
+      now() >= deadline ||
+      !isSessionIdentityBootstrap(result) ||
+      new TextEncoder().encode(JSON.stringify(result)).byteLength >
+        SESSION_IDENTITY_BOOTSTRAP_MAX_RESPONSE_BYTES
+    ) {
+      return unavailable();
+    }
+    return result;
+  } catch (error) {
+    return !canceled &&
+      !request.signal.aborted &&
+      now() < deadline &&
+      error instanceof AuthApiFailure &&
+      error.status === 409 &&
+      error.message === "profile-repair-required"
+      ? { ok: false, status: 409 }
+      : unavailable();
+  } finally {
+    (dependencies.clearTimer || clearTimeout)(timer);
+    request.signal.removeEventListener("abort", cancel);
+  }
+}
 
 export type SessionBootstrapDependencies = GameBootstrapDependencies &
   EventSnapshotSeedDependencies & {
@@ -47,7 +150,9 @@ export function readSessionBootstrapTarget(
       (url.pathname !== SESSION_ANONYMOUS_PATH &&
         url.pathname !== SESSION_REFRESH_PATH) ||
       params.getAll("bootstrapEventId").length !== 1 ||
-      [...params.keys()].some((key) => key !== "bootstrapEventId") ||
+      [...params.keys()].some(
+        (key) => key !== "bootstrapEventId" && key !== "bootstrapIdentity",
+      ) ||
       !isSessionEventBootstrapTarget(target)
     )
       throw new AuthApiFailure(
@@ -69,7 +174,10 @@ export function readSessionBootstrapTarget(
     params.getAll("bootstrapInviteId").length !== 1 ||
     params.getAll("bootstrapSelection").length > 1 ||
     [...params.keys()].some(
-      (key) => key !== "bootstrapInviteId" && key !== "bootstrapSelection",
+      (key) =>
+        key !== "bootstrapInviteId" &&
+        key !== "bootstrapSelection" &&
+        key !== "bootstrapIdentity",
     ) ||
     !isSessionBootstrapTarget(target)
   )

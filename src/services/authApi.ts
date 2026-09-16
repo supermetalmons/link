@@ -17,6 +17,10 @@ import {
   type XRedirectStartRequest,
   type XRedirectStartResponse,
 } from "@mons/shared/x-redirect";
+import {
+  isProfileLookupResponse,
+  type ProfileLookupResponse,
+} from "@mons/shared/profiles";
 
 import {
   authenticatedJsonRequest,
@@ -109,6 +113,7 @@ async function authRequest<T>(
   tokenProvider: AuthTokenProvider,
   validate: (value: unknown) => value is T,
   timeoutMs = AUTH_API_TIMEOUT_MS,
+  maxResponseBytes = AUTH_API_MAX_RESPONSE_BYTES,
 ): Promise<T> {
   return authenticatedJsonRequest({
     url: `${AUTH_API_ROOT}${path}`,
@@ -116,7 +121,7 @@ async function authRequest<T>(
     tokenProvider,
     validate,
     timeoutMs,
-    maxResponseBytes: AUTH_API_MAX_RESPONSE_BYTES,
+    maxResponseBytes,
     assertCurrentUser: () => tokenProvider.assertCurrentUser?.(),
     errors: authErrorPolicy,
   });
@@ -169,6 +174,19 @@ export function syncProfileViaApi(
     tokenProvider,
     isLinkedAuthMethodsResponse,
     PROFILE_SYNC_TIMEOUT_MS,
+  );
+}
+
+export function getIdentityViaApi(
+  tokenProvider: AuthTokenProvider,
+): Promise<ProfileLookupResponse> {
+  return authRequest(
+    "/auth/identity",
+    { method: "GET" },
+    tokenProvider,
+    isProfileLookupResponse,
+    AUTH_API_TIMEOUT_MS,
+    4 * 1024 * 1024,
   );
 }
 

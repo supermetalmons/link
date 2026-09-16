@@ -103,6 +103,11 @@ import {
 } from "../session/sessionTransitionPort";
 import { getSessionGuard } from "./matchSession";
 import { syncOwnProfileMiningState } from "../services/ownProfileMiningHydration";
+import { sessionAuth } from "../session/sessionAuth";
+import {
+  peekInitialIdentity,
+  wasInitialIdentityConsumed,
+} from "../services/initialIdentityBootstrap";
 import { RouteState, getCurrentRouteState } from "../navigation/routeState";
 import { INVALID_SNAPSHOT_ROUTE_ERROR } from "../session/sessionErrors";
 import {
@@ -6081,7 +6086,7 @@ export function didRecoverMyMatch(match: Match, matchId: string) {
   preloadRematchScoresAfterGameLoaded();
 }
 
-export function enterWatchOnlyMode() {
+export function enterWatchOnlyMode(reuseInitialIdentity = false) {
   setWatchOnlyState(true);
   setWatchOnlyVisible(true);
   const storedLoginId = storage.getLoginId("");
@@ -6090,24 +6095,38 @@ export function enterWatchOnlyMode() {
     return;
   }
   const sessionGuard = getSessionGuard();
-  connection
-    .getProfileByLoginId(storedLoginId)
-    .then((profile) => {
-      if (!sessionGuard()) {
-        return;
+  const user = sessionAuth.currentUser;
+  const isCurrent = () =>
+    sessionGuard() &&
+    sessionAuth.currentUser === user &&
+    storage.getLoginId("") === storedLoginId &&
+    storage.getProfileId("") === storedProfileId;
+  const canUseInitialIdentity =
+    reuseInitialIdentity && user?.uid === storedLoginId;
+  void (async () => {
+    if (canUseInitialIdentity) {
+      if (wasInitialIdentityConsumed(user)) return;
+      const pendingIdentity = peekInitialIdentity(user);
+      if (pendingIdentity) {
+        try {
+          const result = await pendingIdentity;
+          if (!isCurrent()) return;
+          if (result.user === user) {
+            const identity = result.read();
+            if (identity.ok) {
+              if (identity.profile?.id === storedProfileId)
+                syncOwnProfileMiningState(identity.profile);
+              return;
+            }
+          }
+        } catch {}
       }
-      if (
-        storage.getLoginId("") !== storedLoginId ||
-        storage.getProfileId("") !== storedProfileId
-      ) {
-        return;
-      }
-      if (profile.id !== storedProfileId) {
-        return;
-      }
+    }
+    if (!isCurrent()) return;
+    const profile = await connection.getProfileByLoginId(storedLoginId);
+    if (isCurrent() && profile.id === storedProfileId)
       syncOwnProfileMiningState(profile);
-    })
-    .catch(() => {});
+  })().catch(() => {});
 }
 
 function movesFensArray(match: Match): string[] {

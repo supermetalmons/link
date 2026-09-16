@@ -13,7 +13,9 @@ import {
   type SessionBootstrapTarget,
   type SessionEventBootstrap,
   type SessionEventBootstrapTarget,
+  type SessionIdentityBootstrap,
 } from "@mons/shared/session-bootstrap";
+import { markAuthLocalReady, markAuthSessionReady } from "./authRestoreTiming";
 import { storage } from "../utils/storage";
 import {
   createIndexedDbSessionStore,
@@ -75,6 +77,19 @@ export type InitialEventSession = {
   bootstrap: SessionEventBootstrap["result"] | null;
 };
 
+type InitialIdentityIntent = {
+  sessionId: string | null;
+  generation: string | null;
+  requested: boolean;
+  result: SessionIdentityBootstrap | undefined;
+};
+
+export type InitialIdentitySession = {
+  user: SessionUser;
+  bootstrap: SessionIdentityBootstrap | undefined;
+  support: SessionTokenReadResult["identitySupport"];
+};
+
 export type SessionAuthDependencies = {
   store: SessionStore;
   logoutIntents?: SessionLogoutIntents;
@@ -99,6 +114,8 @@ export class SessionAuth {
   private access: SessionTokenResult | null = null;
   private initialGameIntent: InitialGameIntent | null = null;
   private initialEventIntent: InitialEventIntent | null = null;
+  private initialIdentityIntent: InitialIdentityIntent | null = null;
+  private identitySupport: SessionTokenReadResult["identitySupport"];
   private stopped = false;
   private ready = false;
   private storeQueue: Promise<void> = Promise.resolve();
@@ -165,6 +182,7 @@ export class SessionAuth {
             ? state.session.sessionId
             : null;
           this.applyState(state, true);
+          markAuthLocalReady();
           void this.flushRevocations();
         })
         .catch((error) => {
@@ -246,7 +264,10 @@ export class SessionAuth {
       };
       this.currentUser = user;
     }
-    if (previous !== this.currentUser) this.access = null;
+    if (previous !== this.currentUser) {
+      this.access = null;
+      this.identitySupport = undefined;
+    }
     if (initial || previous !== this.currentUser) {
       for (const listener of this.listeners) listener.next(this.currentUser);
     }
@@ -387,9 +408,24 @@ export class SessionAuth {
     intent: InitialGameIntent | null,
     response: SessionTokenReadResult,
     eventIntent: InitialEventIntent | null,
+    identityIntent: InitialIdentityIntent | null,
   ): SessionTokenResult {
-    const { gameBootstrap, eventBootstrap, ...token } = response;
+    const {
+      gameBootstrap,
+      eventBootstrap,
+      identityBootstrap,
+      identitySupport,
+      ...token
+    } = response;
     const user = this.currentUser;
+    if (identitySupport) this.identitySupport = identitySupport;
+    if (
+      identityIntent &&
+      this.initialIdentityIntent === identityIntent &&
+      user?.generation === identityIntent.generation &&
+      user?.sessionId === identityIntent.sessionId
+    )
+      identityIntent.result = identityBootstrap;
     if (
       intent &&
       this.initialGameIntent === intent &&
@@ -411,6 +447,70 @@ export class SessionAuth {
       eventIntent.result = eventBootstrap ?? null;
     }
     return token;
+  }
+
+  async prepareInitialIdentity(): Promise<InitialIdentitySession> {
+    const intent: InitialIdentityIntent = {
+      sessionId: null,
+      generation: null,
+      requested: false,
+      result: undefined,
+    };
+    this.initialIdentityIntent = intent;
+    const bind = () => {
+      const state = this.state;
+      if (
+        !state?.session ||
+        this.initialIdentityIntent !== intent ||
+        this.stopped
+      )
+        throw this.changed();
+      if (
+        intent.sessionId !== null &&
+        (intent.sessionId !== state.session.sessionId ||
+          intent.generation !== state.generation)
+      )
+        throw this.changed();
+      intent.sessionId = state.session.sessionId;
+      intent.generation = state.generation;
+    };
+    try {
+      await this.authStateReady();
+      markAuthLocalReady();
+      if (this.state?.session) bind();
+      if (!this.currentUser) await this.signInAnonymously();
+      bind();
+      const user = this.currentUser;
+      if (!user) throw this.changed();
+      await user.getIdToken();
+      this.assertUser(user);
+      bind();
+      markAuthSessionReady();
+      return { user, bootstrap: intent.result, support: this.identitySupport };
+    } finally {
+      if (this.initialIdentityIntent === intent)
+        this.initialIdentityIntent = null;
+      intent.result = undefined;
+    }
+  }
+
+  private claimInitialIdentity(
+    session: StoredSession,
+    generation: string,
+  ): InitialIdentityIntent | null {
+    const intent = this.initialIdentityIntent;
+    if (
+      !intent ||
+      intent.requested ||
+      (intent.sessionId !== null &&
+        (intent.sessionId !== session.sessionId ||
+          intent.generation !== generation))
+    )
+      return null;
+    intent.sessionId = session.sessionId;
+    intent.generation = generation;
+    intent.requested = true;
+    return intent;
   }
 
   prepareInitialEvent(
@@ -544,11 +644,16 @@ export class SessionAuth {
     const initialEvent = initialGame
       ? null
       : this.claimInitialEvent(session, state.generation);
+    const initialIdentity = this.claimInitialIdentity(
+      session,
+      state.generation,
+    );
     let response: SessionTokenReadResult;
     try {
       response = await this.dependencies.api.create(
         session,
         initialGame?.target ?? initialEvent?.target ?? undefined,
+        initialIdentity !== null,
       );
     } catch (error) {
       if (
@@ -585,7 +690,9 @@ export class SessionAuth {
       initialGame,
       response,
       initialEvent,
+      initialIdentity,
     );
+    markAuthSessionReady();
     this.dependencies.notify?.();
   }
 
@@ -655,10 +762,12 @@ export class SessionAuth {
     const initialEvent = initialGame
       ? null
       : this.claimInitialEvent(session, user.generation);
+    const initialIdentity = this.claimInitialIdentity(session, user.generation);
     try {
       const response = await this.dependencies.api.refresh(
         session,
         initialGame?.target ?? initialEvent?.target ?? undefined,
+        initialIdentity !== null,
       );
       await this.reconcile();
       this.assertUser(user);
@@ -668,7 +777,9 @@ export class SessionAuth {
         initialGame,
         response,
         initialEvent,
+        initialIdentity,
       );
+      markAuthSessionReady();
       return response.accessToken;
     } catch (error) {
       if (
@@ -721,6 +832,8 @@ export class SessionAuth {
     this.stopped = true;
     this.currentUser = null;
     this.access = null;
+    this.identitySupport = undefined;
+    this.initialIdentityIntent = null;
     for (const listener of this.listeners) listener.next(null);
     let applied = true;
     const state = await this.updateStore((current) => {

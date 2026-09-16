@@ -29,6 +29,7 @@ export function isAllowedAuthOrigin(origin: string): boolean {
 }
 
 export const AUTH_PATHS = new Set([
+  "/auth/identity",
   "/auth/intents",
   "/auth/methods/apple/verify",
   "/auth/methods/eth/verify",

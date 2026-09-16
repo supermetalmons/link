@@ -1,7 +1,11 @@
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { createAuthProfileRepository } from "../src/authProfileRepository.ts";
+import {
+  createAuthProfileRepository,
+  readAuthIdentityProfile,
+} from "../src/authProfileRepository.ts";
+import { AuthApiFailure } from "../src/authErrors.ts";
 import { handleAuthRoute } from "../src/authRoutes.ts";
 import {
   CanonicalProfileCorruption,
@@ -23,6 +27,7 @@ const validMethodValues = {
 
 async function createProfile(
   methods: Partial<Record<CanonicalAuthMethodValue["method"], string>> = {},
+  username: string | null = null,
 ) {
   const profileId = `auth-methods-profile-${crypto.randomUUID()}`;
   const loginUid = `auth-methods-login-${crypto.randomUUID()}`;
@@ -42,7 +47,7 @@ async function createProfile(
             totalManaPoints: 5,
             win: true,
             emoji: 2,
-            username: null,
+            username,
             eth: null,
             sol: null,
             completedProblemIds: [],
@@ -173,6 +178,83 @@ describe("canonical auth profile reads", () => {
       appleLinked: false,
     });
     expect(observed.allQueries).toHaveLength(1);
+  });
+
+  it("reads missing and complete identity profiles with one query and no mutations", async () => {
+    const profile = await createProfile({ sol: validMethodValues.sol });
+    for (const loginUid of ["missing-identity-login", profile.loginUid]) {
+      const observed = observeDatabase();
+      const result = await readAuthIdentityProfile(observed.database, loginUid);
+      expect(observed.allQueries).toHaveLength(1);
+      expect(observed.allQueries[0]).not.toMatch(
+        /profile_auth_recovery_jobs|profile_february_opponents/,
+      );
+      if (loginUid !== profile.loginUid) {
+        expect(result).toEqual({ ok: true, profile: null });
+      } else {
+        expect(result.profile).toMatchObject({
+          id: profile.profileId,
+          rating: 1500,
+          nonce: 1,
+          emoji: 2,
+          mining: { materials: { dust: 0 } },
+        });
+        expect(JSON.stringify(result)).not.toMatch(
+          /legacy_fields|auth_method|revision|normalized_value/,
+        );
+      }
+    }
+  });
+
+  it("requests username repair only for unnamed Apple or X profiles without wallets", async () => {
+    for (const method of ["apple", "x"] as const) {
+      const profile = await createProfile({
+        [method]: validMethodValues[method],
+      });
+      const observed = observeDatabase();
+      await expect(
+        readAuthIdentityProfile(observed.database, profile.loginUid),
+      ).rejects.toMatchObject({
+        status: 409,
+        code: "failed-precondition",
+        message: "profile-repair-required",
+      } satisfies Partial<AuthApiFailure>);
+      expect(observed.allQueries).toHaveLength(1);
+    }
+    for (const profile of [
+      await createProfile({
+        apple: validMethodValues.apple,
+        sol: validMethodValues.sol,
+      }),
+      await createProfile({ apple: validMethodValues.apple }, "SeedName"),
+      await createProfile(),
+    ]) {
+      const result = await readAuthIdentityProfile(db, profile.loginUid);
+      expect(result).toMatchObject({
+        ok: true,
+        profile: { id: profile.profileId },
+      });
+      expect(JSON.stringify(result)).not.toContain(validMethodValues.apple);
+    }
+  });
+
+  it("identity reads reject corrupt ownership instead of reporting a missing profile", async () => {
+    const profile = await createProfile({ sol: validMethodValues.sol });
+    for (const changes of [
+      { profile_id: null, payload_json: null },
+      { auth_owner_login_uid: "another-login" },
+      { auth_owner_profile_id: "another-profile" },
+      { state: "retiring", merged_into_profile_id: "target" },
+      { auth_merge_source_profile_id: "source" },
+    ]) {
+      const observed = observeDatabase({
+        mapRow: (row) => ({ ...row, ...changes }),
+      });
+      await expect(
+        readAuthIdentityProfile(observed.database, profile.loginUid),
+      ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+      expect(observed.allQueries).toHaveLength(1);
+    }
   });
 
   it("retains a profile with no linked methods", async () => {

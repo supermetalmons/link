@@ -9,6 +9,7 @@ import {
 } from "@mons/shared/x-redirect";
 import {
   createAuthProfileRepository,
+  readAuthIdentityProfile,
   type AuthProfileRepository,
 } from "./authProfileRepository.ts";
 import {
@@ -50,6 +51,7 @@ import {
 import { authMutationsDisabled } from "./authPolicy.ts";
 import { secureAlphanumericId, secureRandomBytes } from "./authRandom.ts";
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
+import type { ProfileLookupResponse } from "@mons/shared/profiles";
 
 const AUTH_INTENT_TTL_MS = 5 * 60 * 1_000;
 const CREATE_ID_ATTEMPTS = 3;
@@ -61,6 +63,7 @@ export type AuthRouteDependencies = {
   profileSync?: ProfileSyncDependencies;
   randomBytes?: (length: number) => Uint8Array;
   repository?: AuthProfileRepository;
+  readIdentity?: (uid: string) => Promise<ProfileLookupResponse>;
   stateRepository?: AuthStateRepository;
   mutation?: AuthMutationDependencies;
   verifyIdentity?: (
@@ -252,17 +255,65 @@ export async function handleAuthRoute(
   dependencies: AuthRouteDependencies = {},
 ): Promise<Response> {
   let corsHeaders: Record<string, string> = { Vary: "Origin" };
+  const now = dependencies.now || Date.now;
+  const startedAt = now();
+  const timings = new Map<string, number>();
+  const measure = async <T>(
+    name: string,
+    work: () => Promise<T>,
+  ): Promise<T> => {
+    const started = now();
+    try {
+      return await work();
+    } finally {
+      timings.set(name, Math.max(0, now() - started));
+    }
+  };
+  const finish = (response: Response): Response => {
+    timings.set("total", Math.max(0, now() - startedAt));
+    response.headers.set(
+      "Server-Timing",
+      Array.from(
+        timings,
+        ([name, duration]) => `${name};dur=${duration.toFixed(1)}`,
+      ).join(", "),
+    );
+    return response;
+  };
+  const respond: typeof authJsonResponse = (body, status, headers) =>
+    finish(authJsonResponse(body, status, headers));
   try {
     corsHeaders = getAuthCorsHeaders(request);
     if (request.method === "OPTIONS") {
       return authPreflightResponse(corsHeaders);
     }
+    corsHeaders["Access-Control-Expose-Headers"] = "Retry-After, Server-Timing";
+    const origin = corsHeaders["Access-Control-Allow-Origin"];
+    if (origin) corsHeaders["Timing-Allow-Origin"] = origin;
     const pathname = new URL(request.url).pathname;
-    const expectedMethod = pathname === "/auth/methods" ? "GET" : "POST";
+    const expectedMethod =
+      pathname === "/auth/methods" || pathname === "/auth/identity"
+        ? "GET"
+        : "POST";
     assertMethod(request, expectedMethod);
     const identity = await (
       dependencies.verifyIdentity || verifySessionRequest
     )(request, env, ctx);
+    if (pathname === "/auth/identity") {
+      if (new URL(request.url).search) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      return respond(
+        await measure("identity", () =>
+          (
+            dependencies.readIdentity ||
+            ((uid) => readAuthIdentityProfile(env.PROFILE_DB, uid))
+          )(identity.uid),
+        ),
+        200,
+        corsHeaders,
+      );
+    }
     if (request.method === "POST") {
       await assertProfileMutationAllowed(env);
       if (authMutationsDisabled(env.AUTH_MUTATIONS_DISABLED)) {
@@ -290,7 +341,7 @@ export async function handleAuthRoute(
         env,
         `auth-mutation:${operation}:${identity.uid}`,
       );
-      return authJsonResponse(
+      return respond(
         await handleAuthMutation(request, identity, env, ctx, {
           ...dependencies.mutation,
           stateRepository:
@@ -301,14 +352,14 @@ export async function handleAuthRoute(
       );
     }
     if (pathname === "/auth/methods") {
-      return authJsonResponse(
+      return respond(
         await repository.getLinkedAuthMethods(identity.uid),
         200,
         corsHeaders,
       );
     }
     if (pathname === "/auth/intents") {
-      return authJsonResponse(
+      return respond(
         await handleBeginIntent(
           request,
           env,
@@ -325,17 +376,19 @@ export async function handleAuthRoute(
       pathname === "/auth/profile-claim/sync"
     ) {
       await enforceAuthRateLimit(env, `auth-profile-claim:${identity.uid}`);
-      return authJsonResponse(
-        await syncProfile(identity, env, {
-          ...dependencies.profileSync,
-          repository,
-        }),
+      return respond(
+        await measure("profile_sync", () =>
+          syncProfile(identity, env, {
+            ...dependencies.profileSync,
+            repository,
+          }),
+        ),
         200,
         corsHeaders,
       );
     }
     if (pathname === "/auth/x/flows") {
-      return authJsonResponse(
+      return respond(
         await handleBeginXFlow(
           request,
           env,
@@ -363,6 +416,6 @@ export async function handleAuthRoute(
           console.error(JSON.stringify({ event: "auth_route_failure", kind })))
       )(kind);
     }
-    return authErrorResponse(failure, corsHeaders);
+    return finish(authErrorResponse(failure, corsHeaders));
   }
 }

@@ -1687,3 +1687,94 @@ test("legacy initialization runs once across simultaneous new clients", async ()
   ]);
   assert.equal(cleanups, 1);
 });
+
+test("identity bootstrap shares anonymous creation with each route and is never persisted", async () => {
+  for (const route of ["home", "game", "event"]) {
+    const h = harness();
+    const auth = h.make();
+    const create = h.api.create;
+    const calls = [];
+    h.api.create = async (session, target, includeIdentity) => {
+      calls.push({ target, includeIdentity });
+      const base = await create(session);
+      return {
+        ...(route === "game"
+          ? attachInitialGame(base, target)
+          : route === "event"
+            ? attachInitialEvent(base, target)
+            : base),
+        identitySupport: "supported",
+        identityBootstrap: { ok: true, profile: null },
+      };
+    };
+    const routePreparation =
+      route === "game"
+        ? auth.prepareInitialGame("game-a", initialGameOptions())
+        : route === "event"
+          ? auth.prepareInitialEvent("event-a", initialEventOptions())
+          : null;
+    const identity = auth.prepareInitialIdentity();
+    await Promise.all([routePreparation, auth.signInAnonymously()]);
+    const result = await identity;
+    assert.equal(result.user, auth.currentUser);
+    assert.deepEqual(result.bootstrap, { ok: true, profile: null });
+    assert.equal(result.support, "supported");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].includeIdentity, true);
+    assert.equal(h.creates.length, 1);
+    assert.equal(h.refreshes.length, 0);
+    assert.equal("identityBootstrap" in auth.access, false);
+    assert.equal("identitySupport" in auth.access, false);
+    assert.equal(JSON.stringify(h.store.read()).includes("identity"), false);
+    assert.equal(auth.initialIdentityIntent, null);
+    const second = await auth.prepareInitialIdentity();
+    assert.equal(second.bootstrap, undefined);
+    assert.equal(second.support, "supported");
+    assert.equal(h.refreshes.length, 0);
+  }
+});
+
+test("identity joins the cold token refresh and remembers legacy capability with a warm token", async () => {
+  const h = harness();
+  await h.make().signInAnonymously();
+  const auth = h.make();
+  const refresh = h.api.refresh;
+  const flags = [];
+  h.api.refresh = async (session, target, includeIdentity) => {
+    flags.push(includeIdentity);
+    return { ...(await refresh(session)), identitySupport: "legacy" };
+  };
+  const identity = auth.prepareInitialIdentity();
+  await auth.authStateReady();
+  await Promise.all([auth.currentUser.getIdToken(), identity]);
+  assert.deepEqual(flags, [true]);
+  assert.equal((await identity).support, "legacy");
+  assert.equal((await auth.prepareInitialIdentity()).support, "legacy");
+  assert.equal(h.refreshes.length, 1);
+});
+
+test("logout fences an identity seed from an already dispatched token response", async () => {
+  const h = harness();
+  await h.make().signInAnonymously();
+  const auth = h.make();
+  const gate = deferred();
+  const refresh = h.api.refresh;
+  h.api.refresh = async (session) => {
+    const token = await refresh(session);
+    await gate.promise;
+    return {
+      ...token,
+      identitySupport: "supported",
+      identityBootstrap: { ok: true, profile: null },
+    };
+  };
+  const identity = auth.prepareInitialIdentity();
+  const rejected = assert.rejects(identity, /authentication-changed/);
+  await flush();
+  await auth.signOut();
+  gate.resolve();
+  await rejected;
+  assert.equal(auth.currentUser, null);
+  assert.equal(auth.initialIdentityIntent, null);
+  assert.equal(auth.identitySupport, undefined);
+});

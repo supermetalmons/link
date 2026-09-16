@@ -17,7 +17,7 @@ mons.link is a browser game backed by Cloudflare sessions, D1, SQLite Durable Ob
 
 ## Runtime architecture
 
-The frontend Worker serves `mons.link`; the API Worker serves `api.mons.link`. Persistent sessions live in `AUTH_STATE_DB`, with five-minute Worker-issued access tokens. `PROFILE_DB.profile_login_owners` maps login IDs to canonical profiles. `POST /auth/profile/sync` restores canonical ownership and existing catch-up work; the legacy `POST /auth/profile-claim/sync` URL remains a compatibility alias.
+The frontend Worker serves `mons.link`; the API Worker serves `api.mons.link`. Persistent sessions live in `AUTH_STATE_DB`, with five-minute Worker-issued access tokens. `PROFILE_DB.profile_login_owners` maps login IDs to canonical profiles. Startup requests `bootstrapIdentity=1` with session creation or refresh to read the verified profile alongside the token, before loading the main application. `GET /auth/identity` provides the same read-only profile lookup. `POST /auth/profile/sync` retains explicit repair and legacy restoration behavior; the legacy `POST /auth/profile-claim/sync` URL remains a compatibility alias.
 
 The existing per-invite `InviteReactions` Durable Object owns active matches, timer claims, reactions, and live appearance. It delivers revisioned match, metadata, wager, reaction, and presentation snapshots over HTTP and WebSockets. Match routes and immutable archived records remain in gameplay D1. A missing route returns `match: null`; an existing route with unavailable canonical state returns a retryable error.
 

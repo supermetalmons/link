@@ -1,5 +1,10 @@
 import { sessionAuth } from "../session/sessionAuth";
 import {
+  invalidateInitialIdentity,
+  peekInitialIdentity,
+  wasInitialIdentityConsumed,
+} from "../services/initialIdentityBootstrap";
+import {
   didFindInviteThatCanBeJoined,
   didReceiveInviteReactionUpdate,
   didReceiveMatchUpdates,
@@ -124,7 +129,10 @@ import {
 } from "../services/gameplayApi";
 import { takeInitialEventBootstrap } from "../services/initialEventBootstrap";
 import { resetNftCache } from "../services/nftCache";
-import { resetPlayerMetadataCaches } from "../utils/playerMetadataCache";
+import {
+  profilesForUids,
+  resetPlayerMetadataCaches,
+} from "../utils/playerMetadataCache";
 import { resetLeaderboardCache } from "../ui/leaderboardCache";
 import {
   RouteState,
@@ -178,7 +186,10 @@ import type {
   StartMatchTimerResponse,
 } from "@mons/shared/timers";
 import { isToggleEventPrizeSelectionRequest } from "@mons/shared/event-prizes";
-import type { ProfileCustomizationUpdateRequest } from "@mons/shared/profiles";
+import {
+  isPlayerProfile,
+  type ProfileCustomizationUpdateRequest,
+} from "@mons/shared/profiles";
 import type {
   WagerOutcomeResolveResponse,
   WagerProposalAcceptResponse,
@@ -632,6 +643,7 @@ class Connection {
   private activateContext(
     nextContext: MatchRuntimeContext,
     reason: string,
+    reuseInitialIdentity = false,
   ): void {
     const previousContext = this.activeContext;
     if (
@@ -648,7 +660,7 @@ class Connection {
     this.inviteId = nextContext.inviteId;
     this.matchId = nextContext.matchId;
     const writableActorUid = nextContext.canWrite ? nextContext.actorUid : null;
-    this.setSameProfilePlayerUid(writableActorUid);
+    this.setSameProfilePlayerUid(writableActorUid, reuseInitialIdentity);
     this.logContextEvent("ctx.activate", {
       reason,
       contextId: nextContext.contextId,
@@ -1535,7 +1547,11 @@ class Connection {
   public async editUsername(username: string): Promise<any> {
     try {
       await this.ensureAuthenticated();
-      return editUsernameViaApi(username, this.getAuthApiToken);
+      const tokenProvider = this.getUserBoundAuthTokenProvider();
+      const result = await editUsernameViaApi(username, tokenProvider);
+      tokenProvider.assertCurrentUser();
+      if (result.ok) invalidateInitialIdentity();
+      return result;
     } catch (error) {
       console.error("Error editing username:", error);
       throw error;
@@ -1618,6 +1634,8 @@ class Connection {
     try {
       const tokenProvider = this.getUserBoundAuthTokenProvider();
       const result = await unlinkAuthMethodViaApi(method, tokenProvider);
+      tokenProvider.assertCurrentUser();
+      invalidateInitialIdentity();
       return bindAuthSessionResult(result, tokenProvider.assertCurrentUser);
     } catch (error) {
       console.error("Error unlinking auth method:", error);
@@ -4096,7 +4114,10 @@ class Connection {
     return id === "" ? null : id;
   }
 
-  private hydrateSameProfilePlayer(uid: string): void {
+  private hydrateSameProfilePlayer(
+    uid: string,
+    reuseInitialIdentity = false,
+  ): void {
     const expectedEpoch = this.sessionEpoch;
     setupPlayerId(uid, false);
     const activeRequest = this.sameProfileHydrationRequest;
@@ -4117,9 +4138,59 @@ class Connection {
       this.sameProfileHydrationRequest === request &&
       this.isSessionEpochActive(expectedEpoch) &&
       this.sameProfilePlayerUid === uid;
-    this.getPlayerProfileWithRetry(uid, isHydrationActive)
+    const initialUser = this.auth.currentUser;
+    const canUseInitialIdentity =
+      reuseInitialIdentity && initialUser?.uid === uid;
+    let canApplyProfile = () => true;
+    const loadProfile = async (): Promise<PlayerProfile | null> => {
+      if (canUseInitialIdentity) {
+        const pendingIdentity = peekInitialIdentity(initialUser);
+        if (pendingIdentity) {
+          try {
+            const result = await pendingIdentity;
+            if (!isHydrationActive() || this.auth.currentUser !== initialUser)
+              return null;
+            if (result.user === initialUser) {
+              const identity = result.read();
+              if (identity.ok && identity.profile) {
+                canApplyProfile = () => {
+                  result.read();
+                  return true;
+                };
+                return identity.profile;
+              }
+            }
+          } catch {}
+        } else if (wasInitialIdentityConsumed(initialUser)) {
+          const profile = profilesForUids[uid];
+          if (
+            this.auth.currentUser === initialUser &&
+            isPlayerProfile(profile) &&
+            profile.id === this.getLocalProfileId()
+          ) {
+            canApplyProfile = () =>
+              wasInitialIdentityConsumed(initialUser) &&
+              profilesForUids[uid] === profile &&
+              profile.id === this.getLocalProfileId();
+            return profile;
+          }
+        }
+      }
+      if (!isHydrationActive()) return null;
+      return this.getPlayerProfileWithRetry(uid, isHydrationActive);
+    };
+    loadProfile()
       .then((profile) => {
-        if (!profile || !isHydrationActive()) {
+        if (
+          !profile ||
+          !isHydrationActive() ||
+          (canUseInitialIdentity && this.auth.currentUser !== initialUser)
+        ) {
+          return;
+        }
+        try {
+          if (!canApplyProfile()) return;
+        } catch {
           return;
         }
         didGetPlayerProfile(profile, uid, true);
@@ -4144,10 +4215,13 @@ class Connection {
       });
   }
 
-  private setSameProfilePlayerUid(uid: string | null): void {
+  private setSameProfilePlayerUid(
+    uid: string | null,
+    reuseInitialIdentity = false,
+  ): void {
     if (this.sameProfilePlayerUid === uid) {
       if (uid) {
-        this.hydrateSameProfilePlayer(uid);
+        this.hydrateSameProfilePlayer(uid, reuseInitialIdentity);
       }
       return;
     }
@@ -4155,7 +4229,7 @@ class Connection {
     this.sameProfilePlayerUid = uid;
     this.observeMiningFrozen(uid);
     if (uid) {
-      this.hydrateSameProfilePlayer(uid);
+      this.hydrateSameProfilePlayer(uid, reuseInitialIdentity);
     }
   }
 
@@ -4224,9 +4298,12 @@ class Connection {
     } catch {
       return;
     }
-    void updateProfileCustomizationViaApi(request, tokenProvider).catch(
-      () => undefined,
-    );
+    void updateProfileCustomizationViaApi(request, tokenProvider)
+      .then(() => {
+        tokenProvider.assertCurrentUser?.();
+        invalidateInitialIdentity();
+      })
+      .catch(() => undefined);
   }
 
   public sendVoiceReaction(reaction: Reaction): void {
@@ -4717,7 +4794,9 @@ class Connection {
     };
     this.connectAttemptCleanup = releaseDeliveries;
     let firstRead = true;
+    let reuseInitialIdentity = false;
     const readBootstrap = async (): Promise<ReadGameBootstrapResponse> => {
+      reuseInitialIdentity = false;
       if (!isConnectActive()) throw new GameBootstrapApiError("aborted");
       for (const [key, delivery] of this.moveDeliveries) {
         if (
@@ -4750,7 +4829,9 @@ class Connection {
             delivery.scope.loginUid === uid &&
             delivery.scope.inviteId === inviteId,
         );
-        return hasMoveRecovery ? readBootstrap() : bootstrap;
+        if (hasMoveRecovery) return readBootstrap();
+        reuseInitialIdentity = true;
+        return bootstrap;
       } catch (error) {
         if (
           error instanceof GameBootstrapApiError &&
@@ -5081,7 +5162,11 @@ class Connection {
           canWrite,
           connectEpoch,
         );
-        this.activateContext(nextContext, "connect-to-game");
+        this.activateContext(
+          nextContext,
+          "connect-to-game",
+          reuseInitialIdentity,
+        );
         if (!isConnectActive()) return;
         const startObservers = () => {
           if (!isConnectActive()) return;
@@ -5113,7 +5198,7 @@ class Connection {
           if (canJoinAsGuest) {
             didFindInviteThatCanBeJoined();
           } else {
-            enterWatchOnlyMode();
+            enterWatchOnlyMode(reuseInitialIdentity);
             if (!isConnectActive()) return;
             this.observeMatch(
               workingInvite.hostId,

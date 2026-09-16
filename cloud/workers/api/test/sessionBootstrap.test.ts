@@ -210,6 +210,66 @@ test("event creation and refresh bootstrap snapshots without game reads", async 
   }
 });
 
+test("identity enrichment runs alongside game and event bootstrap without changing their envelopes", async () => {
+  for (const kind of ["game", "event"] as const) {
+    const h = setup();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let identityStarted = false;
+    let targetStarted = false;
+    h.dependencies.identity = {
+      readIdentity: async (loginUid) => {
+        assert.equal(loginUid, uid);
+        identityStarted = true;
+        await gate;
+        return { ok: true, profile: null };
+      },
+    };
+    if (kind === "event") {
+      h.bootstrap.readEventSnapshotSeed = async () => {
+        targetStarted = true;
+        await gate;
+        return eventSeed;
+      };
+    } else {
+      const readAdmission = h.bootstrap.readAdmission!;
+      h.bootstrap.readAdmission = async (...args) => {
+        targetStarted = true;
+        await gate;
+        return readAdmission(...args);
+      };
+    }
+    const responsePromise = h.read(
+      h.request(
+        "refresh",
+        `${kind === "game" ? `bootstrapInviteId=${inviteId}` : "bootstrapEventId=event-one"}&bootstrapIdentity=1`,
+      ),
+    );
+    try {
+      while (!identityStarted && !targetStarted) await flush();
+      assert.equal(identityStarted, true);
+      assert.equal(targetStarted, true);
+    } finally {
+      release();
+    }
+    const response = await responsePromise;
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(
+      kind === "game"
+        ? isSessionBootstrapResponse(body)
+        : isSessionEventBootstrapResponse(body),
+      true,
+    );
+    assert.deepEqual(
+      (body as { identityBootstrap: unknown }).identityBootstrap,
+      { ok: true, profile: null },
+    );
+  }
+});
+
 test("event bootstrap failures preserve valid issued tokens", async () => {
   const h = setup();
   h.bootstrap.readEventSnapshotSeed = async () => {

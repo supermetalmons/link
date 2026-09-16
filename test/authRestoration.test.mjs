@@ -19,6 +19,26 @@ registerHooks({
 });
 
 const { ProfileApiError } = await import("../src/services/profileApi.ts");
+const { AuthApiError } = await import("../src/services/authApi.ts");
+
+const profileApplicationSource = ts.createSourceFile(
+  "verifiedProfile.ts",
+  readFileSync(
+    new URL("../src/connection/verifiedProfile.ts", import.meta.url),
+    "utf8",
+  ),
+  ts.ScriptTarget.Latest,
+  true,
+);
+const profileApplication = profileApplicationSource.statements.find(
+  (node) =>
+    ts.isFunctionDeclaration(node) &&
+    node.name?.text === "applyVerifiedProfile",
+);
+const { outputText: profileApplicationOutput } = ts.transpileModule(
+  profileApplication.getText(profileApplicationSource).replace("export ", ""),
+  { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
+);
 
 const source = ts.createSourceFile(
   "authentication.ts",
@@ -87,11 +107,13 @@ const deferred = () => {
 };
 
 function harness({
+  initialIdentity = async () => ({ ok: false, status: "legacy" }),
   syncProfile = async () => ({ ok: true, profileId: "profile-1" }),
   lookupProfile = async () => authoritativeProfile,
   watchOnly = false,
   stored = {},
   claimProfileId = "",
+  applicationErrors = {},
 } = {}) {
   const data = { ...cachedIdentity, ...stored };
   const events = {
@@ -106,6 +128,10 @@ function harness({
     flushes: 0,
     attempts: 0,
     unsubscribed: false,
+    identities: 0,
+    consumedIdentities: 0,
+    invalidatedIdentities: 0,
+    tutorials: [],
   };
   const timers = new Map();
   const windowListeners = new Map();
@@ -124,11 +150,31 @@ function harness({
     visibilityState: "visible",
   };
   const navigator = { onLine: true };
+  const checkApplicationError = (operation) => {
+    if (applicationErrors[operation]) throw applicationErrors[operation];
+  };
   const storage = {};
   for (const field of Object.keys(data)) {
     const suffix = field[0].toUpperCase() + field.slice(1);
     storage[`get${suffix}`] = (fallback) => data[field] ?? fallback;
     storage[`set${suffix}`] = (value) => {
+      checkApplicationError(`set${suffix}`);
+      data[field] = value;
+    };
+  }
+  for (const field of [
+    "playerRating",
+    "playerNonce",
+    "playerTotalManaPoints",
+    "cardBackgroundId",
+    "cardStickers",
+    "cardSubtitleId",
+    "profileCounter",
+    "profileMons",
+  ]) {
+    const suffix = field[0].toUpperCase() + field.slice(1);
+    storage[`set${suffix}`] = (value) => {
+      checkApplicationError(`set${suffix}`);
       data[field] = value;
     };
   }
@@ -203,19 +249,53 @@ function harness({
     document,
     navigator,
     ProfileApiError,
+    AuthApiError,
+    markAuthIdentityReady: () => {},
+    readInitialIdentity: async () => {
+      events.identities++;
+      const user = connection.auth.currentUser;
+      const identity = await initialIdentity();
+      return { user, read: () => identity };
+    },
+    consumeInitialIdentity: () => {
+      events.consumedIdentities++;
+    },
+    invalidateInitialIdentity: () => {
+      events.invalidatedIdentities++;
+    },
+    repairInitialIdentity: async (initial, repair) => {
+      initial.read();
+      await repair();
+      dependencies.invalidateInitialIdentity();
+      return dependencies.readInitialIdentity();
+    },
+    syncTutorialProgress: (...args) => {
+      checkApplicationError("syncTutorialProgress");
+      events.tutorials.push(args);
+    },
     didAttemptAuthentication: () => {
       events.attempts++;
     },
     normalizeProfileEmojiId,
     flushPendingOwnProfileMiningState: () => {
+      checkApplicationError("flushPendingOwnProfileMiningState");
       events.flushes++;
     },
-    syncOwnProfileMiningState: (profile) => events.mining.push(profile),
+    syncOwnProfileMiningState: (profile) => {
+      checkApplicationError("syncOwnProfileMiningState");
+      events.mining.push(profile);
+    },
     isWatchOnly: watchOnly,
     updateProfileDisplayName: (...args) => events.displays.push(args),
-    setupLoggedInPlayerProfile: (profile, uid) =>
-      events.profiles.push({ profile, uid }),
+    setupLoggedInPlayerProfile: (profile, uid) => {
+      checkApplicationError("setupLoggedInPlayerProfile");
+      events.profiles.push({ profile, uid });
+    },
   };
+  dependencies.applyVerifiedProfile = new Function(
+    ...Object.keys(dependencies),
+    `${profileApplicationOutput}\nreturn applyVerifiedProfile;`,
+  )(...Object.values(dependencies));
   const cleanup = new Function(
     ...Object.keys(dependencies),
     `${outputText}\nreturn restoreAuth();`,
@@ -270,6 +350,94 @@ function harness({
   };
 }
 
+test("applies the complete verified identity without sync or profile lookup", async () => {
+  const profile = {
+    ...authoritativeProfile,
+    rating: 1688,
+    nonce: 12,
+    totalManaPoints: 42,
+    win: true,
+    cardBackgroundId: 3,
+    cardSubtitleId: 2,
+    profileCounter: "gp",
+    profileMons: "1,2,3,4,5",
+    cardStickers: "stickers",
+    completedProblemIds: ["one"],
+    isTutorialCompleted: true,
+  };
+  const h = harness({
+    initialIdentity: async () => ({ ok: true, profile }),
+    stored: { loginId: "another-login", username: "Stale name" },
+  });
+  h.changeAuth();
+  await h.settle();
+  assert.deepEqual(h.events.statuses, ["authenticated"]);
+  assert.equal(h.events.syncs, 0);
+  assert.deepEqual(h.events.lookups, []);
+  assert.deepEqual(h.events.profiles, [{ profile, uid: "login-1" }]);
+  assert.deepEqual(h.events.tutorials, [[["one"], true]]);
+  assert.equal(h.data.username, "Canonical player");
+  assert.equal(h.data.loginId, "login-1");
+  assert.equal(h.data.playerRating, 1688);
+  assert.equal(h.data.profileMons, profile.profileMons);
+  assert.equal(h.events.consumedIdentities, 1);
+});
+
+test("a verified missing owner stays anonymous without trusting the saved profile", async () => {
+  const h = harness({
+    initialIdentity: async () => ({ ok: true, profile: null }),
+  });
+  h.changeAuth();
+  await h.settle();
+  assert.deepEqual(h.events.statuses, ["unauthenticated"]);
+  assert.deepEqual(h.events.profiles, []);
+  assert.equal(h.events.syncs, 0);
+  assert.deepEqual(h.events.lookups, []);
+  assert.deepEqual(h.retryDelays(), []);
+});
+
+test("unavailable identity retries without entering legacy profile repair", async () => {
+  const h = harness({
+    initialIdentity: async () => ({ ok: false, status: 503 }),
+  });
+  h.changeAuth();
+  await h.settle();
+  assert.deepEqual(h.events.statuses, ["unauthenticated"]);
+  assert.equal(h.events.syncs, 0);
+  assert.deepEqual(h.events.lookups, []);
+  assert.deepEqual(h.retryDelays(), [1_000]);
+  h.cleanup();
+});
+
+test("repairs only an explicit repair-required identity then reads the fresh profile", async () => {
+  let reads = 0;
+  const h = harness({
+    initialIdentity: async () =>
+      ++reads === 1
+        ? { ok: false, status: 409 }
+        : { ok: true, profile: authoritativeProfile },
+  });
+  h.changeAuth();
+  await h.settle();
+  assert.equal(h.events.syncs, 1);
+  assert.equal(h.events.identities, 2);
+  assert.equal(h.events.invalidatedIdentities, 1);
+  assert.deepEqual(h.events.lookups, []);
+  assert.deepEqual(h.events.statuses, ["authenticated"]);
+});
+
+test("a newer login fences a late verified startup identity", async () => {
+  const pending = deferred();
+  const h = harness({ initialIdentity: () => pending.promise });
+  h.changeAuth();
+  h.confirmSignIn();
+  pending.resolve({ ok: true, profile: authoritativeProfile });
+  await h.settle();
+  assert.deepEqual(h.events.statuses, ["authenticated"]);
+  assert.deepEqual(h.events.profiles, []);
+  assert.equal(h.events.consumedIdentities, 0);
+});
+
 test("restores canonical ownership without token claims or forced refreshes", async () => {
   const h = harness();
   h.changeAuth();
@@ -283,6 +451,36 @@ test("restores canonical ownership without token claims or forced refreshes", as
   assert.equal(h.events.claimReads, 0);
   assert.equal(h.events.tokenRefreshes, 0);
   assert.equal(h.events.attempts, 1);
+});
+
+test("legacy fallback applies full profile storage and tutorial data without a second lookup", async () => {
+  const profile = {
+    ...authoritativeProfile,
+    rating: 1700,
+    nonce: 15,
+    totalManaPoints: 23,
+    completedProblemIds: ["first-problem"],
+    isTutorialCompleted: true,
+    cardBackgroundId: 2,
+    cardSubtitleId: 3,
+    profileMons: "0,1,2,3,4",
+  };
+  const h = harness({
+    syncProfile: unavailable,
+    lookupProfile: async () => profile,
+  });
+  h.changeAuth();
+  await h.settle();
+  assert.deepEqual(h.events.statuses, ["authenticated"]);
+  assert.deepEqual(h.events.lookups, ["login-1"]);
+  assert.equal(h.data.playerRating, 1700);
+  assert.equal(h.data.playerNonce, 15);
+  assert.equal(h.data.playerTotalManaPoints, 23);
+  assert.equal(h.data.cardBackgroundId, 2);
+  assert.equal(h.data.cardSubtitleId, 3);
+  assert.equal(h.data.profileMons, "0,1,2,3,4");
+  assert.deepEqual(h.events.tutorials, [[["first-problem"], true]]);
+  assert.deepEqual(h.events.mining, [profile]);
 });
 
 test("replaces stale cached ownership and presentation with the canonical profile", async () => {
@@ -396,6 +594,7 @@ test("retries in the current game session after discarding an older ownership re
   const pending = deferred();
   const h = harness({ syncProfile: () => pending.promise });
   h.changeAuth();
+  await h.settle();
   h.changeSession();
   pending.resolve({ ok: true, profileId: "profile-2" });
   await h.settle();
@@ -417,6 +616,7 @@ test("ignores a pending ownership response after sign-out", async () => {
   const pending = deferred();
   const h = harness({ syncProfile: () => pending.promise });
   h.changeAuth();
+  await h.settle();
   h.changeAuth(null);
   pending.resolve({ ok: true, profileId: "profile-2" });
   await h.settle();
@@ -455,6 +655,7 @@ test("keeps the newer auth result when callbacks overlap for the same login", as
       ++syncs === 1 ? pending.promise : { ok: true, profileId: "profile-1" },
   });
   h.changeAuth();
+  await h.settle();
   h.changeAuth();
   await h.settle();
   pending.resolve({ ok: true, profileId: "profile-2" });
@@ -680,4 +881,128 @@ for (const cancellation of ["sign-out", "account change", "cleanup"]) {
       assert.equal(h.events.unsubscribed, true);
     }
   });
+}
+
+for (const operation of [
+  "setCardStickers",
+  "setUsername",
+  "setPlayerRating",
+  "syncTutorialProgress",
+  "setupLoggedInPlayerProfile",
+  "syncOwnProfileMiningState",
+  "flushPendingOwnProfileMiningState",
+]) {
+  test(`quota failure in optional ${operation} preserves verified authentication and display`, async () => {
+    const profile = {
+      ...authoritativeProfile,
+      id: cachedIdentity.profileId,
+      username:
+        operation === "setUsername"
+          ? "FreshServerName"
+          : cachedIdentity.username,
+      eth: cachedIdentity.ethAddress,
+      sol: cachedIdentity.solAddress,
+      rating: 1688,
+      nonce: 12,
+      totalManaPoints: 42,
+      cardStickers: JSON.stringify({ "big-mon-top-right": "applecreme" }),
+      completedProblemIds: ["one"],
+      isTutorialCompleted: true,
+    };
+    const h = harness({
+      initialIdentity: async () => ({ ok: true, profile }),
+      applicationErrors: {
+        [operation]: new DOMException(
+          "Storage quota exceeded",
+          "QuotaExceededError",
+        ),
+      },
+    });
+    h.changeAuth();
+    await h.settle();
+
+    assert.deepEqual(h.events.statuses, ["authenticated"]);
+    assert.deepEqual(h.events.displays, [
+      [profile.username, profile.eth, profile.sol],
+    ]);
+    assert.equal(h.data.loginId, cachedIdentity.loginId);
+    assert.equal(h.data.profileId, cachedIdentity.profileId);
+    assert.equal(h.data.ethAddress, cachedIdentity.ethAddress);
+    assert.equal(h.data.solAddress, cachedIdentity.solAddress);
+    if (operation === "setUsername")
+      assert.equal(h.data.username, cachedIdentity.username);
+    assert.equal(h.events.consumedIdentities, 1);
+    assert.equal(h.events.syncs, 0);
+    assert.deepEqual(h.events.lookups, []);
+    assert.deepEqual(h.retryDelays(), []);
+  });
+}
+
+for (const operation of [
+  "setLoginId",
+  "setProfileId",
+  "setEthAddress",
+  "setSolAddress",
+]) {
+  test(`quota failure writing required identity ${operation} still fails restoration`, async () => {
+    const h = harness({
+      initialIdentity: async () => ({
+        ok: true,
+        profile: authoritativeProfile,
+      }),
+      applicationErrors: {
+        [operation]: new DOMException(
+          "Storage quota exceeded",
+          "QuotaExceededError",
+        ),
+      },
+    });
+    h.changeAuth();
+    await h.settle();
+
+    assert.deepEqual(h.events.statuses, ["unauthenticated"]);
+    assert.deepEqual(h.events.displays, []);
+    assert.equal(h.events.consumedIdentities, 0);
+    assert.deepEqual(h.retryDelays(), [1_000]);
+    h.cleanup();
+  });
+}
+
+for (const [label, error] of [
+  ["ordinary error", new Error("Unexpected profile failure")],
+  [
+    "blocked storage",
+    new DOMException("Storage access denied", "SecurityError"),
+  ],
+  [
+    "non-DOM quota error",
+    Object.assign(new Error("Unexpected quota error"), {
+      name: "QuotaExceededError",
+    }),
+  ],
+]) {
+  for (const operation of [
+    "setCardStickers",
+    "syncTutorialProgress",
+    "setupLoggedInPlayerProfile",
+    "syncOwnProfileMiningState",
+  ]) {
+    test(`${label} in ${operation} is not hidden by optional quota handling`, async () => {
+      const h = harness({
+        initialIdentity: async () => ({
+          ok: true,
+          profile: authoritativeProfile,
+        }),
+        applicationErrors: { [operation]: error },
+      });
+      h.changeAuth();
+      await h.settle();
+
+      assert.deepEqual(h.events.statuses, ["unauthenticated"]);
+      assert.deepEqual(h.events.displays, []);
+      assert.equal(h.events.consumedIdentities, 0);
+      assert.deepEqual(h.retryDelays(), [1_000]);
+      h.cleanup();
+    });
+  }
 }

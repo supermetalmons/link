@@ -16,7 +16,9 @@ Preserve existing login IDs, applied SQL migrations, immutable snapshots, import
 
 ## Browser sessions and profile recovery
 
-Persistent browser sessions use five-minute Worker access tokens. Refresh and revocation are coordinated in D1. `POST /auth/profile/sync` resolves canonical ownership, repairs profile presentation, and dispatches existing catch-up jobs. The legacy `POST /auth/profile-claim/sync` URL remains a compatibility alias.
+Persistent browser sessions use five-minute Worker access tokens. Refresh and revocation are coordinated in D1. Session creation and refresh accept `bootstrapIdentity=1`, independently of game or event bootstrap parameters, to return the full verified public profile from one read-only canonical lookup. An authoritative missing owner returns `profile: null`; unavailable enrichment preserves the session token. `GET /auth/identity` retries profile reads without repair writes. `POST /auth/profile/sync` retains explicit repair and legacy restoration behavior, including the exceptional Apple/X missing-username repair. The legacy `POST /auth/profile-claim/sync` URL remains a compatibility alias.
+
+Browser DevTools exposes `auth:restore-start`, `auth:local-ready`, `auth:session-ready`, `auth:identity-ready`, and `auth:name-committed` marks. `auth:name-visible` is a guarded two-animation-frame approximation after the verified label commits, not an exact paint measurement. Session responses expose `session`, `identity` when requested, and `total` in `Server-Timing`, alongside existing game/event phases. No timing telemetry is uploaded.
 
 Canonical ownership changes create catch-up work atomically in D1. The scheduled sweep recovers Queue dispatch. Completed jobs stay absent; do not reset request IDs or replay cursors. `mons-link-auth-recovery` owns idempotent profile recovery. Investigate a stuck job without deleting it or purging its Queue.
 

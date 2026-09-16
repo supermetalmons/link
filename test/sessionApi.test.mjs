@@ -20,6 +20,7 @@ const {
   SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES,
   SESSION_BOOTSTRAP_REQUEST_TIMEOUT_MS,
   SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES,
+  SESSION_IDENTITY_BOOTSTRAP_MAX_RESPONSE_BYTES,
 } = await import("@mons/shared/session-bootstrap");
 const { eventSnapshotEtag } = await import("@mons/shared/events");
 const originalFetch = globalThis.fetch;
@@ -446,4 +447,140 @@ test("network and body time consume token lifetime without depending on later wa
   const result = await sessionApi.create(session);
   assert.equal(result.accessDeadlineMs, 300_000);
   assert.equal(result.accessDeadlineMs - performance.now(), 287_000);
+});
+
+test("identity opt-in composes with route seeds and preserves strict token parsing", async () => {
+  for (const target of [
+    undefined,
+    { inviteId: "game-a", selection: "current" },
+    { eventId: "event-a" },
+  ]) {
+    const route = !target
+      ? {}
+      : "eventId" in target
+        ? { eventBootstrap: { ...target, result: { ok: false, status: 404 } } }
+        : { gameBootstrap: { ...target, result: { ok: false, status: 404 } } };
+    for (const operation of [sessionApi.create, sessionApi.refresh]) {
+      globalThis.fetch = async (url) => {
+        assert.equal(new URL(url).searchParams.get("bootstrapIdentity"), "1");
+        assert.equal(String(url).includes(session.refreshSecret), false);
+        return json({
+          ...response(),
+          ...route,
+          identityBootstrap: { ok: true, profile: null },
+        });
+      };
+      const result = await operation(session, target, true);
+      assert.deepEqual(result.identityBootstrap, { ok: true, profile: null });
+      assert.equal(result.identitySupport, "supported");
+    }
+  }
+  globalThis.fetch = async () =>
+    json({ ...response(), identityBootstrap: { ok: true, profile: null } });
+  await assert.rejects(sessionApi.refresh(session), { code: "unavailable" });
+  globalThis.fetch = async () =>
+    json({ ...response(), identityBootstrap: null, extra: true });
+  await assert.rejects(sessionApi.refresh(session, undefined, true), {
+    code: "unavailable",
+  });
+});
+
+test("only absent opted-in identity identifies legacy; malformed and unavailable remain supported", async () => {
+  for (const identityBootstrap of [
+    undefined,
+    null,
+    {},
+    { ok: false, status: 401 },
+    { ok: false, status: 409 },
+    { ok: false, status: 503 },
+  ]) {
+    globalThis.fetch = async () =>
+      json({
+        ...response(),
+        ...(identityBootstrap === undefined ? {} : { identityBootstrap }),
+      });
+    const result = await sessionApi.refresh(session, undefined, true);
+    assert.equal(
+      result.identitySupport,
+      identityBootstrap === undefined ? "legacy" : "supported",
+    );
+    assert.deepEqual(
+      result.identityBootstrap,
+      identityBootstrap?.status === 409 || identityBootstrap?.status === 503
+        ? identityBootstrap
+        : undefined,
+    );
+  }
+});
+
+test("combined old-server 400 retries once without identity using identical capability and target", async () => {
+  const target = { eventId: "event-a" };
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url: new URL(url), options });
+    return calls.length === 1
+      ? json({}, 400)
+      : json({
+          ...response(),
+          eventBootstrap: { ...target, result: { ok: false, status: 404 } },
+        });
+  };
+  const result = await sessionApi.refresh(session, target, true);
+  assert.equal(result.identitySupport, "legacy");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].url.searchParams.get("bootstrapIdentity"), "1");
+  assert.equal(calls[1].url.searchParams.has("bootstrapIdentity"), false);
+  assert.equal(calls[1].url.searchParams.get("bootstrapEventId"), "event-a");
+  assert.deepEqual(calls[1].options.headers, calls[0].options.headers);
+  let attempts = 0;
+  globalThis.fetch = async () => {
+    attempts++;
+    return json({}, 400);
+  };
+  await assert.rejects(sessionApi.refresh(session, target, true), {
+    code: "unavailable",
+  });
+  assert.equal(attempts, 2);
+  attempts = 0;
+  await assert.rejects(sessionApi.refresh(session, undefined, true), {
+    code: "unavailable",
+  });
+  assert.equal(attempts, 1);
+});
+
+test("identity response bytes remain bounded separately from the base token", async () => {
+  globalThis.fetch = async () =>
+    json({ ...response(), identityBootstrap: { padding: "a".repeat(20_000) } });
+  const result = await sessionApi.refresh(session, undefined, true);
+  assert.equal(result.identitySupport, "supported");
+  assert.equal(result.identityBootstrap, undefined);
+  globalThis.fetch = async () =>
+    json({
+      ...response(),
+      identityBootstrap: {
+        padding: "a".repeat(
+          SESSION_IDENTITY_BOOTSTRAP_MAX_RESPONSE_BYTES + 16_384,
+        ),
+      },
+    });
+  await assert.rejects(sessionApi.refresh(session, undefined, true), {
+    code: "unavailable",
+  });
+});
+
+test("identity allowance cannot be borrowed by an oversized route payload", async () => {
+  const target = { eventId: "event-a" };
+  const seed = eventSeed();
+  seed.snapshot.event.description = "a".repeat(
+    SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES,
+  );
+  globalThis.fetch = async () =>
+    json({
+      ...response(),
+      eventBootstrap: { ...target, result: seed },
+      identityBootstrap: { ok: true, profile: null },
+    });
+  await assert.rejects(sessionApi.refresh(session, target, true), {
+    code: "unavailable",
+  });
 });

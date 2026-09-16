@@ -2,6 +2,12 @@ import {
   getLinkedAuthMethodsFromProfile,
   type LinkedAuthMethodsResponse,
 } from "@mons/shared/auth";
+import type {
+  CompletePlayerProfile,
+  ProfileLookupResponse,
+} from "@mons/shared/profiles";
+import { AuthApiFailure } from "./authErrors.ts";
+import { hasValidUsername } from "./authIdentityCanonical/policy.ts";
 import {
   CanonicalProfileCorruption,
   parseCanonicalAuthMethodRow,
@@ -25,6 +31,7 @@ async function readAuthProfileSnapshot(
   loginUid: string,
 ): Promise<{
   profileId: string;
+  profile: CompletePlayerProfile;
   authMethods: CanonicalAuthMethodSnapshot[];
 } | null> {
   const { results } = await db
@@ -101,7 +108,33 @@ async function readAuthProfileSnapshot(
     }
     authMethods.push(method);
   }
-  return { profileId: profile.profileId, authMethods };
+  return {
+    profileId: profile.profileId,
+    profile: profile.profile,
+    authMethods,
+  };
+}
+
+export async function readAuthIdentityProfile(
+  db: D1Database,
+  uid: string,
+): Promise<ProfileLookupResponse> {
+  const snapshot = await readAuthProfileSnapshot(db, uid);
+  if (!snapshot) return { ok: true, profile: null };
+  const methods = new Set(snapshot.authMethods.map((method) => method.method));
+  if (
+    (methods.has("apple") || methods.has("x")) &&
+    !hasValidUsername(snapshot.profile.username) &&
+    !methods.has("eth") &&
+    !methods.has("sol")
+  ) {
+    throw new AuthApiFailure(
+      409,
+      "failed-precondition",
+      "profile-repair-required",
+    );
+  }
+  return { ok: true, profile: snapshot.profile };
 }
 
 function createCanonicalAuthProfileRepository(

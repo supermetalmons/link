@@ -10,6 +10,7 @@ import {
 import {
   SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES,
   SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES,
+  SESSION_IDENTITY_BOOTSTRAP_MAX_RESPONSE_BYTES,
   type SessionBootstrapTarget,
   type SessionEventBootstrapTarget,
 } from "@mons/shared/session-bootstrap";
@@ -29,13 +30,17 @@ import {
   readSessionBootstrap,
   readSessionBootstrapTarget,
   readSessionEventBootstrap,
+  readSessionIdentityBootstrap,
+  readSessionIdentityBootstrapRequested,
   type SessionBootstrapDependencies,
+  type SessionIdentityBootstrapDependencies,
 } from "./sessionBootstrap.ts";
 
 export type SessionRouteDependencies = {
   now?: () => number;
   repository?: SessionRepository;
   bootstrap?: SessionBootstrapDependencies;
+  identity?: SessionIdentityBootstrapDependencies;
 };
 
 function capability(
@@ -67,6 +72,7 @@ export async function handleSessionRoute(
   const timings = new Map<string, number>();
   let target: SessionBootstrapTarget | SessionEventBootstrapTarget | null =
     null;
+  let includeIdentity = false;
   let headers: Record<string, string> = { Vary: "Origin" };
   const measure = async <T>(
     name: string,
@@ -83,7 +89,6 @@ export async function handleSessionRoute(
     }
   };
   const finish = (response: Response): Response => {
-    if (!target) return response;
     timings.set("total", Math.max(0, now() - startedAt));
     response.headers.set(
       "Server-Timing",
@@ -97,56 +102,88 @@ export async function handleSessionRoute(
   const tokenResponse = async (
     session: SessionTokenResponse,
   ): Promise<Response> => {
-    if (!target) return authJsonResponse(session, 200, headers);
-    if ("eventId" in target) {
-      const eventTarget = target;
-      let eventBootstrap = await measure("event_snapshot", () =>
-        readSessionEventBootstrap(
-          request,
-          eventTarget,
-          env,
-          dependencies.bootstrap,
-        ),
+    const readTarget = async () => {
+      if (!target) return {};
+      if ("eventId" in target) {
+        const eventTarget = target;
+        let eventBootstrap = await measure("event_snapshot", () =>
+          readSessionEventBootstrap(
+            request,
+            eventTarget,
+            env,
+            dependencies.bootstrap,
+          ),
+        );
+        if (
+          new TextEncoder().encode(
+            JSON.stringify({ ...session, eventBootstrap }),
+          ).byteLength > SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES
+        )
+          eventBootstrap = {
+            ...eventTarget,
+            result: { ok: false, status: 503 },
+          };
+        return { eventBootstrap };
+      }
+      let gameBootstrap = await readSessionBootstrap(
+        request,
+        target,
+        session,
+        env,
+        {
+          ...dependencies.bootstrap,
+          measure,
+        },
       );
       if (
-        new TextEncoder().encode(JSON.stringify({ ...session, eventBootstrap }))
-          .byteLength > SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES
+        new TextEncoder().encode(JSON.stringify({ ...session, gameBootstrap }))
+          .byteLength > SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES
       )
-        eventBootstrap = { ...eventTarget, result: { ok: false, status: 503 } };
-      return finish(
-        authJsonResponse({ ...session, eventBootstrap }, 200, headers),
-      );
-    }
-    let gameBootstrap = await readSessionBootstrap(
-      request,
-      target,
-      session,
-      env,
-      {
-        ...dependencies.bootstrap,
-        measure,
-      },
-    );
+        gameBootstrap = { ...target, result: { ok: false, status: 503 } };
+      return { gameBootstrap };
+    };
+    const [bootstrap, identityBootstrap] = await Promise.all([
+      readTarget(),
+      includeIdentity
+        ? measure("identity", () =>
+            readSessionIdentityBootstrap(
+              request,
+              session.uid,
+              env,
+              dependencies.identity,
+            ),
+          )
+        : Promise.resolve(undefined),
+    ]);
+    const body = {
+      ...session,
+      ...bootstrap,
+      ...(includeIdentity ? { identityBootstrap } : {}),
+    };
+    const baseLimit = target
+      ? "eventId" in target
+        ? SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES
+        : SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES
+      : 16_384;
     if (
-      new TextEncoder().encode(JSON.stringify({ ...session, gameBootstrap }))
-        .byteLength > SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES
-    )
-      gameBootstrap = { ...target, result: { ok: false, status: 503 } };
-    return finish(
-      authJsonResponse({ ...session, gameBootstrap }, 200, headers),
-    );
+      includeIdentity &&
+      new TextEncoder().encode(JSON.stringify(body)).byteLength >
+        baseLimit + SESSION_IDENTITY_BOOTSTRAP_MAX_RESPONSE_BYTES
+    ) {
+      body.identityBootstrap = { ok: false, status: 503 };
+    }
+    return finish(authJsonResponse(body, 200, headers));
   };
   try {
     headers = getAuthCorsHeaders(request);
     if (request.method === "OPTIONS") return authPreflightResponse(headers);
+    headers["Access-Control-Expose-Headers"] = "Retry-After, Server-Timing";
+    const origin = headers["Access-Control-Allow-Origin"];
+    if (origin) headers["Timing-Allow-Origin"] = origin;
     if (request.method !== "POST")
       throw new AuthApiFailure(405, "method-not-allowed", "method-not-allowed");
+    includeIdentity = readSessionIdentityBootstrapRequested(request);
     target = readSessionBootstrapTarget(request);
-    if (target) {
-      headers["Access-Control-Expose-Headers"] = "Retry-After, Server-Timing";
-      const origin = headers["Access-Control-Allow-Origin"];
-      if (origin) headers["Timing-Allow-Origin"] = origin;
-    }
     const pathname = new URL(request.url).pathname;
     const nowMs = now();
     const ip = request.headers.get("CF-Connecting-IP") || "unknown";
@@ -220,10 +257,12 @@ export async function handleSessionRoute(
     }
     if (pathname === SESSION_LOGOUT_PATH) {
       await repository.revoke(proof!, nowMs);
-      return new Response(null, {
-        status: 204,
-        headers: { ...headers, "Cache-Control": "no-store" },
-      });
+      return finish(
+        new Response(null, {
+          status: 204,
+          headers: { ...headers, "Cache-Control": "no-store" },
+        }),
+      );
     }
     throw new AuthApiFailure(404, "not-found", "not-found");
   } catch (error) {

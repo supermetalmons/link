@@ -7,6 +7,7 @@ const {
 } = require("./game-bootstrap");
 const { selectInviteMatch } = require("./rematches");
 const { isSessionTokenResponse } = require("./session-auth");
+const { isProfileLookupResponse } = require("./profiles");
 const {
   isEventSnapshotSeed,
   MAX_EVENT_READ_RESPONSE_BYTES,
@@ -17,6 +18,7 @@ const SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES =
 const SESSION_BOOTSTRAP_REQUEST_TIMEOUT_MS = 25_000;
 const SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES =
   MAX_EVENT_READ_RESPONSE_BYTES + 16_384;
+const SESSION_IDENTITY_BOOTSTRAP_MAX_RESPONSE_BYTES = 65_536;
 
 const record = (value) =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -80,8 +82,23 @@ function isSessionBootstrap(value) {
 
 function isSessionBootstrapResponse(value) {
   if (!record(value)) return false;
-  const { gameBootstrap, ...session } = value;
-  return isSessionTokenResponse(session) && isSessionBootstrap(gameBootstrap);
+  const { gameBootstrap, identityBootstrap, ...session } = value;
+  return (
+    isSessionTokenResponse(session) &&
+    isSessionBootstrap(gameBootstrap) &&
+    (!Object.hasOwn(value, "identityBootstrap") ||
+      isSessionIdentityBootstrap(identityBootstrap))
+  );
+}
+
+function isSessionIdentityBootstrap(value) {
+  return (
+    isProfileLookupResponse(value) ||
+    (record(value) &&
+      exactKeys(value, ["ok", "status"]) &&
+      value.ok === false &&
+      [409, 503].includes(value.status))
+  );
 }
 
 function isSessionEventBootstrapTarget(value) {
@@ -106,9 +123,12 @@ function isSessionEventBootstrap(value) {
 
 function isSessionEventBootstrapResponse(value) {
   if (!record(value)) return false;
-  const { eventBootstrap, ...session } = value;
+  const { eventBootstrap, identityBootstrap, ...session } = value;
   return (
-    isSessionTokenResponse(session) && isSessionEventBootstrap(eventBootstrap)
+    isSessionTokenResponse(session) &&
+    isSessionEventBootstrap(eventBootstrap) &&
+    (!Object.hasOwn(value, "identityBootstrap") ||
+      isSessionIdentityBootstrap(identityBootstrap))
   );
 }
 
@@ -116,6 +136,8 @@ module.exports = {
   SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES,
   SESSION_BOOTSTRAP_REQUEST_TIMEOUT_MS,
   SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES,
+  SESSION_IDENTITY_BOOTSTRAP_MAX_RESPONSE_BYTES,
+  isSessionIdentityBootstrap,
   isSessionBootstrapTarget,
   isSessionBootstrapFailure,
   isSessionBootstrap,
