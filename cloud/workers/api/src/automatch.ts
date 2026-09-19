@@ -39,10 +39,8 @@ import {
   stateIncrement,
 } from "./stateCompatibility.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
-import type {
-  GameplayProfile,
-  GameplayRepository,
-} from "./gameplayRepository.ts";
+import type { GameplayProfile } from "./gameplayRepository.ts";
+import type { AutomatchRepository } from "./gameplayContracts.ts";
 import type { GameSessionMutationLockStore } from "./gameplayCoordinationD1.ts";
 import { requestAutomatchProfileProjection } from "./gameSessionProjectionChanges.ts";
 import type { GameSessionChange } from "./gameSessionContracts.ts";
@@ -237,7 +235,7 @@ function buildAutomatchReceiptChanges(
 async function readAutomatchReceipt(
   requesterUid: string,
   request: StartAutomatchOperationRequest,
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   signal?: AbortSignal,
 ): Promise<AutomatchReceipt | null> {
   const rawReceipt = await measureAutomatchPhase("receipt", () =>
@@ -307,7 +305,7 @@ function getQueuedAutomatchesForUid(
 
 async function readQueuedAutomatchesByUid(
   uid: string,
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   signal?: AbortSignal,
 ): Promise<QueuedAutomatch[]> {
   return getQueuedAutomatchesForUid(
@@ -322,18 +320,11 @@ async function readQueuedAutomatchesByUid(
 
 export async function findOwnedQueuedAutomatches(
   loginUids: readonly string[],
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   signal?: AbortSignal,
 ): Promise<QueuedAutomatch[]> {
   const uniqueLoginUids = Array.from(new Set(loginUids));
   const persistence = repository.automatchPersistence;
-  if (!persistence) {
-    throw new AuthApiFailure(
-      503,
-      "unavailable",
-      "automatch-persistence-unavailable",
-    );
-  }
   const stored = await persistence.readQueuedByLogins(uniqueLoginUids, signal);
   signal?.throwIfAborted();
   return uniqueLoginUids
@@ -343,7 +334,7 @@ export async function findOwnedQueuedAutomatches(
 
 async function didClearOwnedQueuedAutomatches(
   loginUids: readonly string[],
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
 ): Promise<boolean> {
   try {
     const queued = await findOwnedQueuedAutomatches(
@@ -359,7 +350,7 @@ async function didClearOwnedQueuedAutomatches(
 
 export async function findOwnedQueuedAutomatch(
   loginUids: readonly string[],
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   signal?: AbortSignal,
 ): Promise<QueuedAutomatch | null> {
   return (
@@ -369,7 +360,7 @@ export async function findOwnedQueuedAutomatch(
 
 export async function readAutomatchRequesterSnapshot(
   uid: string,
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   logFailure: () => void = () => undefined,
 ): Promise<AutomatchRequesterSnapshot> {
   let ownership: ProfileOwnershipSnapshot;
@@ -544,7 +535,7 @@ async function didCommitAutomatchReceipt(
   requesterUid: string,
   request: StartAutomatchOperationRequest,
   expected: SuccessfulStartAutomatchResponse,
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
 ): Promise<boolean> {
   try {
     const receipt = await readAutomatchReceipt(
@@ -566,7 +557,7 @@ async function readAutomatchCancellationProof(
   inviteId: string,
   expectedUid: string,
   requestId: string,
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   signal: AbortSignal,
 ): Promise<boolean> {
   try {
@@ -594,7 +585,7 @@ async function didCommitAutomatchCancellation(
   inviteId: string,
   expectedUid: string,
   requestId: string,
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   signal: AbortSignal,
   wait: (milliseconds: number, signal: AbortSignal) => Promise<void>,
 ): Promise<boolean> {
@@ -631,7 +622,7 @@ async function didCommitAutomatchCancellation(
 
 export async function cancelQueuedAutomatch(
   queued: QueuedAutomatch,
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   dependencies: AutomatchDependencies,
   signal: AbortSignal = dependencies.signal ||
     AbortSignal.timeout(AUTOMATCH_TOTAL_TIMEOUT_MS),
@@ -763,7 +754,7 @@ export async function cancelQueuedAutomatch(
 
 async function convergeOwnedQueuedAutomatches(
   loginUids: readonly string[],
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   signal: AbortSignal,
   dependencies: AutomatchDependencies,
 ): Promise<QueuedAutomatch | null> {
@@ -792,12 +783,12 @@ async function convergeOwnedQueuedAutomatches(
 async function withAutomatchOwnerLease<T>(
   requester: AutomatchRequesterSnapshot,
   uid: string,
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   signal: AbortSignal,
   dependencies: AutomatchDependencies,
   work: () => Promise<T>,
 ): Promise<T> {
-  await repository.automatchPersistence?.recoverLogins(
+  await repository.automatchPersistence.recoverLogins(
     requester.loginUids,
     signal,
   );
@@ -856,7 +847,7 @@ async function withAutomatchOwnerLease<T>(
 
 export async function cancelOwnedQueuedAutomatches(
   uid: string,
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   dependencies: AutomatchDependencies,
 ): Promise<boolean> {
   const signal =
@@ -1009,7 +1000,7 @@ async function persistExistingAutomatchReceipt(
   request: StartAutomatchOperationRequest,
   inviteId: string,
   ownerUids: readonly string[],
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   signal: AbortSignal,
   dependencies: AutomatchDependencies,
 ): Promise<SuccessfulStartAutomatchResponse | null> {
@@ -1087,7 +1078,7 @@ async function attemptAutomatch(
   identity: RequestIdentity,
   request: StartAutomatchOperationRequest,
   requester: AutomatchRequesterSnapshot,
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   random: RandomSource,
   signal: AbortSignal,
   retryCount: number,
@@ -1532,7 +1523,7 @@ async function attemptAutomatch(
 async function startAutomatchForCurrentOwner(
   identity: RequestIdentity,
   request: StartAutomatchOperationRequest,
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   signal: AbortSignal,
   dependencies: AutomatchDependencies,
 ): Promise<StartAutomatchResponse> {
@@ -1596,7 +1587,7 @@ async function startAutomatchForCurrentOwner(
 export async function startAutomatch(
   identity: RequestIdentity,
   request: StartAutomatchOperationRequest,
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   dependencies: AutomatchDependencies,
 ): Promise<StartAutomatchResponse> {
   const signal =

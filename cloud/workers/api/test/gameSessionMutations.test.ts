@@ -36,14 +36,12 @@ import {
   GameSessionMutationLockFailure,
   type GameSessionMutationLockStore,
 } from "../src/gameplayCoordinationD1.ts";
-import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import type { GameSessionRepository } from "../src/gameplayContracts.ts";
 import type {
   ProfileOwnershipQuery,
   ProfileOwnershipSnapshot,
 } from "../src/profileOwnership.ts";
-import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
-import { createAutomatchPersistenceStub } from "./automatchPersistenceTestUtils.ts";
 
 const identity: RequestIdentity = {
   uid: "login-1",
@@ -55,11 +53,11 @@ type GameSessionDependencyOverrides = Omit<
 >;
 
 const coordinationByRepository = new WeakMap<
-  GameplayRepository,
+  GameSessionRepository,
   ReturnType<typeof createMemoryGameplayCoordinationStores>
 >();
 
-function coordination(repository: GameplayRepository) {
+function coordination(repository: GameSessionRepository) {
   let stores = coordinationByRepository.get(repository);
   if (!stores) {
     stores = createMemoryGameplayCoordinationStores();
@@ -69,7 +67,7 @@ function coordination(repository: GameplayRepository) {
 }
 
 function sessionDependencies(
-  repository: GameplayRepository,
+  repository: GameSessionRepository,
   dependencies: GameSessionDependencyOverrides = {},
 ): GameSessionMutationDependencies {
   return {
@@ -81,7 +79,7 @@ function sessionDependencies(
 function createManualInvite(
   actor: RequestIdentity,
   request: CreateInviteRequest,
-  repository: GameplayRepository,
+  repository: GameSessionRepository,
   dependencies: GameSessionDependencyOverrides = {},
 ) {
   return createManualInviteImpl(
@@ -95,7 +93,7 @@ function createManualInvite(
 function joinInvite(
   actor: RequestIdentity,
   request: JoinInviteRequest,
-  repository: GameplayRepository,
+  repository: GameSessionRepository,
   dependencies: GameSessionDependencyOverrides = {},
 ) {
   return joinInviteImpl(
@@ -109,7 +107,7 @@ function joinInvite(
 function proposeRematch(
   actor: RequestIdentity,
   request: ProposeRematchRequest,
-  repository: GameplayRepository,
+  repository: GameSessionRepository,
   dependencies: GameSessionDependencyOverrides = {},
 ) {
   return proposeRematchImpl(
@@ -123,7 +121,7 @@ function proposeRematch(
 function endRematchSeries(
   actor: RequestIdentity,
   request: EndRematchRequest,
-  repository: GameplayRepository,
+  repository: GameSessionRepository,
   dependencies: GameSessionDependencyOverrides = {},
 ) {
   return endRematchSeriesImpl(
@@ -137,7 +135,7 @@ function endRematchSeries(
 function ensureParticipantMatch(
   actor: RequestIdentity,
   request: EnsureMatchRequest,
-  repository: GameplayRepository,
+  repository: GameSessionRepository,
   dependencies: GameSessionDependencyOverrides = {},
 ) {
   return ensureParticipantMatchImpl(
@@ -152,7 +150,7 @@ function acquireGameSessionMutationLease(
   lockId: string,
   operationId: string,
   ownerId: string,
-  repository: GameplayRepository,
+  repository: GameSessionRepository,
   nowMs: number,
 ) {
   return acquireGameSessionMutationLeaseImpl(
@@ -168,7 +166,7 @@ function refreshGameSessionMutationLease(
   lockId: string,
   operationId: string,
   ownerId: string,
-  repository: GameplayRepository,
+  repository: GameSessionRepository,
   nowMs: number,
 ) {
   return refreshGameSessionMutationLeaseImpl(
@@ -184,7 +182,7 @@ function releaseGameSessionMutationLease(
   lockId: string,
   operationId: string,
   ownerId: string,
-  repository: GameplayRepository,
+  repository: GameSessionRepository,
 ) {
   return releaseGameSessionMutationLeaseImpl(
     lockId,
@@ -295,24 +293,12 @@ function repository(initial: Record<string, unknown> = {}, nowMs = 1_000) {
   const values = new Map(Object.entries(initial));
   const patches: Record<string, unknown>[] = [];
   const source: Omit<
-    GameplayRepository,
+    GameSessionRepository,
     | keyof import("../src/gameSessionContracts.ts").GameSessionPort
     | keyof import("../src/repositoryContracts.ts").MatchStatePort
-    | "wagers"
   > &
     LegacyGameplayTestMethods &
-    Pick<GameplayRepository, "readInviteMetadata"> = {
-    applyWagerTransferOnce: async () => "applied",
-    deleteNavigationGame: async () => "deleted",
-    getNavigationGame: async () => null,
-    getMiningMaterials: async () => ({
-      dust: 0,
-      slime: 0,
-      gum: 0,
-      metal: 0,
-      ice: 0,
-    }),
-    getMiningSnapshot: async () => null,
+    Pick<GameSessionRepository, "readInviteMetadata"> = {
     readInviteMetadata: async (inviteId) =>
       (values.get(`invites/${inviteId}`) ?? null) as Record<
         string,
@@ -370,7 +356,7 @@ function repository(initial: Record<string, unknown> = {}, nowMs = 1_000) {
   const result = attachGameplayTestPorts(source);
   return {
     patches,
-    repository: result as typeof result & GameplayRepository,
+    repository: result,
     values,
   };
 }
@@ -1507,38 +1493,18 @@ test("rejects structural mutations for event-owned invites", async () => {
   );
 });
 
-test("uses the canonical bounded expiry operation without reading or patching Firebase receipts", async () => {
+test("expires receipts through the injected bounded cleanup operation", async () => {
   assert.equal(GAME_SESSION_MUTATION_RECEIPT_SWEEP_LIMIT, 1000);
-  const state = repository();
   const calls: number[][] = [];
-  state.repository.getStatePath = async () => {
-    throw new Error("unexpected-receipt-read");
-  };
-  state.repository.automatchPersistence = createAutomatchPersistenceStub({
-    async expireReceipts(cutoff, limit) {
-      calls.push([cutoff, limit]);
-      return 3;
-    },
-  });
   const count = await sweepGameSessionMutationReceipts(
-    TELEGRAM_TEST_ENV as Env,
     {
-      now: () => 7 * 24 * 60 * 60 * 1_000 + 100,
-      repository: state.repository,
+      async expireReceipts(cutoff, limit) {
+        calls.push([cutoff, limit]);
+        return 3;
+      },
     },
+    { now: () => 7 * 24 * 60 * 60 * 1_000 + 100 },
   );
   assert.equal(count, 3);
   assert.deepEqual(calls, [[100, 1000]]);
-  assert.deepEqual(state.patches, []);
-});
-
-test("rejects receipt expiry without a canonical persistence coordinator", async () => {
-  const state = repository();
-  await assert.rejects(
-    sweepGameSessionMutationReceipts(TELEGRAM_TEST_ENV as Env, {
-      repository: state.repository,
-    }),
-    /automatch-persistence-unavailable/,
-  );
-  assert.deepEqual(state.patches, []);
 });

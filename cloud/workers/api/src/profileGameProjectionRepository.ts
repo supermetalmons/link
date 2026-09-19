@@ -39,7 +39,7 @@ import type { HistoricalMatchSource } from "./historicalMatches.ts";
 import { archiveHistoricalMatchWithPresentation } from "./historicalMatchPresentation.ts";
 import { readRatingCompletion } from "./ratingCompletionD1.ts";
 import {
-  captureEventMatchDiscovery,
+  ensureEventMatchDiscovery,
   eventMatchInviteIds,
 } from "./eventLoginMatchDiscovery.ts";
 import {
@@ -296,25 +296,21 @@ export function createEventProfileGameProjectionRuntime(
       );
     },
 
-    async getEvent(eventId) {
-      const value = await state.readEvent(eventId);
-      if (value) {
-        await captureEventMatchDiscovery(
-          d1,
-          state,
-          eventMatchInviteIds(value),
-          undefined,
-          (dependencies.now || Date.now)(),
-        );
-      }
-      return value;
-    },
+    getEvent: (eventId) => state.readEvent(eventId),
 
     readProfileOwnershipSnapshot: (query) =>
       readEventProjectionOwnershipSnapshot(profileDb, query),
   };
   const projection = createEventProfileGameProjectionCore({
     now: dependencies.now,
+    prepareEventProjection: (_eventId, event) =>
+      ensureEventMatchDiscovery(
+        d1,
+        state,
+        eventMatchInviteIds(event),
+        undefined,
+        (dependencies.now || Date.now)(),
+      ),
     repository,
     wait: dependencies.wait,
   });

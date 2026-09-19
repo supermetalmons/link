@@ -22,10 +22,8 @@ import {
   STATE_SERVER_TIMESTAMP,
   stateIncrement,
 } from "../test/stateRepositoryTestTypes.ts";
-import type {
-  GameplayProfile,
-  GameplayRepository,
-} from "../src/gameplayRepository.ts";
+import type { GameplayProfile } from "../src/gameplayRepository.ts";
+import type { AutomatchRepository } from "../src/gameplayContracts.ts";
 import type {
   ProfileOwnershipQuery,
   ProfileOwnershipSnapshot,
@@ -42,11 +40,11 @@ const identity: RequestIdentity = {
 const AUTOMATCH_OPERATION_ID = "00000000-0000-4000-8000-000000000001";
 
 const coordinationByRepository = new WeakMap<
-  GameplayRepository,
+  AutomatchRepository,
   ReturnType<typeof createMemoryGameplayCoordinationStores>
 >();
 
-function coordinationFor(repository: GameplayRepository) {
+function coordinationFor(repository: AutomatchRepository) {
   let coordination = coordinationByRepository.get(repository);
   if (!coordination) {
     coordination = createMemoryGameplayCoordinationStores();
@@ -56,7 +54,7 @@ function coordinationFor(repository: GameplayRepository) {
 }
 
 function automatchDependencies(
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   dependencies: Partial<AutomatchDependencies> = {},
 ): AutomatchDependencies {
   return {
@@ -68,7 +66,7 @@ function automatchDependencies(
 function startAutomatch(
   identity: Parameters<typeof startAutomatchImpl>[0],
   request: Parameters<typeof startAutomatchImpl>[1],
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   dependencies: Partial<AutomatchDependencies> = {},
 ) {
   return startAutomatchImpl(
@@ -81,7 +79,7 @@ function startAutomatch(
 
 function cancelQueuedAutomatch(
   queued: Parameters<typeof cancelQueuedAutomatchImpl>[0],
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   dependencies: Partial<AutomatchDependencies> = {},
   signal?: AbortSignal,
 ) {
@@ -95,7 +93,7 @@ function cancelQueuedAutomatch(
 
 function cancelAutomatch(
   identity: Parameters<typeof cancelAutomatchImpl>[0],
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   dependencies: Partial<AutomatchDependencies> = {},
 ) {
   return cancelAutomatchImpl(
@@ -260,9 +258,9 @@ function ownershipSnapshot(
 }
 
 function repository(
-  overrides: Partial<GameplayRepository & LegacyGameplayTestMethods> = {},
+  overrides: Partial<AutomatchRepository & LegacyGameplayTestMethods> = {},
   readReceipt: (() => unknown) | null = null,
-): GameplayRepository & LegacyGameplayTestMethods {
+): AutomatchRepository & LegacyGameplayTestMethods {
   const transactionValues = new Map<string, unknown>();
   const receiptValues = new Map<string, unknown>();
   const getStatePath = overrides.getStatePath;
@@ -273,28 +271,15 @@ function repository(
     ...remainingOverrides
   } = overrides;
   const source: Omit<
-    GameplayRepository,
-    | keyof import("../src/gameSessionContracts.ts").GameSessionPort
-    | keyof import("../src/repositoryContracts.ts").MatchStatePort
-    | "wagers"
+    AutomatchRepository,
+    keyof import("../src/gameSessionContracts.ts").GameSessionPort
   > &
     LegacyGameplayTestMethods &
-    Pick<GameplayRepository, "readInviteMetadata"> = {
+    Pick<AutomatchRepository, "readInviteMetadata"> = {
     automatchPersistence: createAutomatchPersistenceStub({
       readQueuedByLogins: createAutomatchQueueLookup(getStatePath),
     }),
-    applyWagerTransferOnce: async () => "applied",
-    deleteNavigationGame: async () => "deleted",
     readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
-    getNavigationGame: async () => null,
-    getMiningMaterials: async () => ({
-      dust: 10,
-      slime: 10,
-      gum: 10,
-      metal: 10,
-      ice: 10,
-    }),
-    getMiningSnapshot: async () => null,
     readInviteMetadata: async (inviteId, signal) =>
       ((await getStatePath?.(`invites/${inviteId}`, undefined, signal)) ??
         null) as Record<string, unknown> | null,
@@ -347,7 +332,7 @@ function repository(
       signal,
     ),
   });
-  return result as GameplayRepository & LegacyGameplayTestMethods;
+  return result;
 }
 
 test("reselects and rereads ownership after a named journal selection conflict", async () => {
@@ -420,19 +405,6 @@ test("selection retries keep the original cancellation signal", async () => {
     /original-deadline/,
   );
   assert.equal(attempts, 1);
-});
-
-test("requires canonical persistence for owner lookup without reading a Firebase queue", async () => {
-  const source = repository({
-    automatchPersistence: undefined,
-    async getStatePath() {
-      throw new Error("unexpected-queue-read");
-    },
-  });
-  await assert.rejects(
-    findOwnedQueuedAutomatch(["host"], source),
-    /automatch-persistence-unavailable/,
-  );
 });
 
 test("normalizes the first bounded queue result", () => {

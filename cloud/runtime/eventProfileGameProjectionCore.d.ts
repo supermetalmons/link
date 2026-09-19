@@ -43,6 +43,10 @@ export type EventProjectionCommitOptions = {
 
 export function createEventProfileGameProjectionCore(dependencies: {
   now?: () => number;
+  prepareEventProjection?(
+    eventId: string,
+    event: Record<string, unknown>,
+  ): Promise<void>;
   repository: EventProfileGameProjectionRepository;
   wait?(milliseconds: number): Promise<void>;
 }): {

@@ -218,6 +218,70 @@ test("live reconciliation projects one immutable event read", async () => {
   );
 });
 
+test("event preparation shares the projection snapshot and missing events skip it", async () => {
+  const first = { participants: {}, status: "active" };
+  const second = { participants: {}, status: "ended" };
+  const state = createRepository({ events: [first, second, null] });
+  const prepared: Array<Record<string, unknown>> = [];
+  const core = createEventProfileGameProjectionCore({
+    repository: state.repository,
+    async prepareEventProjection(eventId, event) {
+      assert.equal(eventId, "event-1");
+      prepared.push(event);
+    },
+    wait: async () => undefined,
+  });
+  assert.equal(
+    (await core.reconcileEventProjection("event-1")).status,
+    "projected",
+  );
+  assert.deepEqual(prepared, [first]);
+  assert.equal(
+    (await core.reconcileEventProjection("event-1")).status,
+    "projected",
+  );
+  assert.deepEqual(prepared, [first, second]);
+  assert.equal(
+    (await core.reconcileEventProjection("event-1")).status,
+    "missing",
+  );
+  assert.deepEqual(prepared, [first, second]);
+});
+
+test("failed event preparation retries the event read before projecting", async () => {
+  const first = {
+    participants: { first: { profileId: "first", loginUid: "login-first" } },
+  };
+  const second = {
+    participants: { second: { profileId: "second", loginUid: "login-second" } },
+  };
+  const state = createRepository({
+    events: [first, second],
+    canonicalProfileIds: { first: "first", second: "second" },
+    loginProfileIds: { "login-first": "first", "login-second": "second" },
+  });
+  const prepared: Array<Record<string, unknown>> = [];
+  const core = createEventProfileGameProjectionCore({
+    repository: state.repository,
+    async prepareEventProjection(_eventId, event) {
+      prepared.push(event);
+      assert.equal(state.writes.length, 0);
+      if (prepared.length === 1)
+        throw new Error("discovery-temporarily-unavailable");
+    },
+    wait: async () => undefined,
+  });
+  assert.equal(
+    (await core.reconcileEventProjection("event-1")).status,
+    "projected",
+  );
+  assert.deepEqual(prepared, [first, second]);
+  assert.deepEqual(
+    state.writes[0].map((write) => write.profileId),
+    ["second"],
+  );
+});
+
 test("event projection reads one ownership snapshot", async () => {
   let ownershipReads = 0;
   const repository: EventProfileGameProjectionRepository = {

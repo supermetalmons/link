@@ -3,6 +3,7 @@ import {
   type WagerTestState,
 } from "./wagerStateTestUtils.ts";
 import { normalizeMaterials } from "@mons/shared/mining";
+import { createAutomatchPersistenceStub } from "./automatchPersistenceTestUtils.ts";
 import type { WagerReservationRuntime } from "../src/wagerReservationRuntime.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import { frozenOperationState } from "../src/wagerFrozenRecords.ts";
@@ -140,6 +141,7 @@ export function attachMemoryWagerFrozenStore(
     throw new Error("unexpected-gameplay-operation");
   };
   const repository = {
+    automatchPersistence: createAutomatchPersistenceStub(),
     readAutomatchTelegramSource: unexpected,
     transactAutomatchTelegramSource: unexpected,
     readAutomatchTelegramOutbox: unexpected,

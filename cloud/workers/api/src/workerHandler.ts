@@ -51,6 +51,8 @@ import {
   HISTORICAL_MATCH_PATH,
 } from "./historicalMatchRoute.ts";
 import { createGameplayRepository } from "./gameplayRepository.ts";
+import { createAutomatchPersistence } from "./automatchPersistence.ts";
+import { createMatchStateSource } from "./matchStateSource.ts";
 import {
   createGameSessionMutationLockStore,
   createMatchTimerStartStore,
@@ -133,13 +135,17 @@ export async function handleScheduled(
       }
     },
     gameSessionReceipts: () =>
-      sweepGameSessionMutationReceipts(env, {
-        now: () => controller.scheduledTime,
-      }),
+      sweepGameSessionMutationReceipts(
+        createAutomatchPersistence(
+          env.PROFILE_GAMES_DB,
+          createMatchStateSource(env),
+        ),
+        { now: () => controller.scheduledTime },
+      ),
     gameSessionTransitions: async () => {
       const repository = createGameplayRepository(env);
-      const result = await repository.automatchPersistence?.sweep();
-      if (result?.failed)
+      const result = await repository.automatchPersistence.sweep();
+      if (result.failed)
         throw new Error("game-session-transition-recovery-failed");
       return result;
     },

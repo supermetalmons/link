@@ -15,6 +15,7 @@ import {
 } from "../automatch.ts";
 import { enforceGameSessionMutationRateLimit } from "../gameSessionMutations.ts";
 import type { GameplayRepository } from "../gameplayRepository.ts";
+import type { AutomatchRepository } from "../gameplayContracts.ts";
 import type { RequestIdentity } from "../requestIdentity.ts";
 import { readAuthenticatedGameBootstrap } from "../gameBootstrap.ts";
 import { measureAutomatchPhase } from "../automatchTelemetry.ts";
@@ -38,7 +39,7 @@ export function readAutomatchOperationId(request: Request): string {
 
 export async function cancelAutomatch(
   identity: RequestIdentity,
-  repository: GameplayRepository,
+  repository: AutomatchRepository,
   dependencies: AutomatchDependencies,
 ): Promise<CancelAutomatchResponse> {
   return {

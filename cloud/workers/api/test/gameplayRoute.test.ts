@@ -216,11 +216,13 @@ function repository(
   });
   Object.assign(result, session, overrides);
 
-  result.automatchPersistence ??= createAutomatchPersistenceStub({
-    readQueuedByLogins: createAutomatchQueueLookup((...args) =>
-      result.readState(...args),
-    ),
-  });
+  result.automatchPersistence =
+    overrides.automatchPersistence ||
+    createAutomatchPersistenceStub({
+      readQueuedByLogins: createAutomatchQueueLookup((...args) =>
+        result.readState(...args),
+      ),
+    });
   return result;
 }
 

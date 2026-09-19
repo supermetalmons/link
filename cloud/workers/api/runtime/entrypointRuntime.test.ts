@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { env } from "cloudflare:workers";
+import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import * as entrypoint from "../src/index.ts";
 import {
   createEventProgressWorkflowDependencies,
@@ -446,6 +448,92 @@ describe("Worker entrypoint", () => {
         "telegramProjection",
       ]),
     );
+  });
+
+  it("expires receipts through the default scheduled cleanup with the scheduled cutoff", async () => {
+    const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
+    const db = testEnv.PROFILE_GAMES_DB;
+    const scheduledTime = 7 * 24 * 60 * 60 * 1_000 + 1_000;
+    const executedAtMs = scheduledTime + 60_000;
+    const payload = JSON.stringify({ kind: "invite-create" });
+    const receipts = [
+      { key: "due", completedAtMs: 999 },
+      { key: "boundary", completedAtMs: 1_000 },
+      { key: "future", completedAtMs: 1_001 },
+      { key: "reserved", completedAtMs: 999 },
+    ];
+    await applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS);
+    await db.batch([
+      db.prepare(
+        "UPDATE automatch_runtime_control SET backend = 'd1', state = 'active' WHERE singleton = 1",
+      ),
+      db.prepare(
+        "UPDATE invite_source_control SET backend = 'd1', state = 'active', epoch = 1, verified_at_ms = 1, activated_at_ms = 1 WHERE singleton = 1",
+      ),
+      ...receipts.map(({ key, completedAtMs }) =>
+        db
+          .prepare(
+            `INSERT INTO game_session_mutation_receipts
+               (record_key, payload_json, revision, expiration_json, expiration_revision, updated_at_ms)
+             VALUES (?, ?, 1, ?, 1, 1)`,
+          )
+          .bind(key, payload, JSON.stringify({ completedAtMs })),
+      ),
+      db.prepare(
+        `INSERT INTO game_session_transitions
+           (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms)
+         VALUES ('pending-transition', 'invite', '{}', 'pending', 1, 1)`,
+      ),
+      db.prepare(
+        `INSERT INTO game_session_transition_resources (resource_key, transition_id)
+         VALUES ('gameplay-operation:reserved', 'pending-transition')`,
+      ),
+    ]);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(executedAtMs);
+    try {
+      await handleScheduled(
+        { ...controller, scheduledTime },
+        withProfileControl(
+          { ...TELEGRAM_TEST_ENV, PROFILE_GAMES_DB: db },
+          "frozen",
+        ),
+        {
+          authState: async () => undefined,
+          gameSessionLocks: async () => undefined,
+        },
+      );
+    } finally {
+      clock.mockRestore();
+    }
+    for (const { key, completedAtMs } of receipts) {
+      const expired = key === "due" || key === "boundary";
+      expect(
+        await db
+          .prepare(
+            `SELECT payload_json, revision, expiration_json, expiration_revision, updated_at_ms
+             FROM game_session_mutation_receipts WHERE record_key = ?`,
+          )
+          .bind(key)
+          .first(),
+        key,
+      ).toEqual({
+        payload_json: expired ? null : payload,
+        revision: expired ? 2 : 1,
+        expiration_json: expired ? null : JSON.stringify({ completedAtMs }),
+        expiration_revision: expired ? 2 : 1,
+        updated_at_ms: expired ? executedAtMs : 1,
+      });
+    }
+    for (const table of [
+      "automatch_write_admissions",
+      "invite_source_write_admissions",
+    ]) {
+      expect(
+        await db
+          .prepare(`SELECT COUNT(*) AS count FROM ${table}`)
+          .first("count"),
+      ).toBe(0);
+    }
   });
 
   it("runs all scheduled work, logs each failure, and reports the first failure", async () => {

@@ -255,7 +255,7 @@ export type GameplayRepository = ProfileOwnershipReader &
   MatchStatePort & {
     wagers: WagerReader;
     wagerWriter?: WagerWriter;
-    automatchPersistence?: AutomatchPersistence;
+    automatchPersistence: AutomatchPersistence;
     wagerFrozen?: WagerFrozenStore;
     applyWagerTransferOnce: (
       input: WagerTransferInput,

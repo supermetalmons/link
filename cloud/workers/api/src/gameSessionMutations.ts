@@ -47,11 +47,12 @@ import {
   stateIncrement,
 } from "./stateCompatibility.ts";
 import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
-import {
-  createGameplayRepository,
-  type GameplayProfile,
-  type GameplayRepository,
-} from "./gameplayRepository.ts";
+import type { GameplayProfile } from "./gameplayRepository.ts";
+import type {
+  GameSessionRepository,
+  InviteAccessRepository,
+} from "./gameplayContracts.ts";
+import type { AutomatchPersistence } from "./automatchPersistence.ts";
 import {
   GameSessionMutationLockFailure,
   type GameSessionMutationLockStore,
@@ -69,6 +70,7 @@ import {
   loginsShareProfile,
   requireProfileOwnershipSnapshot,
   type ProfileOwnershipSnapshot,
+  type ProfileOwnershipReader,
 } from "./profileOwnership.ts";
 
 const GAME_SESSION_MUTATION_RECEIPT_ROOT = "gameplayMutationReceipts";
@@ -467,7 +469,7 @@ async function runGameSessionMutation<T extends GameSessionResponse>(
   kind: GameSessionMutationKind,
   requesterUid: string,
   request: GameSessionRequest,
-  repository: GameplayRepository,
+  repository: GameSessionRepository,
   validateResponse: (value: unknown) => value is T,
   build: () => Promise<GameSessionMutationOutcome<T>>,
   dependencies: GameSessionMutationDependencies,
@@ -559,7 +561,7 @@ async function runGameSessionMutation<T extends GameSessionResponse>(
 export async function resolveInviteRole(
   identity: RequestIdentity,
   request: ResolveInviteRoleRequest,
-  repository: GameplayRepository,
+  repository: InviteAccessRepository,
 ): Promise<ResolveInviteRoleResponse> {
   const storedInvite = await repository.readInviteMetadata(request.inviteId);
   return resolveInviteRoleFromSnapshot(
@@ -574,7 +576,7 @@ export async function resolveInviteRoleFromSnapshot(
   identity: RequestIdentity,
   request: ResolveInviteRoleRequest,
   storedInvite: unknown,
-  repository: GameplayRepository,
+  repository: ProfileOwnershipReader,
 ): Promise<ResolveInviteRoleResponse> {
   if (storedInvite === null || storedInvite === undefined) {
     throw new AuthApiFailure(404, "not-found", "invite-not-found");
@@ -643,7 +645,7 @@ export async function resolveInviteRoleFromSnapshot(
 async function resolveParticipant(
   identity: RequestIdentity,
   invite: Record<string, unknown>,
-  repository: GameplayRepository,
+  repository: ProfileOwnershipReader,
 ): Promise<ParticipantResolution> {
   const hostUid = readStoredString(invite.hostId);
   const guestUid = readStoredString(invite.guestId);
@@ -704,7 +706,7 @@ function ensureMutableInvite(invite: Record<string, unknown>): void {
 export async function createManualInvite(
   identity: RequestIdentity,
   request: CreateInviteRequest,
-  repository: GameplayRepository,
+  repository: GameSessionRepository,
   dependencies: GameSessionMutationDependencies,
 ): Promise<CreateInviteResponse> {
   return runGameSessionMutation(
@@ -824,7 +826,7 @@ function automatchJoinChanges(
 export async function joinInvite(
   identity: RequestIdentity,
   request: JoinInviteRequest,
-  repository: GameplayRepository,
+  repository: GameSessionRepository,
   dependencies: GameSessionMutationDependencies,
 ): Promise<JoinInviteResponse> {
   return runGameSessionMutation(
@@ -1035,7 +1037,7 @@ function rematchColor(
 export async function proposeRematch(
   identity: RequestIdentity,
   request: ProposeRematchRequest,
-  repository: GameplayRepository,
+  repository: GameSessionRepository,
   dependencies: GameSessionMutationDependencies,
 ): Promise<ProposeRematchResponse> {
   return runGameSessionMutation(
@@ -1170,7 +1172,7 @@ export async function proposeRematch(
 export async function endRematchSeries(
   identity: RequestIdentity,
   request: EndRematchRequest,
-  repository: GameplayRepository,
+  repository: GameSessionRepository,
   dependencies: GameSessionMutationDependencies,
 ): Promise<EndRematchResponse> {
   return runGameSessionMutation(
@@ -1250,7 +1252,7 @@ export async function endRematchSeries(
 export async function ensureParticipantMatch(
   identity: RequestIdentity,
   request: EnsureMatchRequest,
-  repository: GameplayRepository,
+  repository: GameSessionRepository,
   dependencies: GameSessionMutationDependencies,
 ): Promise<EnsureMatchResponse> {
   return runGameSessionMutation(
@@ -1329,24 +1331,10 @@ export async function ensureParticipantMatch(
 }
 
 export async function sweepGameSessionMutationReceipts(
-  env: Env,
-  {
-    now = Date.now,
-    repository = createGameplayRepository(env),
-  }: {
-    now?: () => number;
-    repository?: GameplayRepository;
-  } = {},
+  persistence: Pick<AutomatchPersistence, "expireReceipts">,
+  { now = Date.now }: { now?: () => number } = {},
 ): Promise<number> {
   const cutoff = now() - GAME_SESSION_MUTATION_RECEIPT_RETENTION_MS;
-  const persistence = repository.automatchPersistence;
-  if (!persistence) {
-    throw new AuthApiFailure(
-      503,
-      "unavailable",
-      "automatch-persistence-unavailable",
-    );
-  }
   return persistence.expireReceipts(
     cutoff,
     GAME_SESSION_MUTATION_RECEIPT_SWEEP_LIMIT,

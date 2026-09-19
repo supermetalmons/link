@@ -27,6 +27,7 @@ const defaultWait = (milliseconds) =>
 
 const createEventProfileGameProjectionCore = ({
   now = Date.now,
+  prepareEventProjection,
   repository,
   wait = defaultWait,
 }) => {
@@ -246,7 +247,13 @@ const createEventProfileGameProjectionCore = ({
     const cleanupIds = new Set(
       cleanupOwnerProfileIds.map(normalizeString).filter(Boolean),
     );
-    const liveData = await readWithRetries(() => repository.getEvent(eventId));
+    const liveData = await readWithRetries(async () => {
+      const event = await repository.getEvent(eventId);
+      if (event && prepareEventProjection) {
+        await prepareEventProjection(eventId, event);
+      }
+      return event;
+    });
     getOwnerProfileIds(
       liveData?.participants && typeof liveData.participants === "object"
         ? liveData.participants
