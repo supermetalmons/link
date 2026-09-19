@@ -418,7 +418,9 @@ export function useAuthStatus() {
           }
           if (identity.ok) {
             if (identity.profile) {
-              applyVerifiedProfile(identity.profile, uid);
+              applyVerifiedProfile(identity.profile, uid, {
+                deferPresentationCache: true,
+              });
               setAuthStatus("authenticated");
             } else {
               setAuthStatus("unauthenticated");
@@ -623,7 +625,9 @@ export function useAuthStatus() {
         };
         markAuthIdentityReady();
         if (loadedProfile) {
-          applyVerifiedProfile(loadedProfile, uid);
+          applyVerifiedProfile(loadedProfile, uid, {
+            deferPresentationCache: true,
+          });
         } else {
           updateProfileDisplayName(
             resolvedUsername,

@@ -34,6 +34,29 @@ async function fixture(run) {
       viewport: { width: 1280, height: 1000 },
     });
     context.setDefaultTimeout(15_000);
+    await context.addInitScript(() => {
+      globalThis.failSessionStorage = (once = false) => {
+        const open = indexedDB.open;
+        const transaction = IDBDatabase.prototype.transaction;
+        const restore = () => {
+          indexedDB.open = open;
+          IDBDatabase.prototype.transaction = transaction;
+        };
+        const fail = () => {
+          if (once) restore();
+          throw new DOMException("Temporary storage failure", "UnknownError");
+        };
+        indexedDB.open = function (...args) {
+          if (args[0] === "mons-link-sessions-v1") fail();
+          return open.apply(this, args);
+        };
+        IDBDatabase.prototype.transaction = function (...args) {
+          if (this.name === "mons-link-sessions-v1") fail();
+          return transaction.apply(this, args);
+        };
+        return restore;
+      };
+    });
     const sessions = new Map();
     const revoked = new Set();
     const refreshes = [];
@@ -115,7 +138,7 @@ async function fixture(run) {
 }
 
 test(
-  "clearing native IndexedDB invalidates live cached and forced tokens before a new guest can sign in",
+  "clearing native IndexedDB invalidates cached and forced tokens in two live tabs before a new guest can sign in",
   { timeout: 60_000 },
   async () => {
     await fixture(async ({ open, refreshes, sessions }) => {
@@ -129,6 +152,14 @@ test(
           sessionId: sessionAuth.currentUser.sessionId,
         };
       });
+      const second = await open();
+      const secondSessionId = await second.evaluate(async () => {
+        const { sessionAuth } = await import("/src/session/sessionAuth.ts");
+        globalThis.oldSessionUser = sessionAuth.currentUser;
+        await globalThis.oldSessionUser.getIdToken();
+        return sessionAuth.currentUser.sessionId;
+      });
+      assert.equal(secondSessionId, old.sessionId);
       const previousRefreshes = refreshes.length;
       await page.evaluate(
         () =>
@@ -141,23 +172,25 @@ test(
               reject(new Error("native-session-clear-blocked"));
           }),
       );
-      const cleared = await page.evaluate(async () => {
-        const { sessionAuth } = await import("/src/session/sessionAuth.ts");
-        const outcomes = [];
-        for (const force of [false, true]) {
-          try {
-            await globalThis.oldSessionUser.getIdToken(force);
-            outcomes.push("token-returned");
-          } catch (error) {
-            outcomes.push(error.message);
+      for (const tab of [page, second]) {
+        const cleared = await tab.evaluate(async () => {
+          const { sessionAuth } = await import("/src/session/sessionAuth.ts");
+          const outcomes = [];
+          for (const force of [false, true]) {
+            try {
+              await globalThis.oldSessionUser.getIdToken(force);
+              outcomes.push("token-returned");
+            } catch (error) {
+              outcomes.push(error.message);
+            }
           }
-        }
-        return { outcomes, user: sessionAuth.currentUser?.uid ?? null };
-      });
-      assert.deepEqual(cleared, {
-        outcomes: ["authentication-changed", "authentication-changed"],
-        user: null,
-      });
+          return { outcomes, user: sessionAuth.currentUser?.uid ?? null };
+        });
+        assert.deepEqual(cleared, {
+          outcomes: ["authentication-changed", "authentication-changed"],
+          user: null,
+        });
+      }
       assert.equal(refreshes.length, previousRefreshes);
       const replacement = await page.evaluate(async () => {
         const { connection } = await import("/src/connection/connection.ts");
@@ -243,14 +276,11 @@ test(
           await import("/src/ui/identity/profileUiPort.ts");
         setAuthStatusGlobally("authenticated");
         handleLogout();
-        const open = indexedDB.open;
+        const restoreSessionStorage = globalThis.failSessionStorage();
         const setItem = Storage.prototype.setItem;
         globalThis.restoreLogoutStorage = () => {
-          indexedDB.open = open;
+          restoreSessionStorage();
           Storage.prototype.setItem = setItem;
-        };
-        indexedDB.open = () => {
-          throw new DOMException("Temporary storage failure", "UnknownError");
         };
         Storage.prototype.setItem = function (key, value) {
           if (key.startsWith("__mons_link_session_logout__:"))
@@ -320,7 +350,7 @@ test(
 );
 
 test(
-  "a logout that cannot open IndexedDB clears the original session and profile before restoring after reload",
+  "a logout that cannot access IndexedDB clears the original session and profile before restoring after reload",
   { timeout: 60_000 },
   async () => {
     await fixture(async ({ open, revoked }) => {
@@ -348,9 +378,7 @@ test(
         const { connection } = await import("/src/connection/connection.ts");
         const { performLogoutCleanupAndReload } =
           await import("/src/session/logoutOrchestrator.ts");
-        indexedDB.open = () => {
-          throw new DOMException("Temporary storage failure", "UnknownError");
-        };
+        globalThis.failSessionStorage();
         await connection.signOut().catch(() => {});
         if (
           localStorage.getItem("__mons_link_session_logout__:" + generation) !==
@@ -388,7 +416,7 @@ test(
 );
 
 test(
-  "a stopped logout recovers after a transient native storage-open failure",
+  "a stopped logout recovers after a transient native storage-access failure",
   { timeout: 60_000 },
   async () => {
     await fixture(async ({ open }) => {
@@ -413,11 +441,7 @@ test(
       await page.evaluate(async () => {
         const { performLogoutCleanupAndReload } =
           await import("/src/session/logoutOrchestrator.ts");
-        const open = indexedDB.open.bind(indexedDB);
-        indexedDB.open = (...args) => {
-          indexedDB.open = open;
-          throw new DOMException("Temporary storage failure", "UnknownError");
-        };
+        globalThis.failSessionStorage(true);
         void performLogoutCleanupAndReload().catch(() => {});
       });
       await navigation;
@@ -698,14 +722,11 @@ for (const [scenario, name] of [
           }
           return;
         }
-        const open = indexedDB.open;
+        const restoreSessionStorage = globalThis.failSessionStorage();
         const setItem = Storage.prototype.setItem;
         globalThis.resumeLogoutStorage = () => {
-          indexedDB.open = open;
+          restoreSessionStorage();
           Storage.prototype.setItem = setItem;
-        };
-        indexedDB.open = () => {
-          throw new DOMException("Temporary storage failure", "UnknownError");
         };
         Storage.prototype.setItem = function (key, value) {
           if (key.startsWith("__mons_link_session_logout__:"))

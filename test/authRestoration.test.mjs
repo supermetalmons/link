@@ -20,6 +20,10 @@ registerHooks({
 
 const { ProfileApiError } = await import("../src/services/profileApi.ts");
 const { AuthApiError } = await import("../src/services/authApi.ts");
+const { createDeferredProfilePresentation } =
+  await import("../src/connection/deferredProfilePresentation.ts");
+const { formatProfileDisplayName } =
+  await import("../src/ui/identity/profileUiPort.ts");
 
 const profileApplicationSource = ts.createSourceFile(
   "verifiedProfile.ts",
@@ -114,6 +118,7 @@ function harness({
   stored = {},
   claimProfileId = "",
   applicationErrors = {},
+  autoFlushPresentation = true,
 } = {}) {
   const data = { ...cachedIdentity, ...stored };
   const events = {
@@ -132,6 +137,7 @@ function harness({
     consumedIdentities: 0,
     invalidatedIdentities: 0,
     tutorials: [],
+    presentationErrors: [],
   };
   const timers = new Map();
   const windowListeners = new Map();
@@ -187,7 +193,7 @@ function harness({
   let sessionEpoch = 0;
   let nextTimerId = 0;
   const connection = {
-    auth: { currentUser: { uid: "login-1" } },
+    auth: { currentUser: { uid: "login-1" }, isStoppedForLogout: false },
     isCurrentAuthUser: (uid) => connection.auth.currentUser?.uid === uid,
     createSessionGuard: () => {
       const epoch = sessionEpoch;
@@ -216,6 +222,28 @@ function harness({
     },
     getSameProfilePlayerUid: () => null,
   };
+  const presentationFrames = new Map();
+  let nextPresentationFrame = 0;
+  const presentation = createDeferredProfilePresentation({
+    isHidden: () => false,
+    requestFrame: (callback) => {
+      const id = ++nextPresentationFrame;
+      presentationFrames.set(id, callback);
+      return id;
+    },
+    cancelFrame: (id) => presentationFrames.delete(id),
+    scheduleTask: () => {
+      throw new Error("unexpected hidden presentation task");
+    },
+    cancelTask: () => {},
+    subscribeVisibility: () => () => {},
+    reportError: (error) => events.presentationErrors.push(error),
+  });
+  const advancePresentationFrame = () => {
+    const callbacks = [...presentationFrames.values()];
+    presentationFrames.clear();
+    callbacks.forEach((callback) => callback());
+  };
   const authChangeVersionRef = { current: 0 };
   let authState = { authStatus: "authenticated", ...storage.getAuthIdentity() };
   const statusDependencies = {
@@ -236,6 +264,17 @@ function harness({
     authChangeVersionRef,
     connection,
     storage,
+    sessionAuth: connection.auth,
+    localStorage: {
+      getItem: (key) => {
+        const value = data[key];
+        if (value == null) return null;
+        return typeof value === "string" ? value : JSON.stringify(value);
+      },
+    },
+    beginVerifiedProfileApplication: presentation.beginApplication,
+    queueDeferredProfilePresentation: presentation.queue,
+    formatProfileDisplayName,
     setAuthStatus,
     window: {
       ...eventTarget(windowListeners),
@@ -305,6 +344,17 @@ function harness({
     events,
     connection,
     cleanup,
+    applyProfile: dependencies.applyVerifiedProfile,
+    commitName: () =>
+      presentation.nameCommitted(
+        {
+          profileId: data.profileId,
+          displayName: events.displays.at(-1)?.[0] ?? "anon",
+        },
+        () => true,
+      ),
+    advancePresentationFrame,
+    flushPresentation: presentation.flush,
     confirmSignIn: () => setAuthStatus("authenticated"),
     setOnline: (online) => {
       navigator.onLine = online;
@@ -345,6 +395,17 @@ function harness({
         if (delay !== 23) continue;
         timers.delete(id);
         callback();
+      }
+      if (autoFlushPresentation) {
+        presentation.nameCommitted(
+          {
+            profileId: data.profileId,
+            displayName: events.displays.at(-1)?.[0] ?? "anon",
+          },
+          () => true,
+        );
+        advancePresentationFrame();
+        advancePresentationFrame();
       }
     },
   };
@@ -981,8 +1042,23 @@ for (const [label, error] of [
     }),
   ],
 ]) {
+  test(`${label} in deferred cosmetics is reported without retrying verified authentication`, async () => {
+    const h = harness({
+      initialIdentity: async () => ({
+        ok: true,
+        profile: authoritativeProfile,
+      }),
+      applicationErrors: { setCardStickers: error },
+    });
+    h.changeAuth();
+    await h.settle();
+    assert.deepEqual(h.events.statuses, ["authenticated"]);
+    assert.deepEqual(h.events.presentationErrors, [error]);
+    assert.equal(h.events.consumedIdentities, 1);
+    assert.deepEqual(h.retryDelays(), []);
+    h.cleanup();
+  });
   for (const operation of [
-    "setCardStickers",
     "syncTutorialProgress",
     "setupLoggedInPlayerProfile",
     "syncOwnProfileMiningState",
@@ -1006,3 +1082,124 @@ for (const [label, error] of [
     });
   }
 }
+
+test("restores verified identity and state before deferring only cosmetic cache writes until after the header paint", async () => {
+  const profile = {
+    ...authoritativeProfile,
+    cardBackgroundId: 4,
+    cardStickers: "server stickers",
+    cardSubtitleId: 8,
+    profileCounter: "wins",
+    profileMons: "1,2,3,4,5",
+    rating: 1800,
+    nonce: 7,
+    totalManaPoints: 42,
+  };
+  const h = harness({
+    initialIdentity: async () => ({ ok: true, profile }),
+    autoFlushPresentation: false,
+  });
+  h.changeAuth();
+  await h.settle();
+  assert.deepEqual(h.events.statuses, ["authenticated"]);
+  assert.equal(h.data.username, profile.username);
+  assert.equal(h.data.playerRating, profile.rating);
+  assert.equal(h.data.playerNonce, profile.nonce);
+  assert.equal(h.data.playerTotalManaPoints, profile.totalManaPoints);
+  assert.equal(h.events.profiles.length, 1);
+  assert.equal(h.events.tutorials.length, 1);
+  assert.equal(h.events.mining.length, 1);
+  const fields = [
+    "cardBackgroundId",
+    "cardStickers",
+    "cardSubtitleId",
+    "profileCounter",
+    "profileMons",
+  ];
+  fields.forEach((field) => assert.equal(h.data[field], undefined));
+  h.commitName();
+  h.advancePresentationFrame();
+  fields.forEach((field) => assert.equal(h.data[field], undefined));
+  h.advancePresentationFrame();
+  fields.forEach((field) => assert.equal(h.data[field], profile[field]));
+  h.cleanup();
+});
+
+for (const invalidate of [
+  "logout",
+  "replacement session for the same uid",
+  "different profile",
+]) {
+  test(`${invalidate} fences deferred presentation persistence`, async () => {
+    const h = harness({
+      initialIdentity: async () => ({
+        ok: true,
+        profile: { ...authoritativeProfile, cardBackgroundId: 4 },
+      }),
+      autoFlushPresentation: false,
+    });
+    h.changeAuth();
+    await h.settle();
+    h.commitName();
+    if (invalidate === "logout") h.connection.auth.isStoppedForLogout = true;
+    else if (invalidate === "replacement session for the same uid")
+      h.connection.auth.currentUser = { uid: "login-1" };
+    else h.data.profileId = "different-profile";
+    h.advancePresentationFrame();
+    h.advancePresentationFrame();
+    assert.equal(h.data.cardBackgroundId, undefined);
+    h.cleanup();
+  });
+}
+
+test("an explicit verified application stays synchronous and supersedes deferred restoration", async () => {
+  const h = harness({
+    initialIdentity: async () => ({
+      ok: true,
+      profile: { ...authoritativeProfile, cardBackgroundId: 4 },
+    }),
+    autoFlushPresentation: false,
+  });
+  h.changeAuth();
+  await h.settle();
+  h.commitName();
+  h.applyProfile(
+    { ...authoritativeProfile, cardBackgroundId: 9, username: "New login" },
+    "login-1",
+  );
+  assert.equal(h.data.cardBackgroundId, 9);
+  assert.equal(h.data.username, "New login");
+  h.advancePresentationFrame();
+  h.advancePresentationFrame();
+  assert.equal(h.data.cardBackgroundId, 9);
+  h.cleanup();
+});
+
+test("an explicit verified application preserves synchronous unexpected-error handling", () => {
+  const error = new Error("Unexpected cosmetic failure");
+  const h = harness({ applicationErrors: { setCardStickers: error } });
+  assert.throws(() => h.applyProfile(authoritativeProfile, "login-1"), error);
+  assert.deepEqual(h.events.presentationErrors, []);
+  h.cleanup();
+});
+
+test("a newer cosmetic edit survives restoration persistence without dropping other fields", async () => {
+  const h = harness({
+    initialIdentity: async () => ({
+      ok: true,
+      profile: {
+        ...authoritativeProfile,
+        cardBackgroundId: 4,
+        cardSubtitleId: 7,
+      },
+    }),
+    autoFlushPresentation: false,
+  });
+  h.changeAuth();
+  await h.settle();
+  h.data.cardBackgroundId = 9;
+  h.flushPresentation();
+  assert.equal(h.data.cardBackgroundId, 9);
+  assert.equal(h.data.cardSubtitleId, 7);
+  h.cleanup();
+});

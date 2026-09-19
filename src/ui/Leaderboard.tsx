@@ -10,6 +10,7 @@ import {
 } from "../connection/connectionModels";
 import { AvatarImage } from "./AvatarImage";
 import { storage } from "../utils/storage";
+import { flushDeferredProfilePresentation } from "../connection/deferredProfilePresentation";
 import { getStashedPlayerProfile } from "../utils/playerMetadata";
 import {
   leaderboardCache,
@@ -547,6 +548,7 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({
 
   const getCurrentPlayerEntry = useCallback((): LeaderboardEntry | null => {
     if (!currentProfileId) return null;
+    flushDeferredProfilePresentation();
     const storedUsername = storage.getUsername("");
     const storedEth = storage.getEthAddress("");
     const storedSol = storage.getSolAddress("");

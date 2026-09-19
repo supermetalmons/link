@@ -1,4 +1,5 @@
 import type { PlayerProfile } from "../connection/connectionModels";
+import { flushDeferredProfilePresentation } from "../connection/deferredProfilePresentation";
 
 export type ActiveInventoryItemSelection = {
   avatarId: number | null;
@@ -47,7 +48,10 @@ export const showShinyCard = (
   profile: PlayerProfile | null,
   displayName: string,
   isOtherPlayer: boolean,
-): Promise<void> => getApi().show(profile, displayName, isOtherPlayer);
+): Promise<void> => {
+  if (!isOtherPlayer) flushDeferredProfilePresentation();
+  return getApi().show(profile, displayName, isOtherPlayer);
+};
 
 export const hideShinyCard = (): void => {
   getApi().hide();
@@ -58,8 +62,10 @@ export const updateShinyCardDisplayName = (displayName: string): void => {
 };
 
 export const getActiveInventoryItemSelection =
-  (): ActiveInventoryItemSelection =>
-    getApi().getActiveInventoryItemSelection();
+  (): ActiveInventoryItemSelection => {
+    flushDeferredProfilePresentation();
+    return getApi().getActiveInventoryItemSelection();
+  };
 
 export const setOwnershipVerifiedSpecialItem = (id: number): void => {
   getApi().setOwnershipVerifiedSpecialItem(id);

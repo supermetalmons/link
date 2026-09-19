@@ -1,6 +1,7 @@
 import { getStableRandomIdForProfileId } from "../utils/misc";
 import { PlayerProfile } from "../connection/connectionModels";
 import { storage } from "../utils/storage";
+import { flushDeferredProfilePresentation } from "../connection/deferredProfilePresentation";
 
 export enum MonType {
   DEMON = "demon",
@@ -86,6 +87,7 @@ export function getMonsIndexes(
   isOtherPlayer: boolean,
   profile: PlayerProfile | null,
 ): [number, number, number, number, number] {
+  if (!isOtherPlayer) flushDeferredProfilePresentation();
   const currentIndexes = isOtherPlayer
     ? (profile?.profileMons ?? "")
     : storage.getProfileMons("");

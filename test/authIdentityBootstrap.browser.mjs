@@ -36,6 +36,14 @@ const profile = {
     materials: { dust: 2, slime: 3, gum: 4, metal: 5, ice: 6 },
   },
 };
+const presentationProfile = {
+  ...profile,
+  cardBackgroundId: 3,
+  cardSubtitleId: 1,
+  cardStickers: JSON.stringify({ mana: "blue-mana" }),
+  profileCounter: "mp",
+  profileMons: "0,0,0,0,0",
+};
 const fen = new Game({ variant: "Classic" }).toFen();
 const matchRecord = (color) => ({
   version: 2,
@@ -176,6 +184,7 @@ async function fixture(
     unpaired = false,
     quotaKey = null,
     storedUsername = cachedName,
+    holdPresentationFrames = false,
     identity = { ok: true, profile },
     fallbackIdentity = { ok: true, profile },
   } = {},
@@ -405,9 +414,71 @@ async function fixture(
         });
     });
     await context.addInitScript(
-      ({ expectedName, quotaKey }) => {
+      ({ expectedName, quotaKey, holdPresentationFrames }) => {
         localStorage.setItem("preferredAssetsSet", "pixel");
         localStorage.setItem("isMuted", "true");
+        globalThis.identitySessionStorageProbe = { opens: 0, puts: 0 };
+        const open = indexedDB.open;
+        indexedDB.open = function (...args) {
+          if (args[0] === "mons-link-sessions-v1")
+            globalThis.identitySessionStorageProbe.opens += 1;
+          return open.apply(this, args);
+        };
+        const put = IDBObjectStore.prototype.put;
+        IDBObjectStore.prototype.put = function (...args) {
+          if (this.transaction.db.name === "mons-link-sessions-v1")
+            globalThis.identitySessionStorageProbe.puts += 1;
+          return put.apply(this, args);
+        };
+        const cosmeticKeys = new Set([
+          "cardBackgroundId",
+          "cardStickers",
+          "cardSubtitleId",
+          "profileCounter",
+          "profileMons",
+        ]);
+        globalThis.identityCosmeticWrites = [];
+        const recordSetItem = Storage.prototype.setItem;
+        Storage.prototype.setItem = function (key, value) {
+          if (this === localStorage && cosmeticKeys.has(key)) {
+            globalThis.identityCosmeticWrites.push({
+              key,
+              value,
+              time: performance.now(),
+              nameVisible:
+                performance.getEntriesByName("auth:name-visible").length > 0,
+            });
+          }
+          return recordSetItem.call(this, key, value);
+        };
+        if (holdPresentationFrames) {
+          const requestFrame = requestAnimationFrame;
+          const cancelFrame = cancelAnimationFrame;
+          const heldFrames = new Map();
+          let nextFrame = -1;
+          let released = false;
+          window.requestAnimationFrame = (callback) => {
+            if (
+              !released &&
+              performance.getEntriesByName("auth:name-committed").length > 0
+            ) {
+              const id = nextFrame--;
+              heldFrames.set(id, callback);
+              return id;
+            }
+            return requestFrame(callback);
+          };
+          window.cancelAnimationFrame = (id) => {
+            if (id < 0) heldFrames.delete(id);
+            else cancelFrame(id);
+          };
+          globalThis.releaseIdentityPresentationFrames = () => {
+            released = true;
+            const frames = [...heldFrames.values()];
+            heldFrames.clear();
+            frames.forEach((callback) => requestFrame(callback));
+          };
+        }
         if (quotaKey) {
           if (quotaKey === "cardStickers")
             localStorage.setItem("cardStickers", "{}");
@@ -436,6 +507,7 @@ async function fixture(
             globalThis.identityMarkProbe.push({
               name,
               time: performance.now(),
+              sessionStorage: { ...globalThis.identitySessionStorageProbe },
               nameInDom: Array.from(document.querySelectorAll("button")).some(
                 (button) => button.textContent === expectedName,
               ),
@@ -444,7 +516,7 @@ async function fixture(
           return mark(name, options);
         };
       },
-      { expectedName: profile.username, quotaKey },
+      { expectedName: profile.username, quotaKey, holdPresentationFrames },
     );
     const page = await context.newPage();
     page.on("pageerror", (error) =>
@@ -583,6 +655,377 @@ async function assertVerifiedProfile(page) {
     },
   );
 }
+
+test(
+  "restoration reuses IndexedDB and paints the verified name before cosmetic persistence",
+  { timeout: 60_000 },
+  async (t) => {
+    await fixture(
+      async ({ page, requests }) => {
+        await assertVerifiedProfile(page);
+        await page.waitForFunction(
+          () =>
+            performance.getEntriesByName("auth:name-visible").length > 0 &&
+            globalThis.identityCosmeticWrites.length === 5,
+        );
+        const probe = await page.evaluate(() => ({
+          storage: globalThis.identitySessionStorageProbe,
+          writes: globalThis.identityCosmeticWrites,
+          timings: Object.fromEntries(
+            performance
+              .getEntriesByType("measure")
+              .filter((entry) => entry.name.startsWith("auth:"))
+              .map((entry) => [entry.name, Math.round(entry.duration)]),
+          ),
+        }));
+        t.diagnostic(
+          JSON.stringify({
+            sessionStorage: probe.storage,
+            cosmeticWritesAfterNameVisible: probe.writes.filter(
+              (write) => write.nameVisible,
+            ).length,
+            timingsMs: probe.timings,
+          }),
+        );
+        assert.deepEqual(probe.storage, { opens: 1, puts: 0 });
+        assert.ok(probe.writes.every((write) => write.nameVisible));
+        assertSingleIdentitySession(requests);
+        const preconnect = page.locator(
+          'link[rel="preconnect"][href="https://api.mons.link"]',
+        );
+        assert.equal(await preconnect.count(), 1);
+        assert.equal(await preconnect.getAttribute("crossorigin"), "");
+      },
+      { identity: { ok: true, profile: presentationProfile } },
+    );
+  },
+);
+
+test(
+  "opening the own profile card flushes pending cosmetics before held paint callbacks",
+  { timeout: 60_000 },
+  async () => {
+    await fixture(
+      async ({ page }) => {
+        await assertVerifiedProfile(page);
+        assert.equal(
+          await page.evaluate(() => globalThis.identityCosmeticWrites.length),
+          0,
+        );
+        await page
+          .getByRole("button", { name: profile.username, exact: true })
+          .dispatchEvent("click");
+        assert.deepEqual(
+          await page.evaluate(() => ({
+            background: localStorage.getItem("cardBackgroundId"),
+            counter: localStorage.getItem("profileCounter"),
+            writes: globalThis.identityCosmeticWrites.length,
+          })),
+          { background: "3", counter: "mp", writes: 5 },
+        );
+        await page.evaluate(() =>
+          globalThis.releaseIdentityPresentationFrames(),
+        );
+      },
+      {
+        identity: { ok: true, profile: presentationProfile },
+        holdPresentationFrames: true,
+      },
+    );
+  },
+);
+
+test(
+  "the own leaderboard fallback flushes pending cosmetics before caching its profile",
+  { timeout: 60_000, skip: Boolean(buildDirectory) },
+  async () => {
+    await fixture(
+      async ({ page, origin, sessionRequested, sessionGate }) => {
+        await withinDeadline(sessionRequested.promise);
+        await page.route("https://api.mons.link/leaderboards/read", (route) =>
+          route.fulfill({
+            headers: {
+              "Access-Control-Allow-Origin": origin,
+              "Access-Control-Allow-Headers": "Authorization, Content-Type",
+              "Access-Control-Allow-Methods": "POST, OPTIONS",
+            },
+            json: { ok: true, profiles: [] },
+          }),
+        );
+        await page.evaluate(() => {
+          localStorage.setItem("cardBackgroundId", "7");
+          localStorage.setItem("profileMons", "1,1,1,1,1");
+        });
+        sessionGate.resolve();
+        await assertVerifiedProfile(page);
+        assert.equal(
+          await page.evaluate(() => localStorage.getItem("cardBackgroundId")),
+          "7",
+        );
+        await page.locator('button:has(img[alt=""])').dispatchEvent("click");
+        await page
+          .locator("tr")
+          .filter({ hasText: profile.username })
+          .first()
+          .waitFor({ state: "visible" });
+        const readPresentation = () =>
+          page.evaluate(async (profileId) => {
+            const { leaderboardCache } =
+              await import("/src/ui/leaderboardCache.ts");
+            const cachedProfile = leaderboardCache
+              .get("rating")
+              ?.find((row) => row.id === profileId)?.profile;
+            return {
+              storedBackground: localStorage.getItem("cardBackgroundId"),
+              storedMons: localStorage.getItem("profileMons"),
+              cachedBackground: cachedProfile?.cardBackgroundId,
+              cachedMons: cachedProfile?.profileMons,
+              cachedUsername: cachedProfile?.username,
+            };
+          }, profile.id);
+        const expected = {
+          storedBackground: null,
+          storedMons: null,
+          cachedBackground: 0,
+          cachedMons: "",
+          cachedUsername: profile.username,
+        };
+        assert.deepEqual(await readPresentation(), expected);
+        await page.evaluate(() =>
+          globalThis.releaseIdentityPresentationFrames(),
+        );
+        await page.waitForFunction(
+          () => performance.getEntriesByName("auth:name-visible").length > 0,
+        );
+        assert.deepEqual(await readPresentation(), expected);
+      },
+      { holdSession: true, holdPresentationFrames: true },
+    );
+  },
+);
+
+test(
+  "a newer cosmetic edit survives deferred restoration while the other fields persist",
+  { timeout: 60_000 },
+  async () => {
+    await fixture(
+      async ({ page }) => {
+        await assertVerifiedProfile(page);
+        await page.evaluate(() => {
+          localStorage.setItem("cardBackgroundId", "7");
+          globalThis.releaseIdentityPresentationFrames();
+        });
+        await page.waitForFunction(
+          () => localStorage.getItem("profileCounter") === "mp",
+        );
+        assert.equal(
+          await page.evaluate(() => localStorage.getItem("cardBackgroundId")),
+          "7",
+        );
+      },
+      {
+        identity: { ok: true, profile: presentationProfile },
+        holdPresentationFrames: true,
+      },
+    );
+  },
+);
+
+test(
+  "own board sprite selection flushes verified cosmetics before reading them",
+  { timeout: 60_000, skip: Boolean(buildDirectory) },
+  async () => {
+    await fixture(
+      async ({ page }) => {
+        await assertVerifiedProfile(page);
+        const selection = await page.evaluate(async () => {
+          const { getMonsIndexes } = await import("/src/utils/namedMons.ts");
+          const before = globalThis.identityCosmeticWrites.length;
+          const indexes = getMonsIndexes(false, null);
+          const writes = globalThis.identityCosmeticWrites.length;
+          globalThis.releaseIdentityPresentationFrames();
+          return { before, indexes, writes };
+        });
+        assert.deepEqual(selection, {
+          before: 0,
+          indexes: [1, 1, 1, 1, 1],
+          writes: 5,
+        });
+      },
+      {
+        identity: {
+          ok: true,
+          profile: { ...presentationProfile, profileMons: "1,1,1,1,1" },
+        },
+        holdPresentationFrames: true,
+      },
+    );
+  },
+);
+
+test(
+  "logout before cosmetic persistence prevents the deferred profile from returning",
+  { timeout: 60_000, skip: Boolean(buildDirectory) },
+  async () => {
+    await fixture(
+      async ({ page }) => {
+        await assertVerifiedProfile(page);
+        await page.evaluate(async () => {
+          const { connection } = await import("/src/connection/connection.ts");
+          const { storage } = await import("/src/utils/storage.ts");
+          await connection.signOut();
+          storage.signOut();
+          globalThis.releaseIdentityPresentationFrames();
+          await new Promise((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(resolve)),
+          );
+        });
+        assert.deepEqual(
+          await page.evaluate(() => ({
+            background: localStorage.getItem("cardBackgroundId"),
+            counter: localStorage.getItem("profileCounter"),
+            writes: globalThis.identityCosmeticWrites.length,
+          })),
+          { background: null, counter: null, writes: 0 },
+        );
+      },
+      {
+        identity: { ok: true, profile: presentationProfile },
+        holdPresentationFrames: true,
+      },
+    );
+  },
+);
+
+test(
+  "a newer login for the same user supersedes deferred restoration cosmetics",
+  { timeout: 60_000, skip: Boolean(buildDirectory) },
+  async () => {
+    await fixture(
+      async ({ page }) => {
+        await assertVerifiedProfile(page);
+        await page.evaluate(
+          async ({ uid, profile }) => {
+            const { handleLoginSuccess } =
+              await import("/src/connection/loginSuccess.ts");
+            const { setAuthStatusGlobally } =
+              await import("/src/connection/authentication.ts");
+            if (
+              !handleLoginSuccess({
+                ok: true,
+                ...profile,
+                uid,
+                profileId: "newer-verified-profile",
+                username: "NewerVerifiedLogin",
+                cardBackgroundId: 7,
+                profileCounter: "gp",
+              })
+            )
+              throw new Error("newer-login-rejected");
+            setAuthStatusGlobally("authenticated");
+            globalThis.releaseIdentityPresentationFrames();
+            await new Promise((resolve) =>
+              requestAnimationFrame(() => requestAnimationFrame(resolve)),
+            );
+          },
+          { uid, profile: presentationProfile },
+        );
+        await page
+          .getByRole("button", { name: "NewerVerifiedLogin", exact: true })
+          .waitFor({ state: "visible" });
+        assert.deepEqual(
+          await page.evaluate(() => ({
+            profileId: localStorage.getItem("profileId"),
+            background: localStorage.getItem("cardBackgroundId"),
+            counter: localStorage.getItem("profileCounter"),
+            writes: globalThis.identityCosmeticWrites.length,
+          })),
+          {
+            profileId: "newer-verified-profile",
+            background: "7",
+            counter: "gp",
+            writes: 5,
+          },
+        );
+      },
+      {
+        identity: { ok: true, profile: presentationProfile },
+        holdPresentationFrames: true,
+      },
+    );
+  },
+);
+
+test(
+  "hidden documents finish cosmetic persistence without waiting for animation frames",
+  { timeout: 60_000 },
+  async () => {
+    await fixture(
+      async ({ page, sessionRequested, sessionGate }) => {
+        await withinDeadline(sessionRequested.promise);
+        await page.evaluate(() => {
+          Object.defineProperty(document, "visibilityState", {
+            configurable: true,
+            value: "hidden",
+          });
+          document.dispatchEvent(new Event("visibilitychange"));
+        });
+        sessionGate.resolve();
+        await assertVerifiedProfile(page);
+        await page.waitForFunction(
+          () => localStorage.getItem("profileCounter") === "mp",
+        );
+        assert.equal(
+          await page.evaluate(() => globalThis.identityCosmeticWrites.length),
+          5,
+        );
+        await page.evaluate(() =>
+          globalThis.releaseIdentityPresentationFrames(),
+        );
+      },
+      {
+        identity: { ok: true, profile: presentationProfile },
+        holdSession: true,
+        holdPresentationFrames: true,
+      },
+    );
+  },
+);
+
+test(
+  "a same-name profile refresh persists cosmetics without a header rerender",
+  { timeout: 60_000, skip: Boolean(buildDirectory) },
+  async () => {
+    await fixture(
+      async ({ page }) => {
+        await assertVerifiedProfile(page);
+        await page.waitForFunction(
+          () => localStorage.getItem("cardBackgroundId") === "3",
+        );
+        await page.evaluate(
+          async ({ profile, uid }) => {
+            const { applyVerifiedProfile } =
+              await import("/src/connection/verifiedProfile.ts");
+            applyVerifiedProfile({ ...profile, cardBackgroundId: 9 }, uid, {
+              deferPresentationCache: true,
+            });
+          },
+          { profile: presentationProfile, uid },
+        );
+        await page.waitForFunction(
+          () => localStorage.getItem("cardBackgroundId") === "9",
+        );
+        assert.equal(
+          await page
+            .getByRole("button", { name: profile.username, exact: true })
+            .count(),
+          1,
+        );
+      },
+      { identity: { ok: true, profile: presentationProfile } },
+    );
+  },
+);
 
 for (const { label, path, target } of [
   { label: "home", path: "/" },

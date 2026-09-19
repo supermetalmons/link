@@ -19,6 +19,7 @@ import { setAuthStatusGlobally } from "../../connection/authentication";
 import type { AuthState } from "../../connection/authModels";
 import { handleLoginSuccess } from "../../connection/loginSuccess";
 import { markAuthNameCommitted } from "../../session/authRestoreTiming";
+import { notifyVerifiedProfileNameCommitted } from "../../connection/deferredProfilePresentation";
 import {
   clearConsumedXRedirectResult,
   isXRedirectStartedError,
@@ -342,18 +343,26 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
 
   useLayoutEffect(() => {
     if (authStatus !== "authenticated" || isEventSignInPopup) return;
-    const uid = storage.getLoginId("");
     const profileId = authState.profileId;
     const expectedName = profileDisplayName || "Connected";
-    return markAuthNameCommitted(() => {
+    const isCurrent = () => {
       const button = signInButtonRef.current;
       return (
-        connection.isCurrentAuthUser(uid) &&
+        connection.isCurrentAuthUser(storage.getLoginId("")) &&
         storage.getProfileId("") === profileId &&
         button?.isConnected === true &&
         button.textContent === expectedName
       );
-    });
+    };
+    const cancelTiming = markAuthNameCommitted(isCurrent);
+    const cancelPresentation = notifyVerifiedProfileNameCommitted(
+      { profileId, displayName: expectedName },
+      isCurrent,
+    );
+    return () => {
+      cancelTiming();
+      cancelPresentation();
+    };
   }, [authStatus, authState.profileId, profileDisplayName, isEventSignInPopup]);
 
   useEffect(() => {
