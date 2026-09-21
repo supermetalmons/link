@@ -1,8 +1,6 @@
 import { buildUsernameLookupKey } from "@mons/shared/usernames";
-import {
-  CanonicalProfileConflict,
-  readCanonicalProfileAggregateByLogin,
-} from "./profileCanonicalD1.ts";
+import { CanonicalProfileConflict } from "./profileCanonicalD1.ts";
+import { readCanonicalAuthProfileByLogin } from "./profileCanonical/authProfile.ts";
 import {
   commitCanonicalProfileUpdate,
   materializeCanonicalProfileUpdate,
@@ -57,23 +55,20 @@ export function createUsernameRepository(
       const updatedAtMs = now();
       for (let attempt = 0; attempt < attempts; attempt++) {
         try {
+          const authSnapshot = nextUsername
+            ? null
+            : await readCanonicalAuthProfileByLogin(d1, loginUid);
           const resolved = nextUsername
             ? await readCanonicalProfileMutationByLogin(d1, loginUid)
-            : await readCanonicalProfileAggregateByLogin(d1, loginUid);
+            : authSnapshot;
           if (!resolved) return "profile-not-found";
-          const owner = resolved.owner;
-          const aggregate = "aggregate" in resolved ? resolved.aggregate : null;
-          const profile =
-            "profile" in resolved
-              ? resolved.profile
-              : resolved.aggregate.profile;
-          if (!profile) throw new UsernameRepositoryFailure();
+          const { owner, profile } = resolved;
           const currentUsername = profile.profile.username || "";
           if (currentUsername === nextUsername) return "updated";
           if (!nextUsername) {
-            if (!aggregate) throw new UsernameRepositoryFailure();
+            if (!authSnapshot) throw new UsernameRepositoryFailure();
             const methods = new Set(
-              aggregate.authMethods.map((method) => method.method),
+              authSnapshot.authMethods.map((method) => method.method),
             );
             if (
               (methods.has("apple") || methods.has("x")) &&

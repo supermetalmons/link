@@ -1068,114 +1068,188 @@ describe("canonical gameplay repositories", () => {
     ).toBe(1);
   });
 
-  it("re-resolves February profiles that merge after ownership resolution", async () => {
-    const sourceProfileId = "d1-feb-race-source";
-    const targetProfileId = "d1-feb-race-target";
-    const opponentProfileId = "d1-feb-race-opponent";
-    await insertProfile(sourceProfileId, "d1-feb-race-source-login");
-    await insertProfile(targetProfileId, null);
-    await insertProfile(opponentProfileId, "d1-feb-race-opponent-login");
-    const racedDb = beforeMatchingBatch(
+  it.each(["retiring", "deleted"] as const)(
+    "re-resolves February profiles left %s by a merge after ownership resolution",
+    async (sourceState) => {
+      const sourceProfileId = "d1-feb-race-source";
+      const targetProfileId = "d1-feb-race-target";
+      const opponentProfileId = "d1-feb-race-opponent";
+      await insertProfile(sourceProfileId, "d1-feb-race-source-login");
+      await insertProfile(targetProfileId, null);
+      await insertProfile(opponentProfileId, "d1-feb-race-opponent-login");
+      const racedDb = beforeMatchingBatch(
+        testEnv.PROFILE_DB,
+        (queries) =>
+          queries.some((query) =>
+            query.includes("canonical_orphaned_dependents"),
+          ),
+        async () => {
+          const source = await readCanonicalProfile(
+            testEnv.PROFILE_DB,
+            sourceProfileId,
+          );
+          const target = await readCanonicalProfile(
+            testEnv.PROFILE_DB,
+            targetProfileId,
+          );
+          const owner = await readCanonicalLoginOwner(
+            testEnv.PROFILE_DB,
+            "d1-feb-race-source-login",
+          );
+          if (!source || !target || !owner) {
+            throw new Error("missing-february-race-profiles");
+          }
+          await commitCanonicalPlan(testEnv.PROFILE_DB, {
+            expectations: [
+              {
+                kind: "profile-revision",
+                profileId: sourceProfileId,
+                revision: source.revision,
+              },
+              {
+                kind: "profile-revision",
+                profileId: targetProfileId,
+                revision: target.revision,
+              },
+              {
+                kind: "login-owner-revision",
+                loginUid: owner.loginUid,
+                profileId: owner.profileId,
+                revision: owner.revision,
+              },
+              { kind: "merge-target-absent", sourceProfileId },
+            ],
+            mutations: [
+              {
+                kind: "retire-profile-with-redirect",
+                profile: materializeCanonicalProfile({
+                  profile: source.profile,
+                  createdAtMs: source.createdAtMs,
+                  updatedAtMs: 2_000,
+                  state: "retiring",
+                  mergedAtMs: 2_000,
+                  mergedIntoProfileId: targetProfileId,
+                  sortPresence: source.sortPresence,
+                  sortValues: source.sortValues,
+                  winPresent: source.winPresent,
+                  emojiPresent: source.emojiPresent,
+                }),
+                redirect: {
+                  sourceProfileId,
+                  targetProfileId,
+                  mergedAtMs: 2_000,
+                  opId: "d1-feb-race-merge",
+                  sourceLegacyFields: source.legacyFields,
+                },
+              },
+              {
+                kind: "update-login-owner",
+                value: {
+                  loginUid: owner.loginUid,
+                  profileId: targetProfileId,
+                  createdAtMs: owner.createdAtMs,
+                  updatedAtMs: 2_000,
+                },
+              },
+            ],
+          });
+          if (sourceState === "deleted") {
+            const retired = await readCanonicalProfile(
+              testEnv.PROFILE_DB,
+              sourceProfileId,
+            );
+            if (!retired)
+              throw new Error("missing-retired-february-race-profile");
+            await commitCanonicalPlan(testEnv.PROFILE_DB, {
+              expectations: [
+                {
+                  kind: "profile-revision",
+                  profileId: sourceProfileId,
+                  revision: retired.revision,
+                },
+                { kind: "merge-target", sourceProfileId, targetProfileId },
+              ],
+              mutations: [
+                {
+                  kind: "delete-retired-profile",
+                  profileId: sourceProfileId,
+                  targetProfileId,
+                },
+              ],
+            });
+          }
+        },
+      );
+      const gameplay = createGameplayRepository(testEnv, {
+        stateClient: matchTestPort(state),
+      });
+      const rating = createCanonicalRatingRepository(racedDb, gameplay, {
+        createFailure: () => new Error("rating-unavailable"),
+        maxAttempts: 5,
+        now: () => 3_000,
+      });
+      await expect(
+        rating.applyFebruaryChallengeReplay(sourceProfileId, opponentProfileId),
+      ).resolves.toBeUndefined();
+      const remainingSource = await readCanonicalProfile(
+        testEnv.PROFILE_DB,
+        sourceProfileId,
+      );
+      if (sourceState === "deleted") {
+        expect(remainingSource).toBeNull();
+      } else {
+        expect(remainingSource?.profile.feb2026UniqueOpponentsCount).toBe(0);
+      }
+      expect(
+        (await readCanonicalProfile(testEnv.PROFILE_DB, targetProfileId))
+          ?.profile.feb2026UniqueOpponentsCount,
+      ).toBe(1);
+      expect(
+        (await readCanonicalProfile(testEnv.PROFILE_DB, opponentProfileId))
+          ?.profile.feb2026UniqueOpponentsCount,
+      ).toBe(1);
+    },
+  );
+
+  it("propagates February snapshot read failures without applying counters", async () => {
+    const playerProfileId = "d1-feb-failure-player";
+    const opponentProfileId = "d1-feb-failure-opponent";
+    await insertProfile(playerProfileId, null);
+    await insertProfile(opponentProfileId, null);
+    const failure = new Error("challenge-snapshot-unavailable");
+    const failedDb = beforeMatchingBatch(
       testEnv.PROFILE_DB,
       (queries) =>
         queries.some((query) =>
-          query.includes("SELECT * FROM profile_records WHERE profile_id = ?"),
+          query.includes("canonical_orphaned_dependents"),
         ),
       async () => {
-        const source = await readCanonicalProfile(
-          testEnv.PROFILE_DB,
-          sourceProfileId,
-        );
-        const target = await readCanonicalProfile(
-          testEnv.PROFILE_DB,
-          targetProfileId,
-        );
-        const owner = await readCanonicalLoginOwner(
-          testEnv.PROFILE_DB,
-          "d1-feb-race-source-login",
-        );
-        if (!source || !target || !owner) {
-          throw new Error("missing-february-race-profiles");
-        }
-        await commitCanonicalPlan(testEnv.PROFILE_DB, {
-          expectations: [
-            {
-              kind: "profile-revision",
-              profileId: sourceProfileId,
-              revision: source.revision,
-            },
-            {
-              kind: "profile-revision",
-              profileId: targetProfileId,
-              revision: target.revision,
-            },
-            {
-              kind: "login-owner-revision",
-              loginUid: owner.loginUid,
-              profileId: owner.profileId,
-              revision: owner.revision,
-            },
-            { kind: "merge-target-absent", sourceProfileId },
-          ],
-          mutations: [
-            {
-              kind: "retire-profile-with-redirect",
-              profile: materializeCanonicalProfile({
-                profile: source.profile,
-                createdAtMs: source.createdAtMs,
-                updatedAtMs: 2_000,
-                state: "retiring",
-                mergedAtMs: 2_000,
-                mergedIntoProfileId: targetProfileId,
-                sortPresence: source.sortPresence,
-                sortValues: source.sortValues,
-                winPresent: source.winPresent,
-                emojiPresent: source.emojiPresent,
-              }),
-              redirect: {
-                sourceProfileId,
-                targetProfileId,
-                mergedAtMs: 2_000,
-                opId: "d1-feb-race-merge",
-                sourceLegacyFields: source.legacyFields,
-              },
-            },
-            {
-              kind: "update-login-owner",
-              value: {
-                loginUid: owner.loginUid,
-                profileId: targetProfileId,
-                createdAtMs: owner.createdAtMs,
-                updatedAtMs: 2_000,
-              },
-            },
-          ],
-        });
+        throw failure;
       },
     );
     const gameplay = createGameplayRepository(testEnv, {
       stateClient: matchTestPort(state),
     });
-    const rating = createCanonicalRatingRepository(racedDb, gameplay, {
+    const rating = createCanonicalRatingRepository(failedDb, gameplay, {
       createFailure: () => new Error("rating-unavailable"),
       maxAttempts: 5,
       now: () => 3_000,
     });
+
     await expect(
-      rating.applyFebruaryChallengeReplay(sourceProfileId, opponentProfileId),
-    ).resolves.toBeUndefined();
+      rating.applyFebruaryChallengeReplay(playerProfileId, opponentProfileId),
+    ).rejects.toBe(failure);
+    for (const profileId of [playerProfileId, opponentProfileId]) {
+      expect(
+        (await readCanonicalProfile(testEnv.PROFILE_DB, profileId))?.profile
+          .feb2026UniqueOpponentsCount,
+      ).toBe(0);
+    }
     expect(
-      (await readCanonicalProfile(testEnv.PROFILE_DB, sourceProfileId))?.profile
-        .feb2026UniqueOpponentsCount,
+      await testEnv.PROFILE_DB.prepare(
+        "SELECT COUNT(*) AS count FROM profile_february_opponents",
+      ).first("count"),
     ).toBe(0);
-    expect(
-      (await readCanonicalProfile(testEnv.PROFILE_DB, targetProfileId))?.profile
-        .feb2026UniqueOpponentsCount,
-    ).toBe(1);
-    expect(
-      (await readCanonicalProfile(testEnv.PROFILE_DB, opponentProfileId))
-        ?.profile.feb2026UniqueOpponentsCount,
-    ).toBe(1);
   });
 
   it("leases and atomically finalizes ratings with all pending projections", async () => {

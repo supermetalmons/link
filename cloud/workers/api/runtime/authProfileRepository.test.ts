@@ -7,10 +7,12 @@ import {
 } from "../src/authProfileRepository.ts";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { handleAuthRoute } from "../src/authRoutes.ts";
+import { readCanonicalAuthProfileByLogin } from "../src/profileCanonical/authProfile.ts";
 import {
   CanonicalProfileCorruption,
   commitCanonicalPlan,
   materializeCanonicalProfile,
+  readCanonicalProfile,
   type CanonicalAuthMethodValue,
 } from "../src/profileCanonicalD1.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
@@ -178,6 +180,34 @@ describe("canonical auth profile reads", () => {
       appleLinked: false,
     });
     expect(observed.allQueries).toHaveLength(1);
+  });
+
+  it("retains owner, profile, and method revisions in the shared snapshot", async () => {
+    const initial = await createProfile({ sol: validMethodValues.sol });
+    const observed = observeDatabase();
+    const result = await readCanonicalAuthProfileByLogin(
+      observed.database,
+      initial.loginUid,
+    );
+    expect(observed.allQueries).toHaveLength(1);
+    expect(result?.owner).toEqual({
+      loginUid: initial.loginUid,
+      profileId: initial.profileId,
+      revision: 1,
+      createdAtMs: 1_000,
+      updatedAtMs: 2_000,
+    });
+    expect(result?.profile).toEqual(
+      await readCanonicalProfile(db, initial.profileId),
+    );
+    expect(result?.authMethods).toEqual([
+      expect.objectContaining({
+        method: "sol",
+        profileId: initial.profileId,
+        revision: 1,
+        rawValue: validMethodValues.sol,
+      }),
+    ]);
   });
 
   it("reads missing and complete identity profiles with one query and no mutations", async () => {

@@ -13,7 +13,6 @@ import {
   commitCanonicalPlan,
   readCanonicalProfileOwnershipSnapshot,
   readCanonicalRatingUpdate,
-  readCanonicalProfileAggregateSnapshots,
   readCanonicalWagerSettlement,
   resolveCanonicalProfile,
   CanonicalProfileConflict,
@@ -42,6 +41,7 @@ import {
 } from "./profileCanonical/validation.ts";
 import {
   materializeCanonicalProfileUpdate,
+  readCanonicalChallengeReplayProfiles,
   readCanonicalRatingProfiles,
   type CanonicalRatingProfileSnapshot,
 } from "./profileMutationD1.ts";
@@ -1020,9 +1020,12 @@ export function createCanonicalRatingRepository(
         ) {
           return;
         }
-        const [player, opponent] = await readCanonicalProfileAggregateSnapshots(
+        const { player, opponent } = await readCanonicalChallengeReplayProfiles(
           db,
-          [resolvedPlayerProfileId, resolvedOpponentProfileId],
+          {
+            playerProfileId: resolvedPlayerProfileId,
+            opponentProfileId: resolvedOpponentProfileId,
+          },
         );
         if (
           player.profile?.state !== "active" ||
