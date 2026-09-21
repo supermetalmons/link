@@ -118,6 +118,30 @@ type SuccessfulStartAutomatchResponse = Extract<
   { ok: true }
 >;
 
+type AutomatchPlanDependencies = Pick<
+  AutomatchDependencies,
+  "createProjectionRequestId"
+>;
+
+type AutomatchPlanInput = {
+  requesterUid: string;
+  request: StartAutomatchOperationRequest;
+  emojiId: GameplayProfile["emoji"];
+  aura: string | null;
+  name: string;
+};
+
+type AutomatchPlan = {
+  response: SuccessfulStartAutomatchResponse;
+  changes: GameSessionChange[];
+  profileGameProjectionTask: AutomatchProfileGameProjectionTask;
+  projectionTask: AutomatchTelegramProjectionTask | null;
+};
+
+type MatchedAutomatchPlan = AutomatchPlan & {
+  inviteChange: Extract<GameSessionChange, { kind: "invite-merge" }>;
+};
+
 type AutomatchReceipt = {
   aura: string;
   completedAtMs: number;
@@ -414,7 +438,7 @@ function secureRandom(): number {
 
 export function createAutomatchProjectionTask(
   inviteId: string,
-  dependencies: AutomatchDependencies,
+  dependencies: AutomatchPlanDependencies,
   requestId = (
     dependencies.createProjectionRequestId || (() => crypto.randomUUID())
   )(),
@@ -428,7 +452,7 @@ export function createAutomatchProjectionTask(
 
 export function createAutomatchProfileGameProjectionTask(
   inviteId: string,
-  dependencies: AutomatchDependencies,
+  dependencies: AutomatchPlanDependencies,
 ): AutomatchProfileGameProjectionTask {
   return {
     kind: "automatch-profile-game-projection",
@@ -1074,6 +1098,241 @@ async function persistExistingAutomatchReceipt(
   return response;
 }
 
+function buildPendingAutomatchPlan(
+  {
+    requesterUid,
+    request,
+    profile,
+    emojiId,
+    aura,
+    name,
+    random,
+  }: AutomatchPlanInput & {
+    profile: GameplayProfile;
+    random: RandomSource;
+  },
+  dependencies: AutomatchPlanDependencies,
+): AutomatchPlan {
+  const inviteId = buildAutoInviteId(random);
+  const password = randomAlphanumeric(AUTOMATCH_PASSWORD_LENGTH, random);
+  const hostColor = pickHostColor(random);
+  const matchSeed = gameVariantHelpers.buildRandomGameSeed(random);
+  const timestamp = STATE_SERVER_TIMESTAMP;
+  const match = buildFreshMatchRecord({
+    color: hostColor,
+    emojiId,
+    aura,
+    seed: matchSeed,
+  });
+  const waitingText = `${name} is looking for a match https://mons.link ${getTelegramEmojiTag(AUTOMATCH_WAITING_EMOJI_ID)}`;
+  const canceledText = `<i>${name} canceled an automatch</i>`;
+  const response: SuccessfulStartAutomatchResponse = {
+    ok: true,
+    inviteId,
+    mode: "pending",
+    matchedImmediately: false,
+  };
+  const profileGameProjectionTask = createAutomatchProfileGameProjectionTask(
+    inviteId,
+    dependencies,
+  );
+  const projectionTask = createAutomatchProjectionTask(
+    inviteId,
+    dependencies,
+    profileGameProjectionTask.requestId,
+  );
+  const changes: GameSessionChange[] = [
+    {
+      kind: "match-create",
+      playerId: requesterUid,
+      matchId: inviteId,
+      value: match,
+    },
+    {
+      kind: "automatch-entry",
+      inviteId,
+      value: {
+        uid: requesterUid,
+        rating: profile.rating,
+        timestamp,
+        username: profile.username,
+        ethAddress: profile.eth,
+        solAddress: profile.sol,
+        profileId: profile.profileId,
+        hostColor,
+        password,
+        emojiId,
+        gameVariant: matchSeed.gameVariant,
+        telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION,
+      },
+    },
+    {
+      kind: "invite-merge",
+      inviteId,
+      value: {
+        version: CONTROLLER_VERSION,
+        hostId: requesterUid,
+        hostColor,
+        guestId: null,
+        password,
+        automatchStateHint: "pending",
+        automatchCanceledAt: null,
+        automatchOperationIds: {
+          [requesterUid]: request.operationId,
+        },
+        telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION,
+      },
+    },
+    {
+      kind: "telegram-source",
+      inviteId,
+      value: buildPendingAutomatchTelegramSource({
+        inviteId,
+        waitingText,
+        canceledText,
+        timestamp,
+      }),
+    },
+    ...buildAutomatchTelegramProjectionChanges({
+      inviteId,
+      requestId: projectionTask.requestId,
+      timestamp,
+    }),
+    ...requestAutomatchProfileProjection({
+      inviteId,
+      requestId: profileGameProjectionTask.requestId,
+      timestamp,
+    }),
+    ...buildAutomatchReceiptChanges(
+      requesterUid,
+      request,
+      response,
+      profileGameProjectionTask.requestId,
+      true,
+    ),
+  ];
+  return { response, changes, profileGameProjectionTask, projectionTask };
+}
+
+function buildMatchedAutomatchPlan(
+  {
+    requesterUid,
+    request,
+    queued,
+    existingUid,
+    emojiId,
+    aura,
+    name,
+  }: AutomatchPlanInput & {
+    queued: QueuedAutomatch;
+    existingUid: string;
+  },
+  dependencies: AutomatchPlanDependencies,
+): MatchedAutomatchPlan {
+  const matchSeed = gameVariantHelpers.buildGameSeedForStoredVariant(
+    queued.data.gameVariant,
+  );
+  const hostColor = normalizeString(queued.data.hostColor);
+  const existingPlayerName = getDisplayNameFromAddress(
+    queued.data.username,
+    queued.data.ethAddress,
+    queued.data.solAddress,
+    finiteNumber(queued.data.rating),
+    queued.data.emojiId,
+  );
+  const usesTelegramDeliveryV2 =
+    queued.data.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION;
+  const invite: Record<string, unknown> = {
+    version: CONTROLLER_VERSION,
+    hostId: existingUid,
+    hostColor,
+    guestId: requesterUid,
+    password: normalizeString(queued.data.password),
+    automatchStateHint: "matched",
+    automatchCanceledAt: null,
+    automatchOperationIds: {
+      [requesterUid]: request.operationId,
+    },
+    ...(usesTelegramDeliveryV2
+      ? { telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION }
+      : {}),
+  };
+  const match = buildFreshMatchRecord({
+    color: hostColor === "white" ? "black" : "white",
+    emojiId,
+    aura,
+    seed: matchSeed,
+  });
+  const matchedText = `${existingPlayerName} vs. ${name} https://mons.link/${queued.inviteId}`;
+  const inviteChange: MatchedAutomatchPlan["inviteChange"] = {
+    kind: "invite-merge",
+    inviteId: queued.inviteId,
+    value: invite,
+  };
+  const changes: GameSessionChange[] = [
+    { kind: "automatch-entry", inviteId: queued.inviteId, value: null },
+    inviteChange,
+    {
+      kind: "match-create",
+      playerId: requesterUid,
+      matchId: queued.inviteId,
+      value: match,
+    },
+  ];
+  const matchedResponse = matchedAutomatchResponse(queued.inviteId);
+  const profileGameProjectionTask = createAutomatchProfileGameProjectionTask(
+    queued.inviteId,
+    dependencies,
+  );
+  const projectionTask = usesTelegramDeliveryV2
+    ? createAutomatchProjectionTask(
+        queued.inviteId,
+        dependencies,
+        profileGameProjectionTask.requestId,
+      )
+    : null;
+  changes.push(
+    ...requestAutomatchProfileProjection({
+      inviteId: queued.inviteId,
+      requestId: profileGameProjectionTask.requestId,
+      timestamp: STATE_SERVER_TIMESTAMP,
+    }),
+  );
+  if (usesTelegramDeliveryV2) {
+    changes.push(
+      ...buildMatchedAutomatchTelegramChanges({
+        inviteId: queued.inviteId,
+        matchedText,
+        timestamp: STATE_SERVER_TIMESTAMP,
+        generation: stateIncrement(1),
+      }),
+    );
+    changes.push(
+      ...buildAutomatchTelegramProjectionChanges({
+        inviteId: queued.inviteId,
+        requestId: projectionTask?.requestId || "",
+        timestamp: STATE_SERVER_TIMESTAMP,
+      }),
+    );
+  }
+  changes.push(
+    ...buildAutomatchReceiptChanges(
+      requesterUid,
+      request,
+      matchedResponse,
+      profileGameProjectionTask.requestId,
+      usesTelegramDeliveryV2,
+    ),
+  );
+  return {
+    response: matchedResponse,
+    changes,
+    profileGameProjectionTask,
+    projectionTask,
+    inviteChange,
+  };
+}
+
 async function attemptAutomatch(
   identity: RequestIdentity,
   request: StartAutomatchOperationRequest,
@@ -1184,34 +1443,20 @@ async function attemptAutomatch(
   );
 
   if (!queued) {
-    const inviteId = buildAutoInviteId(random);
-    const password = randomAlphanumeric(AUTOMATCH_PASSWORD_LENGTH, random);
-    const hostColor = pickHostColor(random);
-    const matchSeed = gameVariantHelpers.buildRandomGameSeed(random);
-    const timestamp = STATE_SERVER_TIMESTAMP;
-    const match = buildFreshMatchRecord({
-      color: hostColor,
-      emojiId,
-      aura,
-      seed: matchSeed,
-    });
-    const waitingText = `${name} is looking for a match https://mons.link ${getTelegramEmojiTag(AUTOMATCH_WAITING_EMOJI_ID)}`;
-    const canceledText = `<i>${name} canceled an automatch</i>`;
-    const response: SuccessfulStartAutomatchResponse = {
-      ok: true,
-      inviteId,
-      mode: "pending",
-      matchedImmediately: false,
-    };
-    const profileGameProjectionTask = createAutomatchProfileGameProjectionTask(
-      inviteId,
-      dependencies,
-    );
-    const projectionTask = createAutomatchProjectionTask(
-      inviteId,
-      dependencies,
-      profileGameProjectionTask.requestId,
-    );
+    const { response, changes, profileGameProjectionTask, projectionTask } =
+      buildPendingAutomatchPlan(
+        {
+          requesterUid: identity.uid,
+          request,
+          profile,
+          emojiId,
+          aura,
+          name,
+          random,
+        },
+        dependencies,
+      );
+    const inviteId = response.inviteId;
     let patchAttempted = false;
     try {
       await withGameSessionMutationLease(
@@ -1221,79 +1466,7 @@ async function attemptAutomatch(
         async () => {
           await dependencies.assertMutationAllowed?.();
           patchAttempted = true;
-          await repository.commitSessionChanges(
-            [
-              {
-                kind: "match-create",
-                playerId: identity.uid,
-                matchId: inviteId,
-                value: match,
-              },
-              {
-                kind: "automatch-entry",
-                inviteId,
-                value: {
-                  uid: identity.uid,
-                  rating: profile.rating,
-                  timestamp,
-                  username: profile.username,
-                  ethAddress: profile.eth,
-                  solAddress: profile.sol,
-                  profileId: profile.profileId,
-                  hostColor,
-                  password,
-                  emojiId,
-                  gameVariant: matchSeed.gameVariant,
-                  telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION,
-                },
-              },
-              {
-                kind: "invite-merge",
-                inviteId,
-                value: {
-                  version: CONTROLLER_VERSION,
-                  hostId: identity.uid,
-                  hostColor,
-                  guestId: null,
-                  password,
-                  automatchStateHint: "pending",
-                  automatchCanceledAt: null,
-                  automatchOperationIds: {
-                    [identity.uid]: request.operationId,
-                  },
-                  telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION,
-                },
-              },
-              {
-                kind: "telegram-source",
-                inviteId,
-                value: buildPendingAutomatchTelegramSource({
-                  inviteId,
-                  waitingText,
-                  canceledText,
-                  timestamp,
-                }),
-              },
-              ...buildAutomatchTelegramProjectionChanges({
-                inviteId,
-                requestId: projectionTask.requestId,
-                timestamp,
-              }),
-              ...requestAutomatchProfileProjection({
-                inviteId,
-                requestId: profileGameProjectionTask.requestId,
-                timestamp,
-              }),
-              ...buildAutomatchReceiptChanges(
-                identity.uid,
-                request,
-                response,
-                profileGameProjectionTask.requestId,
-                true,
-              ),
-            ],
-            signal,
-          );
+          await repository.commitSessionChanges(changes, signal);
         },
       );
     } catch (error) {
@@ -1351,95 +1524,23 @@ async function attemptAutomatch(
     );
   }
 
-  const matchSeed = gameVariantHelpers.buildGameSeedForStoredVariant(
-    queued.data.gameVariant,
-  );
-  const hostColor = normalizeString(queued.data.hostColor);
-  const existingPlayerName = getDisplayNameFromAddress(
-    queued.data.username,
-    queued.data.ethAddress,
-    queued.data.solAddress,
-    finiteNumber(queued.data.rating),
-    queued.data.emojiId,
-  );
-  const usesTelegramDeliveryV2 =
-    queued.data.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION;
-  const invite: Record<string, unknown> = {
-    version: CONTROLLER_VERSION,
-    hostId: existingUid,
-    hostColor,
-    guestId: identity.uid,
-    password: normalizeString(queued.data.password),
-    automatchStateHint: "matched",
-    automatchCanceledAt: null,
-    automatchOperationIds: {
-      [identity.uid]: request.operationId,
-    },
-    ...(usesTelegramDeliveryV2
-      ? { telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION }
-      : {}),
-  };
-  const match = buildFreshMatchRecord({
-    color: hostColor === "white" ? "black" : "white",
-    emojiId,
-    aura,
-    seed: matchSeed,
-  });
-  const matchedText = `${existingPlayerName} vs. ${name} https://mons.link/${queued.inviteId}`;
-  const changes: GameSessionChange[] = [
-    { kind: "automatch-entry", inviteId: queued.inviteId, value: null },
-    { kind: "invite-merge", inviteId: queued.inviteId, value: invite },
+  const {
+    response: matchedResponse,
+    changes,
+    profileGameProjectionTask,
+    projectionTask,
+    inviteChange,
+  } = buildMatchedAutomatchPlan(
     {
-      kind: "match-create",
-      playerId: identity.uid,
-      matchId: queued.inviteId,
-      value: match,
-    },
-  ];
-  const matchedResponse = matchedAutomatchResponse(queued.inviteId);
-  const profileGameProjectionTask = createAutomatchProfileGameProjectionTask(
-    queued.inviteId,
-    dependencies,
-  );
-  const projectionTask = usesTelegramDeliveryV2
-    ? createAutomatchProjectionTask(
-        queued.inviteId,
-        dependencies,
-        profileGameProjectionTask.requestId,
-      )
-    : null;
-  changes.push(
-    ...requestAutomatchProfileProjection({
-      inviteId: queued.inviteId,
-      requestId: profileGameProjectionTask.requestId,
-      timestamp: STATE_SERVER_TIMESTAMP,
-    }),
-  );
-  if (usesTelegramDeliveryV2) {
-    changes.push(
-      ...buildMatchedAutomatchTelegramChanges({
-        inviteId: queued.inviteId,
-        matchedText,
-        timestamp: STATE_SERVER_TIMESTAMP,
-        generation: stateIncrement(1),
-      }),
-    );
-    changes.push(
-      ...buildAutomatchTelegramProjectionChanges({
-        inviteId: queued.inviteId,
-        requestId: projectionTask?.requestId || "",
-        timestamp: STATE_SERVER_TIMESTAMP,
-      }),
-    );
-  }
-  changes.push(
-    ...buildAutomatchReceiptChanges(
-      identity.uid,
+      requesterUid: identity.uid,
       request,
-      matchedResponse,
-      profileGameProjectionTask.requestId,
-      usesTelegramDeliveryV2,
-    ),
+      queued,
+      existingUid,
+      emojiId,
+      aura,
+      name,
+    },
+    dependencies,
   );
   let matchResult: "matched" | "stale" = "stale";
   let patchAttempted = false;
@@ -1461,13 +1562,8 @@ async function attemptAutomatch(
         ) {
           return "stale" as const;
         }
-        const inviteChange = changes.find(
-          (change) => change.kind === "invite-merge",
-        );
-        if (!inviteChange || inviteChange.kind !== "invite-merge")
-          throw new Error("automatch-invite-change-missing");
         inviteChange.value = {
-          ...invite,
+          ...inviteChange.value,
           automatchOperationIds: {
             ...readAutomatchOperationIds(currentInvite?.automatchOperationIds),
             [identity.uid]: request.operationId,

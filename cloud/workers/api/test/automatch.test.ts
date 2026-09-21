@@ -427,6 +427,13 @@ test("normalizes the first bounded queue result", () => {
 
 test("creates a pending automatch with profile metadata and exact roots", async () => {
   let updates: Record<string, unknown> | null = null;
+  const randomValues = [
+    ...Array.from({ length: 26 }, (_, index) => (index + 0.5) / 62),
+    0.75,
+    0.01,
+  ];
+  let randomCalls = 0;
+  let projectionRequestIdCalls = 0;
   const projectionTasks: unknown[] = [];
   const profileProjectionTasks: unknown[] = [];
   const result = await startAutomatch(
@@ -454,46 +461,54 @@ test("creates a pending automatch with profile metadata and exact roots", async 
       },
     }),
     {
-      createProjectionRequestId: () => "request-1",
+      createProjectionRequestId: () => {
+        assert.equal(randomCalls, randomValues.length);
+        return `request-${++projectionRequestIdCalls}`;
+      },
       enqueueTelegramProjection: async (task) => {
         projectionTasks.push(task);
       },
       enqueueProfileGameProjection: async (task) => {
         profileProjectionTasks.push(task);
       },
-      random: () => 0,
+      random: () => {
+        assert.ok(randomCalls < randomValues.length);
+        return randomValues[randomCalls++];
+      },
     },
   );
+  assert.equal(randomCalls, randomValues.length);
+  assert.equal(projectionRequestIdCalls, 1);
   assert.deepEqual(result, {
     ok: true,
-    inviteId: "auto_aaaaaaaaaaa",
+    inviteId: "auto_abcdefghijk",
     mode: "pending",
     matchedImmediately: false,
   });
   assert.deepEqual(projectionTasks, [
     {
       kind: "automatch-telegram-projection",
-      inviteId: "auto_aaaaaaaaaaa",
+      inviteId: "auto_abcdefghijk",
       requestId: "request-1",
     },
   ]);
   assert.deepEqual(profileProjectionTasks, [
     {
       kind: "automatch-profile-game-projection",
-      inviteId: "auto_aaaaaaaaaaa",
+      inviteId: "auto_abcdefghijk",
       requestId: "request-1",
     },
   ]);
   assert.ok(updates);
   assert.deepEqual(Object.keys(updates).sort(), [
-    "automatch/auto_aaaaaaaaaaa",
+    "automatch/auto_abcdefghijk",
     `gameplayMutationReceiptExpirations/${AUTOMATCH_OPERATION_ID}`,
     `gameplayMutationReceipts/${AUTOMATCH_OPERATION_ID}`,
-    "invites/auto_aaaaaaaaaaa",
-    "players/guest-uid/matches/auto_aaaaaaaaaaa",
-    "profileGameProjectionOutbox/automatch/auto_aaaaaaaaaaa",
-    "telegramAutomatches/auto_aaaaaaaaaaa",
-    "telegramProjectionOutbox/automatch/auto_aaaaaaaaaaa",
+    "invites/auto_abcdefghijk",
+    "players/guest-uid/matches/auto_abcdefghijk",
+    "profileGameProjectionOutbox/automatch/auto_abcdefghijk",
+    "telegramAutomatches/auto_abcdefghijk",
+    "telegramProjectionOutbox/automatch/auto_abcdefghijk",
   ]);
   const receipt = updates[
     `gameplayMutationReceipts/${AUTOMATCH_OPERATION_ID}`
@@ -504,7 +519,7 @@ test("creates a pending automatch with profile metadata and exact roots", async 
   assert.equal(receipt.requesterUid, identity.uid);
   assert.equal(receipt.emojiId, 1);
   assert.equal(receipt.aura, "");
-  assert.equal(receipt.inviteId, "auto_aaaaaaaaaaa");
+  assert.equal(receipt.inviteId, "auto_abcdefghijk");
   assert.equal(receipt.profileProjectionRequestId, "request-1");
   assert.equal(receipt.telegramProjection, true);
   assert.deepEqual(receipt.response, result);
@@ -512,21 +527,21 @@ test("creates a pending automatch with profile metadata and exact roots", async 
     updates[`gameplayMutationReceiptExpirations/${AUTOMATCH_OPERATION_ID}`],
     { completedAtMs: STATE_SERVER_TIMESTAMP },
   );
-  const queue = updates["automatch/auto_aaaaaaaaaaa"] as Record<
+  const queue = updates["automatch/auto_abcdefghijk"] as Record<
     string,
     unknown
   >;
-  const match = updates["players/guest-uid/matches/auto_aaaaaaaaaaa"] as Record<
+  const match = updates["players/guest-uid/matches/auto_abcdefghijk"] as Record<
     string,
     unknown
   >;
-  const invite = updates["invites/auto_aaaaaaaaaaa"] as Record<string, unknown>;
-  const telegram = updates["telegramAutomatches/auto_aaaaaaaaaaa"] as Record<
+  const invite = updates["invites/auto_abcdefghijk"] as Record<string, unknown>;
+  const telegram = updates["telegramAutomatches/auto_abcdefghijk"] as Record<
     string,
     unknown
   >;
   assert.deepEqual(
-    updates["profileGameProjectionOutbox/automatch/auto_aaaaaaaaaaa"],
+    updates["profileGameProjectionOutbox/automatch/auto_abcdefghijk"],
     {
       schemaVersion: 1,
       status: "pending",
@@ -537,7 +552,7 @@ test("creates a pending automatch with profile metadata and exact roots", async 
     },
   );
   assert.deepEqual(
-    updates["telegramProjectionOutbox/automatch/auto_aaaaaaaaaaa"],
+    updates["telegramProjectionOutbox/automatch/auto_abcdefghijk"],
     {
       schemaVersion: 1,
       status: "pending",
@@ -547,19 +562,20 @@ test("creates a pending automatch with profile metadata and exact roots", async 
   );
   assert.equal(queue.emojiId, 9);
   assert.equal(queue.profileId, "guest-profile");
-  assert.equal(queue.password, "aaaaaaaaaaaaaaa");
+  assert.equal(queue.password, "lmnopqrstuvwxyz");
   assert.deepEqual(queue.timestamp, STATE_SERVER_TIMESTAMP);
   assert.equal(match.emojiId, 9);
   assert.equal(match.aura, "rainbow");
-  assert.equal(match.color, "white");
-  assert.equal(match.gameVariant, queue.gameVariant);
+  assert.equal(match.color, "black");
+  assert.equal(match.gameVariant, "Classic");
+  assert.equal(queue.gameVariant, "Classic");
   assert.equal(typeof match.fen, "string");
   assert.deepEqual(invite, {
     version: 2,
     hostId: "guest-uid",
-    hostColor: "white",
+    hostColor: "black",
     guestId: null,
-    password: "aaaaaaaaaaaaaaa",
+    password: "lmnopqrstuvwxyz",
     automatchStateHint: "pending",
     automatchCanceledAt: null,
     automatchOperationIds: {
@@ -2842,6 +2858,9 @@ test("fails before the match patch when the pair snapshot is unavailable", async
 test("matches a different v2 candidate without rereading a known commit", async () => {
   let updates: Record<string, unknown> = {};
   let guestReads = 0;
+  let randomCalls = 0;
+  let projectionRequestIdCalls = 0;
+  const telegramProjectionTasks: unknown[] = [];
   const profileProjectionTasks: unknown[] = [];
   const result = await startAutomatch(
     identity,
@@ -2884,7 +2903,14 @@ test("matches a different v2 candidate without rereading a known commit", async 
       },
     }),
     {
-      createProjectionRequestId: () => "request-1",
+      createProjectionRequestId: () => `request-${++projectionRequestIdCalls}`,
+      enqueueTelegramProjection: async (task) => {
+        telegramProjectionTasks.push(task);
+      },
+      random: () => {
+        randomCalls++;
+        return 0.75;
+      },
       enqueueProfileGameProjection: async (task) => {
         profileProjectionTasks.push(task);
       },
@@ -2897,6 +2923,21 @@ test("matches a different v2 candidate without rereading a known commit", async 
     matchedImmediately: true,
   });
   assert.equal(guestReads, 1);
+  assert.equal(randomCalls, 0);
+  assert.equal(projectionRequestIdCalls, 1);
+  assert.deepEqual(telegramProjectionTasks, [
+    {
+      kind: "automatch-telegram-projection",
+      inviteId: "auto_existing",
+      requestId: "request-1",
+    },
+  ]);
+  const receipt = updates[
+    `gameplayMutationReceipts/${AUTOMATCH_OPERATION_ID}`
+  ] as Record<string, unknown>;
+  assert.equal(receipt.profileProjectionRequestId, "request-1");
+  assert.equal(receipt.telegramProjection, true);
+  assert.deepEqual(receipt.response, result);
   assert.deepEqual(profileProjectionTasks, [
     {
       kind: "automatch-profile-game-projection",
@@ -3461,8 +3502,15 @@ test("replays a committed result when the operation lock release is ambiguous", 
   const first = await startAutomatch(identity, request(), value, {
     random: () => 0,
   });
+  let replayRandomCalls = 0;
+  let replayRequestIdCalls = 0;
   const replay = await startAutomatch(identity, request(), value, {
-    random: () => 0.5,
+    random: () => {
+      replayRandomCalls++;
+      return 0.5;
+    },
+    createProjectionRequestId: () =>
+      `unexpected-replay-${++replayRequestIdCalls}`,
   });
 
   assert.deepEqual(first, {
@@ -3473,6 +3521,8 @@ test("replays a committed result when the operation lock release is ambiguous", 
   });
   assert.deepEqual(replay, first);
   assert.equal(writes, 1);
+  assert.equal(replayRandomCalls, 0);
+  assert.equal(replayRequestIdCalls, 0);
 });
 
 test("does not retry an unconfirmed patch failure", async () => {
@@ -3587,7 +3637,19 @@ test("replays an ambiguously committed match before creating another queue", asy
     () => startAutomatch(identity, automatchRequest, value),
     /response-lost-after-commit/,
   );
-  assert.deepEqual(await startAutomatch(identity, automatchRequest, value), {
+  let replayRandomCalls = 0;
+  let replayRequestIdCalls = 0;
+  const replay = await startAutomatch(identity, automatchRequest, value, {
+    random: () => {
+      replayRandomCalls++;
+      return 0.5;
+    },
+    createProjectionRequestId: () =>
+      `unexpected-replay-${++replayRequestIdCalls}`,
+  });
+  assert.equal(replayRandomCalls, 0);
+  assert.equal(replayRequestIdCalls, 0);
+  assert.deepEqual(replay, {
     ok: true,
     inviteId: "auto_receipt_replay",
     mode: "matched",
