@@ -6,6 +6,7 @@ import type { CompletePlayerProfile } from "@mons/shared/profiles";
 import type { StateRepository } from "../test/stateRepositoryTestTypes.ts";
 import {
   canonicalProfileFields,
+  createCanonicalGameplayRepository,
   createCanonicalRatingRepository,
 } from "../src/gameplayCanonicalRepository.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
@@ -94,6 +95,7 @@ function beforeMatchingBatch(
   matches: (queries: readonly string[]) => boolean,
   action: () => Promise<void>,
   onPrepare?: (query: string) => void,
+  onBind?: (query: string, values: unknown[]) => void,
 ): D1Database {
   const nativeStatements = new WeakMap<object, D1PreparedStatement>();
   const statementQueries = new WeakMap<object, string>();
@@ -105,7 +107,10 @@ function beforeMatchingBatch(
     const wrapped = new Proxy(statement, {
       get(target, property) {
         if (property === "bind") {
-          return (...values: unknown[]) => wrap(target.bind(...values), query);
+          return (...values: unknown[]) => {
+            onBind?.(query, values);
+            return wrap(target.bind(...values), query);
+          };
         }
         const value = Reflect.get(target, property, target);
         return typeof value === "function" ? value.bind(target) : value;
@@ -139,6 +144,57 @@ function beforeMatchingBatch(
     withSession: (constraintOrBookmark) =>
       database.withSession(constraintOrBookmark),
   };
+}
+
+type ObservedProfileWrite = { query: string; bindings: unknown[] };
+
+async function readRawProfileRow(profileId: string) {
+  const row = await testEnv.PROFILE_DB.prepare(
+    "SELECT * FROM profile_records WHERE profile_id = ?",
+  )
+    .bind(profileId)
+    .first<Record<string, unknown>>();
+  if (!row) throw new Error("missing-raw-profile");
+  return row;
+}
+
+async function seedRetainedProfileFields(profileIds: readonly string[]) {
+  await testEnv.PROFILE_DB.batch(
+    profileIds.map((profileId) =>
+      testEnv.PROFILE_DB.prepare(
+        "UPDATE profile_records SET legacy_fields_json = ? WHERE profile_id = ?",
+      ).bind(JSON.stringify({ imported: "retained".repeat(512) }), profileId),
+    ),
+  );
+  return Promise.all(profileIds.map(readRawProfileRow));
+}
+
+function expectNarrowProfileWrite(
+  write: ObservedProfileWrite,
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+  changedColumns: readonly string[],
+) {
+  const assignments = write.query.match(/\bSET\b([\s\S]*?)\bWHERE\b/i)?.[1];
+  expect(assignments).toBeDefined();
+  expect(
+    Array.from(
+      assignments!.matchAll(/\b([a-z_]+)\s*=/g),
+      ([, key]) => key,
+    ).sort(),
+  ).toEqual([...changedColumns, "revision"].sort());
+  for (const [column, value] of Object.entries(before)) {
+    if (column !== "revision" && !changedColumns.includes(column)) {
+      expect(after[column], column).toEqual(value);
+    }
+  }
+  expect(after.revision).toBe(Number(before.revision) + 1);
+  const fullBindings = Object.entries(after)
+    .filter(([column]) => column !== "revision")
+    .map(([, value]) => value);
+  const bytes = (values: unknown[]) =>
+    new TextEncoder().encode(JSON.stringify(values)).byteLength;
+  expect(bytes(write.bindings)).toBeLessThan(bytes(fullBindings) / 2);
 }
 
 function profile(
@@ -429,6 +485,210 @@ async function resetCanonicalRows(db: D1Database): Promise<void> {
 }
 
 describe("canonical gameplay repositories", () => {
+  it.each(["wager", "rating", "challenge"] as const)(
+    "narrows %s profile writes without extra reads or changing retained fields",
+    async (kind) => {
+      const playerId = `narrow-${kind}-player`;
+      const opponentId = `narrow-${kind}-opponent`;
+      const playerLogin = `${playerId}-login`;
+      const opponentLogin = `${opponentId}-login`;
+      for (const [profileId, loginUid] of [
+        [playerId, playerLogin],
+        [opponentId, opponentLogin],
+      ]) {
+        await insertProfile(
+          profileId,
+          loginUid,
+          {
+            mining: {
+              lastRockDate: "2026-08-28",
+              materials: {
+                dust: profileId === playerId ? 0 : 10,
+                slime: 0,
+                gum: 0,
+                metal: 0,
+                ice: 0,
+              },
+            },
+          },
+          {
+            nonce: false,
+            mp: false,
+            dust: profileId !== playerId,
+            slime: false,
+            gum: false,
+            metal: false,
+            ice: false,
+          },
+          false,
+          false,
+          "",
+        );
+      }
+      const before = await seedRetainedProfileFields([playerId, opponentId]);
+      const gameplay = createGameplayRepository(testEnv, {
+        stateClient: matchTestPort(state),
+      });
+      const identity = {
+        inviteId: `narrow-${kind}-invite`,
+        matchId: `narrow-${kind}-match`,
+        playerId: playerLogin,
+        opponentId: opponentLogin,
+      };
+      const operationId = `${identity.inviteId}__${identity.matchId}`;
+      const options = {
+        createFailure: () => new Error("narrow-profile-write-failed"),
+        maxAttempts: 2,
+        now: () => 2_000,
+      };
+      if (kind === "rating") {
+        await createCanonicalRatingRepository(
+          testEnv.PROFILE_DB,
+          gameplay,
+          options,
+        ).tryAcquireRatingLease({
+          ...identity,
+          ownerUid: playerLogin,
+          ownerToken: "narrow-owner",
+          leaseMs: 30_000,
+        });
+      }
+      const queries: string[] = [];
+      const writes: ObservedProfileWrite[] = [];
+      const db = beforeMatchingBatch(
+        testEnv.PROFILE_DB,
+        () => false,
+        async () => {},
+        (query) => queries.push(query),
+        (query, bindings) => {
+          if (/^\s*UPDATE profile_records\b/.test(query)) {
+            writes.push({ query, bindings });
+          }
+        },
+      );
+      let expectedColumns: string[][];
+      if (kind === "wager") {
+        await expect(
+          createCanonicalGameplayRepository(
+            db,
+            testEnv.PROFILE_GAMES_DB,
+            options,
+          ).applyWagerTransferOnce({
+            operationId,
+            fingerprint: "narrow-fingerprint",
+            winnerProfileId: playerId,
+            loserProfileId: opponentId,
+            material: "dust",
+            count: 10,
+            appliedAtMs: 2_000,
+          }),
+        ).resolves.toBe("applied");
+        expectedColumns = [
+          ["payload_json", "dust_sort", "dust_sort_present", "updated_at_ms"],
+          ["payload_json", "dust_sort", "updated_at_ms"],
+        ];
+        expect(
+          await readCanonicalWagerSettlement(testEnv.PROFILE_DB, operationId),
+        ).toMatchObject({ outcome: "applied", count: 10, revision: 1 });
+      } else {
+        const rating = createCanonicalRatingRepository(db, gameplay, options);
+        if (kind === "rating") {
+          await expect(
+            rating.finalizeRatingUpdate(
+              { ...identity, operationId, ownerToken: "narrow-owner" },
+              () => ({
+                playerUpdate: {
+                  rating: 0,
+                  nonce: 0,
+                  totalManaPoints: 0,
+                  win: false,
+                },
+                opponentUpdate: { rating: 1490, win: false },
+                repairData: {
+                  playerProfileId: playerId,
+                  opponentProfileId: opponentId,
+                  shouldUpdateFebruaryChallenge: false,
+                },
+                ratingUpdate: {
+                  status: "done",
+                  playerProfileId: playerId,
+                  opponentProfileId: opponentId,
+                  completedAtMs: 2_000,
+                  updatedAtMs: 2_000,
+                  leaseExpiresAtMs: 2_000,
+                },
+              }),
+            ),
+          ).resolves.toMatchObject({ status: "committed" });
+          expectedColumns = [
+            [
+              "payload_json",
+              "rating_sort",
+              "mana_points_sort",
+              "nonce_sort",
+              "mana_points_sort_present",
+              "nonce_sort_present",
+              "win_present",
+              "updated_at_ms",
+            ],
+            ["payload_json", "rating_sort", "win_present", "updated_at_ms"],
+          ];
+          expect(
+            await testEnv.PROFILE_DB.prepare(
+              "SELECT status, revision FROM rating_updates WHERE operation_id = ?",
+            )
+              .bind(operationId)
+              .first(),
+          ).toEqual({ status: "done", revision: 2 });
+        } else {
+          await rating.applyFebruaryChallengeReplay(playerId, opponentId);
+          expectedColumns = [
+            ["payload_json", "updated_at_ms"],
+            ["payload_json", "updated_at_ms"],
+          ];
+          expect(
+            await testEnv.PROFILE_DB.prepare(
+              "SELECT COUNT(*) AS count FROM profile_february_opponents",
+            ).first("count"),
+          ).toBe(2);
+        }
+      }
+      expect(
+        queries.filter((query) => /^\s*(?:SELECT|WITH)\b/i.test(query)),
+      ).toHaveLength({ wager: 3, rating: 5, challenge: 8 }[kind]);
+      expect(writes).toHaveLength(2);
+      for (const [index, profileId] of [playerId, opponentId].entries()) {
+        const write = writes.find(
+          ({ bindings }) => bindings.at(-1) === profileId,
+        );
+        expect(write).toBeDefined();
+        const after = await readRawProfileRow(profileId);
+        expectNarrowProfileWrite(
+          write!,
+          before[index],
+          after,
+          expectedColumns[index],
+        );
+        const payload = JSON.parse(String(after.payload_json));
+        expect(payload.mining.materials.dust).toBe(
+          kind === "wager" ? (index === 0 ? 10 : 0) : index === 0 ? 0 : 10,
+        );
+        if (kind === "rating") {
+          expect(payload.win).toBe(false);
+          if (index === 0) {
+            expect(payload).toMatchObject({
+              rating: 1500,
+              nonce: 0,
+              totalManaPoints: 0,
+            });
+            expect(after.rating_sort).toBe(0);
+            expect(after.rating_sort_present).toBe(1);
+          }
+        }
+      }
+    },
+  );
+
   beforeAll(async () => {
     await applyRetiredProfileMigrations(
       testEnv.PROFILE_DB,

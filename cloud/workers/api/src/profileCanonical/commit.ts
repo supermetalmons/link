@@ -4,6 +4,7 @@ import { classifyD1Failure } from "../d1Failure.ts";
 import {
   type D1Value,
   type CanonicalProfileValue,
+  type CanonicalProfileSnapshot,
   type CanonicalMergeTargetValue,
   type CanonicalSingleMutation,
   type CanonicalMutation,
@@ -29,6 +30,7 @@ function canonicalRowMutationStatement<Row extends Record<string, D1Value>>(
   keyColumn: keyof Row & string,
   row: Row,
   insert: boolean,
+  current?: Row,
 ): D1PreparedStatement {
   const fields = Object.entries(row);
   if (insert) {
@@ -39,12 +41,14 @@ function canonicalRowMutationStatement<Row extends Record<string, D1Value>>(
       )
       .bind(...fields.map(([, value]) => value));
   }
-  const updates = fields.filter(([column]) => column !== keyColumn);
+  const updates = fields.filter(
+    ([column, value]) =>
+      column !== keyColumn && (!current || current[column] !== value),
+  );
   return db
     .prepare(
       `UPDATE ${table} SET
-         ${updates.map(([column]) => `${column} = ?`).join(", ")},
-         revision = revision + 1
+         ${[...updates.map(([column]) => `${column} = ?`), "revision = revision + 1"].join(", ")}
        WHERE ${keyColumn} = ?`,
     )
     .bind(...updates.map(([, value]) => value), row[keyColumn]);
@@ -54,6 +58,7 @@ function profileMutationStatement(
   db: D1Database,
   value: CanonicalProfileValue,
   insert: boolean,
+  current?: CanonicalProfileSnapshot,
 ): D1PreparedStatement {
   return canonicalRowMutationStatement(
     db,
@@ -61,6 +66,7 @@ function profileMutationStatement(
     "profile_id",
     profileWriteRow(value),
     insert,
+    current ? profileWriteRow(current) : undefined,
   );
 }
 
@@ -436,6 +442,7 @@ function mutationStatements(
     case "insert-active-profile":
       return [profileMutationStatement(db, mutation.value, true)];
     case "update-active-profile":
+    case "patch-active-profile":
       return [
         guardStatement(
           db,
@@ -446,7 +453,14 @@ function mutationStatements(
           [mutation.value.profile.id],
           "invariant",
         ),
-        profileMutationStatement(db, mutation.value, false),
+        profileMutationStatement(
+          db,
+          mutation.value,
+          false,
+          mutation.kind === "patch-active-profile"
+            ? mutation.current
+            : undefined,
+        ),
       ];
     case "retire-profile-with-redirect":
       return [
@@ -565,13 +579,23 @@ function validateCanonicalCommitPlan(plan: CanonicalCommitPlan): void {
         );
         break;
       case "update-active-profile":
+      case "patch-active-profile":
         requireUniqueLifecycleProfile(mutation.value.profile.id);
         requireExpectation(mutation.value.state === "active");
+        if (mutation.kind === "patch-active-profile") {
+          requireExpectation(
+            mutation.current.state === "active" &&
+              mutation.current.profileId === mutation.value.profile.id &&
+              mutation.current.profile.id === mutation.value.profile.id,
+          );
+        }
         requireExpectation(
           has(
             (expectation) =>
               expectation.kind === "profile-revision" &&
-              expectation.profileId === mutation.value.profile.id,
+              expectation.profileId === mutation.value.profile.id &&
+              (mutation.kind !== "patch-active-profile" ||
+                expectation.revision === mutation.current.revision),
           ),
         );
         break;
@@ -892,6 +916,7 @@ function canonicalTopologyProfileIds(plan: CanonicalCommitPlan): string[] {
     switch (mutation.kind) {
       case "insert-active-profile":
       case "update-active-profile":
+      case "patch-active-profile":
         profileIds.add(mutation.value.profile.id);
         break;
       case "retire-profile-with-redirect":

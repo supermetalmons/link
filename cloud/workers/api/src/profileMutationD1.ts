@@ -96,7 +96,7 @@ export function commitCanonicalProfileUpdate(
         : []),
       ...additionalExpectations,
     ],
-    mutations: [{ kind: "update-active-profile", value }],
+    mutations: [{ kind: "patch-active-profile", current: snapshot, value }],
   });
 }
 

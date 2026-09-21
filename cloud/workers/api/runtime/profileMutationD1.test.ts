@@ -104,16 +104,20 @@ function observeDatabase(
   const firstQueries: string[] = [];
   const allQueries: string[] = [];
   const batchQueries: string[][] = [];
+  const batchBindings: unknown[][][] = [];
   const nativeStatements = new WeakMap<object, D1PreparedStatement>();
   const statementQueries = new WeakMap<object, string>();
+  const statementBindings = new WeakMap<object, unknown[]>();
   const wrap = (
     statement: D1PreparedStatement,
     query: string,
+    bindings: unknown[] = [],
   ): D1PreparedStatement => {
     const wrapped = new Proxy(statement, {
       get(target, property) {
         if (property === "bind") {
-          return (...values: unknown[]) => wrap(target.bind(...values), query);
+          return (...values: unknown[]) =>
+            wrap(target.bind(...values), query, values);
         }
         if (
           options.forbidStandaloneReads &&
@@ -154,6 +158,7 @@ function observeDatabase(
     });
     nativeStatements.set(wrapped, statement);
     statementQueries.set(wrapped, query);
+    statementBindings.set(wrapped, bindings);
     return wrapped;
   };
   const database = new Proxy(db, {
@@ -166,6 +171,11 @@ function observeDatabase(
           batchQueries.push(
             statements.map(
               (statement) => statementQueries.get(statement) || "",
+            ),
+          );
+          batchBindings.push(
+            statements.map(
+              (statement) => statementBindings.get(statement) || [],
             ),
           );
           if (batchQueries.length === 1) await options.beforeFirstBatch?.();
@@ -182,7 +192,53 @@ function observeDatabase(
       return typeof member === "function" ? member.bind(target) : member;
     },
   });
-  return { database, firstQueries, allQueries, batchQueries };
+  return { database, firstQueries, allQueries, batchQueries, batchBindings };
+}
+
+async function readProfileRow(profileId: string) {
+  const row = await db
+    .prepare("SELECT * FROM profile_records WHERE profile_id = ?")
+    .bind(profileId)
+    .first<Record<string, unknown>>();
+  expect(row).not.toBeNull();
+  return row!;
+}
+
+async function expectProfileUpdate(
+  observed: ReturnType<typeof observeDatabase>,
+  original: Record<string, unknown>,
+  changes: Record<string, unknown>,
+) {
+  const updates = observed.batchQueries.flatMap((queries, batchIndex) =>
+    queries.flatMap((query, statementIndex) =>
+      /^\s*UPDATE profile_records\s+SET\b/.test(query)
+        ? [
+            {
+              query,
+              bindings: observed.batchBindings[batchIndex][statementIndex],
+            },
+          ]
+        : [],
+    ),
+  );
+  expect(updates).toHaveLength(1);
+  const [{ query, bindings }] = updates;
+  const columns = query
+    .split("SET")[1]
+    .split("WHERE")[0]
+    .split(",")
+    .map((assignment) => assignment.split("=")[0].trim());
+  expect([...columns].sort()).toEqual(Object.keys(changes).sort());
+  expect(bindings).toEqual([
+    ...columns
+      .filter((column) => column !== "revision")
+      .map((column) => changes[column]),
+    original.profile_id,
+  ]);
+  await expect(readProfileRow(String(original.profile_id))).resolves.toEqual({
+    ...original,
+    ...changes,
+  });
 }
 
 async function mergeOwner(
@@ -601,6 +657,7 @@ describe("canonical profile mutation reads", () => {
         sortValues: { mp: null },
       },
     );
+    const original = await readProfileRow(initial.profile.profileId);
     const observed = observeDatabase();
     await expect(
       createProfileCustomizationRepository(testEnv, {
@@ -621,7 +678,16 @@ describe("canonical profile mutation reads", () => {
       updatedAtMs: 4_000,
     });
     expect(observed.firstQueries).toHaveLength(1);
+    expect(observed.allQueries).toHaveLength(0);
     expect(observed.batchQueries.map((queries) => queries.length)).toEqual([6]);
+    await expectProfileUpdate(observed, original, {
+      payload_json: JSON.stringify({
+        ...initial.profile.profile,
+        cardBackgroundId: 4,
+      }),
+      updated_at_ms: 4_000,
+      revision: 2,
+    });
   });
 
   it("replaces a legacy emoji with zero without changing sparse fields", async () => {
@@ -630,14 +696,17 @@ describe("canonical profile mutation reads", () => {
       {
         legacyFields: { imported: { emoji: "" } },
         emojiPresent: false,
-        gameplayEmoji: "legacy-gameplay-emoji",
+        gameplayEmoji: "0",
         winPresent: false,
         sortPresence: { rating: false, nonce: false, mp: true },
         sortValues: { mp: null },
       },
     );
+    const original = await readProfileRow(initial.profile.profileId);
+    const observed = observeDatabase();
     await expect(
       createProfileCustomizationRepository(testEnv, {
+        d1: observed.database,
         now: () => 4_000,
       }).updateCustomization(
         initial.owner.loginUid,
@@ -654,6 +723,20 @@ describe("canonical profile mutation reads", () => {
       gameplayEmoji: 0,
       revision: 2,
       updatedAtMs: 4_000,
+    });
+    expect(observed.firstQueries).toHaveLength(1);
+    expect(observed.allQueries).toHaveLength(0);
+    expect(observed.batchQueries.map((queries) => queries.length)).toEqual([6]);
+    await expectProfileUpdate(observed, original, {
+      payload_json: JSON.stringify({
+        ...initial.profile.profile,
+        emoji: 0,
+        aura: "",
+      }),
+      gameplay_emoji_json: "0",
+      emoji_present: 1,
+      updated_at_ms: 4_000,
+      revision: 2,
     });
   });
 
@@ -681,6 +764,7 @@ describe("canonical profile mutation reads", () => {
       lastRockDate: "2026-09-11",
       materials: { dust: 0, slime: 3, gum: 4, metal: 5, ice: 6 },
     };
+    const original = await readProfileRow(initial.profile.profileId);
     const observed = observeDatabase();
     const snapshot = await createMiningRepository(testEnv, {
       d1: observed.database,
@@ -708,7 +792,64 @@ describe("canonical profile mutation reads", () => {
       revision: 2,
       updatedAtMs: 4_000,
     });
+    await expectProfileUpdate(observed, original, {
+      payload_json: JSON.stringify({ ...initial.profile.profile, mining }),
+      ...Object.fromEntries(
+        Object.entries(mining.materials).flatMap(([material, value]) => [
+          [`${material}_sort`, value],
+          [`${material}_sort_present`, 1],
+        ]),
+      ),
+      updated_at_ms: 4_000,
+      revision: 2,
+    });
   });
+
+  it.each(["customization", "mining"] as const)(
+    "increments the revision for an unchanged %s value and timestamp",
+    async (operation) => {
+      const initial = await createProfile({ cardBackgroundId: 4 });
+      const original = await readProfileRow(initial.profile.profileId);
+      const observed = observeDatabase();
+      const dependencies = {
+        d1: observed.database,
+        now: () => initial.profile.updatedAtMs,
+      };
+      if (operation === "customization") {
+        let authorizations = 0;
+        await expect(
+          createProfileCustomizationRepository(
+            testEnv,
+            dependencies,
+          ).updateCustomization(
+            initial.owner.loginUid,
+            { field: "cardBackgroundId", value: 4 },
+            async () => {
+              authorizations++;
+            },
+          ),
+        ).resolves.toBe("updated");
+        expect(authorizations).toBe(1);
+      } else {
+        const snapshot = await createMiningRepository(
+          testEnv,
+          dependencies,
+        ).getProfileSnapshot(initial.profile.profileId);
+        expect(snapshot).not.toBeNull();
+        await expect(snapshot!.commitMining(snapshot!.mining)).resolves.toBe(
+          "updated",
+        );
+      }
+      expect(observed.firstQueries).toHaveLength(
+        operation === "customization" ? 1 : 0,
+      );
+      expect(observed.allQueries).toHaveLength(operation === "mining" ? 1 : 0);
+      expect(observed.batchQueries.map((queries) => queries.length)).toEqual([
+        operation === "customization" ? 6 : 5,
+      ]);
+      await expectProfileUpdate(observed, original, { revision: 2 });
+    },
+  );
 
   it("rejects a mining write after a concurrent edit without overwriting it", async () => {
     const initial = await createProfile();
@@ -877,30 +1018,56 @@ describe("canonical profile mutation reads", () => {
 
   it("keeps rename and unchanged-name reads within their query budgets", async () => {
     const initial = await createProfile();
+    const original = await readProfileRow(initial.profile.profileId);
     const username = `Rename${crypto.randomUUID()}`;
     const renamed = observeDatabase();
     await expect(
-      createUsernameRepository(testEnv, { d1: renamed.database }).editUsername(
-        initial.owner.loginUid,
-        username,
-      ),
+      createUsernameRepository(testEnv, {
+        d1: renamed.database,
+        now: () => 4_000,
+      }).editUsername(initial.owner.loginUid, username),
     ).resolves.toBe("updated");
     expect(renamed.firstQueries).toHaveLength(2);
+    expect(renamed.allQueries).toHaveLength(0);
     expect(renamed.batchQueries.map((queries) => queries.length)).toEqual([7]);
+    await expectProfileUpdate(renamed, original, {
+      payload_json: JSON.stringify({ ...initial.profile.profile, username }),
+      username_key: username.toLowerCase(),
+      updated_at_ms: 4_000,
+      revision: 2,
+    });
+    const renamedRow = await readProfileRow(initial.profile.profileId);
     const unchanged = observeDatabase();
     await expect(
       createUsernameRepository(testEnv, {
         d1: unchanged.database,
+        now: () => 5_000,
       }).editUsername(initial.owner.loginUid, username),
     ).resolves.toBe("updated");
     expect(unchanged.firstQueries).toHaveLength(1);
+    expect(unchanged.allQueries).toHaveLength(0);
     expect(unchanged.batchQueries).toHaveLength(0);
+    await expect(readProfileRow(initial.profile.profileId)).resolves.toEqual(
+      renamedRow,
+    );
+    const caseOnly = observeDatabase();
     await expect(
-      createUsernameRepository(testEnv).editUsername(
-        initial.owner.loginUid,
-        username.toUpperCase(),
-      ),
+      createUsernameRepository(testEnv, {
+        d1: caseOnly.database,
+        now: () => 6_000,
+      }).editUsername(initial.owner.loginUid, username.toUpperCase()),
     ).resolves.toBe("updated");
+    expect(caseOnly.firstQueries).toHaveLength(2);
+    expect(caseOnly.allQueries).toHaveLength(0);
+    expect(caseOnly.batchQueries.map((queries) => queries.length)).toEqual([7]);
+    await expectProfileUpdate(caseOnly, renamedRow, {
+      payload_json: JSON.stringify({
+        ...initial.profile.profile,
+        username: username.toUpperCase(),
+      }),
+      updated_at_ms: 6_000,
+      revision: 3,
+    });
   });
 
   it("reports a username claimed between its read and guarded commit", async () => {

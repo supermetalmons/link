@@ -531,6 +531,11 @@ export type CanonicalMutation =
   | { kind: "insert-active-profile"; value: CanonicalProfileValue }
   | { kind: "update-active-profile"; value: CanonicalProfileValue }
   | {
+      kind: "patch-active-profile";
+      current: CanonicalProfileSnapshot;
+      value: CanonicalProfileValue;
+    }
+  | {
       kind: "retire-profile-with-redirect";
       profile: CanonicalProfileValue;
       redirect: CanonicalMergeTargetValue;
@@ -614,6 +619,7 @@ type CanonicalLifecycleMutation = Extract<
     kind:
       | "insert-active-profile"
       | "update-active-profile"
+      | "patch-active-profile"
       | "retire-profile-with-redirect"
       | "delete-retired-profile";
   }

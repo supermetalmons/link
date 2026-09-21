@@ -518,7 +518,8 @@ export function createCanonicalGameplayRepository(
               );
               mutations.push(
                 {
-                  kind: "update-active-profile",
+                  kind: "patch-active-profile",
+                  current: winner,
                   value: patchCanonicalProfile(
                     winner,
                     {
@@ -532,7 +533,8 @@ export function createCanonicalGameplayRepository(
                   ),
                 },
                 {
-                  kind: "update-active-profile",
+                  kind: "patch-active-profile",
+                  current: loser,
                   value: patchCanonicalProfile(
                     loser,
                     {
@@ -966,7 +968,8 @@ export function createCanonicalRatingRepository(
         }
         for (const { snapshot, patch } of profileWrites.values()) {
           mutations.push({
-            kind: "update-active-profile",
+            kind: "patch-active-profile",
+            current: snapshot,
             value: patchCanonicalProfile(
               snapshot,
               patch,
@@ -1099,7 +1102,8 @@ export function createCanonicalRatingRepository(
               recordedAtMs: options.now(),
             },
             {
-              kind: "update-active-profile",
+              kind: "patch-active-profile",
+              current: snapshot,
               value: patchCanonicalProfile(
                 snapshot,
                 {

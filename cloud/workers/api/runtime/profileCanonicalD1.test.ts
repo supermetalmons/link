@@ -30,6 +30,7 @@ import {
   type CanonicalCommitPlan,
   type CanonicalExpectation,
   type CanonicalMutation,
+  type CanonicalProfileSnapshot,
   type CanonicalProfileValue,
   type CanonicalRatingUpdateValue,
 } from "../src/profileCanonicalD1.ts";
@@ -1355,6 +1356,293 @@ describe("canonical profile D1 store", () => {
         ],
       }),
     ).rejects.toBeInstanceOf(CanonicalProfileConflict);
+  });
+
+  describe("active profile patches", () => {
+    async function insertProfile(
+      id: string,
+    ): Promise<CanonicalProfileSnapshot> {
+      const value = profileValue(id);
+      await commitCanonicalPlan(testEnv.PROFILE_DB, {
+        expectations: [{ kind: "profile-absent", profileId: id }],
+        mutations: [{ kind: "insert-active-profile", value }],
+      });
+      return (await readCanonicalProfile(testEnv.PROFILE_DB, id))!;
+    }
+
+    function patchPlan(
+      current: CanonicalProfileSnapshot,
+      value: CanonicalProfileValue = {
+        ...current,
+        profile: { ...current.profile, cardBackgroundId: 4 },
+        updatedAtMs: 2_000,
+      },
+    ): CanonicalCommitPlan {
+      return {
+        expectations: [
+          {
+            kind: "profile-revision",
+            profileId: current.profileId,
+            revision: current.revision,
+          },
+        ],
+        mutations: [{ kind: "patch-active-profile", current, value }],
+      };
+    }
+
+    function settlementMutation(operationId: string): CanonicalMutation {
+      return {
+        kind: "insert-wager-settlement",
+        value: {
+          operationId,
+          fingerprint: `${operationId}-fingerprint`,
+          winnerProfileId: "patch-winner",
+          loserProfileId: "patch-loser",
+          material: "dust",
+          count: 1,
+          appliedAtMs: 2_000,
+          outcome: "applied",
+          revision: 1,
+        },
+      };
+    }
+
+    it.each([
+      "missing revision",
+      "different revision",
+      "different expectation profile",
+      "different snapshot profile ID",
+      "different snapshot payload ID",
+      "different next profile ID",
+      "retiring snapshot",
+      "retiring next value",
+    ])("rejects %s before executing a patch", async (mode) => {
+      const initial = profileValue("patch-invalid");
+      let current: CanonicalProfileSnapshot = {
+        ...initial,
+        profileId: initial.profile.id,
+        revision: 1,
+      };
+      let value = initial;
+      let expectations: CanonicalExpectation[] = [
+        {
+          kind: "profile-revision",
+          profileId: initial.profile.id,
+          revision: 1,
+        },
+      ];
+      if (mode === "missing revision") expectations = [];
+      if (mode === "different revision") {
+        expectations = [
+          {
+            kind: "profile-revision",
+            profileId: initial.profile.id,
+            revision: 2,
+          },
+        ];
+      }
+      if (mode === "different expectation profile") {
+        expectations = [
+          { kind: "profile-revision", profileId: "patch-other", revision: 1 },
+        ];
+      }
+      if (mode === "different snapshot profile ID") {
+        current = { ...current, profileId: "patch-other" };
+      }
+      if (mode === "different snapshot payload ID") {
+        current = { ...current, profile: profile("patch-other") };
+      }
+      if (mode === "different next profile ID")
+        value = profileValue("patch-other");
+      if (mode === "retiring snapshot") {
+        current = {
+          ...current,
+          state: "retiring",
+          mergedIntoProfileId: "patch-other",
+          mergedAtMs: 2_000,
+        };
+      }
+      if (mode === "retiring next value") {
+        value = {
+          ...value,
+          state: "retiring",
+          mergedIntoProfileId: "patch-other",
+          mergedAtMs: 2_000,
+        };
+      }
+      const observed = observeAggregateDatabase();
+      await expect(
+        commitCanonicalPlan(observed.database, {
+          expectations,
+          mutations: [{ kind: "patch-active-profile", current, value }],
+        }),
+      ).rejects.toThrow("unsafe-canonical-commit-plan");
+      expect(observed.batches).toHaveLength(0);
+    });
+
+    it.each(["patch", "full update"])(
+      "rejects a patch and a duplicate %s for the same profile",
+      async (mode) => {
+        const current = await insertProfile("patch-duplicate");
+        const plan = patchPlan(current);
+        const observed = observeAggregateDatabase();
+        await expect(
+          commitCanonicalPlan(observed.database, {
+            ...plan,
+            mutations: [
+              ...plan.mutations,
+              mode === "patch"
+                ? plan.mutations[0]
+                : { kind: "update-active-profile", value: current },
+            ],
+          }),
+        ).rejects.toThrow("unsafe-canonical-commit-plan");
+        expect(observed.batches).toHaveLength(0);
+        await expect(
+          readCanonicalProfile(testEnv.PROFILE_DB, current.profileId),
+        ).resolves.toEqual(current);
+      },
+    );
+
+    it("increments the revision when a patch changes no stored values", async () => {
+      const current = await insertProfile("patch-unchanged");
+      const observed = observeAggregateDatabase();
+      await commitCanonicalPlan(observed.database, patchPlan(current, current));
+      expect(observed.batches.map((queries) => queries.length)).toEqual([5]);
+      await expect(
+        readCanonicalProfile(testEnv.PROFILE_DB, current.profileId),
+      ).resolves.toEqual({ ...current, revision: current.revision + 1 });
+    });
+
+    it("rejects a stale patch without committing another profile or settlement", async () => {
+      const current = await insertProfile("patch-stale");
+      const other = await insertProfile("patch-unaffected");
+      await commitCanonicalPlan(testEnv.PROFILE_DB, patchPlan(current));
+      const advanced = await readCanonicalProfile(
+        testEnv.PROFILE_DB,
+        current.profileId,
+      );
+      const stalePlan = patchPlan(current, {
+        ...current,
+        profile: { ...current.profile, isTutorialCompleted: false },
+        updatedAtMs: 3_000,
+      });
+      const otherPlan = patchPlan(other);
+      const operationId = "patch-stale-settlement";
+      const observed = observeD1FailureDatabase(testEnv.PROFILE_DB);
+      const failure = await commitCanonicalPlan(observed.database, {
+        expectations: [
+          ...otherPlan.expectations,
+          { kind: "wager-settlement-absent", operationId },
+          ...stalePlan.expectations,
+        ],
+        mutations: [
+          ...otherPlan.mutations,
+          settlementMutation(operationId),
+          ...stalePlan.mutations,
+        ],
+      }).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(CanonicalProfileConflict);
+      expect(failure).toHaveProperty("cause", observed.errors[0]);
+      expect(classifyD1Failure(observed.errors[0])).toBe("profile-conflict");
+      expect(observed.sessions).toEqual([]);
+      await expect(
+        readCanonicalProfile(testEnv.PROFILE_DB, current.profileId),
+      ).resolves.toEqual(advanced);
+      await expect(
+        readCanonicalProfile(testEnv.PROFILE_DB, other.profileId),
+      ).resolves.toEqual(other);
+      await expect(
+        readCanonicalWagerSettlement(testEnv.PROFILE_DB, operationId),
+      ).resolves.toBeNull();
+    });
+
+    it.each(["frozen", "retired"])(
+      "rejects a patch when its database state becomes %s",
+      async (mode) => {
+        const current = await insertProfile("patch-state-guard");
+        if (mode === "frozen") {
+          await testEnv.PROFILE_DB.prepare(
+            "UPDATE profile_canonical_control SET state = 'frozen' WHERE singleton = 1",
+          ).run();
+        } else {
+          await testEnv.PROFILE_DB.prepare(
+            `UPDATE profile_records SET state = 'retiring',
+             merged_into_profile_id = 'patch-other', merged_at_ms = 2_000
+             WHERE profile_id = ?`,
+          )
+            .bind(current.profileId)
+            .run();
+        }
+        const before = await readCanonicalProfile(
+          testEnv.PROFILE_DB,
+          current.profileId,
+        );
+        const observed = observeD1FailureDatabase(testEnv.PROFILE_DB);
+        try {
+          const failure = await commitCanonicalPlan(
+            observed.database,
+            patchPlan(current),
+          ).catch((error: unknown) => error);
+          expect(failure).toBeInstanceOf(
+            mode === "frozen"
+              ? ProfileWritesDisabledFailure
+              : CanonicalProfileCorruption,
+          );
+          expect(failure).toHaveProperty("cause", observed.errors[0]);
+          expect(classifyD1Failure(observed.errors[0])).toBe("guard");
+          expect(observed.sessions).toEqual(["first-primary"]);
+          await expect(
+            readCanonicalProfile(testEnv.PROFILE_DB, current.profileId),
+          ).resolves.toEqual(before);
+        } finally {
+          if (mode === "frozen") {
+            await testEnv.PROFILE_DB.prepare(
+              "UPDATE profile_canonical_control SET state = 'active' WHERE singleton = 1",
+            ).run();
+          }
+        }
+      },
+    );
+
+    it("rolls a patch and settlement back when the final topology guard fails", async () => {
+      const current = await insertProfile("patch-topology");
+      const operationId = "patch-topology-settlement";
+      const plan = patchPlan(current);
+      await testEnv.PROFILE_DB.prepare(
+        `CREATE TRIGGER patch_test_profile_topology
+         AFTER UPDATE OF payload_json ON profile_records
+         BEGIN
+           UPDATE profile_records SET state = 'retiring',
+             merged_into_profile_id = 'patch-other', merged_at_ms = 2_000
+           WHERE profile_id = NEW.profile_id;
+         END`,
+      ).run();
+      const observed = observeD1FailureDatabase(testEnv.PROFILE_DB);
+      try {
+        const failure = await commitCanonicalPlan(observed.database, {
+          expectations: [
+            { kind: "wager-settlement-absent", operationId },
+            ...plan.expectations,
+          ],
+          mutations: [settlementMutation(operationId), ...plan.mutations],
+        }).catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(CanonicalProfileCorruption);
+        expect(failure).toHaveProperty("cause", observed.errors[0]);
+        expect(classifyD1Failure(observed.errors[0])).toBe("guard");
+        expect(observed.sessions).toEqual(["first-primary"]);
+        await expect(
+          readCanonicalProfile(testEnv.PROFILE_DB, current.profileId),
+        ).resolves.toEqual(current);
+        await expect(
+          readCanonicalWagerSettlement(testEnv.PROFILE_DB, operationId),
+        ).resolves.toBeNull();
+      } finally {
+        await testEnv.PROFILE_DB.prepare(
+          "DROP TRIGGER IF EXISTS patch_test_profile_topology",
+        ).run();
+      }
+    });
   });
 
   it("roundtrips every profile write field on insert and update", async () => {
