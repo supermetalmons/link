@@ -219,6 +219,77 @@ function projectionRatingRepository(db = testEnv.PROFILE_DB) {
   );
 }
 
+const ratingDiscoveryCases = [
+  {
+    list: "listDueRatingEventProgress",
+    claim: "claimRatingEventProgress",
+    field: "eventProgress",
+    prefix: "event_progress",
+  },
+  {
+    list: "listDueRatingProfileGameProjections",
+    claim: "claimRatingProfileGameProjection",
+    field: "profileGameProjection",
+    prefix: "profile_game_projection",
+  },
+  {
+    list: "listDueRatingTelegramProjections",
+    claim: "claimRatingTelegramProjection",
+    field: "telegramProjection",
+    prefix: "telegram_projection",
+  },
+] as const;
+
+function observeRatingDiscovery(db: D1Database) {
+  const queries: string[] = [];
+  const reads: Array<{
+    query: string;
+    bindings: unknown[];
+    rows: Record<string, unknown>[];
+    rowsWritten: number;
+  }> = [];
+  const wrap = (
+    statement: D1PreparedStatement,
+    query: string,
+    bindings: unknown[] = [],
+  ): D1PreparedStatement =>
+    new Proxy(statement, {
+      get(target, property) {
+        if (property === "bind") {
+          return (...values: unknown[]) =>
+            wrap(target.bind(...values), query, values);
+        }
+        if (property === "all") {
+          return async () => {
+            const result = await target.all<Record<string, unknown>>();
+            reads.push({
+              query,
+              bindings,
+              rows: result.results,
+              rowsWritten: result.meta.rows_written,
+            });
+            return result;
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  const database = new Proxy(db, {
+    get(target, property) {
+      if (property === "prepare") {
+        return (query: string) => {
+          queries.push(query);
+          return wrap(target.prepare(query), query);
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { database, queries, reads };
+}
+
 async function insertProfile(
   id: string,
   loginUid: string | null,
@@ -1421,6 +1492,249 @@ describe("canonical gameplay repositories", () => {
                 },
         });
       }
+    },
+  );
+
+  it.each(ratingDiscoveryCases)(
+    "discovers only due $field metadata with indexed reads",
+    async ({ list, field, prefix }) => {
+      const archive = "retained-match-payload-".repeat(5_000);
+      for (const [operationId, timestamp, state, version] of [
+        ["tie-b", 2_000, "pending", 3],
+        ["future", 2_001, "pending", 1],
+        ["first", 1_500, "pending", null],
+        ["tie-a", 2_000, "pending", 0],
+        ["done", 1_000, "done", 1],
+        ["dead", 1_000, "dead", 1],
+        ["unmarked", 1_000, null, null],
+        ["processing", 1_800, "pending", 1],
+      ] as const) {
+        await insertProjectionRating(operationId, {
+          inviteId: " projection-invite ",
+          matchId: " projection-match ",
+          payload: { eventId: " \u2003projection-event\u00a0", archive },
+          [`${field}State`]: state,
+          [`${field}UpdatedAtMs`]: timestamp,
+          [`${field}Version`]: version,
+          ...(operationId === "processing"
+            ? { status: "processing", completedAtMs: null }
+            : {}),
+        });
+      }
+      const observed = observeRatingDiscovery(testEnv.PROFILE_DB);
+      const rating = projectionRatingRepository(observed.database);
+      const expected = [
+        ["first", 0],
+        ["processing", 1],
+        ["tie-a", 0],
+        ["tie-b", 3],
+      ].map(([operationId, version]) => ({
+        operationId,
+        updateTime: "1",
+        ...(field === "telegramProjection"
+          ? {}
+          : {
+              inviteId: " projection-invite ",
+              matchId: " projection-match ",
+              version,
+            }),
+        ...(field === "eventProgress" ? { eventId: "projection-event" } : {}),
+      }));
+      await expect(rating[list](2_000, 10)).resolves.toEqual(expected);
+      expect(observed.queries).toHaveLength(1);
+      expect(observed.reads).toHaveLength(1);
+      const read = observed.reads[0];
+      expect(read.rowsWritten).toBe(0);
+      expect(read.rows).toHaveLength(4);
+      for (const row of read.rows) {
+        expect(row).not.toHaveProperty("payload_json");
+        expect(row).not.toHaveProperty("owner_token");
+      }
+      expect(JSON.stringify(read.rows)).not.toContain(archive);
+      expect(JSON.stringify(read.rows).length).toBeLessThan(2_000);
+      const plan = await testEnv.PROFILE_DB.prepare(
+        `EXPLAIN QUERY PLAN ${read.query}`,
+      )
+        .bind(...read.bindings)
+        .all<{ detail: string }>();
+      expect(plan.results.map((row) => row.detail).join("\n")).toContain(
+        `USING INDEX idx_rating_updates_${prefix}`,
+      );
+      await expect(rating[list](2_000, 1)).resolves.toEqual(
+        expected.slice(0, 1),
+      );
+      await expect(rating[list](1_999, 100)).resolves.toEqual(
+        expected.slice(0, 2),
+      );
+      await expect(rating[list](0, 100)).resolves.toEqual([]);
+    },
+  );
+
+  it("caps each rating discovery page at the maximum requested limit", async () => {
+    for (let index = 0; index < 101; index++) {
+      await insertProjectionRating(`limit-${String(index).padStart(3, "0")}`);
+    }
+    const rating = projectionRatingRepository();
+    for (const { list } of ratingDiscoveryCases) {
+      const page = await rating[list](2_000, 100);
+      expect(page).toHaveLength(100);
+      expect(page[0].operationId).toBe("limit-000");
+      expect(page.at(-1)?.operationId).toBe("limit-099");
+    }
+  });
+
+  it.each(ratingDiscoveryCases)(
+    "rejects invalid $field discovery bounds before querying",
+    async ({ list }) => {
+      const observed = observeRatingDiscovery(testEnv.PROFILE_DB);
+      const rating = projectionRatingRepository(observed.database);
+      for (const [cutoff, limit] of [
+        [-1, 10],
+        [1.5, 10],
+        [NaN, 10],
+        [Number.MAX_SAFE_INTEGER + 1, 10],
+        [2_000, 0],
+        [2_000, 101],
+        [2_000, 1.5],
+        [2_000, Infinity],
+      ]) {
+        await expect(rating[list](cutoff, limit)).rejects.toThrow(
+          "invalid-rating-projection-list",
+        );
+      }
+      expect(observed.queries).toEqual([]);
+    },
+  );
+
+  it("keeps JSON event ID string and last-duplicate-key semantics", async () => {
+    const payloads = [
+      "{}",
+      '{"eventId":null}',
+      '{"eventId":12}',
+      '{"eventId":true}',
+      '{"eventId":[]}',
+      '{"eventId":{"nested":"value"}}',
+      JSON.stringify({ eventId: " \t\n " }),
+      JSON.stringify({ eventId: "\ufeff\u2003event-雪\u00a0" }),
+      JSON.stringify({ eventId: "event-\ud83d\ude00" }),
+      JSON.stringify({ eventId: "event\u0000suffix" }),
+      '{"eventId":"first","eventId":" last "}',
+      '{"eventId":"\\ud800","eventId":"last"}',
+      '{"eventId":"first","event\\u0049d":"last"}',
+      '{"eventId\\u0000suffix":"wrong"}',
+      '{"eventId":"right","eventId\\u0000suffix":"wrong"}',
+      '{"eventId\\u0000suffix":"wrong","eventId":"right"}',
+      '{"eventId":"first","eventId":null}',
+      '{"eventId":"first","eventId":12}',
+      '{"eventId":"first","eventId":true}',
+      '{"eventId":"first","eventId":[]}',
+      '{"eventId":"first","eventId":{}}',
+      '{"nested":{"eventId":"nested"},"eventId":"root"}',
+    ];
+    for (const [index, payload] of payloads.entries()) {
+      const operationId = `event-id-${String(index).padStart(2, "0")}`;
+      await insertProjectionRating(operationId);
+      await testEnv.PROFILE_DB.prepare(
+        "UPDATE rating_updates SET payload_json = ? WHERE operation_id = ?",
+      )
+        .bind(payload, operationId)
+        .run();
+    }
+    const records =
+      await projectionRatingRepository().listDueRatingEventProgress(2_000, 100);
+    expect(records.map((record) => record.eventId)).toEqual(
+      payloads.map((payload) => {
+        const value = JSON.parse(payload).eventId;
+        return typeof value === "string" ? value.trim() : "";
+      }),
+    );
+  });
+
+  it.each([
+    '{"eventId":"\\ud800"}',
+    '{"eventId":"\\udfff"}',
+    '{"eventId":"first","eventId":"\\ud800"}',
+  ])(
+    "rejects invalid Unicode event IDs before claiming: %s",
+    async (payload) => {
+      const operationId = "invalid-unicode-event";
+      await insertProjectionRating(operationId);
+      await testEnv.PROFILE_DB.prepare(
+        "UPDATE rating_updates SET payload_json = ? WHERE operation_id = ?",
+      )
+        .bind(payload, operationId)
+        .run();
+      const observed = observeD1FailureDatabase(testEnv.PROFILE_DB);
+      await expect(
+        projectionRatingRepository(
+          observed.database,
+        ).listDueRatingEventProgress(2_000, 100),
+      ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+      expect(observed.batches).toEqual([]);
+      await expect(
+        testEnv.PROFILE_DB.prepare(
+          "SELECT revision FROM rating_updates WHERE operation_id = ?",
+        )
+          .bind(operationId)
+          .first<number>("revision"),
+      ).resolves.toBe(1);
+    },
+  );
+
+  it.each(ratingDiscoveryCases)(
+    "rejects malformed selected $field discovery metadata",
+    async ({ list, prefix, field }) => {
+      const operationId = "invalid-discovery-metadata";
+      await insertProjectionRating(operationId);
+      const columns = [
+        "revision",
+        ...(field === "telegramProjection" ? [] : [`${prefix}_version`]),
+      ];
+      for (const column of columns) {
+        for (const value of [1.5, Number.MAX_SAFE_INTEGER + 1]) {
+          await testEnv.PROFILE_DB.prepare(
+            `UPDATE rating_updates SET ${column} = ? WHERE operation_id = ?`,
+          )
+            .bind(value, operationId)
+            .run();
+          await expect(
+            projectionRatingRepository()[list](2_000, 10),
+          ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+        }
+        await testEnv.PROFILE_DB.prepare(
+          `UPDATE rating_updates SET ${column} = 1 WHERE operation_id = ?`,
+        )
+          .bind(operationId)
+          .run();
+      }
+    },
+  );
+
+  it.each(ratingDiscoveryCases)(
+    "validates unrelated corrupt rating fields before $field claims mutate",
+    async ({ list, claim }) => {
+      const operationId = "corrupt-rating-claim";
+      await insertProjectionRating(operationId);
+      await testEnv.PROFILE_DB.prepare(
+        "UPDATE rating_updates SET lease_expires_at_ms = ? WHERE operation_id = ?",
+      )
+        .bind(Number.MAX_SAFE_INTEGER + 1, operationId)
+        .run();
+      const observed = observeD1FailureDatabase(testEnv.PROFILE_DB);
+      const rating = projectionRatingRepository(observed.database);
+      const records = await rating[list](2_000, 10);
+      expect(records).toHaveLength(1);
+      await expect(
+        rating[claim](operationId, records[0].updateTime, 3_000),
+      ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+      expect(observed.batches).toEqual([]);
+      await expect(
+        testEnv.PROFILE_DB.prepare(
+          "SELECT revision FROM rating_updates WHERE operation_id = ?",
+        )
+          .bind(operationId)
+          .first<number>("revision"),
+      ).resolves.toBe(1);
     },
   );
 

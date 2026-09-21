@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import {
   isHistoricalMatchPair,
   type HistoricalMatchPair,
@@ -10,13 +11,13 @@ import {
 } from "@mons/shared/mining";
 import {
   commitCanonicalPlan,
-  parseCanonicalRatingUpdateRow,
   readCanonicalProfileOwnershipSnapshot,
   readCanonicalRatingUpdate,
   readCanonicalProfileAggregateSnapshots,
   readCanonicalWagerSettlement,
   resolveCanonicalProfile,
   CanonicalProfileConflict,
+  CanonicalProfileCorruption,
   type CanonicalProfileSnapshot,
   type CanonicalProfileValue,
   type CanonicalExpectation,
@@ -30,7 +31,15 @@ import {
   canonicalRatingProjectionFields,
   buildCanonicalRatingProjectionMutation,
 } from "./profileCanonical/accounting.ts";
-import type { CanonicalRatingProjectionKind } from "./profileCanonical/types.ts";
+import type {
+  CanonicalRatingProjectionKind,
+  RatingRow,
+} from "./profileCanonical/types.ts";
+import {
+  nonempty,
+  nullableSafeInteger,
+  safeInteger,
+} from "./profileCanonical/validation.ts";
 import {
   materializeCanonicalProfileUpdate,
   readCanonicalRatingProfiles,
@@ -71,7 +80,14 @@ type CanonicalRatingRepository = RatingProjectionRepository &
   RatingEventProgressRepository &
   RatingProfileGameProjectionRepository;
 
-type RatingRow = Parameters<typeof parseCanonicalRatingUpdateRow>[0];
+type RatingRecoveryRow = Pick<RatingRow, "operation_id" | "revision">;
+
+type RatingGameRecoveryRow = RatingRecoveryRow &
+  Pick<RatingRow, "invite_id" | "match_id"> & { version: number | null };
+
+type RatingEventRecoveryRow = RatingGameRecoveryRow & {
+  event_id_hex: string | null;
+};
 
 function string(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -643,13 +659,43 @@ async function claimProjection(
   }
 }
 
-async function listDueRatings(
+function parseRatingRecoveryRow(
+  row: RatingRecoveryRow,
+): PendingRatingTelegramProjection {
+  return {
+    operationId: nonempty(row.operation_id),
+    updateTime: String(safeInteger(row.revision, 1)),
+  };
+}
+
+function parseRatingGameRecoveryRow(
+  row: RatingGameRecoveryRow,
+): PendingRatingProfileGameProjection {
+  return {
+    ...parseRatingRecoveryRow(row),
+    inviteId: nonempty(row.invite_id),
+    matchId: nonempty(row.match_id),
+    version: nullableSafeInteger(row.version) ?? 0,
+  };
+}
+
+function parseRatingEventId(hex: string | null): string {
+  if (hex === null) return "";
+  try {
+    return new TextDecoder("utf-8", { fatal: true })
+      .decode(Buffer.from(hex, "hex"))
+      .trim();
+  } catch {
+    throw new CanonicalProfileCorruption();
+  }
+}
+
+async function listDueRatings<Row>(
   db: D1Database,
-  stateColumn: string,
-  updatedColumn: string,
+  query: string,
   updatedBeforeMs: number,
   limit: number,
-): Promise<CanonicalRatingUpdateSnapshot[]> {
+): Promise<Row[]> {
   if (
     !Number.isSafeInteger(updatedBeforeMs) ||
     updatedBeforeMs < 0 ||
@@ -659,24 +705,11 @@ async function listDueRatings(
   ) {
     throw new TypeError("invalid-rating-projection-list");
   }
-  const allowed = new Set([
-    "event_progress_state:event_progress_updated_at_ms",
-    "profile_game_projection_state:profile_game_projection_updated_at_ms",
-    "telegram_projection_state:telegram_projection_updated_at_ms",
-  ]);
-  if (!allowed.has(`${stateColumn}:${updatedColumn}`)) {
-    throw new TypeError("invalid-rating-projection-columns");
-  }
   const result = await db
-    .prepare(
-      `SELECT * FROM rating_updates
-       WHERE ${stateColumn} = 'pending' AND ${updatedColumn} <= ?
-       ORDER BY ${updatedColumn} ASC, operation_id ASC
-       LIMIT ?`,
-    )
+    .prepare(query)
     .bind(updatedBeforeMs, limit)
-    .all<RatingRow>();
-  return result.results.map(parseCanonicalRatingUpdateRow);
+    .all<Row>();
+  return result.results;
 }
 
 async function markProjection(
@@ -1127,20 +1160,24 @@ export function createCanonicalRatingRepository(
       limit,
     ): Promise<PendingRatingEventProgress[]> {
       return (
-        await listDueRatings(
+        await listDueRatings<RatingEventRecoveryRow>(
           db,
-          "event_progress_state",
-          "event_progress_updated_at_ms",
+          `SELECT operation_id, revision, invite_id, match_id,
+                  event_progress_version AS version,
+                  (SELECT CASE WHEN type = 'text' THEN hex(atom) ELSE NULL END
+                   FROM json_each(rating_updates.payload_json)
+                   WHERE key = 'eventId'
+                   ORDER BY id DESC LIMIT 1) AS event_id_hex
+           FROM rating_updates
+           WHERE event_progress_state = 'pending' AND event_progress_updated_at_ms <= ?
+           ORDER BY event_progress_updated_at_ms ASC, operation_id ASC
+           LIMIT ?`,
           updatedBeforeMs,
           limit,
         )
-      ).map((snapshot) => ({
-        eventId: string(snapshot.payload.eventId),
-        inviteId: snapshot.inviteId,
-        matchId: snapshot.matchId,
-        operationId: snapshot.operationId,
-        updateTime: String(snapshot.revision),
-        version: snapshot.eventProgressVersion || 0,
+      ).map((row) => ({
+        ...parseRatingGameRecoveryRow(row),
+        eventId: parseRatingEventId(row.event_id_hex),
       }));
     },
 
@@ -1149,20 +1186,18 @@ export function createCanonicalRatingRepository(
       limit,
     ): Promise<PendingRatingProfileGameProjection[]> {
       return (
-        await listDueRatings(
+        await listDueRatings<RatingGameRecoveryRow>(
           db,
-          "profile_game_projection_state",
-          "profile_game_projection_updated_at_ms",
+          `SELECT operation_id, revision, invite_id, match_id,
+                  profile_game_projection_version AS version
+           FROM rating_updates
+           WHERE profile_game_projection_state = 'pending' AND profile_game_projection_updated_at_ms <= ?
+           ORDER BY profile_game_projection_updated_at_ms ASC, operation_id ASC
+           LIMIT ?`,
           updatedBeforeMs,
           limit,
         )
-      ).map((snapshot) => ({
-        inviteId: snapshot.inviteId,
-        matchId: snapshot.matchId,
-        operationId: snapshot.operationId,
-        updateTime: String(snapshot.revision),
-        version: snapshot.profileGameProjectionVersion || 0,
-      }));
+      ).map(parseRatingGameRecoveryRow);
     },
 
     async listDueRatingTelegramProjections(
@@ -1170,17 +1205,17 @@ export function createCanonicalRatingRepository(
       limit,
     ): Promise<PendingRatingTelegramProjection[]> {
       return (
-        await listDueRatings(
+        await listDueRatings<RatingRecoveryRow>(
           db,
-          "telegram_projection_state",
-          "telegram_projection_updated_at_ms",
+          `SELECT operation_id, revision
+           FROM rating_updates
+           WHERE telegram_projection_state = 'pending' AND telegram_projection_updated_at_ms <= ?
+           ORDER BY telegram_projection_updated_at_ms ASC, operation_id ASC
+           LIMIT ?`,
           updatedBeforeMs,
           limit,
         )
-      ).map((snapshot) => ({
-        operationId: snapshot.operationId,
-        updateTime: String(snapshot.revision),
-      }));
+      ).map(parseRatingRecoveryRow);
     },
 
     async markRatingEventProgress(operationId, state, updatedAtMs, reason) {
