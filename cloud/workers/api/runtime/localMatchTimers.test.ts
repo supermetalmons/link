@@ -348,6 +348,39 @@ describe("local timer cohorts", () => {
     });
   });
 
+  it("claims and replays local timers without D1 access or changing retained markers", async () => {
+    const { room, input, records } = fixture();
+    await runInDurableObject(room, async (_instance, ctx) => {
+      let clock = now;
+      const settings = options({ now: () => clock });
+      const store = new MatchStateStore(ctx.storage, settings);
+      store.createRecords({ ...input, records });
+      const started = await store.startTimer(input);
+      const saved = markers(ctx.storage);
+      clock += 100_000;
+      const request = { ...input, eventId: "local-timer-event" };
+      expect(await store.claimTimer(request)).toEqual({ ok: true });
+      const committed = store.readPair(input);
+      const effects = store.listDueEffects();
+      const alarm = await ctx.storage.getAlarm();
+      expect(committed.playerMatch?.timer).toBe(MATCH_TIMER_TERMINAL);
+      expect(committed.claim).toMatchObject({
+        status: "claimed",
+        timer: started.timer,
+        claimedAtMs: clock,
+      });
+      expect(effects).toHaveLength(1);
+      expect(alarm).toBe(clock);
+      clock += 1_000;
+      expect(await store.claimTimer(request)).toEqual({ ok: true });
+      expect(store.readPair(input)).toEqual(committed);
+      expect(store.listDueEffects()).toEqual(effects);
+      expect(await ctx.storage.getAlarm()).toBe(alarm);
+      expect(markers(ctx.storage)).toEqual(saved);
+      expectNoD1(settings);
+    });
+  });
+
   it.each(["own-turn", "winner", "history", "terminal", "surrendered"])(
     "rejects local %s starts without D1 access or marker changes",
     async (condition) => {
@@ -426,6 +459,12 @@ describe("local timer cohorts", () => {
         await expect(store.startTimer(input)).rejects.toMatchObject({
           status: 503,
         });
+        if (corruption === "missing-cohort" || corruption === "d1-cohort")
+          await expect(
+            store.cleanupLegacyTimerStarts(input),
+          ).rejects.toMatchObject({
+            status: 503,
+          });
         expect(store.readPair(input)).toEqual(before);
         expect(markers(ctx.storage)).toEqual(saved);
         expectNoD1(settings);
@@ -450,11 +489,16 @@ describe("local timer cohorts", () => {
       await expect(store.startTimer(input)).rejects.toMatchObject({
         status: 503,
       });
+      await expect(store.cleanupLegacyTimerStarts(input)).rejects.toMatchObject(
+        {
+          status: 503,
+        },
+      );
       expectNoD1(settings);
     });
   });
 
-  it("keeps the local cohort and exact deadline after eviction with D1 creation configured", async () => {
+  it("keeps local deadlines and skips legacy cleanup after eviction with D1 creation configured", async () => {
     const { room, input, records } = fixture();
     const first = await runInDurableObject(room, async (_instance, ctx) => {
       const store = new MatchStateStore(ctx.storage, options());
@@ -468,6 +512,11 @@ describe("local timer cohorts", () => {
         now: () => now + 60_000,
       });
       const store = new MatchStateStore(ctx.storage, settings);
+      const saved = markers(ctx.storage);
+      const before = store.readPair(input);
+      await store.cleanupLegacyTimerStarts(input);
+      expect(markers(ctx.storage)).toEqual(saved);
+      expect(store.readPair(input)).toEqual(before);
       expect(await store.startTimer(input)).toEqual(first);
       expectNoD1(settings);
     });

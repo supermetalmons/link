@@ -625,6 +625,20 @@ export class MatchStateStore {
     return nowMs;
   }
 
+  async cleanupLegacyTimerStarts(
+    input: Pick<
+      MatchStateStartTimerRequest,
+      "matchId" | "playerId" | "opponentId"
+    >,
+  ): Promise<void> {
+    if (this.localTimers.mode(input.matchId) === "local") return;
+    await this.options.timerStarts.deletePair(
+      input.playerId,
+      input.opponentId,
+      input.matchId,
+    );
+  }
+
   async claimTimer(
     input: MatchStateClaimTimerRequest,
   ): Promise<ClaimMatchVictoryByTimerResponse> {
@@ -637,11 +651,7 @@ export class MatchStateStore {
       rawMatchTimerIsTerminal(snapshot.playerMatch) ||
       rawMatchTimerIsTerminal(snapshot.opponentMatch)
     ) {
-      await this.options.timerStarts.deletePair(
-        input.playerId,
-        input.opponentId,
-        input.matchId,
-      );
+      await this.cleanupLegacyTimerStarts(input);
     }
     return this.storage.transaction(async (transaction) => {
       const current = this.timerPair(timerRequest);

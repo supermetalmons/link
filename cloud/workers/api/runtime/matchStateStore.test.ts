@@ -600,83 +600,92 @@ describe("canonical match state storage", () => {
     });
   });
 
-  it("retries failed marker cleanup on terminal replay without changing the claim or effect", async () => {
-    const { room, input, records } = fixture();
-    await runInDurableObject(room, async (_instance, ctx) => {
-      const markerStore = timers();
-      let cleanupAttempts = 0;
-      const store = new MatchStateStore(
-        ctx.storage,
-        options({
-          timerStarts: {
-            ...markerStore,
-            async deletePair(...args) {
-              cleanupAttempts++;
-              expect(args).toEqual([
-                input.playerId,
-                input.opponentId,
-                input.matchId,
-              ]);
-              if (cleanupAttempts === 1)
-                throw new Error("marker-cleanup-failed");
-              await markerStore.deletePair(...args);
+  it.each(["d1", "missing-cohort"] as const)(
+    "retries failed %s marker cleanup on terminal replay without changing the claim or effect",
+    async (cohort) => {
+      const { room, input, records } = fixture();
+      await runInDurableObject(room, async (_instance, ctx) => {
+        const markerStore = timers();
+        let cleanupAttempts = 0;
+        const store = new MatchStateStore(
+          ctx.storage,
+          options({
+            newMatchTimerStorage: "d1",
+            timerStarts: {
+              ...markerStore,
+              async deletePair(...args) {
+                cleanupAttempts++;
+                expect(args).toEqual([
+                  input.playerId,
+                  input.opponentId,
+                  input.matchId,
+                ]);
+                if (cleanupAttempts === 1)
+                  throw new Error("marker-cleanup-failed");
+                await markerStore.deletePair(...args);
+              },
             },
-          },
-        }),
-      );
-      const timer = formatMatchTimer(game.turnNumber, future - 1);
-      records[0].value.timer = timer;
-      for (const [playerId, opponentId] of [
-        [input.playerId, input.opponentId],
-        [input.opponentId, input.playerId],
-      ]) {
-        await markerStore.getOrAdvance(
-          playerId,
-          opponentId,
-          input.matchId,
-          { timer, turnNumber: game.turnNumber },
-          future - 1,
+          }),
         );
-      }
-      store.createRecords({ ...input, records });
-      const request = { ...input, eventId: "event-one" };
-      expect(await store.claimTimer(request)).toEqual({ ok: true });
-      const committed = store.readPair(input);
-      const effects = store.listDueEffects();
-      const alarm = await ctx.storage.getAlarm();
-      expect(committed.playerMatch?.timer).toBe(MATCH_TIMER_TERMINAL);
-
-      await expect(store.claimTimer(request)).rejects.toThrow(
-        "marker-cleanup-failed",
-      );
-      expect(store.readPair(input)).toEqual(committed);
-      expect(store.listDueEffects()).toEqual(effects);
-      expect(await store.claimTimer(request)).toEqual({ ok: true });
-      expect(cleanupAttempts).toBe(2);
-      expect(store.readPair(input)).toEqual(committed);
-      expect(store.listDueEffects()).toEqual(effects);
-      expect(await ctx.storage.getAlarm()).toBe(alarm);
-      for (const [playerId, opponentId] of [
-        [input.playerId, input.opponentId],
-        [input.opponentId, input.playerId],
-      ]) {
-        expect(
+        const timer = formatMatchTimer(game.turnNumber, future - 1);
+        records[0].value.timer = timer;
+        for (const [playerId, opponentId] of [
+          [input.playerId, input.opponentId],
+          [input.opponentId, input.playerId],
+        ]) {
           await markerStore.getOrAdvance(
             playerId,
             opponentId,
             input.matchId,
-            {
-              timer: formatMatchTimer(game.turnNumber, future + 100),
-              turnNumber: game.turnNumber,
-            },
-            future,
-          ),
-        ).toMatchObject({
-          timer: formatMatchTimer(game.turnNumber, future + 100),
-        });
-      }
-    });
-  });
+            { timer, turnNumber: game.turnNumber },
+            future - 1,
+          );
+        }
+        store.createRecords({ ...input, records });
+        if (cohort === "missing-cohort")
+          ctx.storage.sql.exec(
+            "DELETE FROM match_state_timer_cohorts WHERE match_id = ?",
+            input.matchId,
+          );
+        const request = { ...input, eventId: "event-one" };
+        expect(await store.claimTimer(request)).toEqual({ ok: true });
+        const committed = store.readPair(input);
+        const effects = store.listDueEffects();
+        const alarm = await ctx.storage.getAlarm();
+        expect(committed.playerMatch?.timer).toBe(MATCH_TIMER_TERMINAL);
+
+        await expect(store.claimTimer(request)).rejects.toThrow(
+          "marker-cleanup-failed",
+        );
+        expect(store.readPair(input)).toEqual(committed);
+        expect(store.listDueEffects()).toEqual(effects);
+        expect(await store.claimTimer(request)).toEqual({ ok: true });
+        expect(cleanupAttempts).toBe(2);
+        expect(store.readPair(input)).toEqual(committed);
+        expect(store.listDueEffects()).toEqual(effects);
+        expect(await ctx.storage.getAlarm()).toBe(alarm);
+        for (const [playerId, opponentId] of [
+          [input.playerId, input.opponentId],
+          [input.opponentId, input.playerId],
+        ]) {
+          expect(
+            await markerStore.getOrAdvance(
+              playerId,
+              opponentId,
+              input.matchId,
+              {
+                timer: formatMatchTimer(game.turnNumber, future + 100),
+                turnNumber: game.turnNumber,
+              },
+              future,
+            ),
+          ).toMatchObject({
+            timer: formatMatchTimer(game.turnNumber, future + 100),
+          });
+        }
+      });
+    },
+  );
 
   for (const [condition, resolvedGame] of [
     ["the caller's own turn", { ...game, activeColor: "white" }],

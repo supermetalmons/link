@@ -1,8 +1,17 @@
 import { env } from "cloudflare:workers";
-import type { D1Migration } from "cloudflare:test";
-import { beforeAll, beforeEach, expect, it } from "vitest";
-import { createMatchEffectDelivery } from "../src/matchEffectsDispatcher.ts";
+import { runInDurableObject, type D1Migration } from "cloudflare:test";
+import { beforeAll, beforeEach, expect, it, vi } from "vitest";
+import { formatMatchTimer } from "@mons/shared/timers";
+import {
+  createMatchEffectDelivery,
+  MatchEffectsDispatcher,
+} from "../src/matchEffectsDispatcher.ts";
+import {
+  MatchStateStore,
+  type MatchStateStoreOptions,
+} from "../src/matchStateStore.ts";
 import type { MatchStateEffect } from "../src/matchStateTypes.ts";
+import { createMatchTimerStartStore } from "../src/gameplayCoordinationD1.ts";
 import { buildEventProgressPlan } from "../src/eventProgressCodec.ts";
 import {
   acquireEventWriteAdmission,
@@ -35,7 +44,17 @@ const effect: MatchStateEffect = {
   attempts: 0,
 };
 
-function environment(onDispatch: () => Promise<void>) {
+function environment(
+  onDispatch: () => Promise<void>,
+  cleanupLegacyTimerStarts: Parameters<typeof createMatchEffectDelivery>[1] = (
+    input,
+  ) =>
+    createMatchTimerStartStore(testEnv.PROFILE_GAMES_DB).deletePair(
+      input.playerId,
+      input.opponentId,
+      input.matchId,
+    ),
+) {
   let dispatched = 0;
   const value: Env = {
     ...testEnv,
@@ -55,9 +74,78 @@ function environment(onDispatch: () => Promise<void>) {
     },
   };
   return {
-    deliver: createMatchEffectDelivery(value),
+    deliver: createMatchEffectDelivery(value, cleanupLegacyTimerStarts),
     dispatched: () => dispatched,
   };
+}
+
+async function localTimerEffect(
+  storage: DurableObjectStorage,
+  eventId: string | null,
+) {
+  const now = 2_000_000_000_000;
+  const timerStarts = {
+    getOrAdvance: vi.fn<MatchStateStoreOptions["timerStarts"]["getOrAdvance"]>(
+      async () => {
+        throw new Error("unexpected-d1-timer-write");
+      },
+    ),
+    deletePair: vi.fn<MatchStateStoreOptions["timerStarts"]["deletePair"]>(
+      async () => {
+        throw new Error("unexpected-d1-timer-cleanup");
+      },
+    ),
+  };
+  const settings = {
+    timerStarts,
+    newMatchTimerStorage: "local",
+    now: () => now,
+    resolveGame: () => ({
+      activeColor: "black",
+      historyValid: true,
+      turnNumber: 7,
+      winner: undefined,
+    }),
+  } satisfies MatchStateStoreOptions;
+  const store = new MatchStateStore(storage, settings);
+  const input = {
+    inviteId: effect.matchId,
+    matchId: effect.matchId,
+    epoch: effect.epoch,
+    playerId: effect.playerId,
+    opponentId: effect.opponentId,
+  };
+  store.createRecords({
+    ...input,
+    records: [input.playerId, input.opponentId].map((playerId, index) => ({
+      matchId: input.matchId,
+      playerId,
+      marker: `${playerId}-created`,
+      value: {
+        color: index === 0 ? "white" : "black",
+        fen: "initial",
+        flatMovesString: "",
+        status: "",
+        timer: index === 0 ? formatMatchTimer(7, now - 1) : "",
+      },
+    })),
+  });
+  await store.startTimer(input);
+  await store.claimTimer({ ...input, eventId });
+  return {
+    store: new MatchStateStore(storage, {
+      ...settings,
+      newMatchTimerStorage: "d1",
+    }),
+    timerStarts,
+    now,
+  };
+}
+
+function localMarkers(storage: DurableObjectStorage) {
+  return storage.sql
+    .exec("SELECT * FROM match_state_timer_starts ORDER BY match_id, player_id")
+    .toArray();
 }
 
 async function timerCount() {
@@ -172,16 +260,25 @@ it("retains the committed outbox without dispatch when admission release is unco
   ).toBe(1);
 });
 
-it("keeps timer markers when canonical profile writes are frozen", async () => {
-  await testEnv.PROFILE_DB.prepare(
-    "UPDATE profile_canonical_control SET state = 'frozen' WHERE singleton = 1",
-  ).run();
-  const f = environment(async () => {});
-  await expect(f.deliver(effect)).rejects.toThrow("profile-writes-disabled");
-  expect(await timerCount()).toBe(2);
-  expect(await admissionCount()).toBe(0);
-  expect(f.dispatched()).toBe(0);
-});
+it.each(["event", null])(
+  "keeps timer markers for event %s when canonical profile writes are frozen",
+  async (eventId) => {
+    await testEnv.PROFILE_DB.prepare(
+      "UPDATE profile_canonical_control SET state = 'frozen' WHERE singleton = 1",
+    ).run();
+    const cleanup = vi.fn(async () => {
+      throw new Error("unexpected-timer-cleanup");
+    });
+    const f = environment(async () => {}, cleanup);
+    await expect(f.deliver({ ...effect, eventId })).rejects.toThrow(
+      "profile-writes-disabled",
+    );
+    expect(cleanup).not.toHaveBeenCalled();
+    expect(await timerCount()).toBe(2);
+    expect(await admissionCount()).toBe(0);
+    expect(f.dispatched()).toBe(0);
+  },
+);
 
 it("cleans non-event timer markers without creating an event outbox or Workflow", async () => {
   const f = environment(async () => {});
@@ -194,4 +291,85 @@ it("cleans non-event timer markers without creating an event outbox or Workflow"
       "SELECT COUNT(*) AS count FROM event_progress_outboxes",
     ).first<number>("count"),
   ).toBe(0);
+});
+
+it.each(["event", null])(
+  "delivers a persisted local timer effect for event %s without D1 timer cleanup",
+  async (eventId) => {
+    const room = testEnv.INVITE_REACTIONS.getByName(crypto.randomUUID());
+    await runInDurableObject(room, async (_instance, ctx) => {
+      try {
+        const { store, timerStarts, now } = await localTimerEffect(
+          ctx.storage,
+          eventId,
+        );
+        const pending = store.listDueEffects(now);
+        expect(pending).toHaveLength(1);
+        const markers = localMarkers(ctx.storage);
+        expect(markers).toHaveLength(1);
+        const f = environment(
+          async () => {},
+          store.cleanupLegacyTimerStarts.bind(store),
+        );
+        await new MatchEffectsDispatcher(store, {
+          deliver: f.deliver,
+          scheduleAlarm: async () => {},
+          now: () => now,
+        }).dispatch();
+
+        expect(store.listDueEffects(now)).toEqual([]);
+        expect(store.nextEffectAt()).toBeNull();
+        expect(localMarkers(ctx.storage)).toEqual(markers);
+        expect(timerStarts.getOrAdvance).not.toHaveBeenCalled();
+        expect(timerStarts.deletePair).not.toHaveBeenCalled();
+        expect(await timerCount()).toBe(2);
+        expect(f.dispatched()).toBe(eventId ? 1 : 0);
+        expect(await admissionCount()).toBe(0);
+        expect(
+          await testEnv.EVENT_DB.prepare(
+            "SELECT COUNT(*) AS count FROM event_progress_outboxes",
+          ).first<number>("count"),
+        ).toBe(eventId ? 1 : 0);
+      } finally {
+        await ctx.storage.deleteAlarm();
+      }
+    });
+  },
+);
+
+it("rejects an inconsistent local cohort before cleanup or event dispatch", async () => {
+  const room = testEnv.INVITE_REACTIONS.getByName(crypto.randomUUID());
+  await runInDurableObject(room, async (_instance, ctx) => {
+    try {
+      const { store, timerStarts, now } = await localTimerEffect(
+        ctx.storage,
+        "event",
+      );
+      const pending = store.listDueEffects(now);
+      expect(pending).toHaveLength(1);
+      const markers = localMarkers(ctx.storage);
+      ctx.storage.sql.exec("DELETE FROM match_state_timer_cohorts");
+      const f = environment(
+        async () => {},
+        store.cleanupLegacyTimerStarts.bind(store),
+      );
+
+      await expect(f.deliver(pending[0])).rejects.toThrow(
+        "match-timer-storage-invalid",
+      );
+      expect(store.listDueEffects(now)).toEqual(pending);
+      expect(localMarkers(ctx.storage)).toEqual(markers);
+      expect(timerStarts.deletePair).not.toHaveBeenCalled();
+      expect(await timerCount()).toBe(2);
+      expect(f.dispatched()).toBe(0);
+      expect(await admissionCount()).toBe(0);
+      expect(
+        await testEnv.EVENT_DB.prepare(
+          "SELECT COUNT(*) AS count FROM event_progress_outboxes",
+        ).first<number>("count"),
+      ).toBe(0);
+    } finally {
+      await ctx.storage.deleteAlarm();
+    }
+  });
 });

@@ -153,7 +153,9 @@ export class InviteReactions
         this.scheduleInviteAlarm(atMs, transaction),
     });
     this.matchEffects = new MatchEffectsDispatcher(this.matchState, {
-      deliver: createMatchEffectDelivery(env),
+      deliver: createMatchEffectDelivery(env, (effect) =>
+        this.matchState.cleanupLegacyTimerStarts(effect),
+      ),
       scheduleAlarm: (atMs) => this.scheduleInviteAlarm(atMs),
     });
     this.matchSync = new MatchSyncRoom(ctx, {

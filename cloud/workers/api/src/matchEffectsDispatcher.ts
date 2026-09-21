@@ -1,6 +1,5 @@
 import type { MatchStateStore } from "./matchStateStore.ts";
 import type { MatchStateEffect } from "./matchStateTypes.ts";
-import { createMatchTimerStartStore } from "./gameplayCoordinationD1.ts";
 import {
   acquireEventWriteAdmission,
   commitEventMutations,
@@ -21,14 +20,13 @@ type MatchEffectsDependencies = {
   now?: () => number;
 };
 
-export function createMatchEffectDelivery(env: Env) {
+export function createMatchEffectDelivery(
+  env: Env,
+  cleanupLegacyTimerStarts: MatchStateStore["cleanupLegacyTimerStarts"],
+) {
   return async (effect: MatchStateEffect): Promise<void> => {
     await assertProfileBackgroundMutationsEnabled(env);
-    await createMatchTimerStartStore(env.PROFILE_GAMES_DB).deletePair(
-      effect.playerId,
-      effect.opponentId,
-      effect.matchId,
-    );
+    await cleanupLegacyTimerStarts(effect);
     if (!effect.eventId) return;
     const plan = await buildEventProgressPlan(
       {
