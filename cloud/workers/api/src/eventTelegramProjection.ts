@@ -24,6 +24,10 @@ import type { TelegramRepository } from "../../../runtime/telegram/deliveryEngin
 import type { InitialTelegramDelivery } from "./telegramDeliveryTasks.ts";
 import { adoptSundayMonsReminderMessage } from "./eventReminderProjection.ts";
 import type { TelegramAnnouncementRepository } from "./telegramD1.ts";
+import {
+  claimAndEnqueueProjectionTasks,
+  collectProjectionRepairs,
+} from "./projectionSweep.ts";
 
 const EVENT_TELEGRAM_PROJECTION_OWNER_UID = "event-telegram-projector";
 const EVENT_PROJECTION_SWEEP_LIMIT = 100;
@@ -495,40 +499,27 @@ export async function sweepEventTelegramProjections(
   const invalidEventIds = entries.flatMap((entry) =>
     entry.kind === "invalid" ? [entry.eventId] : [],
   );
-  const failures: Error[] = [];
-  for (const eventId of invalidEventIds) {
-    try {
-      await markInvalidEventProjectionSweepEntry(state, eventId, nowMs);
-    } catch (error) {
-      failures.push(
-        error instanceof Error ? error : new Error("invalid-record-failed"),
-      );
-    }
-  }
-  const tasks: EventTelegramProjectionTask[] = [];
-  for (const candidate of candidates) {
-    try {
-      if (await claimEventProjectionSweepCandidate(state, candidate, nowMs)) {
-        tasks.push(candidate.task);
-      }
-    } catch (error) {
-      failures.push(
-        error instanceof Error ? error : new Error("event-claim-failed"),
-      );
-    }
-  }
-  for (let index = 0; index < tasks.length; index += 100) {
-    await queue.sendBatch(
-      tasks.slice(index, index + 100).map((task) => ({ body: task })),
-    );
-  }
+  const { failures: repairFailures } = await collectProjectionRepairs(
+    invalidEventIds,
+    (eventId) => markInvalidEventProjectionSweepEntry(state, eventId, nowMs),
+    "invalid-record-failed",
+  );
+  const { sentCount, claimFailures } = await claimAndEnqueueProjectionTasks({
+    candidates,
+    claim: (candidate) =>
+      claimEventProjectionSweepCandidate(state, candidate, nowMs),
+    toTask: (candidate) => candidate.task,
+    queue,
+    fallbackErrorMessage: "event-claim-failed",
+  });
+  const failures = [...repairFailures, ...claimFailures];
   if (failures.length === 1) {
     throw failures[0];
   }
   if (failures.length > 1) {
     throw new AggregateError(failures, "event-projection-sweep-failed");
   }
-  return tasks.length;
+  return sentCount;
 }
 
 export { EVENT_PROJECTION_SWEEP_LIMIT, settleEventOutbox };

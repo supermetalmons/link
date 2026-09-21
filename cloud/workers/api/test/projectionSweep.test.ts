@@ -123,7 +123,7 @@ test("projection batching stops after a failed send and preserves its error", as
   );
 });
 
-test("projection claims continue sequentially after errors and retain the first failure", async () => {
+test("projection claims continue sequentially and retain all failures with the first failure alias", async () => {
   const failure = new Error("claim-unavailable");
   const visited: number[] = [];
   let claiming = false;
@@ -145,14 +145,18 @@ test("projection claims continue sequentially after errors and retain the first 
   assert.deepEqual(visited, [1, 2, 3, 4, 5]);
   assert.deepEqual(result.claimed, [3, 5]);
   assert.equal(result.failure, failure);
+  assert.equal(result.failures.length, 2);
+  assert.equal(result.failures[0], failure);
+  assert.equal(result.failures[1].message, "projection-claim-failed");
 });
 
 test("projection claims use the caller's fallback for non-Error failures", async () => {
+  const laterFailure = new Error("later-failure");
   const result = await collectSuccessfulClaims(
     [1, 2, 3],
     async (item) => {
       if (item === 1) throw "unavailable";
-      if (item === 2) throw new Error("later-failure");
+      if (item === 2) throw laterFailure;
       return true;
     },
     "profile-game-projection-claim-failed",
@@ -160,10 +164,13 @@ test("projection claims use the caller's fallback for non-Error failures", async
 
   assert.deepEqual(result.claimed, [3]);
   assert.equal(result.failure?.message, "profile-game-projection-claim-failed");
+  assert.equal(result.failure, result.failures[0]);
+  assert.equal(result.failures[1], laterFailure);
 });
 
-test("projection dispatch sends initial tasks and successful claims before returning the first failure", async () => {
+test("projection dispatch sends initial tasks and successful claims before returning all failures", async () => {
   const failure = new Error("claim-unavailable");
+  const laterFailure = new Error("later-failure");
   const visited: number[] = [];
   const batches: string[][] = [];
   let claiming = false;
@@ -176,7 +183,7 @@ test("projection dispatch sends initial tasks and successful claims before retur
       await Promise.resolve();
       claiming = false;
       if (item === 2) throw failure;
-      if (item === 4) throw new Error("later-failure");
+      if (item === 4) throw laterFailure;
       return item !== 1;
     },
     toTask: (item) => `claimed-${item}`,
@@ -194,7 +201,13 @@ test("projection dispatch sends initial tasks and successful claims before retur
   assert.deepEqual(batches, [
     ["repaired-1", "repaired-2", "claimed-3", "claimed-5"],
   ]);
-  assert.deepEqual(result, { sentCount: 4, claimFailure: failure });
+  assert.deepEqual(result, {
+    sentCount: 4,
+    claimFailure: failure,
+    claimFailures: [failure, laterFailure],
+  });
+  assert.equal(result.claimFailures[0], failure);
+  assert.equal(result.claimFailures[1], laterFailure);
 });
 
 test("projection dispatch sends repaired-only work and skips empty batches", async () => {
@@ -218,7 +231,7 @@ test("projection dispatch sends repaired-only work and skips empty batches", asy
         queue,
         fallbackErrorMessage: "projection-claim-failed",
       }),
-      { sentCount: initialTasks.length, claimFailure: null },
+      { sentCount: initialTasks.length, claimFailure: null, claimFailures: [] },
     );
   }
   assert.deepEqual(batches, [["repaired"]]);

@@ -1158,6 +1158,155 @@ test("event sweep claims valid markers and dead-letters malformed records", asyn
   );
 });
 
+function eventSweepFixture(
+  records: { eventId: string; record: Record<string, unknown> }[],
+  failures: ReadonlyMap<string, unknown>,
+) {
+  const state = store(
+    Object.fromEntries(
+      records.map(({ eventId, record }) => [
+        getEventTelegramProjectionOutboxPath(eventId),
+        record,
+      ]),
+    ),
+  );
+  state.client.listDueEventTelegramProjectionOutboxes = async () => records;
+  const transact = state.client.transactEventTelegramProjectionOutbox;
+  const visited: string[] = [];
+  let active = false;
+  state.client.transactEventTelegramProjectionOutbox = async (...args) => {
+    assert.equal(active, false);
+    active = true;
+    visited.push(args[0]);
+    try {
+      await Promise.resolve();
+      if (failures.has(args[0])) throw failures.get(args[0]);
+      return await transact(...args);
+    } finally {
+      active = false;
+    }
+  };
+  const batches: TelegramProjectionTask[][] = [];
+  const queue = {
+    ...TELEGRAM_TEST_ENV.TELEGRAM_PROJECTION_QUEUE,
+    async sendBatch(messages) {
+      assert.equal(active, false);
+      visited.push("enqueue");
+      batches.push(Array.from(messages, ({ body }) => body));
+      return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
+    },
+  } satisfies Queue<TelegramProjectionTask>;
+  return { state, visited, batches, queue };
+}
+
+for (const phase of ["repair", "claim"] as const) {
+  test(`event sweep enqueues successful claims before rethrowing a single ${phase} failure`, async () => {
+    const failure = new Error(`${phase}-unavailable`);
+    const { state, visited, batches, queue } = eventSweepFixture(
+      [
+        {
+          eventId: "event-failed",
+          record:
+            phase === "repair"
+              ? { status: "pending", updatedAtMs: 100 }
+              : marker,
+        },
+        { eventId: task.eventId, record: marker },
+      ],
+      new Map([["event-failed", failure]]),
+    );
+    await assert.rejects(
+      sweepEventTelegramProjections(queue, state.client, 200),
+      (error) => error === failure,
+    );
+    assert.deepEqual(visited, ["event-failed", task.eventId, "enqueue"]);
+    assert.deepEqual(batches, [[task]]);
+  });
+}
+
+test("event sweep enqueues in order and aggregates all repair and claim failures", async () => {
+  const repairFailure = new Error("repair-unavailable");
+  const claimFailure = new Error("claim-unavailable");
+  const malformed = { status: "pending", updatedAtMs: 100 };
+  const { state, visited, batches, queue } = eventSweepFixture(
+    [
+      { eventId: "claim-failed", record: marker },
+      { eventId: "repair-failed", record: malformed },
+      { eventId: task.eventId, record: marker },
+      { eventId: "stale", record: marker },
+      { eventId: "repair-non-error", record: malformed },
+      { eventId: "claim-non-error", record: marker },
+      {
+        eventId: "event-last",
+        record: { ...marker, requestId: "request-last" },
+      },
+    ],
+    new Map<string, unknown>([
+      ["repair-failed", repairFailure],
+      ["claim-failed", claimFailure],
+      ["repair-non-error", "unavailable"],
+      ["claim-non-error", "unavailable"],
+    ]),
+  );
+  state.write(getEventTelegramProjectionOutboxPath("stale"), {
+    ...marker,
+    requestId: "newer-request",
+  });
+  await assert.rejects(
+    sweepEventTelegramProjections(queue, state.client, 200),
+    (error) => {
+      assert.ok(error instanceof AggregateError);
+      assert.equal(error.message, "event-projection-sweep-failed");
+      assert.equal(error.errors.length, 4);
+      assert.equal(error.errors[0], repairFailure);
+      assert.equal(error.errors[1].message, "invalid-record-failed");
+      assert.equal(error.errors[2], claimFailure);
+      assert.equal(error.errors[3].message, "event-claim-failed");
+      return true;
+    },
+  );
+  assert.deepEqual(visited, [
+    "repair-failed",
+    "repair-non-error",
+    "claim-failed",
+    task.eventId,
+    "stale",
+    "claim-non-error",
+    "event-last",
+    "enqueue",
+  ]);
+  assert.deepEqual(batches, [
+    [task, { ...task, eventId: "event-last", requestId: "request-last" }],
+  ]);
+});
+
+test("event sweep preserves queue failure precedence over repair and claim failures", async () => {
+  const queueFailure = new Error("queue-unavailable");
+  const { state, visited, queue } = eventSweepFixture(
+    [
+      { eventId: "repair-failed", record: { updatedAtMs: 100 } },
+      { eventId: "claim-failed", record: marker },
+      { eventId: task.eventId, record: marker },
+    ],
+    new Map([
+      ["repair-failed", new Error("repair-unavailable")],
+      ["claim-failed", new Error("claim-unavailable")],
+    ]),
+  );
+  queue.sendBatch = async (messages) => {
+    assert.deepEqual(visited, ["repair-failed", "claim-failed", task.eventId]);
+    assert.deepEqual(
+      Array.from(messages, ({ body }) => body),
+      [task],
+    );
+    throw queueFailure;
+  };
+  await assert.rejects(
+    sweepEventTelegramProjections(queue, state.client, 200),
+    (error) => error === queueFailure,
+  );
+});
+
 function reminderProjectionFixture() {
   const messageKey = `event:${task.eventId}:reminder`;
   const messagePath = `telegramMessages/${messageKey}`;

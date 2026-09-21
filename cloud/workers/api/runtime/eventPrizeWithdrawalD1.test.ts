@@ -4,6 +4,7 @@ import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import {
   createD1EventPrizeWithdrawalReader,
   createD1EventPrizeWithdrawalStore,
+  EventPrizeWithdrawalD1Failure,
   MAX_TRANSACTION_ATTEMPTS,
   readEventPrizeWithdrawalStorageControl,
   readEventPrizeWithdrawalStorageMode,
@@ -16,6 +17,19 @@ const testEnv = env as Env & {
 
 const eventId = "NN3eRzoZo80";
 const prizeId = "1092";
+
+function failingDatabase(error: Error): D1Database {
+  const fail = () => {
+    throw error;
+  };
+  return {
+    batch: fail,
+    dump: fail,
+    exec: fail,
+    prepare: fail,
+    withSession: fail,
+  };
+}
 
 function processing(updatedAtMs: number) {
   return {
@@ -50,6 +64,41 @@ describe("event prize withdrawal D1 repository", () => {
       ),
     ]);
   });
+
+  it.each([
+    [
+      "record",
+      (db: D1Database) =>
+        createD1EventPrizeWithdrawalStore(db).get(eventId, prizeId),
+    ],
+    ["storage control", readEventPrizeWithdrawalStorageControl],
+    [
+      "event",
+      (db: D1Database) => createD1EventPrizeWithdrawalReader(db)(eventId),
+    ],
+  ] as const)(
+    "preserves the D1 failure cause from %s reads",
+    async (_, read) => {
+      const cause = new Error("provider-failure");
+      const failure: unknown = await read(failingDatabase(cause)).catch(
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(EventPrizeWithdrawalD1Failure);
+      expect(failure).toHaveProperty(
+        "message",
+        "event-prize-withdrawal-d1-unavailable",
+      );
+      expect(failure instanceof Error && failure.cause).toBe(cause);
+
+      const domainFailure = new EventPrizeWithdrawalD1Failure(
+        "invalid-event-prize-withdrawal-record",
+        { cause },
+      );
+      await expect(read(failingDatabase(domainFailure))).rejects.toBe(
+        domainFailure,
+      );
+    },
+  );
 
   it("persists and conditionally updates a withdrawal record", async () => {
     const store = createD1EventPrizeWithdrawalStore(
@@ -154,6 +203,27 @@ describe("event prize withdrawal D1 repository", () => {
     ).rejects.toThrow("event-prize-withdrawal-d1-unavailable");
     expect(decisions).toBe(2);
     expect(clockCalls).toBe(1);
+    await expect(reference.read()).resolves.toBeNull();
+  });
+
+  it("preserves serialization failures without retrying the transaction", async () => {
+    const reference = createD1EventPrizeWithdrawalStore(
+      testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
+      { now: () => 100 },
+    ).record(eventId, prizeId);
+    const circular: Record<string, unknown> = processing(100);
+    circular.self = circular;
+    let decisions = 0;
+    await expect(
+      reference.transaction(() => {
+        decisions++;
+        return { value: circular };
+      }),
+    ).rejects.toMatchObject({
+      message: "invalid-event-prize-withdrawal-record",
+      cause: expect.any(TypeError),
+    });
+    expect(decisions).toBe(1);
     await expect(reference.read()).resolves.toBeNull();
   });
 

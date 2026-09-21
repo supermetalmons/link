@@ -71,8 +71,8 @@ export type TelegramAnnouncementRepository = {
 };
 
 export class TelegramD1Failure extends Error {
-  constructor() {
-    super("telegram-d1-unavailable");
+  constructor(options?: ErrorOptions) {
+    super("telegram-d1-unavailable", options);
   }
 }
 
@@ -94,8 +94,8 @@ function parseJsonRecord(value: unknown): Record<string, unknown> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(value) as unknown;
-  } catch {
-    throw new TelegramD1Failure();
+  } catch (error) {
+    throw new TelegramD1Failure({ cause: error });
   }
   const record = asRecord(parsed);
   if (!record) throw new TelegramD1Failure();
@@ -107,8 +107,8 @@ function encodeJsonRecord(value: unknown): string {
   if (!record) throw new TelegramD1Failure();
   try {
     return JSON.stringify(record);
-  } catch {
-    throw new TelegramD1Failure();
+  } catch (error) {
+    throw new TelegramD1Failure({ cause: error });
   }
 }
 
@@ -256,8 +256,8 @@ function parseMessageIds(value: string | null): number[] | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(value) as unknown;
-  } catch {
-    throw new TelegramD1Failure();
+  } catch (error) {
+    throw new TelegramD1Failure({ cause: error });
   }
   return Array.isArray(parsed) &&
     parsed.length > 0 &&
@@ -309,7 +309,7 @@ export function createD1TelegramAnnouncementRepository(
       return row ? decodeAnnouncement(row) : null;
     } catch (error) {
       if (error instanceof TelegramD1Failure) throw error;
-      throw new TelegramD1Failure();
+      throw new TelegramD1Failure({ cause: error });
     }
   };
   return {
@@ -381,7 +381,7 @@ export function createD1TelegramAnnouncementRepository(
         return existing;
       } catch (error) {
         if (error instanceof TelegramD1Failure) throw error;
-        throw new TelegramD1Failure();
+        throw new TelegramD1Failure({ cause: error });
       }
     },
     async storeOutcome(input) {
@@ -406,8 +406,8 @@ export function createD1TelegramAnnouncementRepository(
           )
           .run();
         return result.meta.changes === 1;
-      } catch {
-        throw new TelegramD1Failure();
+      } catch (error) {
+        throw new TelegramD1Failure({ cause: error });
       }
     },
   };

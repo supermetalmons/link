@@ -45,20 +45,21 @@ export async function collectSuccessfulClaims<T>(
   items: readonly T[],
   claim: (item: T) => Promise<boolean>,
   fallbackErrorMessage: string,
-): Promise<{ claimed: T[]; failure: Error | null }> {
+): Promise<{ claimed: T[]; failure: Error | null; failures: Error[] }> {
   const claimed: T[] = [];
-  let failure: Error | null = null;
+  const failures: Error[] = [];
   for (const item of items) {
     try {
       if (await claim(item)) {
         claimed.push(item);
       }
     } catch (error) {
-      failure ||=
-        error instanceof Error ? error : new Error(fallbackErrorMessage);
+      failures.push(
+        error instanceof Error ? error : new Error(fallbackErrorMessage),
+      );
     }
   }
-  return { claimed, failure };
+  return { claimed, failure: failures[0] ?? null, failures };
 }
 
 export async function claimAndEnqueueProjectionTasks<Candidate, Task>({
@@ -75,7 +76,11 @@ export async function claimAndEnqueueProjectionTasks<Candidate, Task>({
   queue: Pick<Queue<Task>, "sendBatch">;
   initialTasks?: readonly Task[];
   fallbackErrorMessage: string;
-}): Promise<{ sentCount: number; claimFailure: Error | null }> {
+}): Promise<{
+  sentCount: number;
+  claimFailure: Error | null;
+  claimFailures: Error[];
+}> {
   const claims = await collectSuccessfulClaims(
     candidates,
     claim,
@@ -83,5 +88,9 @@ export async function claimAndEnqueueProjectionTasks<Candidate, Task>({
   );
   const tasks = [...initialTasks, ...claims.claimed.map(toTask)];
   await sendQueueTasks(queue, tasks);
-  return { sentCount: tasks.length, claimFailure: claims.failure };
+  return {
+    sentCount: tasks.length,
+    claimFailure: claims.failure,
+    claimFailures: claims.failures,
+  };
 }

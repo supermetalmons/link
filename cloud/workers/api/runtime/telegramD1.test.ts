@@ -6,11 +6,25 @@ import {
   createD1TelegramRepository,
   MAX_D1_TRANSACTION_ATTEMPTS,
   readTelegramStorageMode,
+  TelegramD1Failure,
 } from "../src/telegramD1.ts";
 
 const testEnv = env as Env & {
   TEST_TELEGRAM_D1_MIGRATIONS: D1Migration[];
 };
+
+function failingDatabase(error: Error): D1Database {
+  const fail = () => {
+    throw error;
+  };
+  return {
+    batch: fail,
+    dump: fail,
+    exec: fail,
+    prepare: fail,
+    withSession: fail,
+  };
+}
 
 describe("Telegram D1 repositories", () => {
   beforeAll(async () => {
@@ -39,6 +53,48 @@ describe("Telegram D1 repositories", () => {
            storage_mode = 'd1', updated_at_ms = 1`,
       ),
     ]);
+  });
+
+  it.each(["get", "reserve", "storeOutcome"] as const)(
+    "preserves the D1 failure cause from announcement %s",
+    async (operation) => {
+      const cause = new Error("provider-failure");
+      const repository = createD1TelegramAnnouncementRepository(
+        failingDatabase(cause),
+      );
+      const input = {
+        requestId: "request-1",
+        payloadDigest: "digest",
+        createdAtMs: 100,
+        updatedAtMs: 100,
+        status: "sent",
+      };
+      const failure: unknown = await (
+        operation === "get"
+          ? repository.get(input.requestId)
+          : repository[operation](input)
+      ).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(TelegramD1Failure);
+      expect(failure).toHaveProperty("message", "telegram-d1-unavailable");
+      expect(failure instanceof Error && failure.cause).toBe(cause);
+    },
+  );
+
+  it("passes through existing announcement domain failures", async () => {
+    const failure = new TelegramD1Failure({
+      cause: new Error("original-failure"),
+    });
+    const repository = createD1TelegramAnnouncementRepository(
+      failingDatabase(failure),
+    );
+    await expect(repository.get("request-1")).rejects.toBe(failure);
+    await expect(
+      repository.reserve({
+        requestId: "request-1",
+        payloadDigest: "digest",
+        createdAtMs: 100,
+      }),
+    ).rejects.toBe(failure);
   });
 
   it("persists JSON records and respects logical aborts across cold adapters", async () => {
@@ -129,7 +185,10 @@ describe("Telegram D1 repositories", () => {
         decisions++;
         return { value: circular };
       }),
-    ).rejects.toThrow("telegram-d1-unavailable");
+    ).rejects.toMatchObject({
+      message: "telegram-d1-unavailable",
+      cause: expect.any(TypeError),
+    });
     expect(decisions).toBe(1);
     expect(clockCalls).toBe(1);
     await expect(repository.getMessage("invalid")).resolves.toBeNull();

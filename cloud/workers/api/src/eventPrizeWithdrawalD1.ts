@@ -46,8 +46,11 @@ export type EventPrizeWithdrawalEventReader = (
 ) => Promise<Record<string, Record<string, unknown>>>;
 
 export class EventPrizeWithdrawalD1Failure extends Error {
-  constructor(message = "event-prize-withdrawal-d1-unavailable") {
-    super(message);
+  constructor(
+    message = "event-prize-withdrawal-d1-unavailable",
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
   }
 }
 
@@ -102,6 +105,7 @@ function encodeRecord(
     if (error instanceof EventPrizeWithdrawalD1Failure) throw error;
     throw new EventPrizeWithdrawalD1Failure(
       "invalid-event-prize-withdrawal-record",
+      { cause: error },
     );
   }
 }
@@ -117,8 +121,8 @@ function decodeRecord(
   let parsed: unknown;
   try {
     parsed = JSON.parse(value) as unknown;
-  } catch {
-    throw new EventPrizeWithdrawalD1Failure();
+  } catch (error) {
+    throw new EventPrizeWithdrawalD1Failure(undefined, { cause: error });
   }
   return normalizeRecord(eventId, prizeId, parsed);
 }
@@ -157,7 +161,7 @@ async function readRow(
       : null;
   } catch (error) {
     if (error instanceof EventPrizeWithdrawalD1Failure) throw error;
-    throw new EventPrizeWithdrawalD1Failure();
+    throw new EventPrizeWithdrawalD1Failure(undefined, { cause: error });
   }
 }
 
@@ -259,7 +263,7 @@ export async function readEventPrizeWithdrawalStorageControl(
     );
   } catch (error) {
     if (error instanceof EventPrizeWithdrawalD1Failure) throw error;
-    throw new EventPrizeWithdrawalD1Failure();
+    throw new EventPrizeWithdrawalD1Failure(undefined, { cause: error });
   }
 }
 
@@ -291,7 +295,7 @@ export function createD1EventPrizeWithdrawalReader(
       );
     } catch (error) {
       if (error instanceof EventPrizeWithdrawalD1Failure) throw error;
-      throw new EventPrizeWithdrawalD1Failure();
+      throw new EventPrizeWithdrawalD1Failure(undefined, { cause: error });
     }
   };
 }
