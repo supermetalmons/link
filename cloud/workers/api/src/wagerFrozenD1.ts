@@ -15,6 +15,7 @@ import {
   type WagerFrozenSnapshot,
   type WagerFrozenStore,
 } from "./wagerFrozenStore.ts";
+import { classifyD1Failure } from "./d1Failure.ts";
 
 const MAX_TRANSACTION_ATTEMPTS = 25;
 const EMPTY_FROZEN_JSON = JSON.stringify(createEmptyMaterials());
@@ -48,14 +49,6 @@ function decodeBalance(row: BalanceRow | null): WagerFrozenBalance {
     throw new Error("wager-operation-unavailable");
   }
   return { frozen, revision: row.revision };
-}
-
-function isRevisionConflict(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    (error.message.includes("wager_frozen_revision_guard") ||
-      isRevisionConflict(error.cause))
-  );
 }
 
 export function createWagerFrozenD1Store(
@@ -223,7 +216,7 @@ export function createWagerFrozenD1Store(
           ]);
           return { committed: true, decision: decision.decision, value: next };
         } catch (error) {
-          if (!isRevisionConflict(error)) throw error;
+          if (classifyD1Failure(error) !== "wager-frozen-conflict") throw error;
         }
       }
       throw new Error("wager-operation-unavailable");

@@ -1,4 +1,5 @@
 import { isSafeRecordKey } from "./recordKeys.ts";
+import { classifyD1Failure } from "./d1Failure.ts";
 
 export const WAGER_STATE_WRITER_EPOCH = 1;
 
@@ -132,14 +133,6 @@ function encodeWager(value: unknown): string | null {
   };
   validate(value, 0);
   return JSON.stringify(value);
-}
-
-function isRevisionConflict(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    (error.message.includes("wager_state_revision_guard") ||
-      isRevisionConflict(error.cause))
-  );
 }
 
 export function createWagerStateD1Store(
@@ -286,7 +279,7 @@ export function createWagerStateD1Store(
         ]);
         return true;
       } catch (error) {
-        if (isRevisionConflict(error)) return false;
+        if (classifyD1Failure(error) === "wager-state-conflict") return false;
         throw error;
       }
     },

@@ -11,20 +11,24 @@ import {
   assertAutomatchWriteAdmission,
   AUTOMATCH_RECORD_TABLES,
   automatchAdmissionGuardStatements,
+  isAutomatchRevisionConflict,
   readAutomatchRuntimeControl,
   releaseAutomatchWriteAdmission,
   type AutomatchRoot,
 } from "../src/automatchD1.ts";
+import { isInviteSourceRevisionConflict } from "../src/inviteSourceD1.ts";
+import { classifyD1Failure } from "../src/d1Failure.ts";
+import { observeD1FailureDatabase } from "./d1FailureTestUtils.ts";
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const db = env.PROFILE_GAMES_DB;
 const nowMs = 1_800_000_000_000;
 
-async function writableStore() {
+async function writableStore(database = db) {
   const admission = await acquireAutomatchWriteAdmission(db, "test", {
     now: () => nowMs,
   });
-  const store = createAutomatchD1Store(db, {
+  const store = createAutomatchD1Store(database, {
     now: () => nowMs,
     writeGuards: () => automatchAdmissionGuardStatements(db, admission),
   });
@@ -114,7 +118,8 @@ describe("D1 automatch state", () => {
   });
 
   it("rolls back every root when one expected revision changed", async () => {
-    const { store } = await writableStore();
+    const observed = observeD1FailureDatabase(db);
+    const { store } = await writableStore(observed.database);
     const first = await store.preparePatch({
       "automatch/invite": { uid: "host" },
       "telegramAutomatches/invite": { lifecycle: "pending", generation: 1 },
@@ -122,10 +127,41 @@ describe("D1 automatch state", () => {
     });
     await store.patchRoot({ "automatch/invite": { uid: "new-host" } });
     expect(await store.commit(first)).toBe(false);
+    expect(observed.errors).toHaveLength(1);
+    expect(classifyD1Failure(observed.errors[0])).toBe("automatch-conflict");
+    expect(isAutomatchRevisionConflict(observed.errors[0])).toBe(true);
+    expect(isInviteSourceRevisionConflict(observed.errors[0])).toBe(false);
     expect(await store.getPath("automatch/invite/uid")).toBe("new-host");
     expect(await store.getPath("telegramAutomatches/invite")).toBeNull();
     expect(
       await store.getPath("gameplayMutationReceipts/operation"),
+    ).toBeNull();
+  });
+
+  it.each([
+    ["invite_source_revision_guards", "invite-source-conflict"],
+    ["automatch_write_guards", "integrity"],
+  ])("does not retry failures from %s", async (table, kind) => {
+    const observed = observeD1FailureDatabase(db);
+    const store = createAutomatchD1Store(observed.database, {
+      writeGuards: () => [
+        db.prepare(`INSERT INTO ${table} (singleton) VALUES (0)`),
+      ],
+    });
+    let decisions = 0;
+    await expect(
+      store.transactAutomatchTelegramOutbox("invite", () => {
+        decisions++;
+        return { value: { requestId: "new" } };
+      }),
+    ).rejects.toThrow("CHECK constraint failed");
+    expect(decisions).toBe(1);
+    expect(observed.batches).toHaveLength(1);
+    expect(observed.errors).toHaveLength(1);
+    expect(classifyD1Failure(observed.errors[0])).toBe(kind);
+    expect(isAutomatchRevisionConflict(observed.errors[0])).toBe(false);
+    expect(
+      await store.getPath("telegramProjectionOutbox/automatch/invite"),
     ).toBeNull();
   });
 

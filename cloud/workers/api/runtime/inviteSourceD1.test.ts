@@ -24,6 +24,9 @@ import {
   releaseInviteSourceAdmission,
 } from "../src/inviteSourceD1.ts";
 import { createAutomatchPersistence } from "../src/automatchPersistence.ts";
+import { isAutomatchRevisionConflict } from "../src/automatchD1.ts";
+import { classifyD1Failure } from "../src/d1Failure.ts";
+import { observeD1FailureDatabase } from "./d1FailureTestUtils.ts";
 import type { StateRepository } from "../test/stateRepositoryTestTypes.ts";
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
@@ -389,6 +392,8 @@ describe("canonical invite source", () => {
       failure = error;
     }
     expect(isInviteSourceRevisionConflict(failure)).toBe(true);
+    expect(classifyD1Failure(failure)).toBe("invite-source-conflict");
+    expect(isAutomatchRevisionConflict(failure)).toBe(false);
     expect(await store.read("one")).toEqual({
       inviteId: "one",
       value: { hostId: "first" },
@@ -424,9 +429,13 @@ describe("canonical invite source", () => {
         10,
       ),
     ).toEqual(prepared);
+    const observed = observeD1FailureDatabase(db);
     await expect(
-      db.batch(store.buildCommitStatements(prepared, 11)),
+      observed.database.batch(store.buildCommitStatements(prepared, 11)),
     ).rejects.toThrow();
+    expect(observed.errors).toHaveLength(1);
+    expect(classifyD1Failure(observed.errors[0])).toBe("integrity");
+    expect(isInviteSourceRevisionConflict(observed.errors[0])).toBe(false);
     expect((await store.read("one")).value).toBeNull();
     await releaseInviteSourceAdmission(db, admission);
   });

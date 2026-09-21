@@ -1,6 +1,7 @@
 import { RETIRED_STATE_BACKEND } from "./stateCompatibility.ts";
 import { STATE_VALUE_FIELD } from "./stateCompatibility.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
+import { classifyD1Failure } from "./d1Failure.ts";
 
 const RETIRED_FIELDS = new Set([
   "reactions",
@@ -432,11 +433,7 @@ function resolveValue(
 }
 
 export function isInviteSourceRevisionConflict(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    (error.message.includes("invite_source_revision_guard") ||
-      isInviteSourceRevisionConflict(error.cause))
-  );
+  return classifyD1Failure(error) === "invite-source-conflict";
 }
 
 export function prepareInviteSourceSnapshotRead(

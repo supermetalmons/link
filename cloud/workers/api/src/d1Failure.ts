@@ -2,6 +2,10 @@ export type D1FailureKind =
   | "event-conflict"
   | "profile-conflict"
   | "username-conflict"
+  | "automatch-conflict"
+  | "invite-source-conflict"
+  | "wager-state-conflict"
+  | "wager-frozen-conflict"
   | "guard"
   | "integrity"
   | "unknown";
@@ -25,6 +29,14 @@ export function classifyD1Failure(error: unknown): D1FailureKind {
         return "profile-conflict";
       case "UNIQUE constraint failed: profile_records.username_key":
         return "username-conflict";
+      case "CHECK constraint failed: automatch_revision_guard":
+        return "automatch-conflict";
+      case "CHECK constraint failed: invite_source_revision_guard":
+        return "invite-source-conflict";
+      case "CHECK constraint failed: wager_state_revision_guard":
+        return "wager-state-conflict";
+      case "CHECK constraint failed: wager_frozen_revision_guard":
+        return "wager-frozen-conflict";
     }
     if (/^CHECK constraint failed: singleton\s*=\s*1$/.test(message)) {
       failure = "guard";

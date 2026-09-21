@@ -7,6 +7,7 @@ import { RETIRED_STATE_BACKEND } from "./stateCompatibility.ts";
 import { STATE_VALUE_FIELD } from "./stateCompatibility.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import { validateTelegramTransactionDecision } from "./telegramTransaction.ts";
+import { classifyD1Failure } from "./d1Failure.ts";
 
 export const AUTOMATCH_RECORD_TABLES = {
   automatch: {
@@ -353,11 +354,7 @@ export function decodeSnapshot(
 }
 
 export function isAutomatchRevisionConflict(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    (error.message.includes("automatch_revision_guard") ||
-      isAutomatchRevisionConflict(error.cause))
-  );
+  return classifyD1Failure(error) === "automatch-conflict";
 }
 
 function nestedValue(value: unknown, parts: readonly string[]): unknown {

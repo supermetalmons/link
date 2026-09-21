@@ -23,6 +23,8 @@ import {
 import { composeInviteWagerSource } from "../src/inviteWagerSource.ts";
 import { notifyInviteRooms } from "../src/inviteRoomNotifications.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
+import { classifyD1Failure } from "../src/d1Failure.ts";
+import { observeD1FailureDatabase } from "./d1FailureTestUtils.ts";
 const migrations = (env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] })
   .TEST_PROFILE_D1_MIGRATIONS;
 const db = env.PROFILE_DB;
@@ -266,7 +268,11 @@ describe("canonical wager state", () => {
       expect(
         Object.keys((await writer.readWager(id))!.proposals as object).sort(),
       ).toEqual(["guest", "host"]);
-      const store = createWagerStateD1Store(db, { writeGuards, now });
+      const observed = observeD1FailureDatabase(db);
+      const store = createWagerStateD1Store(observed.database, {
+        writeGuards,
+        now,
+      });
       const stale = await store.read(id);
       const missing = await store.read(key("other"));
       await writer.removeProposal(id, {
@@ -286,6 +292,10 @@ describe("canonical wager state", () => {
           },
         ]),
       ).toBe(false);
+      expect(observed.errors).toHaveLength(1);
+      expect(classifyD1Failure(observed.errors[0])).toBe(
+        "wager-state-conflict",
+      );
       expect((await store.read(key("other"))).revision).toBe(0);
       expect((await writer.readWager(id))?.overwritten).toBeUndefined();
     });
@@ -297,7 +307,8 @@ describe("canonical wager state", () => {
       await writer.sendProposal(id, proposal());
       const claimed = await writer.claimSettlement(id, claim);
       const settlement = readStoredSettlement(claimed.value)!;
-      const rejected = createWagerStateRepository(db, {
+      const observed = observeD1FailureDatabase(db);
+      const rejected = createWagerStateRepository(observed.database, {
         writeGuards: () => [
           ...writeGuards(),
           db.prepare(
@@ -313,6 +324,9 @@ describe("canonical wager state", () => {
           insufficientMaterials: false,
         }),
       ).rejects.toThrow();
+      expect(observed.batches).toHaveLength(1);
+      expect(observed.errors).toHaveLength(1);
+      expect(classifyD1Failure(observed.errors[0])).toBe("guard");
       expect(await writer.readResolutionMarker(id)).toBeNull();
       expect((await writer.readWager(id))!.settlement).toMatchObject({
         state: "pending",
@@ -344,6 +358,37 @@ describe("canonical wager state", () => {
           insufficientMaterials: false,
         }),
       ).toMatchObject({ committed: false });
+    });
+  });
+  it("does not treat a frozen-balance conflict as a wager-state conflict", async () => {
+    await withWriter(async (writeGuards) => {
+      const observed = observeD1FailureDatabase(db);
+      const store = createWagerStateD1Store(observed.database, {
+        writeGuards: () => [
+          ...writeGuards(),
+          db.prepare(
+            `INSERT INTO wager_frozen_balances
+             (player_uid, frozen_json, revision, updated_at_ms)
+             VALUES ('foreign-conflict', '{"dust":0,"slime":0,"gum":0,"metal":0,"ice":0}', 0, 0)`,
+          ),
+        ],
+        now,
+      });
+      const current = await store.read(key("foreign-conflict"));
+      await expect(
+        store.commit([
+          {
+            current,
+            value: { wager: { created: true }, resolutionMarker: null },
+          },
+        ]),
+      ).rejects.toThrow("wager_frozen_revision_guard");
+      expect(observed.batches).toHaveLength(1);
+      expect(observed.errors).toHaveLength(1);
+      expect(classifyD1Failure(observed.errors[0])).toBe(
+        "wager-frozen-conflict",
+      );
+      expect((await store.read(key("foreign-conflict"))).revision).toBe(0);
     });
   });
   it("fences settlement completion by operation and fingerprint without changing either record", async () => {

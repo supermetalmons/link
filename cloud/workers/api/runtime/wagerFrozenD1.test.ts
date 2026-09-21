@@ -5,6 +5,8 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createEmptyMaterials } from "@mons/shared/mining";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import { createWagerFrozenD1Store } from "../src/wagerFrozenD1.ts";
+import { classifyD1Failure } from "../src/d1Failure.ts";
+import { observeD1FailureDatabase } from "./d1FailureTestUtils.ts";
 import {
   consumeWagerReservationOperation,
   operationFingerprint,
@@ -197,38 +199,49 @@ describe("D1 wager frozen reservations", () => {
     ).rejects.toThrow("ambiguous-cleanup");
     await reserve(live, "send");
     expect(pending).toBeDefined();
-    await expect(db.batch(pending!)).rejects.toThrow(
+    const observed = observeD1FailureDatabase(db);
+    await expect(observed.database.batch(pending!)).rejects.toThrow(
       "wager_frozen_revision_guard",
     );
+    expect(observed.errors).toHaveLength(1);
+    expect(classifyD1Failure(observed.errors[0])).toBe("wager-frozen-conflict");
     expect(await store().readBalance("host")).toEqual({
       frozen: materials(3),
       revision: 2,
     });
   });
 
-  it("rolls the balance back if writing its operation fails", async () => {
-    const connection = withBatch((statements) =>
-      db.batch([
-        ...statements,
-        db.prepare(
-          "INSERT INTO profile_transaction_guards (singleton) VALUES (0)",
-        ),
-      ]),
-    );
-    const repo = repository(
-      createWagerFrozenD1Store(connection, { writeGuards: () => [] }),
-    );
-    await expect(reserve(repo, "send")).rejects.toThrow(
-      "wager-operation-unavailable",
-    );
-    expect(await store().readBalance("host")).toEqual({
-      frozen: materials(),
-      revision: 0,
-    });
-    expect((await store().read("host", "send")).operation).toEqual({
-      status: "absent",
-    });
-  });
+  it.each([
+    ["profile_transaction_guards", "guard"],
+    ["wager_state_revision_guards", "wager-state-conflict"],
+  ])(
+    "rolls the balance back without retrying %s failures",
+    async (table, kind) => {
+      const connection = withBatch((statements) =>
+        db.batch([
+          ...statements,
+          db.prepare(`INSERT INTO ${table} (singleton) VALUES (0)`),
+        ]),
+      );
+      const observed = observeD1FailureDatabase(connection);
+      const repo = repository(
+        createWagerFrozenD1Store(observed.database, { writeGuards: () => [] }),
+      );
+      await expect(reserve(repo, "send")).rejects.toThrow(
+        "wager-operation-unavailable",
+      );
+      expect(observed.batches).toHaveLength(1);
+      expect(observed.errors).toHaveLength(1);
+      expect(classifyD1Failure(observed.errors[0])).toBe(kind);
+      expect(await store().readBalance("host")).toEqual({
+        frozen: materials(),
+        revision: 0,
+      });
+      expect((await store().read("host", "send")).operation).toEqual({
+        status: "absent",
+      });
+    },
+  );
 
   it("executes admission guards at the write boundary and honors aborted work", async () => {
     let open = true;
