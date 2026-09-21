@@ -205,6 +205,101 @@ test("duplicate and interleaved targets preserve every result position", async (
   assert.equal(stats.controls, 2);
 });
 
+test("single records and one-item batches preserve the same routing outcomes", async (t) => {
+  const log = t.mock.method(console, "info", () => {});
+  const [input] = requests(1);
+  const cases: Array<{
+    options?: Parameters<typeof fixture>[0];
+    value?: unknown;
+    error?: string;
+  }> = [
+    { value: { ...input, inviteId: "stored-invite-0", epoch: 1 } },
+    {
+      options: { findRoute: () => null },
+      value: null,
+    },
+    {
+      options: {
+        findRoute: (target) => ({
+          ...route(target),
+          kind: "legacy",
+          invite_id: null,
+        }),
+        legacy: async () => [1, { legacy: true }],
+      },
+      value: [1, { legacy: true }],
+    },
+    {
+      options: { read: async () => [null] },
+      error: "match-state-record-unavailable",
+    },
+    {
+      options: {
+        findRoute: (target) => ({
+          ...route(target),
+          kind: "legacy",
+          invite_id: null,
+        }),
+        legacy: async () => null,
+      },
+      error: "match-state-legacy-record-unavailable",
+    },
+    {
+      options: { findRoute: (target) => route(target, 2) },
+      error: "match-state-route-epoch-conflict",
+    },
+    {
+      options: {
+        control: () => ({ backend: "durable", state: "frozen", epoch: 1 }),
+      },
+      value: { ...input, inviteId: "stored-invite-0", epoch: 1 },
+    },
+    {
+      options: {
+        control: () => ({ backend: "rtdb", state: "active", epoch: 1 }),
+      },
+      error: "match-state-durable-authority-required",
+    },
+  ];
+  for (const mode of ["single", "batch"] as const) {
+    for (const scenario of cases) {
+      const { source } = fixture(scenario.options);
+      const result =
+        mode === "single"
+          ? source.readMatchRecord(input)
+          : source.readMatchRecords([input]).then(([record]) => record);
+      if (scenario.error)
+        await assert.rejects(result, { message: scenario.error });
+      else assert.deepEqual(await result, scenario.value);
+    }
+  }
+  assert.equal(log.mock.callCount(), 0);
+});
+
+test("invalid and pre-aborted single records perform no storage reads", async () => {
+  const { source, stats } = fixture();
+  for (const input of [
+    { playerId: "player/invalid", matchId: "match-0" },
+    { playerId: "player-0", matchId: "match/invalid" },
+  ])
+    await assert.rejects(source.readMatchRecord(input), {
+      message: "match-state-invalid-read-target",
+    });
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    source.readMatchRecord(requests(1)[0], controller.signal),
+    {
+      name: "AbortError",
+    },
+  );
+  assert.equal(stats.controls, 0);
+  assert.deepEqual(stats.routeBatches, []);
+  assert.deepEqual(stats.scalarRoutes, []);
+  assert.deepEqual(stats.roomReads, []);
+  assert.deepEqual(stats.legacyReads, []);
+});
+
 test("empty, invalid and pre-aborted batches perform no storage reads", async () => {
   const { source, stats } = fixture();
   assert.deepEqual(await source.readMatchRecords([]), []);
@@ -493,69 +588,119 @@ test("aborted legacy reads do not recheck missing-record routes after draining",
   }
 });
 
-test("cancellation interrupts pending authority, routes and rooms without more work", async () => {
-  for (const blockedAt of [
-    "control-before",
-    "routes",
-    "rooms",
-    "control-after",
-  ]) {
-    const gate = deferred();
-    const controller = new AbortController();
-    const reason = new DOMException("event deadline exceeded", "TimeoutError");
-    const { source, stats } = fixture({
-      control: async (index) => {
-        if (
-          (blockedAt === "control-before" && index === 1) ||
-          (blockedAt === "control-after" && index === 2)
-        )
-          await gate.promise;
-        return { backend: "durable", state: "active", epoch: 1 };
-      },
-      beforeRoutes: async () => {
-        if (blockedAt === "routes") await gate.promise;
-      },
-      findRoute: (input) => ({ ...route(input), invite_id: input.matchId }),
-      read: async (input) => {
-        if (blockedAt === "rooms") await gate.promise;
-        return records(input);
-      },
-    });
-    let outcome: { error?: unknown } | undefined;
-    const observed = source
-      .readMatchRecords(requests(8), controller.signal)
-      .then(
+test("single and batch cancellation interrupt authority, routes and rooms without more work", async () => {
+  for (const mode of ["single", "batch"] as const) {
+    for (const blockedAt of [
+      "control-before",
+      "routes",
+      "rooms",
+      "control-after",
+    ]) {
+      const gate = deferred();
+      const controller = new AbortController();
+      const reason = new DOMException(
+        "event deadline exceeded",
+        "TimeoutError",
+      );
+      const { source, stats } = fixture({
+        control: async (index) => {
+          if (
+            (blockedAt === "control-before" && index === 1) ||
+            (blockedAt === "control-after" && index === 2)
+          )
+            await gate.promise;
+          return { backend: "durable", state: "active", epoch: 1 };
+        },
+        beforeRoutes: async () => {
+          if (blockedAt === "routes") await gate.promise;
+        },
+        findRoute: (input) => ({ ...route(input), invite_id: input.matchId }),
+        read: async (input) => {
+          if (blockedAt === "rooms") await gate.promise;
+          return records(input);
+        },
+      });
+      let outcome: { error?: unknown } | undefined;
+      const observed = (
+        mode === "single"
+          ? source.readMatchRecord(requests(1)[0], controller.signal)
+          : source.readMatchRecords(requests(8), controller.signal)
+      ).then(
         () => (outcome = {}),
         (error) => (outcome = { error }),
       );
-    try {
-      await setImmediate();
-      const beforeAbort = {
-        controls: stats.controls,
-        routes: stats.routeBatches.length,
-        rooms: stats.roomReads.length,
-      };
-      if (blockedAt === "rooms") assert.equal(stats.active, 4);
-      controller.abort(reason);
-      await setImmediate();
-      assert.ok(outcome, blockedAt);
-      assert.equal(outcome.error, reason, blockedAt);
-      gate.resolve();
-      await observed;
-      await setImmediate();
-      assert.deepEqual(
-        {
+      try {
+        await setImmediate();
+        const beforeAbort = {
           controls: stats.controls,
           routes: stats.routeBatches.length,
           rooms: stats.roomReads.length,
-        },
-        beforeAbort,
-        blockedAt,
-      );
-      assert.equal(stats.active, 0);
-    } finally {
-      gate.resolve();
-      await observed;
+        };
+        if (blockedAt === "rooms")
+          assert.equal(stats.active, mode === "single" ? 1 : 4);
+        controller.abort(reason);
+        await setImmediate();
+        assert.ok(outcome, blockedAt);
+        assert.equal(outcome.error, reason, blockedAt);
+        gate.resolve();
+        await observed;
+        await setImmediate();
+        assert.deepEqual(
+          {
+            controls: stats.controls,
+            routes: stats.routeBatches.length,
+            rooms: stats.roomReads.length,
+          },
+          beforeAbort,
+          blockedAt,
+        );
+        assert.equal(stats.active, 0);
+      } finally {
+        gate.resolve();
+        await observed;
+      }
     }
   }
+});
+
+test("record cancellation overrides an earlier failure without retrying stalled groups", async () => {
+  const gate = deferred();
+  const controller = new AbortController();
+  const reason = new DOMException("event deadline exceeded", "TimeoutError");
+  const { source, stats } = fixture({
+    control: (index) => ({
+      backend: "durable",
+      state: "active",
+      epoch: index === 1 ? 1 : 2,
+    }),
+    findRoute: (input) => ({ ...route(input), invite_id: input.matchId }),
+    read: async (input) => {
+      if (input.inviteId === "match-0") throw new Error("room-unavailable");
+      await gate.promise;
+      throw new Error("late-room-failure");
+    },
+  });
+  let outcome: { error?: unknown } | undefined;
+  const observed = source.readMatchRecords(requests(8), controller.signal).then(
+    () => (outcome = {}),
+    (error) => (outcome = { error }),
+  );
+  try {
+    await setImmediate();
+    assert.equal(stats.active, 3);
+    controller.abort(reason);
+    await setImmediate();
+    assert.ok(outcome);
+    assert.equal(outcome.error, reason);
+    assert.equal(stats.active, 3);
+  } finally {
+    gate.resolve();
+    await observed;
+    await setImmediate();
+  }
+  assert.equal(outcome?.error, reason);
+  assert.equal(stats.controls, 1);
+  assert.equal(stats.routeBatches.length, 1);
+  assert.equal(stats.roomReads.length, 4);
+  assert.equal(stats.active, 0);
 });

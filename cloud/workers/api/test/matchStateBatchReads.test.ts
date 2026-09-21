@@ -7,6 +7,8 @@ import type {
   MatchStatePairRequest,
 } from "../src/matchStateTypes.ts";
 
+type Control = { backend: string; state: string; epoch: number };
+
 function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => {
@@ -29,7 +31,8 @@ function pair(input: MatchStatePairRequest): MatchStatePair {
     ...input,
     revision: 1,
     playerMatch: { playerId: input.playerId, epoch: input.epoch },
-    opponentMatch: { playerId: input.opponentId },
+    opponentMatch:
+      input.opponentId === null ? null : { playerId: input.opponentId },
     claim: null,
   };
 }
@@ -38,11 +41,7 @@ function fixture({
   control = () => ({ backend: "durable", state: "active", epoch: 1 }),
   read = async (input) => pair(input),
 }: {
-  control?: (index: number) => {
-    backend: string;
-    state: string;
-    epoch: number;
-  };
+  control?: (index: number) => Control | Promise<Control>;
   read?: (input: MatchStatePairRequest) => Promise<MatchStatePair>;
 } = {}) {
   const stats = {
@@ -58,7 +57,7 @@ function fixture({
         return {
           prepare: () => ({
             first: async () => ({
-              ...control(++stats.controls),
+              ...(await control(++stats.controls)),
               freeze_generation: 0,
             }),
           }),
@@ -347,5 +346,180 @@ test("cancellation during either authority read fences room requests and results
     );
     assert.equal(stats.controls, abortOnRead);
     assert.equal(stats.requests.length, abortOnRead === 1 ? 0 : 2);
+  }
+});
+
+test("single pairs match one-item batches and retain null opponents and duplicate positions", async (t) => {
+  t.mock.method(console, "info", () => {});
+  const { source } = fixture();
+  const inputs = requests(3);
+  const withoutOpponent = { ...inputs[1], opponentId: null };
+  for (const input of [inputs[0], withoutOpponent]) {
+    const single = await source.readMatchPair(input);
+    assert.deepEqual(await source.readMatchPairs([input]), [single]);
+    assert.deepEqual(single, pair({ ...input, epoch: 1 }));
+  }
+  const targets = [inputs[2], withoutOpponent, inputs[0], withoutOpponent];
+  assert.deepEqual(
+    await source.readMatchPairs(targets),
+    targets.map((input) => pair({ ...input, epoch: 1 })),
+  );
+});
+
+test("only nonempty public pair batches emit one timing event", async (t) => {
+  const log = t.mock.method(console, "info", () => {});
+  const { source } = fixture();
+  const [input] = requests(1);
+  await source.readMatchPair(input);
+  assert.deepEqual(await source.readMatchPairs([]), []);
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(source.readMatchPair(input, controller.signal));
+  await assert.rejects(source.readMatchPairs([input], controller.signal));
+  assert.equal(log.mock.callCount(), 0);
+  await source.readMatchPairs([input]);
+  assert.equal(log.mock.callCount(), 1);
+  assert.equal(JSON.parse(log.mock.calls[0].arguments[0]).count, 1);
+  assert.equal(JSON.parse(log.mock.calls[0].arguments[0]).outcome, "ok");
+  const failure = new Error("room-unavailable");
+  const failed = fixture({
+    read: async () => {
+      throw failure;
+    },
+  });
+  await assert.rejects(failed.source.readMatchPair(input), (error) => {
+    assert.equal(error, failure);
+    return true;
+  });
+  assert.equal(log.mock.callCount(), 1);
+  await assert.rejects(failed.source.readMatchPairs([input]));
+  assert.equal(log.mock.callCount(), 2);
+  const timing = JSON.parse(log.mock.calls[1].arguments[0]);
+  assert.equal(timing.count, 1);
+  assert.equal(timing.outcome, "error");
+});
+
+test("single and batch pairs promptly cancel stalled authority and room reads", async (t) => {
+  const log = t.mock.method(console, "info", () => {});
+  for (const mode of ["single", "batch"] as const) {
+    for (const blockedAt of ["control-before", "rooms", "control-after"]) {
+      const gate = deferred();
+      const controller = new AbortController();
+      const reason = new DOMException(
+        "event deadline exceeded",
+        "TimeoutError",
+      );
+      const { source, stats } = fixture({
+        control: async (index) => {
+          if (
+            (blockedAt === "control-before" && index === 1) ||
+            (blockedAt === "control-after" && index === 2)
+          )
+            await gate.promise;
+          return { backend: "durable", state: "active", epoch: 1 };
+        },
+        read: async (input) => {
+          if (blockedAt === "rooms") {
+            await gate.promise;
+            throw new Error("late-room-failure");
+          }
+          return pair(input);
+        },
+      });
+      const inputs = requests(mode === "single" ? 1 : 8);
+      const logsBefore = log.mock.callCount();
+      let outcome: { error?: unknown } | undefined;
+      const observed = (
+        mode === "single"
+          ? source.readMatchPair(inputs[0], controller.signal)
+          : source.readMatchPairs(inputs, controller.signal)
+      ).then(
+        () => (outcome = {}),
+        (error) => (outcome = { error }),
+      );
+      try {
+        await setImmediate();
+        const beforeAbort = {
+          controls: stats.controls,
+          requests: stats.requests.length,
+        };
+        controller.abort(reason);
+        await setImmediate();
+        assert.ok(outcome, `${mode}:${blockedAt}`);
+        assert.equal(outcome.error, reason);
+        assert.equal(
+          log.mock.callCount() - logsBefore,
+          mode === "single" ? 0 : 1,
+        );
+        if (mode === "batch")
+          assert.equal(
+            JSON.parse(log.mock.calls.at(-1)!.arguments[0]).outcome,
+            "aborted",
+          );
+        gate.resolve();
+        await observed;
+        await setImmediate();
+        assert.deepEqual(
+          { controls: stats.controls, requests: stats.requests.length },
+          beforeAbort,
+        );
+        assert.equal(stats.active, 0);
+      } finally {
+        gate.resolve();
+        await observed;
+      }
+    }
+  }
+});
+
+test("aborted pair timing includes elapsed authority and room time before reads drain", async (t) => {
+  const log = t.mock.method(console, "info", () => {});
+  let now = 1_000;
+  t.mock.method(Date, "now", () => now);
+  for (const blockedAt of ["control-before", "rooms", "control-after"]) {
+    const gate = deferred();
+    const controller = new AbortController();
+    const { source, stats } = fixture({
+      control: async (index) => {
+        if (
+          (blockedAt === "control-before" && index === 1) ||
+          (blockedAt === "control-after" && index === 2)
+        )
+          await gate.promise;
+        return { backend: "durable", state: "active", epoch: 1 };
+      },
+      read: async (input) => {
+        if (blockedAt === "rooms") await gate.promise;
+        return pair(input);
+      },
+    });
+    const logsBefore = log.mock.callCount();
+    const observed = source
+      .readMatchPairs(requests(1), controller.signal)
+      .catch((error) => {
+        assert.equal(error, controller.signal.reason);
+      });
+    try {
+      await setImmediate();
+      const active = blockedAt === "rooms" ? 1 : 0;
+      assert.equal(stats.active, active);
+      now += 37;
+      controller.abort();
+      await setImmediate();
+      assert.equal(log.mock.callCount(), logsBefore + 1);
+      assert.equal(stats.active, active);
+      const timing = JSON.parse(log.mock.calls.at(-1)!.arguments[0]);
+      assert.equal(timing.outcome, "aborted");
+      assert.equal(timing.roomReadsMs, blockedAt === "rooms" ? 37 : 0);
+      assert.equal(timing.authorityMs, blockedAt === "rooms" ? 0 : 37);
+      assert.equal(timing.durationMs, 37);
+      now += 100;
+    } finally {
+      gate.resolve();
+      await observed;
+      await setImmediate();
+    }
+    assert.equal(log.mock.callCount(), logsBefore + 1);
+    assert.equal(stats.active, 0);
   }
 });

@@ -136,6 +136,11 @@ describe("routed match record batches", () => {
         }),
       ),
     ).toEqual(Array(MAX_MATCH_STATE_RECORD_READS).fill(fixture.values[0]));
+    await fixture.register([0]);
+    const { source } = observedSource();
+    expect(await source.readMatchRecord(fixture.targets[0])).toEqual(
+      fixture.values[0],
+    );
   });
 
   it("rejects malformed and oversized RPC batches and preserves authority checks", async () => {
@@ -197,53 +202,76 @@ describe("routed match record batches", () => {
       calls.find((call) => call.inviteId === first.inviteId)?.requests,
     ).toEqual([first.targets[2], first.targets[1], first.targets[0]]);
     expect(calls.every((call) => call.epoch === 2)).toBe(true);
+    expect(await source.readMatchRecord(first.targets[2])).toEqual(
+      first.values[2],
+    );
+    expect(calls.at(-1)).toEqual({
+      inviteId: first.inviteId,
+      epoch: 2,
+      requests: [first.targets[2]],
+    });
   });
 
-  it("mixes durable and raw legacy records while leaving unregistered DO records missing", async () => {
-    const fixture = await roomFixture();
-    await fixture.register([0]);
-    const legacy = {
-      playerId: "legacy-login",
-      matchId: `legacy-${crypto.randomUUID()}`,
-    };
-    await db.batch([
-      ...buildMatchStateRouteStatements(db, [
-        {
-          actorUid: legacy.playerId,
-          matchId: legacy.matchId,
-          kind: "legacy",
-          inviteId: null,
-          epoch: 2,
-        },
-      ]),
-      db
-        .prepare(
-          "INSERT INTO match_state_legacy_records VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(
-          legacy.playerId,
-          legacy.matchId,
-          '[1,{"legacy":true}]',
-          "a".repeat(64),
-          "record-batch-import",
-          "malformed",
-        ),
-    ]);
-    const network = vi
-      .spyOn(globalThis, "fetch")
-      .mockRejectedValue(new Error("unexpected-fetch"));
-    const { source, calls } = observedSource();
-    expect(
-      await source.readMatchRecords([
-        fixture.targets[0],
-        legacy,
-        fixture.targets[1],
-      ]),
-    ).toEqual([fixture.values[0], [1, { legacy: true }], null]);
-    expect(calls).toHaveLength(1);
-    expect(calls[0].requests).toEqual([fixture.targets[0]]);
-    expect(network).not.toHaveBeenCalled();
-  });
+  it.each([
+    { label: "array", value: [1, { legacy: true }] },
+    { label: "null", value: null },
+    { label: "boolean", value: false },
+  ])(
+    "mixes durable and raw $label legacy records while leaving unregistered DO records missing",
+    async ({ value }) => {
+      const fixture = await roomFixture();
+      await fixture.register([0]);
+      const legacy = {
+        playerId: "legacy-login",
+        matchId: `legacy-${crypto.randomUUID()}`,
+      };
+      await db.batch([
+        ...buildMatchStateRouteStatements(db, [
+          {
+            actorUid: legacy.playerId,
+            matchId: legacy.matchId,
+            kind: "legacy",
+            inviteId: null,
+            epoch: 2,
+          },
+        ]),
+        db
+          .prepare(
+            "INSERT INTO match_state_legacy_records VALUES (?, ?, ?, ?, ?, ?)",
+          )
+          .bind(
+            legacy.playerId,
+            legacy.matchId,
+            JSON.stringify(value),
+            "a".repeat(64),
+            "record-batch-import",
+            "malformed",
+          ),
+      ]);
+      const network = vi
+        .spyOn(globalThis, "fetch")
+        .mockRejectedValue(new Error("unexpected-fetch"));
+      const { source, calls } = observedSource();
+      expect(
+        await source.readMatchRecords([
+          fixture.targets[0],
+          legacy,
+          fixture.targets[1],
+        ]),
+      ).toEqual([fixture.values[0], value, null]);
+      expect(await source.readMatchRecord(legacy)).toEqual(value);
+      expect(await source.readMatchRecord(fixture.targets[1])).toBeNull();
+      expect(
+        await source.readMatchRecord({
+          playerId: "missing-login",
+          matchId: `missing-${crypto.randomUUID()}`,
+        }),
+      ).toBeNull();
+      expect(calls).toHaveLength(1);
+      expect(calls[0].requests).toEqual([fixture.targets[0]]);
+      expect(network).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(["durable", "legacy"] as const)(
     "fails closed when a %s route has no physical record",
@@ -263,6 +291,11 @@ describe("routed match record batches", () => {
       );
       const { source } = observedSource();
       await expect(source.readMatchRecords([missing])).rejects.toThrow(
+        kind === "durable"
+          ? "match-state-record-unavailable"
+          : "match-state-legacy-record-unavailable",
+      );
+      await expect(source.readMatchRecord(missing)).rejects.toThrow(
         kind === "durable"
           ? "match-state-record-unavailable"
           : "match-state-legacy-record-unavailable",
@@ -294,8 +327,14 @@ describe("routed match record batches", () => {
     expect(await source.readMatchRecords([fixture.targets[0]])).toEqual([
       fixture.values[0],
     ]);
+    expect(await source.readMatchRecord(fixture.targets[0])).toEqual(
+      fixture.values[0],
+    );
     const callsBefore = calls.length;
     await expect(source.readMatchRecords([stale])).rejects.toThrow(
+      "match-state-route-epoch-conflict",
+    );
+    await expect(source.readMatchRecord(stale)).rejects.toThrow(
       "match-state-route-epoch-conflict",
     );
     expect(calls).toHaveLength(callsBefore);

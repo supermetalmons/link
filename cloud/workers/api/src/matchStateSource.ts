@@ -1,4 +1,8 @@
-import type { MatchStateJson, MatchStatePair } from "./matchStateTypes.ts";
+import type {
+  MatchStateJson,
+  MatchStatePair,
+  MatchStatePairRequest,
+} from "./matchStateTypes.ts";
 import type { MatchStatePort } from "./repositoryContracts.ts";
 import { registerMatchStateRoutes } from "./matchStateD1.ts";
 import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
@@ -9,17 +13,57 @@ import {
   type MatchStateReadTiming,
 } from "./matchStateRouting.ts";
 import { getMatchStateRpc, unwrapMatchStateRpc } from "./matchStateRpc.ts";
-import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
+import { runMatchStateReads } from "./matchStateReadPool.ts";
+
+type MatchPairReadTiming = MatchStateReadTiming & { roomReadsMs: number };
+
+async function readMatchStatePairs(
+  env: Env,
+  inputs: readonly Omit<MatchStatePairRequest, "epoch">[],
+  signal?: AbortSignal,
+  timing?: MatchPairReadTiming,
+): Promise<MatchStatePair[]> {
+  signal?.throwIfAborted();
+  if (inputs.length === 0) return [];
+  let roomReadsStartedAt: number | null = null;
+  const finishRoomReads = () => {
+    if (timing && roomReadsStartedAt !== null) {
+      timing.roomReadsMs += Date.now() - roomReadsStartedAt;
+      roomReadsStartedAt = null;
+    }
+  };
+  try {
+    return await readCurrentMatchState(
+      env,
+      async (control) => {
+        if (timing) roomReadsStartedAt = Date.now();
+        try {
+          return await runMatchStateReads(
+            inputs.map(
+              (input) => async () =>
+                unwrapMatchStateRpc(
+                  await getMatchStateRpc(
+                    env,
+                    input.inviteId,
+                  ).readCanonicalMatchPair({ ...input, epoch: control.epoch }),
+                ),
+            ),
+            signal,
+          );
+        } finally {
+          finishRoomReads();
+        }
+      },
+      { signal, timing },
+    );
+  } finally {
+    finishRoomReads();
+  }
+}
 
 export function createMatchStateSource(env: Env): MatchStatePort {
   return {
     async readMatchRecord(input, signal) {
-      signal?.throwIfAborted();
-      if (
-        !isCanonicalLoginUid(input.playerId) ||
-        !isSafeRecordKey(input.matchId)
-      )
-        throw new Error("match-state-invalid-read-target");
       const value = await readMatchStateRecord(env, input, { signal });
       return value as MatchStateJson;
     },
@@ -29,80 +73,21 @@ export function createMatchStateSource(env: Env): MatchStatePort {
       })) as MatchStateJson[];
     },
     async readMatchPair(input, signal) {
-      signal?.throwIfAborted();
-      return readCurrentMatchState(env, async (control) =>
-        unwrapMatchStateRpc(
-          await getMatchStateRpc(env, input.inviteId).readCanonicalMatchPair({
-            ...input,
-            epoch: control.epoch,
-          }),
-        ),
-      );
+      return (await readMatchStatePairs(env, [input], signal))[0];
     },
     async readMatchPairs(inputs, signal) {
       signal?.throwIfAborted();
       if (inputs.length === 0) return [];
       const startedAt = Date.now();
-      const timing: MatchStateReadTiming = {
+      const timing: MatchPairReadTiming = {
         attempts: 0,
         authorityReads: 0,
         authorityMs: 0,
+        roomReadsMs: 0,
       };
-      let roomReadsMs = 0;
       let succeeded = false;
       try {
-        const pairs = await readCurrentMatchState(
-          env,
-          async (control) => {
-            const roomReadsStartedAt = Date.now();
-            const results = new Array<MatchStatePair>(inputs.length);
-            let nextIndex = 0;
-            let failed = false;
-            let failure: unknown;
-            const worker = async () => {
-              try {
-                while (!failed && nextIndex < inputs.length) {
-                  signal?.throwIfAborted();
-                  const index = nextIndex++;
-                  const input = inputs[index];
-                  results[index] = unwrapMatchStateRpc(
-                    await getMatchStateRpc(
-                      env,
-                      input.inviteId,
-                    ).readCanonicalMatchPair({
-                      ...input,
-                      epoch: control.epoch,
-                    }),
-                  );
-                }
-              } catch (error) {
-                if (!failed) failure = error;
-                failed = true;
-              }
-            };
-            let cancel: (() => void) | undefined;
-            try {
-              const drained = Promise.all(
-                Array.from({ length: Math.min(4, inputs.length) }, worker),
-              );
-              const cancelled = signal
-                ? new Promise<never>((_, reject) => {
-                    cancel = () => reject(signal.reason);
-                    signal.addEventListener("abort", cancel, { once: true });
-                    if (signal.aborted) cancel();
-                  })
-                : undefined;
-              await (cancelled ? Promise.race([drained, cancelled]) : drained);
-              signal?.throwIfAborted();
-              if (failed) throw failure;
-              return results;
-            } finally {
-              if (cancel) signal?.removeEventListener("abort", cancel);
-              roomReadsMs += Date.now() - roomReadsStartedAt;
-            }
-          },
-          { signal, timing },
-        );
+        const pairs = await readMatchStatePairs(env, inputs, signal, timing);
         succeeded = true;
         return pairs;
       } finally {
@@ -111,7 +96,6 @@ export function createMatchStateSource(env: Env): MatchStatePort {
             event: "match_state_batch_read",
             count: inputs.length,
             ...timing,
-            roomReadsMs,
             durationMs: Date.now() - startedAt,
             outcome: succeeded ? "ok" : signal?.aborted ? "aborted" : "error",
           }),
