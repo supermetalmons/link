@@ -16,6 +16,10 @@ export type MatchStatePort = {
     input: { playerId: string; matchId: string },
     signal?: AbortSignal,
   ): Promise<MatchStateJson>;
+  readMatchRecords(
+    inputs: readonly { playerId: string; matchId: string }[],
+    signal?: AbortSignal,
+  ): Promise<MatchStateJson[]>;
   readMatchPair(
     input: Omit<MatchStatePairRequest, "epoch">,
     signal?: AbortSignal,

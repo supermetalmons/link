@@ -387,27 +387,32 @@ export async function registerMatchStateRoutes(
   ]);
 }
 
-export async function readMatchStateRoute(
-  db: D1Database,
+type MatchStateRouteRow = {
+  actor_uid: string;
+  match_id: string;
+  kind: MatchStateRoute["kind"];
+  invite_id: string | null;
+  epoch: number;
+};
+
+function prepareMatchStateRouteRead(
+  db: D1DatabaseSession,
   actorUid: string,
   matchId: string,
-): Promise<MatchStateRoute | null> {
+): D1PreparedStatement {
   safeKey(actorUid);
   safeKey(matchId);
-  const row = await db
-    .withSession("first-primary")
+  return db
     .prepare(
       `SELECT actor_uid, match_id, kind, invite_id, epoch
        FROM match_state_routes WHERE actor_uid = ? AND match_id = ?`,
     )
-    .bind(actorUid, matchId)
-    .first<{
-      actor_uid: string;
-      match_id: string;
-      kind: MatchStateRoute["kind"];
-      invite_id: string | null;
-      epoch: number;
-    }>();
+    .bind(actorUid, matchId);
+}
+
+function parseMatchStateRoute(
+  row: MatchStateRouteRow | null | undefined,
+): MatchStateRoute | null {
   return row
     ? {
         actorUid: row.actor_uid,
@@ -419,11 +424,42 @@ export async function readMatchStateRoute(
     : null;
 }
 
+export async function readMatchStateRoute(
+  db: D1Database,
+  actorUid: string,
+  matchId: string,
+): Promise<MatchStateRoute | null> {
+  const row = await prepareMatchStateRouteRead(
+    db.withSession("first-primary"),
+    actorUid,
+    matchId,
+  ).first<MatchStateRouteRow>();
+  return parseMatchStateRoute(row);
+}
+
+export async function readMatchStateRoutes(
+  db: D1Database,
+  inputs: readonly { playerId: string; matchId: string }[],
+): Promise<Array<MatchStateRoute | null>> {
+  if (inputs.length === 0) return [];
+  const session = db.withSession("first-primary");
+  const results = await session.batch<MatchStateRouteRow>(
+    inputs.map((input) =>
+      prepareMatchStateRouteRead(session, input.playerId, input.matchId),
+    ),
+  );
+  if (results.length !== inputs.length)
+    throw new MatchStateD1Failure("routes-unavailable");
+  return results.map((result) => parseMatchStateRoute(result.results[0]));
+}
+
 export async function readLegacyMatchState(
   db: D1Database,
   actorUid: string,
   matchId: string,
+  signal?: AbortSignal,
 ): Promise<unknown | null> {
+  signal?.throwIfAborted();
   safeKey(actorUid);
   safeKey(matchId);
   const row = await db
@@ -433,8 +469,11 @@ export async function readLegacyMatchState(
     )
     .bind(actorUid, matchId)
     .first<{ record_json: string }>();
+  signal?.throwIfAborted();
   if (row) return JSON.parse(row.record_json);
-  if ((await readMatchStateRoute(db, actorUid, matchId))?.kind === "legacy")
+  const route = await readMatchStateRoute(db, actorUid, matchId);
+  signal?.throwIfAborted();
+  if (route?.kind === "legacy")
     throw new MatchStateD1Failure("legacy-record-unavailable");
   return null;
 }

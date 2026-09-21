@@ -5,6 +5,7 @@ import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
 import {
   readCurrentMatchState,
   readMatchStateRecord,
+  readMatchStateRecords,
   type MatchStateReadTiming,
 } from "./matchStateRouting.ts";
 import { getMatchStateRpc, unwrapMatchStateRpc } from "./matchStateRpc.ts";
@@ -21,6 +22,11 @@ export function createMatchStateSource(env: Env): MatchStatePort {
         throw new Error("match-state-invalid-read-target");
       const value = await readMatchStateRecord(env, input, { signal });
       return value as MatchStateJson;
+    },
+    async readMatchRecords(inputs, signal) {
+      return (await readMatchStateRecords(env, inputs, {
+        signal,
+      })) as MatchStateJson[];
     },
     async readMatchPair(input, signal) {
       signal?.throwIfAborted();

@@ -27,6 +27,7 @@ import type { MatchSyncMetadata, MatchSyncReadResult } from "./matchSync.ts";
 import { MatchStateStore } from "./matchStateStore.ts";
 import { parseNewMatchTimerStorage } from "./localMatchTimerStore.ts";
 import { captureMatchStateRpc, type MatchStateRpc } from "./matchStateRpc.ts";
+import { MAX_MATCH_STATE_RECORD_READS } from "./matchStateTypes.ts";
 import type {
   MatchStateClaimTimerRequest,
   MatchStateCreateRequest,
@@ -34,6 +35,7 @@ import type {
   MatchStateMoveRequest,
   MatchStatePairRequest,
   MatchStateRecordRequest,
+  MatchStateRecordsRequest,
   MatchStateStartTimerRequest,
   MatchStateSurrenderRequest,
 } from "./matchStateTypes.ts";
@@ -233,6 +235,26 @@ export class InviteReactions
     return captureMatchStateRpc(() => {
       this.inviteChannels.pinInvite(input.inviteId);
       return this.matchState.readRecord(input);
+    });
+  }
+
+  async readCanonicalMatchRecords(input: MatchStateRecordsRequest) {
+    return captureMatchStateRpc(() => {
+      if (
+        !Array.isArray(input.requests) ||
+        input.requests.length === 0 ||
+        input.requests.length > MAX_MATCH_STATE_RECORD_READS
+      ) {
+        throw new TypeError("match-state-invalid-read-batch");
+      }
+      this.inviteChannels.pinInvite(input.inviteId);
+      return input.requests.map((request) =>
+        this.matchState.readRecord({
+          ...request,
+          inviteId: input.inviteId,
+          epoch: input.epoch,
+        }),
+      );
     });
   }
 

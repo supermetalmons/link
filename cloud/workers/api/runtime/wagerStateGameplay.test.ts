@@ -103,6 +103,11 @@ async function fixture(failCompletedWrite = false) {
         };
       throw new Error("unexpected-player-read");
     },
+    async readMatchRecords(inputs, signal) {
+      return Promise.all(
+        inputs.map((input) => memoryState.readMatchRecord(input, signal)),
+      );
+    },
     async readMatchPair(input, signal) {
       return {
         ...input,

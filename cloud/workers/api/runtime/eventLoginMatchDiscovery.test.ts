@@ -29,6 +29,7 @@ import type { EventReads } from "../../../runtime/eventReads.js";
 import { eventReadFixture } from "../test/eventReadFixture.ts";
 import { applyEventTestMigrations } from "./eventTestMigrations.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
+import type { MatchStatePort } from "../src/repositoryContracts.ts";
 import {
   eventTransitionFixture,
   resetEventReceiptTestState,
@@ -98,6 +99,7 @@ function stateFixture(initial: Record<string, unknown> = {}) {
   const patches: Record<string, unknown>[] = [];
   const reads: string[] = [];
   const metadataReads: string[] = [];
+  const matchBatches: Parameters<MatchStatePort["readMatchRecords"]>[0][] = [];
   const read = async (path: string, query?: StateQuery) => {
     reads.push(path);
     if (path.startsWith("players/")) expect(query).toBeUndefined();
@@ -118,16 +120,24 @@ function stateFixture(initial: Record<string, unknown> = {}) {
     },
   };
   const reader = {
-    async readMatchRecord({
-      playerId,
-      matchId,
-    }: {
-      playerId: string;
-      matchId: string;
-    }) {
+    async readMatchRecord(
+      { playerId, matchId }: { playerId: string; matchId: string },
+      signal?: AbortSignal,
+    ) {
+      signal?.throwIfAborted();
       return read(`players/${playerId}/matches/${matchId}`) as Promise<
         import("../src/matchStateTypes.ts").MatchStateRecord | null
       >;
+    },
+    async readMatchRecords(
+      inputs: Parameters<MatchStatePort["readMatchRecords"]>[0],
+      signal?: AbortSignal,
+    ) {
+      signal?.throwIfAborted();
+      matchBatches.push(inputs);
+      return Promise.all(
+        inputs.map((input) => reader.readMatchRecord(input, signal)),
+      );
     },
     async readInviteMetadata(inviteId: string, signal?: AbortSignal) {
       signal?.throwIfAborted();
@@ -138,7 +148,31 @@ function stateFixture(initial: Record<string, unknown> = {}) {
       > | null;
     },
   };
-  return { client, metadataReads, patches, reader, reads, values };
+  return {
+    client,
+    matchBatches,
+    metadataReads,
+    patches,
+    reader,
+    reads,
+    values,
+  };
+}
+
+function captureFixture(count: number) {
+  const ids = Array.from({ length: count }, (_, index) => `capture-${index}`);
+  return {
+    ids,
+    ...stateFixture(
+      Object.fromEntries(
+        ids.flatMap((id) => [
+          [`invites/${id}`, { hostId: hostUid, guestId: guestUid }],
+          [`players/${hostUid}/matches/${id}`, { fen: "initial" }],
+          [`players/${guestUid}/matches/${id}`, { fen: "initial" }],
+        ]),
+      ),
+    ),
+  };
 }
 
 async function indexedRows() {
@@ -300,6 +334,7 @@ describe("event login-match discovery", () => {
     expect(batchSizes).toEqual([3]);
     expect(fixture.reads).toEqual([]);
     expect(fixture.metadataReads).toEqual([]);
+    expect(fixture.matchBatches).toEqual([]);
   });
 
   it.each(["missing", "unresolved", "backfill", "different-actors"])(
@@ -614,6 +649,79 @@ describe("event login-match discovery", () => {
       captureEventMatchDiscovery(testEnv.PROFILE_GAMES_DB, fixture.reader, ids),
     ).rejects.toThrow("event-match-discovery-match-unavailable");
     expect(await indexedRows()).toEqual([]);
+  });
+
+  it("captures each four-invite chunk with one ordered match batch", async () => {
+    const fixture = captureFixture(5);
+    const readMatchRecords = fixture.reader.readMatchRecords;
+    fixture.reader.readMatchRecords = async (inputs, signal) => {
+      expect(fixture.metadataReads).toHaveLength(
+        fixture.matchBatches.length === 0 ? 4 : 5,
+      );
+      expect(await indexedRows()).toHaveLength(
+        fixture.matchBatches.length === 0 ? 0 : 8,
+      );
+      return readMatchRecords(inputs, signal);
+    };
+    await captureEventMatchDiscovery(
+      testEnv.PROFILE_GAMES_DB,
+      fixture.reader,
+      fixture.ids,
+    );
+    expect(fixture.matchBatches.map((batch) => batch.length)).toEqual([8, 2]);
+    expect(fixture.matchBatches.flat()).toEqual(
+      fixture.ids.flatMap((matchId) =>
+        [hostUid, guestUid].map((playerId) => ({ playerId, matchId })),
+      ),
+    );
+    expect(await indexedRows()).toHaveLength(10);
+  });
+
+  it("keeps completed chunks but captures no part of an incomplete match batch", async () => {
+    const fixture = captureFixture(9);
+    fixture.values.delete(`players/${guestUid}/matches/${fixture.ids[5]}`);
+    await expect(
+      captureEventMatchDiscovery(
+        testEnv.PROFILE_GAMES_DB,
+        fixture.reader,
+        fixture.ids,
+      ),
+    ).rejects.toThrow("event-match-discovery-match-unavailable");
+    expect(fixture.matchBatches.map((batch) => batch.length)).toEqual([8, 8]);
+    expect(fixture.metadataReads).toEqual(fixture.ids.slice(0, 8));
+    const captured = await indexedRows();
+    expect(captured).toHaveLength(8);
+    expect(new Set(captured.map((row) => row.match_id))).toEqual(
+      new Set(fixture.ids.slice(0, 4)),
+    );
+  });
+
+  it("does not capture a returned batch or start another chunk after cancellation", async () => {
+    const fixture = captureFixture(9);
+    const controller = new AbortController();
+    const reason = new Error("discovery-cancelled");
+    const readMatchRecords = fixture.reader.readMatchRecords;
+    fixture.reader.readMatchRecords = async (inputs, signal) => {
+      expect(signal).toBe(controller.signal);
+      const matches = await readMatchRecords(inputs, signal);
+      if (fixture.matchBatches.length === 2) controller.abort(reason);
+      return matches;
+    };
+    await expect(
+      captureEventMatchDiscovery(
+        testEnv.PROFILE_GAMES_DB,
+        fixture.reader,
+        fixture.ids,
+        controller.signal,
+      ),
+    ).rejects.toBe(reason);
+    expect(fixture.matchBatches.map((batch) => batch.length)).toEqual([8, 8]);
+    expect(fixture.metadataReads).toEqual(fixture.ids.slice(0, 8));
+    const captured = await indexedRows();
+    expect(captured).toHaveLength(8);
+    expect(new Set(captured.map((row) => row.match_id))).toEqual(
+      new Set(fixture.ids.slice(0, 4)),
+    );
   });
 
   it("reads sparse Firebase arrays and rejects malformed bracket collections", () => {

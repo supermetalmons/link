@@ -894,7 +894,7 @@ describe("D1-authoritative profile game projection ownership", () => {
         async readInviteMetadata() {
           throw new Error("unexpected-invite-metadata-read");
         },
-        async readMatchRecord() {
+        async readMatchRecords() {
           throw new Error("unexpected-generic-state-read");
         },
         async readEvent(candidateEventId) {

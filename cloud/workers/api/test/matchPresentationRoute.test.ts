@@ -81,6 +81,9 @@ function setup(invite: unknown = paired, uid = "host-login") {
       readMatchRecord: async () => {
         throw new Error("unexpected-source-read");
       },
+      readMatchRecords: async () => {
+        throw new Error("unexpected-source-read");
+      },
       readMatchPair: async () => {
         throw new Error("unexpected-source-read");
       },

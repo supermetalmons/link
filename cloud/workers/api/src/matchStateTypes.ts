@@ -28,6 +28,12 @@ export type MatchStateRecordRequest = MatchStateAuthority & {
   playerId: string;
 };
 
+export const MAX_MATCH_STATE_RECORD_READS = 8;
+
+export type MatchStateRecordsRequest = MatchStateAuthority & {
+  requests: readonly { playerId: string; matchId: string }[];
+};
+
 export type MatchStatePairRequest = MatchStateRecordRequest & {
   opponentId: string | null;
 };

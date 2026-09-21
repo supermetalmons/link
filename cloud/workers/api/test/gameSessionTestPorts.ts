@@ -87,6 +87,11 @@ export function matchTestPort(
         undefined,
         signal,
       )) as Awaited<ReturnType<MatchStatePort["readMatchRecord"]>>,
+    async readMatchRecords(inputs, signal) {
+      return Promise.all(
+        inputs.map((input) => this.readMatchRecord(input, signal)),
+      );
+    },
     async readMatchPair(input, signal) {
       return {
         ...input,

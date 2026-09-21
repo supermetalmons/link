@@ -180,6 +180,10 @@ export function attachMemoryWagerFrozenStore(
   const wagerState = createMemoryWagerState(repository);
   repository.wagers ??= wagerState;
   repository.wagerWriter ??= wagerState;
+  repository.readMatchRecords ??= (inputs, signal) =>
+    Promise.all(
+      inputs.map((input) => repository.readMatchRecord(input, signal)),
+    );
   repository.readMatchPair ??= async (input, signal) => ({
     ...input,
     epoch: 1,

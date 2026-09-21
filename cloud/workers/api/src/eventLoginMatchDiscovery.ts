@@ -19,7 +19,7 @@ const EVENT_MATCH_DISCOVERY_CONCURRENCY = 4;
 
 type EventMatchDiscoveryRepository = Pick<
   GameplayRepository,
-  "readMatchRecord" | "readInviteMetadata"
+  "readMatchRecords" | "readInviteMetadata"
 >;
 
 type EventMatchDiscoveryCoverageRow = {
@@ -100,7 +100,7 @@ export async function captureEventMatchDiscovery(
     offset += EVENT_MATCH_DISCOVERY_CONCURRENCY
   ) {
     signal?.throwIfAborted();
-    const rows = await Promise.all(
+    const inviteRows = await Promise.all(
       inviteIds
         .slice(offset, offset + EVENT_MATCH_DISCOVERY_CONCURRENCY)
         .map(async (inviteId) => {
@@ -116,22 +116,27 @@ export async function captureEventMatchDiscovery(
           ) {
             throw new Error("event-match-discovery-invite-unavailable");
           }
-          return Promise.all(
-            [hostId, guestId].map(async (loginUid) => {
-              const match = await repository.readMatchRecord(
-                { playerId: loginUid, matchId: inviteId },
-                signal,
-              );
-              if (match === null || match === undefined) {
-                throw new Error("event-match-discovery-match-unavailable");
-              }
-              return { loginUid, matchId: inviteId, inviteId };
-            }),
-          );
+          return [hostId, guestId].map((loginUid) => ({
+            loginUid,
+            matchId: inviteId,
+            inviteId,
+          }));
         }),
     );
     signal?.throwIfAborted();
-    await captureLoginMatchDiscovery(db, rows.flat(), nowMs);
+    const rows = inviteRows.flat();
+    const matches = await repository.readMatchRecords(
+      rows.map(({ loginUid, matchId }) => ({ playerId: loginUid, matchId })),
+      signal,
+    );
+    signal?.throwIfAborted();
+    if (
+      matches.length !== rows.length ||
+      matches.some((match) => match === null || match === undefined)
+    ) {
+      throw new Error("event-match-discovery-match-unavailable");
+    }
+    await captureLoginMatchDiscovery(db, rows, nowMs);
   }
 }
 

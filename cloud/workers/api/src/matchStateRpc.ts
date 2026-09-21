@@ -17,6 +17,7 @@ import type {
   MatchStatePairRequest,
   MatchStateRecord,
   MatchStateRecordRequest,
+  MatchStateRecordsRequest,
   MatchStateStartTimerRequest,
   MatchStateSurrenderRequest,
 } from "./matchStateTypes.ts";
@@ -34,6 +35,9 @@ export type MatchStateRpc = {
   readCanonicalMatchRecord(
     input: MatchStateRecordRequest,
   ): Promise<MatchStateRpcResult<MatchStateRecord | null>>;
+  readCanonicalMatchRecords(
+    input: MatchStateRecordsRequest,
+  ): Promise<MatchStateRpcResult<Array<MatchStateRecord | null>>>;
   readCanonicalMatchPair(
     input: MatchStatePairRequest,
   ): Promise<MatchStateRpcResult<MatchStatePair>>;

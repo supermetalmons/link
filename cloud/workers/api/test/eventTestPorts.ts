@@ -170,6 +170,18 @@ export function attachEventTestPorts<T>(
       { playerId, matchId }: { playerId: string; matchId: string },
       signal?: AbortSignal,
     ) => read(`players/${playerId}/matches/${matchId}`, signal);
+  if (typeof source.readMatchRecords !== "function")
+    Object.assign(source, {
+      readMatchRecords: (
+        inputs: Parameters<MatchStatePort["readMatchRecords"]>[0],
+        signal?: AbortSignal,
+      ) =>
+        Promise.all(
+          inputs.map(({ playerId, matchId }) =>
+            read(`players/${playerId}/matches/${matchId}`, signal),
+          ),
+        ),
+    });
   if (typeof source.readMatchPair !== "function")
     (source as EventTestSource).readMatchPair = (
       {

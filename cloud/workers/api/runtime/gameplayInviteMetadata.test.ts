@@ -27,6 +27,7 @@ const unexpectedWrite = async (): Promise<never> => {
 };
 const raw: MatchStatePort = {
   readMatchRecord: unexpectedRead,
+  readMatchRecords: unexpectedRead,
   readMatchPair: unexpectedRead,
   readMatchPairs: unexpectedRead,
   createMatchRecords: unexpectedWrite,
