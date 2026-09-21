@@ -57,51 +57,46 @@ const readExistingProjectionDocuments = async ({
   attempts = READ_RETRY_ATTEMPTS,
   inviteId,
   profileIds,
-  readDocument,
+  readDocuments,
   reason,
   retryDelayMs = READ_RETRY_DELAY_MS,
   logger = console,
   wait = delay,
 }) => {
-  const results = await Promise.allSettled(
-    profileIds.map(async (profileId) => {
-      for (let attempt = 1; attempt <= attempts; attempt += 1) {
-        try {
-          return { profileId, snapshot: await readDocument(profileId) };
-        } catch (error) {
-          if (attempt >= attempts) {
-            throw error;
-          }
-          await wait(retryDelayMs);
-        }
-      }
-      throw new Error("projector:existing-doc-read-retry-exhausted");
-    }),
-  );
-  const documents = [];
-  let failure = null;
-  results.forEach((result, index) => {
-    if (result.status === "rejected") {
-      failure ||= result.reason;
-      logger.error("projector:existing-doc-read-failed", {
-        inviteId,
-        ownerProfileId: profileIds[index],
-        reason,
-        error:
-          result.reason && result.reason.message
-            ? result.reason.message
-            : result.reason,
-      });
-      return;
-    }
-    if (result.value.snapshot.exists) {
-      documents.push(result.value);
-    }
-  });
-  if (failure) {
-    throw failure;
+  const uniqueProfileIds = [...new Set(profileIds)];
+  if (uniqueProfileIds.length === 0) return [];
+  let projections;
+  try {
+    projections = await readWithRetries(
+      () => readDocuments(uniqueProfileIds),
+      attempts,
+      retryDelayMs,
+      wait,
+    );
+  } catch (error) {
+    logger.error("projector:existing-doc-read-failed", {
+      inviteId,
+      ownerProfileIds: uniqueProfileIds,
+      reason,
+      error: error && error.message ? error.message : error,
+    });
+    throw error;
   }
-  return documents;
+  return uniqueProfileIds.flatMap((profileId) => {
+    const projection = projections.get(profileId);
+    return projection
+      ? [
+          {
+            profileId,
+            snapshot: {
+              exists: true,
+              data: () => projection.data,
+              updateTime: projection.updateTime,
+            },
+          },
+        ]
+      : [];
+  });
 };
 
 const buildResolvedProfile = (profilePath) => {
@@ -402,17 +397,8 @@ const createProfileGamesProjectionCore = ({
     const existingDocs = await readExistingProjectionDocuments({
       inviteId: normalizedInviteId,
       profileIds: cleanupProfileIds,
-      readDocument: async (profileId) => {
-        const projection = await repository.getProjection(
-          profileId,
-          normalizedInviteId,
-        );
-        return {
-          exists: projection !== null,
-          data: () => (projection ? projection.data : null),
-          updateTime: projection ? projection.updateTime : "",
-        };
-      },
+      readDocuments: (profileIds) =>
+        repository.getProjections(profileIds, normalizedInviteId),
       reason,
       logger,
       wait,

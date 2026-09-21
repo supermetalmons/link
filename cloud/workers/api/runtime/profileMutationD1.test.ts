@@ -122,7 +122,7 @@ function observeDatabase(
             firstQueries.push(query);
             const row = await target.first<Record<string, unknown>>();
             return row &&
-              query.includes("AS mutation_owner_login_uid") &&
+              query.includes("AS canonical_owner_login_uid") &&
               options.mapMutationRow
               ? options.mapMutationRow(row)
               : row;
@@ -390,14 +390,14 @@ describe("canonical profile mutation reads", () => {
       [
         "player login mismatch",
         0,
-        { mutation_owner_login_uid: "another-login" },
+        { canonical_owner_login_uid: "another-login" },
       ],
       [
         "opponent profile mismatch",
         2,
-        { mutation_owner_profile_id: "another-profile" },
+        { canonical_owner_profile_id: "another-profile" },
       ],
-      ["invalid player owner", 0, { mutation_owner_revision: 0 }],
+      ["invalid player owner", 0, { canonical_owner_revision: 0 }],
       ["invalid opponent profile", 2, { revision: 0 }],
       ["invalid player payload", 0, { payload_json: "{}" }],
       ["invalid opponent legacy fields", 2, { legacy_fields_json: "[]" }],
@@ -409,7 +409,7 @@ describe("canonical profile mutation reads", () => {
       [
         "active opponent redirect",
         2,
-        { mutation_merge_source_profile_id: "source" },
+        { canonical_merge_source_profile_id: "source" },
       ],
     ] as const)("rejects a corrupt %s", async (_label, index, changes) => {
       const initial = await createProfile();
@@ -540,13 +540,13 @@ describe("canonical profile mutation reads", () => {
 
   it.each([
     ["dangling owner", { profile_id: null, payload_json: null }],
-    ["owner login mismatch", { mutation_owner_login_uid: "another-login" }],
+    ["owner login mismatch", { canonical_owner_login_uid: "another-login" }],
     [
       "owner profile mismatch",
-      { mutation_owner_profile_id: "another-profile" },
+      { canonical_owner_profile_id: "another-profile" },
     ],
-    ["owner revision", { mutation_owner_revision: 0 }],
-    ["owner timestamp", { mutation_owner_created_at_ms: -1 }],
+    ["owner revision", { canonical_owner_revision: 0 }],
+    ["owner timestamp", { canonical_owner_created_at_ms: -1 }],
     ["profile revision", { revision: 0 }],
     ["profile payload", { payload_json: "{}" }],
     ["legacy fields", { legacy_fields_json: "[]" }],
@@ -557,7 +557,7 @@ describe("canonical profile mutation reads", () => {
       "retiring profile",
       { state: "retiring", merged_into_profile_id: "target" },
     ],
-    ["active merge mapping", { mutation_merge_source_profile_id: "source" }],
+    ["active merge mapping", { canonical_merge_source_profile_id: "source" }],
   ])(
     "rejects corrupt %s without treating it as missing",
     async (_name, changes) => {

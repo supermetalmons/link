@@ -25,7 +25,7 @@ const fixture = ({
       async commitProjectionWrites(nextWrites) {
         writes.push(...nextWrites);
       },
-      getProjection: async () => null,
+      getProjections: async () => new Map(),
       async readInviteMetadata(readInviteId) {
         metadataReads.push(readInviteId);
         assert.equal(readInviteId, inviteId);

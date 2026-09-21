@@ -11,10 +11,13 @@ import { hasValidUsername } from "./authIdentityCanonical/policy.ts";
 import {
   CanonicalProfileCorruption,
   parseCanonicalAuthMethodRow,
-  parseCanonicalLoginOwnerRow,
-  parseCanonicalProfileRow,
   type CanonicalAuthMethodSnapshot,
 } from "./profileCanonicalD1.ts";
+import {
+  CANONICAL_OWNED_PROFILE_COLUMNS,
+  CANONICAL_OWNED_PROFILE_FROM,
+  parseCanonicalOwnedProfileRow,
+} from "./profileCanonical/ownedProfile.ts";
 
 export type AuthProfileRepository = {
   getLinkedAuthMethods: (uid: string) => Promise<LinkedAuthMethodsResponse>;
@@ -36,13 +39,7 @@ async function readAuthProfileSnapshot(
 } | null> {
   const { results } = await db
     .prepare(
-      `SELECT profile.*,
-              owner.login_uid AS auth_owner_login_uid,
-              owner.profile_id AS auth_owner_profile_id,
-              owner.revision AS auth_owner_revision,
-              owner.created_at_ms AS auth_owner_created_at_ms,
-              owner.updated_at_ms AS auth_owner_updated_at_ms,
-              mapping.source_profile_id AS auth_merge_source_profile_id,
+      `SELECT ${CANONICAL_OWNED_PROFILE_COLUMNS},
               method.method AS auth_method_method,
               method.normalized_value AS auth_method_normalized_value,
               method.profile_id AS auth_method_profile_id,
@@ -55,11 +52,7 @@ async function readAuthProfileSnapshot(
               method.revision AS auth_method_revision,
               method.created_at_ms AS auth_method_created_at_ms,
               method.updated_at_ms AS auth_method_updated_at_ms
-       FROM profile_login_owners AS owner
-       LEFT JOIN profile_records AS profile
-         ON profile.profile_id = owner.profile_id
-       LEFT JOIN profile_merge_targets AS mapping
-         ON mapping.source_profile_id = owner.profile_id
+       ${CANONICAL_OWNED_PROFILE_FROM}
        LEFT JOIN profile_auth_methods AS method
          ON method.profile_id = owner.profile_id
        WHERE owner.login_uid = ?
@@ -67,24 +60,9 @@ async function readAuthProfileSnapshot(
     )
     .bind(loginUid)
     .all<Record<string, unknown>>();
-  const row = results[0];
-  if (!row) return null;
-  const owner = parseCanonicalLoginOwnerRow({
-    login_uid: row.auth_owner_login_uid,
-    profile_id: row.auth_owner_profile_id,
-    revision: row.auth_owner_revision,
-    created_at_ms: row.auth_owner_created_at_ms,
-    updated_at_ms: row.auth_owner_updated_at_ms,
-  });
-  const profile = parseCanonicalProfileRow(row);
-  if (
-    owner.loginUid !== loginUid ||
-    owner.profileId !== profile.profileId ||
-    profile.state !== "active" ||
-    row.auth_merge_source_profile_id !== null
-  ) {
-    throw new CanonicalProfileCorruption();
-  }
+  const snapshot = parseCanonicalOwnedProfileRow(results[0], loginUid);
+  if (!snapshot) return null;
+  const { profile } = snapshot;
   const authMethods: CanonicalAuthMethodSnapshot[] = [];
   for (const methodRow of results) {
     const value = {

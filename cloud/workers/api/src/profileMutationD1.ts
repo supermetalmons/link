@@ -2,19 +2,20 @@ import {
   CanonicalProfileCorruption,
   commitCanonicalPlan,
   materializeCanonicalProfile,
-  parseCanonicalLoginOwnerRow,
-  parseCanonicalProfileRow,
   type CanonicalExpectation,
   type CanonicalLoginOwnerSnapshot,
   type CanonicalProfileSnapshot,
   type CanonicalProfileValue,
   type CanonicalSortKey,
 } from "./profileCanonicalD1.ts";
+import {
+  CANONICAL_OWNED_PROFILE_COLUMNS,
+  CANONICAL_OWNED_PROFILE_FROM,
+  parseCanonicalOwnedProfileRow,
+  type CanonicalOwnedProfileSnapshot,
+} from "./profileCanonical/ownedProfile.ts";
 
-export type CanonicalProfileMutationSnapshot = {
-  owner: CanonicalLoginOwnerSnapshot;
-  profile: CanonicalProfileSnapshot;
-};
+export type CanonicalProfileMutationSnapshot = CanonicalOwnedProfileSnapshot;
 
 export type CanonicalRatingProfileSnapshot =
   CanonicalProfileMutationSnapshot & {
@@ -97,45 +98,11 @@ function canonicalProfileMutationStatement(
 ): D1PreparedStatement {
   return db
     .prepare(
-      `SELECT profile.*,
-              owner.login_uid AS mutation_owner_login_uid,
-              owner.profile_id AS mutation_owner_profile_id,
-              owner.revision AS mutation_owner_revision,
-              owner.created_at_ms AS mutation_owner_created_at_ms,
-              owner.updated_at_ms AS mutation_owner_updated_at_ms,
-              mapping.source_profile_id AS mutation_merge_source_profile_id
-       FROM profile_login_owners AS owner
-       LEFT JOIN profile_records AS profile
-         ON profile.profile_id = owner.profile_id
-       LEFT JOIN profile_merge_targets AS mapping
-         ON mapping.source_profile_id = owner.profile_id
+      `SELECT ${CANONICAL_OWNED_PROFILE_COLUMNS}
+       ${CANONICAL_OWNED_PROFILE_FROM}
        WHERE owner.login_uid = ?`,
     )
     .bind(loginUid);
-}
-
-function parseCanonicalProfileMutationRow(
-  row: Record<string, unknown> | null | undefined,
-  loginUid: string,
-): CanonicalProfileMutationSnapshot | null {
-  if (!row) return null;
-  const owner = parseCanonicalLoginOwnerRow({
-    login_uid: row.mutation_owner_login_uid,
-    profile_id: row.mutation_owner_profile_id,
-    revision: row.mutation_owner_revision,
-    created_at_ms: row.mutation_owner_created_at_ms,
-    updated_at_ms: row.mutation_owner_updated_at_ms,
-  });
-  const profile = parseCanonicalProfileRow(row);
-  if (
-    owner.loginUid !== loginUid ||
-    owner.profileId !== profile.profileId ||
-    profile.state !== "active" ||
-    row.mutation_merge_source_profile_id !== null
-  ) {
-    throw new CanonicalProfileCorruption();
-  }
-  return { owner, profile };
 }
 
 export async function readCanonicalProfileMutationByLogin(
@@ -145,7 +112,7 @@ export async function readCanonicalProfileMutationByLogin(
   const row = await canonicalProfileMutationStatement(db, loginUid).first<
     Record<string, unknown>
   >();
-  return parseCanonicalProfileMutationRow(row, loginUid);
+  return parseCanonicalOwnedProfileRow(row, loginUid);
 }
 
 function parseCanonicalRatingProfile(
@@ -153,7 +120,7 @@ function parseCanonicalRatingProfile(
   opponents: readonly Record<string, unknown>[],
   loginUid: string,
 ): CanonicalRatingProfileSnapshot | null {
-  const snapshot = parseCanonicalProfileMutationRow(row, loginUid);
+  const snapshot = parseCanonicalOwnedProfileRow(row, loginUid);
   if (!snapshot) return null;
   const februaryOpponentProfileIds = opponents.map((opponent) => {
     const profileId = opponent?.opponent_profile_id;

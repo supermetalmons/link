@@ -18,10 +18,10 @@ export type ProjectionOwnershipSnapshot = {
 
 export type ProfileGamesProjectionRepository = {
   commitProjectionWrites(writes: ProjectionWrite[]): Promise<void>;
-  getProjection(
-    profileId: string,
+  getProjections(
+    profileIds: readonly string[],
     inviteId: string,
-  ): Promise<ProjectionDocument | null>;
+  ): Promise<Map<string, ProjectionDocument>>;
   readAutomatchEntry(inviteId: string): Promise<unknown>;
   readInviteMetadata(inviteId: string): Promise<Record<string, unknown> | null>;
   getMatchEmoji?(
@@ -87,11 +87,22 @@ export function readExistingProjectionDocuments(input: {
   inviteId: string;
   logger?: Pick<Console, "error">;
   profileIds: string[];
-  readDocument(profileId: string): Promise<{ exists: boolean }>;
+  readDocuments(
+    profileIds: readonly string[],
+  ): Promise<Map<string, ProjectionDocument>>;
   reason: string;
   retryDelayMs?: number;
   wait?(milliseconds: number): Promise<void>;
-}): Promise<Array<{ profileId: string; snapshot: { exists: boolean } }>>;
+}): Promise<
+  Array<{
+    profileId: string;
+    snapshot: {
+      exists: true;
+      data(): Record<string, unknown>;
+      updateTime: string;
+    };
+  }>
+>;
 
 export const READ_RETRY_ATTEMPTS: number;
 export const READ_RETRY_DELAY_MS: number;

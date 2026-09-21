@@ -236,13 +236,17 @@ const runInviteProjection = async ({
           });
         }
       },
-      async getProjection(profileId) {
-        const data = projections[profileId];
-        if (data === null || data === undefined) {
-          return null;
-        }
-        currentUpdateTimes[profileId] ||= "revision-1";
-        return { data, updateTime: currentUpdateTimes[profileId] };
+      async getProjections(profileIds) {
+        return new Map(
+          profileIds.flatMap((profileId) => {
+            const data = projections[profileId];
+            if (data === null || data === undefined) return [];
+            currentUpdateTimes[profileId] ||= "revision-1";
+            return [
+              [profileId, { data, updateTime: currentUpdateTimes[profileId] }],
+            ];
+          }),
+        );
       },
       async readInviteMetadata(readInviteId) {
         assert.equal(readInviteId, inviteId);
@@ -419,7 +423,7 @@ test("invite projection ignores an legacy profile shadow when D1 has no owner", 
     repository: {
       hasCompletedRatingUpdate: async () => false,
       commitProjectionWrites: async () => undefined,
-      getProjection: async () => null,
+      getProjections: async () => new Map(),
       async readInviteMetadata(readInviteId) {
         assert.equal(readInviteId, inviteId);
         return { hostId: "host-login" };
@@ -462,7 +466,7 @@ test("invite projection retries D1 ownership failures without writing", async ()
         ownerReads += 1;
         throw new Error("d1-owner-unavailable");
       },
-      getProjection: async () => null,
+      getProjections: async () => new Map(),
       async readInviteMetadata(readInviteId) {
         assert.equal(readInviteId, inviteId);
         return { hostId: "host-login" };
@@ -938,47 +942,86 @@ test("profile-link catchup starts its budget after initial reads", async () => {
   );
 });
 
-test("projection cleanup reads settle together and fail before returning data", async () => {
-  let siblingSettled = false;
-  await assert.rejects(
-    readExistingProjectionDocuments({
-      inviteId: "invite-1",
-      profileIds: ["source", "target"],
-      readDocument: async (profileId) => {
-        if (profileId === "source") {
-          throw new Error("source-read-failed");
-        }
-        await new Promise((resolve) => setTimeout(resolve, 10));
-        siblingSettled = true;
-        return { exists: true };
+test("projection cleanup rejects a failed bulk read without writing", async () => {
+  const reads = [];
+  const waits = [];
+  const writes = [];
+  const failures = [];
+  const core = createProfileGamesProjectionCore({
+    logger: { error: (...args) => failures.push(args) },
+    repository: {
+      commitProjectionWrites: async (nextWrites) => writes.push(...nextWrites),
+      getProjections: async (profileIds, inviteId) => {
+        reads.push({ profileIds, inviteId });
+        throw new Error("projection-read-failed");
       },
-      reason: "test",
-      logger: { error: () => undefined },
+      readInviteMetadata: async () => ({ hostId: "host-login" }),
+      readAutomatchEntry: async () => null,
+      hasCompletedRatingUpdate: async () => false,
+      readProfileOwnershipSnapshot: async () =>
+        projectionOwnership([["host-login", "target"]]),
+    },
+    wait: async (milliseconds) => waits.push(milliseconds),
+  });
+  await assert.rejects(
+    core.recomputeInviteProjection("invite-1", "test", {
+      cleanupProfileIds: ["source"],
+      eventTimestampMs: 100,
     }),
-    /source-read-failed/,
+    /projection-read-failed/,
   );
-  assert.equal(siblingSettled, true);
+  assert.deepEqual(reads, [
+    { profileIds: ["source", "target"], inviteId: "invite-1" },
+    { profileIds: ["source", "target"], inviteId: "invite-1" },
+  ]);
+  assert.deepEqual(waits, [25]);
+  assert.deepEqual(writes, []);
+  assert.equal(failures.length, 1);
 });
 
-test("projection cleanup retries transient reads before returning", async () => {
-  let sourceReads = 0;
+test("projection cleanup retries the bulk lookup and preserves cleanup order", async () => {
+  const reads = [];
+  const waits = [];
   const documents = await readExistingProjectionDocuments({
     inviteId: "invite-1",
-    profileIds: ["source", "target"],
-    readDocument: async (profileId) => {
-      if (profileId === "source" && sourceReads++ === 0) {
-        throw new Error("transient-read");
-      }
-      return { exists: true, ref: profileId };
+    profileIds: ["source", "missing", "target", "source"],
+    readDocuments: async (profileIds) => {
+      reads.push(profileIds);
+      if (reads.length === 1) throw new Error("transient-read");
+      return new Map([
+        ["target", { data: { owner: "target" }, updateTime: "12" }],
+        ["source", { data: { owner: "source" }, updateTime: "7" }],
+      ]);
     },
     reason: "test",
-    wait: async () => undefined,
+    wait: async (milliseconds) => waits.push(milliseconds),
   });
-  assert.equal(sourceReads, 2);
+  assert.deepEqual(reads, [
+    ["source", "missing", "target"],
+    ["source", "missing", "target"],
+  ]);
+  assert.deepEqual(waits, [25]);
   assert.deepEqual(
-    documents.map(({ profileId }) => profileId),
-    ["source", "target"],
+    documents.map(({ profileId, snapshot }) => ({
+      profileId,
+      data: snapshot.data(),
+      updateTime: snapshot.updateTime,
+    })),
+    [
+      { profileId: "source", data: { owner: "source" }, updateTime: "7" },
+      { profileId: "target", data: { owner: "target" }, updateTime: "12" },
+    ],
   );
+});
+
+test("projection cleanup skips empty bulk reads", async () => {
+  const documents = await readExistingProjectionDocuments({
+    inviteId: "invite-1",
+    profileIds: [],
+    readDocuments: async () => assert.fail("unexpected-projection-read"),
+    reason: "test",
+  });
+  assert.deepEqual(documents, []);
 });
 
 test("profile-link catchup uses the freshest matching source projection", async () => {

@@ -242,10 +242,10 @@ describe("canonical auth profile reads", () => {
     const profile = await createProfile({ sol: validMethodValues.sol });
     for (const changes of [
       { profile_id: null, payload_json: null },
-      { auth_owner_login_uid: "another-login" },
-      { auth_owner_profile_id: "another-profile" },
+      { canonical_owner_login_uid: "another-login" },
+      { canonical_owner_profile_id: "another-profile" },
       { state: "retiring", merged_into_profile_id: "target" },
-      { auth_merge_source_profile_id: "source" },
+      { canonical_merge_source_profile_id: "source" },
     ]) {
       const observed = observeDatabase({
         mapRow: (row) => ({ ...row, ...changes }),
@@ -316,10 +316,13 @@ describe("canonical auth profile reads", () => {
 
   it.each([
     ["dangling owner", { profile_id: null, payload_json: null }],
-    ["owner login mismatch", { auth_owner_login_uid: "another-login" }],
-    ["owner profile mismatch", { auth_owner_profile_id: "another-profile" }],
-    ["owner revision", { auth_owner_revision: 0 }],
-    ["owner timestamp", { auth_owner_created_at_ms: -1 }],
+    ["owner login mismatch", { canonical_owner_login_uid: "another-login" }],
+    [
+      "owner profile mismatch",
+      { canonical_owner_profile_id: "another-profile" },
+    ],
+    ["owner revision", { canonical_owner_revision: 0 }],
+    ["owner timestamp", { canonical_owner_created_at_ms: -1 }],
     ["profile revision", { revision: 0 }],
     ["profile payload", { payload_json: "{}" }],
     ["legacy fields", { legacy_fields_json: "[]" }],
@@ -327,7 +330,7 @@ describe("canonical auth profile reads", () => {
       "retiring profile",
       { state: "retiring", merged_into_profile_id: "target" },
     ],
-    ["active merge mapping", { auth_merge_source_profile_id: "source" }],
+    ["active merge mapping", { canonical_merge_source_profile_id: "source" }],
     ["method name", { auth_method_method: "unsupported" }],
     ["method owner mismatch", { auth_method_profile_id: "another-profile" }],
     ["partial method row", { auth_method_method: null }],

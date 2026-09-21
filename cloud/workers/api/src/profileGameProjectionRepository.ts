@@ -30,7 +30,7 @@ import {
 } from "./profileCanonicalD1.ts";
 import {
   commitProfileGameProjectionWrites,
-  getProfileGameProjection,
+  getInviteProfileGameProjections,
   reserveEventProfileGameProjectionFence,
   type ProjectionWrite as D1ProjectionWrite,
 } from "./profileGamesD1.ts";
@@ -205,8 +205,8 @@ export function createProfileGameProjectionRuntime(
       );
     },
 
-    async getProjection(profileId, inviteId) {
-      return getProfileGameProjection(d1, profileId, inviteId);
+    async getProjections(profileIds, inviteId) {
+      return getInviteProfileGameProjections(d1, inviteId, profileIds);
     },
 
     readAutomatchEntry: (inviteId) => state.readAutomatchEntry(inviteId),

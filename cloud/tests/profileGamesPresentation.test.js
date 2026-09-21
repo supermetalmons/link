@@ -30,7 +30,12 @@ function fixture({ getMatchEmoji, guestProfile = null }) {
           });
         }
       },
-      getProjection: async (profileId) => projections.get(profileId) || null,
+      getProjections: async (profileIds) =>
+        new Map(
+          profileIds
+            .filter((profileId) => projections.has(profileId))
+            .map((profileId) => [profileId, projections.get(profileId)]),
+        ),
       async readInviteMetadata(readInviteId) {
         assert.equal(readInviteId, inviteId);
         return {

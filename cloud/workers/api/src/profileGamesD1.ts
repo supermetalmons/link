@@ -426,6 +426,43 @@ export async function getProfileGameProjections(
   );
 }
 
+export async function getInviteProfileGameProjections(
+  db: D1Database,
+  inviteId: string,
+  profileIds: readonly string[],
+): Promise<Map<string, { data: Record<string, unknown>; updateTime: string }>> {
+  const uniqueProfileIds = [...new Set(profileIds)];
+  const projections = new Map<
+    string,
+    { data: Record<string, unknown>; updateTime: string }
+  >();
+  for (let offset = 0; offset < uniqueProfileIds.length; offset += 100) {
+    const result = await db
+      .prepare(
+        `SELECT profile_id, payload_json, version
+         FROM profile_game_projections
+         WHERE projection_id = ?
+           AND profile_id IN (SELECT value FROM json_each(?))`,
+      )
+      .bind(
+        inviteId,
+        JSON.stringify(uniqueProfileIds.slice(offset, offset + 100)),
+      )
+      .all<{
+        profile_id: string;
+        payload_json: string;
+        version: number;
+      }>();
+    for (const row of result.results) {
+      projections.set(row.profile_id, {
+        data: parseProjectionPayload(row.payload_json),
+        updateTime: String(row.version),
+      });
+    }
+  }
+  return projections;
+}
+
 export async function listProfileGameProjectionPage(
   db: D1Database,
   profileId: string,

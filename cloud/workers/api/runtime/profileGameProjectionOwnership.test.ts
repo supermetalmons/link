@@ -316,7 +316,36 @@ describe("D1-authoritative profile game projection ownership", () => {
     const profileId = "d1-owner-profile";
     await insertMergedProfileOwner("d1-owner-source", profileId, loginUid);
     const reads: string[] = [];
+    const projectionReads: unknown[][] = [];
+    const d1 = new Proxy(testEnv.PROFILE_GAMES_DB, {
+      get(target, property) {
+        if (property === "prepare") {
+          return (query: string) => {
+            const statement = target.prepare(query);
+            if (
+              !/^\s*SELECT\b/.test(query) ||
+              !query.includes("FROM profile_game_projections")
+            )
+              return statement;
+            return new Proxy(statement, {
+              get(prepared, operation) {
+                if (operation === "bind") {
+                  return (...values: unknown[]) => {
+                    projectionReads.push(values);
+                    return prepared.bind(...values);
+                  };
+                }
+                throw new Error("unexpected-projection-read-operation");
+              },
+            });
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
     const runtime = createProfileGameProjectionRuntime(testEnv, {
+      d1,
       logger: { error() {} },
       state: {
         async readInviteMetadata(candidateInviteId) {
@@ -339,9 +368,13 @@ describe("D1-authoritative profile game projection ownership", () => {
     });
 
     const result = await runtime.recomputeInviteProjection(inviteId, "test", {
+      cleanupProfileIds: ["d1-owner-source"],
       eventTimestampMs: 100,
     });
 
+    expect(projectionReads).toEqual([
+      [inviteId, JSON.stringify(["d1-owner-source", profileId])],
+    ]);
     expect(result.ownerProfileIds).toEqual([profileId]);
     expect(reads.some((path) => /^players\/.+\/profile$/.test(path))).toBe(
       false,
