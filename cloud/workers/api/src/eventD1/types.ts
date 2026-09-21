@@ -138,6 +138,22 @@ export type StoredEventSnapshot = EventSnapshot & {
   pendingTransitionId: string | null;
 };
 
+export type ProgressOutboxSnapshot = {
+  outboxId: string;
+  recordJson: string | null;
+};
+
+export type TelegramProjectionState = {
+  generation: number;
+  revision: number;
+  state: EventJsonRecord;
+};
+
+export type TelegramProjectionSnapshot = {
+  eventId: string;
+  current: TelegramProjectionState | null;
+};
+
 export type EventMutationOptions = {
   admission: EventWriteAdmission;
   allowStoredProfilePrizeAssignment?: boolean;
@@ -154,12 +170,18 @@ export type EventMutationOptions = {
   expectedTelegramStateRevisions?: Readonly<Record<string, number>>;
   now?: () => number;
   profilePrizeSnapshot?: ProfilePrizeAssignmentSnapshot;
+  progressOutboxSnapshot?: ProgressOutboxSnapshot;
+  telegramProjectionSnapshot?: TelegramProjectionSnapshot;
   transition?: { eventId: string; transitionId: string };
 };
 
 export type PublicEventMutationOptions = Omit<
   EventMutationOptions,
-  "allowStoredProfilePrizeAssignment" | "eventSnapshot" | "profilePrizeSnapshot"
+  | "allowStoredProfilePrizeAssignment"
+  | "eventSnapshot"
+  | "profilePrizeSnapshot"
+  | "progressOutboxSnapshot"
+  | "telegramProjectionSnapshot"
 >;
 
 export type EventMutationResult = {

@@ -6,6 +6,7 @@ import {
   EventD1Conflict,
   EventWritesDisabled,
   type EventMutationState,
+  type ProgressOutboxSnapshot,
 } from "./types.ts";
 import { exactKey, encodeJson } from "./validation.ts";
 import { classifyD1Failure } from "../d1Failure.ts";
@@ -236,6 +237,27 @@ export function recordJsonGuard(
          )`,
         [...keyValues, encodeJson(expected)],
       );
+}
+
+export function progressOutboxSnapshotGuard(
+  db: EventD1Connection,
+  snapshot: ProgressOutboxSnapshot,
+): D1PreparedStatement {
+  return guardStatement(
+    db,
+    snapshot.recordJson === null
+      ? `EXISTS (
+           SELECT 1 FROM event_progress_outboxes
+           WHERE outbox_id = ? AND status = 'pending'
+         )`
+      : `NOT EXISTS (
+           SELECT 1 FROM event_progress_outboxes
+           WHERE outbox_id = ? AND status = 'pending' AND record_json = ?
+         )`,
+    snapshot.recordJson === null
+      ? [snapshot.outboxId]
+      : [snapshot.outboxId, snapshot.recordJson],
+  );
 }
 
 export function telegramStateRevisionGuard(

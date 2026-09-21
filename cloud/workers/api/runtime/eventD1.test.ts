@@ -1,4 +1,5 @@
 import { commitEventMutations } from "../src/eventD1.ts";
+import { commitEventMutationsInternal } from "../src/eventD1/commit.ts";
 import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
 import { buildEventProgressPlan } from "../src/eventProgressCodec.ts";
 import type { EventMutation } from "../../../runtime/eventCommands.js";
@@ -1391,6 +1392,426 @@ describe("event D1 store", () => {
         ...(suffix ? { "profile-two": "1111" } : {}),
       });
     }
+  });
+
+  describe("outbox transaction snapshots", () => {
+    type SnapshotKind = "progress" | "state" | "generation";
+
+    async function seed(kind: SnapshotKind, present = true) {
+      const plan = await buildEventProgressPlan(
+        {
+          eventId,
+          sourceKey: "transaction-snapshot:test",
+          reason: "sunday-mons-reminder",
+          runAtMs: 1_000,
+        },
+        100,
+      );
+      const path =
+        kind === "progress"
+          ? `eventProgressOutbox/${plan.outboxId}`
+          : `${kind === "state" ? "eventTelegramProjections" : "eventTelegramProjectionGenerations"}/${eventId}`;
+      await patchEventOwnedPaths(testEnv.EVENT_DB, {
+        [`events/${eventId}`]: eventRecord(),
+        ...(present
+          ? kind === "progress"
+            ? { [path]: plan.outbox }
+            : {
+                [`eventTelegramProjections/${eventId}`]: { retained: true },
+                [`eventTelegramProjectionGenerations/${eventId}`]: 3,
+              }
+          : {}),
+      });
+      return { ...plan, path };
+    }
+
+    function observe(
+      kind: SnapshotKind,
+      beforeBatch?: (attempt: number) => Promise<void>,
+    ) {
+      const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
+        beforeBatch,
+      });
+      let reads = 0;
+      const table =
+        kind === "progress"
+          ? "event_progress_outboxes"
+          : "event_telegram_projection_state";
+      const db: EventD1Connection = {
+        prepare(query) {
+          if (/^\s*SELECT\b/i.test(query) && query.includes(`FROM ${table}`))
+            reads += 1;
+          return observed.database.prepare(query);
+        },
+        batch: (statements) => observed.database.batch(statements),
+      };
+      return {
+        ...observed,
+        db,
+        get reads() {
+          return reads;
+        },
+      };
+    }
+
+    it.each([
+      ["progress", "missing"],
+      ["progress", "existing"],
+      ["progress", "delete"],
+      ["state", "missing"],
+      ["state", "existing"],
+      ["state", "delete"],
+      ["generation", "missing"],
+      ["generation", "existing"],
+    ] as const)(
+      "uses one read and one batch for a %s transaction with a %s row",
+      async (kind, mode) => {
+        const { path, outbox } = await seed(kind, mode !== "missing");
+        const observed = observe(kind);
+        const next =
+          mode === "delete"
+            ? null
+            : kind === "progress"
+              ? { ...outbox, lastQueuedAtMs: 200 }
+              : kind === "state"
+                ? { updated: true }
+                : 4;
+        await expect(
+          transactEventOwnedPath(observed.db, path, () => ({ value: next })),
+        ).resolves.toMatchObject({ committed: true, value: next });
+        expect(observed.reads).toBe(1);
+        expect(observed.batches).toHaveLength(1);
+        if (kind === "progress") {
+          expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(
+            next,
+          );
+        } else {
+          expect(
+            await readEventTelegramProjectionState(testEnv.EVENT_DB, eventId),
+          ).toEqual(
+            mode === "delete"
+              ? null
+              : {
+                  generation:
+                    kind === "generation" ? 4 : mode === "missing" ? 0 : 3,
+                  revision: mode === "missing" ? 1 : 2,
+                  state:
+                    kind === "state"
+                      ? next
+                      : mode === "missing"
+                        ? {}
+                        : { retained: true },
+                },
+          );
+        }
+      },
+    );
+
+    it.each(["state", "generation"] as const)(
+      "refreshes the complete Telegram snapshot after a concurrent %s transaction write",
+      async (kind) => {
+        const { path } = await seed(kind);
+        const observed = observe(kind, async (attempt) => {
+          if (attempt !== 1) return;
+          await patchEventOwnedPaths(testEnv.EVENT_DB, {
+            [`eventTelegramProjections/${eventId}`]: { concurrent: true },
+            [`eventTelegramProjectionGenerations/${eventId}`]: 8,
+          });
+        });
+        const inputs: unknown[] = [];
+        await transactEventOwnedPath(observed.db, path, (current) => {
+          inputs.push(structuredClone(current));
+          if (kind === "generation") return { value: Number(current) + 1 };
+          const value = current as Record<string, unknown>;
+          value.updated = true;
+          return { value };
+        });
+        expect(inputs).toEqual(
+          kind === "state"
+            ? [{ retained: true }, { concurrent: true }]
+            : [3, 8],
+        );
+        expect(observed.reads).toBe(2);
+        expect(observed.batches).toHaveLength(2);
+        expect(
+          await readEventTelegramProjectionState(testEnv.EVENT_DB, eventId),
+        ).toEqual({
+          generation: kind === "state" ? 8 : 9,
+          revision: 3,
+          state:
+            kind === "state"
+              ? { concurrent: true, updated: true }
+              : { concurrent: true },
+        });
+      },
+    );
+
+    it.each([
+      ["progress", "insert"],
+      ["progress", "delete"],
+      ["state", "insert"],
+      ["state", "delete"],
+      ["generation", "insert"],
+      ["generation", "delete"],
+    ] as const)(
+      "refreshes a %s transaction after a concurrent %s",
+      async (kind, race) => {
+        const { path, outboxId, outbox } = await seed(kind, race === "delete");
+        const inserted = {
+          ...outbox,
+          firstQueuedAtMs: 50,
+          lastQueuedAtMs: 200,
+        };
+        const observed = observe(kind, async (attempt) => {
+          if (attempt !== 1) return;
+          if (race === "insert") {
+            await patchEventOwnedPaths(
+              testEnv.EVENT_DB,
+              kind === "progress"
+                ? { [path]: inserted }
+                : {
+                    [`eventTelegramProjections/${eventId}`]: {
+                      concurrent: true,
+                    },
+                    [`eventTelegramProjectionGenerations/${eventId}`]: 8,
+                  },
+            );
+          } else {
+            await testEnv.EVENT_DB.prepare(
+              kind === "progress"
+                ? "DELETE FROM event_progress_outboxes WHERE outbox_id = ? AND status = 'pending'"
+                : "DELETE FROM event_telegram_projection_state WHERE event_id = ?",
+            )
+              .bind(kind === "progress" ? outboxId : eventId)
+              .run();
+          }
+        });
+        const inputs: unknown[] = [];
+        await transactEventOwnedPath(observed.db, path, (current) => {
+          inputs.push(structuredClone(current));
+          return {
+            value:
+              kind === "generation"
+                ? Number(current) + 1
+                : kind === "state"
+                  ? {
+                      ...(current as Record<string, unknown> | null),
+                      updated: true,
+                    }
+                  : { ...outbox, firstQueuedAtMs: 400, lastQueuedAtMs: 300 },
+          };
+        });
+        expect(observed.reads).toBe(2);
+        expect(observed.batches).toHaveLength(2);
+        if (kind === "progress") {
+          expect(inputs).toEqual(
+            race === "insert" ? [null, inserted] : [outbox, null],
+          );
+          expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual({
+            ...outbox,
+            firstQueuedAtMs: race === "insert" ? 50 : 400,
+            lastQueuedAtMs: 300,
+          });
+          expect(
+            await readEventOwnedPath(
+              testEnv.EVENT_DB,
+              `eventProgressOutboxDead/${outboxId}`,
+            ),
+          ).toBeNull();
+        } else {
+          expect(inputs).toEqual(
+            kind === "generation"
+              ? race === "insert"
+                ? [0, 8]
+                : [3, 0]
+              : race === "insert"
+                ? [null, { concurrent: true }]
+                : [{ retained: true }, null],
+          );
+          expect(
+            await readEventTelegramProjectionState(testEnv.EVENT_DB, eventId),
+          ).toEqual({
+            generation:
+              (race === "insert" ? 8 : 0) + (kind === "generation" ? 1 : 0),
+            revision: race === "insert" ? 2 : 1,
+            state: {
+              ...(race === "insert" ? { concurrent: true } : {}),
+              ...(kind === "state" ? { updated: true } : {}),
+            },
+          });
+        }
+      },
+    );
+
+    it("retries progress transactions with the latest raw snapshot and quarantines only the replaced record", async () => {
+      const { path, outboxId, outbox } = await seed("progress");
+      const raced = { ...outbox, schemaVersion: 2, concurrent: true };
+      const observed = observe("progress", async (attempt) => {
+        if (attempt !== 1) return;
+        await testEnv.EVENT_DB.prepare(
+          "UPDATE event_progress_outboxes SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
+        )
+          .bind(JSON.stringify(raced, null, 2), outboxId)
+          .run();
+      });
+      const inputs: unknown[] = [];
+      await transactEventOwnedPath(observed.db, path, (current) => {
+        inputs.push(structuredClone(current));
+        return { value: { ...outbox, lastQueuedAtMs: 200 } };
+      });
+      expect(inputs).toEqual([outbox, raced]);
+      expect(observed.reads).toBe(2);
+      expect(observed.batches).toHaveLength(2);
+      expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual({
+        ...outbox,
+        lastQueuedAtMs: 200,
+      });
+      expect(
+        await readEventOwnedPath(
+          testEnv.EVENT_DB,
+          `eventProgressOutboxDead/${outboxId}`,
+        ),
+      ).toMatchObject({
+        reason: "invalid-event-progress-outbox",
+        originalRecord: raced,
+      });
+    });
+
+    it("keeps raw progress JSON and the earliest timestamp independent of in-place updater mutations", async () => {
+      const { path, outboxId, outbox } = await seed("progress");
+      const storedJson = JSON.stringify(outbox, null, 2).replace(
+        '"firstQueuedAtMs": 100',
+        '"firstQueuedAtMs": 1e2',
+      );
+      await testEnv.EVENT_DB.prepare(
+        "UPDATE event_progress_outboxes SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
+      )
+        .bind(storedJson, outboxId)
+        .run();
+      const observed = observe("progress");
+      await transactEventOwnedPath(observed.db, path, (current) => {
+        const value = current as Record<string, unknown>;
+        value.firstQueuedAtMs = 200;
+        value.lastQueuedAtMs = 300;
+        return { value };
+      });
+      expect(observed.reads).toBe(1);
+      expect(observed.batches).toHaveLength(1);
+      expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual({
+        ...outbox,
+        lastQueuedAtMs: 300,
+      });
+      expect(
+        await readEventOwnedPath(
+          testEnv.EVENT_DB,
+          `eventProgressOutboxDead/${outboxId}`,
+        ),
+      ).toBeNull();
+    });
+
+    it("distinguishes raw JSON null from an absent progress snapshot", async () => {
+      const { outboxId, path } = await seed("progress", false);
+      const observed = observe("progress");
+      await withD1Admission(async (admission) => {
+        const commit = (recordJson: string | null) =>
+          commitEventMutationsInternal(
+            observed.db,
+            [{ kind: "progress-outbox", outboxId, value: null }],
+            { admission, progressOutboxSnapshot: { outboxId, recordJson } },
+          );
+        await expect(commit("null")).rejects.toBeInstanceOf(EventD1Conflict);
+        await expect(commit(null)).resolves.toEqual({
+          eventRevisions: {},
+          profilePrizeRevisions: {},
+        });
+      });
+      expect(observed.reads).toBe(0);
+      expect(observed.batches).toHaveLength(2);
+      expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toBeNull();
+    });
+
+    it.each(["progress", "state", "generation"] as const)(
+      "does not write a declined or aborted %s transaction",
+      async (kind) => {
+        const { path } = await seed(kind);
+        const before = await readEventOwnedPath(testEnv.EVENT_DB, path);
+        const observed = observe(kind);
+        await expect(
+          transactEventOwnedPath(observed.db, path, (current) => {
+            if (typeof current === "object" && current !== null)
+              (current as Record<string, unknown>).discarded = true;
+            return { commit: false };
+          }),
+        ).resolves.toMatchObject({ committed: false });
+        const controller = new AbortController();
+        await expect(
+          transactEventOwnedPath(
+            observed.db,
+            path,
+            (current) => {
+              controller.abort();
+              return { value: current };
+            },
+            { signal: controller.signal },
+          ),
+        ).rejects.toMatchObject({ name: "AbortError" });
+        expect(observed.reads).toBe(2);
+        expect(observed.batches).toHaveLength(0);
+        expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(
+          before,
+        );
+      },
+    );
+
+    it.each(["progress", "state", "generation"] as const)(
+      "bounds exhausted %s snapshot conflicts without applying the transaction",
+      async (kind) => {
+        const { path, outboxId, outbox } = await seed(kind);
+        const observed = observe(kind, async (attempt) => {
+          if (kind === "progress") {
+            await testEnv.EVENT_DB.prepare(
+              "UPDATE event_progress_outboxes SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
+            )
+              .bind(JSON.stringify({ ...outbox, attempt }), outboxId)
+              .run();
+          } else {
+            await patchEventOwnedPaths(testEnv.EVENT_DB, {
+              [`eventTelegramProjectionGenerations/${eventId}`]: attempt + 3,
+            });
+          }
+        });
+        await expect(
+          transactEventOwnedPath(observed.db, path, (current) => ({
+            value:
+              kind === "generation"
+                ? 100
+                : { ...(current as Record<string, unknown>), discarded: true },
+          })),
+        ).rejects.toBeInstanceOf(EventD1Conflict);
+        expect(observed.reads).toBe(12);
+        expect(observed.batches).toHaveLength(12);
+        if (kind === "progress") {
+          expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual({
+            ...outbox,
+            attempt: 12,
+          });
+          expect(
+            await readEventOwnedPath(
+              testEnv.EVENT_DB,
+              `eventProgressOutboxDead/${outboxId}`,
+            ),
+          ).toBeNull();
+        } else {
+          expect(
+            await readEventTelegramProjectionState(testEnv.EVENT_DB, eventId),
+          ).toEqual({
+            generation: 15,
+            revision: 13,
+            state: { retained: true },
+          });
+        }
+      },
+    );
   });
 
   it.each(["events", "eventPrizeSelections"])(

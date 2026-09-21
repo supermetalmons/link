@@ -10,6 +10,8 @@ import {
   type EventLeaseRecord,
   type EventSyncThrottleRecord,
   type EventOutboxRecord,
+  type ProgressOutboxSnapshot,
+  type TelegramProjectionState,
 } from "./types.ts";
 import {
   exactKey,
@@ -452,14 +454,28 @@ export async function readEventProgressOutbox(
   db: EventD1Connection,
   outboxId: string,
 ): Promise<EventOutboxRecord | null> {
+  const snapshot = await readEventProgressOutboxSnapshot(db, outboxId);
+  return snapshot.recordJson === null
+    ? null
+    : (decodeJson(snapshot.recordJson) as EventOutboxRecord);
+}
+
+export async function readEventProgressOutboxSnapshot(
+  db: EventD1Connection,
+  outboxId: string,
+): Promise<ProgressOutboxSnapshot> {
+  const normalizedOutboxId = exactKey(outboxId);
   const row = await db
     .prepare(
       `SELECT record_json FROM event_progress_outboxes
        WHERE outbox_id = ? AND status = 'pending'`,
     )
-    .bind(exactKey(outboxId))
+    .bind(normalizedOutboxId)
     .first<{ record_json: string }>();
-  return row ? (decodeJson(row.record_json) as EventOutboxRecord) : null;
+  return {
+    outboxId: normalizedOutboxId,
+    recordJson: row ? row.record_json : null,
+  };
 }
 
 export async function listDueEventProgressOutboxes(
@@ -574,11 +590,7 @@ async function listProjectionOutboxes(
 export async function readEventTelegramProjectionState(
   db: EventD1Connection,
   eventId: string,
-): Promise<{
-  generation: number;
-  revision: number;
-  state: EventJsonRecord;
-} | null> {
+): Promise<TelegramProjectionState | null> {
   const row = await db
     .prepare(
       `SELECT generation, revision, state_json

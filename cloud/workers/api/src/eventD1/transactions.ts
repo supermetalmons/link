@@ -18,7 +18,7 @@ import { commitEventMutationsInternal } from "./commit.ts";
 import {
   readStoredEventSnapshotIfChanged,
   readProfilePrizeAssignmentSnapshot,
-  readEventProgressOutbox,
+  readEventProgressOutboxSnapshot,
   readEventProgressDeadOutbox,
   readEventProfileGameProjectionOutbox,
   readEventTelegramProjectionOutbox,
@@ -28,7 +28,7 @@ import type {
   EventPrizeAssignmentRecord,
   EventJsonRecord,
 } from "../../../../runtime/eventReads.js";
-import { cloneJson } from "./validation.ts";
+import { cloneJson, decodeJson } from "./validation.ts";
 
 async function transactEventValue<T>(
   db: EventD1Connection,
@@ -199,7 +199,11 @@ export function transactEventProgressOutbox(
     db,
     updater,
     async () => {
-      const value = await readEventProgressOutbox(db, outboxId);
+      const snapshot = await readEventProgressOutboxSnapshot(db, outboxId);
+      const value =
+        snapshot.recordJson === null
+          ? null
+          : (decodeJson(snapshot.recordJson) as EventOutboxRecord);
       return {
         value,
         mutation: (value: EventOutboxRecord | null): EventMutation => ({
@@ -207,7 +211,7 @@ export function transactEventProgressOutbox(
           outboxId,
           value,
         }),
-        options: { expectedRecords: { progress: { [outboxId]: value } } },
+        options: { progressOutboxSnapshot: snapshot },
       };
     },
     options,
@@ -309,13 +313,14 @@ export function transactEventTelegramProjectionState(
     async () => {
       const current = await readEventTelegramProjectionState(db, eventId);
       return {
-        value: current?.state || null,
+        value: cloneJson(current?.state || null),
         mutation: (value: EventOutboxRecord | null): EventMutation => ({
           kind: "telegram-state",
           eventId,
           value,
         }),
         options: {
+          telegramProjectionSnapshot: { eventId, current },
           expectedTelegramStateRevisions: { [eventId]: current?.revision || 0 },
         },
       };
@@ -448,6 +453,7 @@ export function transactEventTelegramProjectionGeneration(
           value: value!,
         }),
         options: {
+          telegramProjectionSnapshot: { eventId, current },
           expectedTelegramStateRevisions: { [eventId]: current?.revision || 0 },
         },
       };

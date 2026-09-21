@@ -30,6 +30,7 @@ import {
   readSelections,
   readProfileEventPrizes,
   readEventProgressOutbox,
+  readEventProgressOutboxSnapshot,
   readEventProfileGameProjectionOutbox,
   readEventTelegramProjectionState,
 } from "./reads.ts";
@@ -41,6 +42,7 @@ import {
   guardStatement,
   profileRevisionGuard,
   recordJsonGuard,
+  progressOutboxSnapshotGuard,
   telegramStateRevisionGuard,
   rethrowEventBatchFailure,
 } from "./guards.ts";
@@ -155,6 +157,23 @@ export async function commitEventMutationsInternal(
   const nowMs = safeInteger(now());
   const eventStates = new Map<string, EventMutationState>();
   const profileStates = new Map<string, ProfilePrizeMutationState>();
+  const progressOutboxSnapshot = options.progressOutboxSnapshot;
+  if (
+    progressOutboxSnapshot &&
+    (changes.length !== 1 ||
+      changes[0].kind !== "progress-outbox" ||
+      changes[0].outboxId !== progressOutboxSnapshot.outboxId)
+  )
+    throw new EventD1Failure("invalid-progress-outbox-snapshot-scope");
+  const telegramProjectionSnapshot = options.telegramProjectionSnapshot;
+  if (
+    telegramProjectionSnapshot &&
+    (changes.length !== 1 ||
+      (changes[0].kind !== "telegram-state" &&
+        changes[0].kind !== "telegram-generation") ||
+      changes[0].eventId !== telegramProjectionSnapshot.eventId)
+  )
+    throw new EventD1Failure("invalid-telegram-projection-snapshot-scope");
   const eventSnapshot = options.eventSnapshot;
   if (eventSnapshot) {
     if (
@@ -544,6 +563,9 @@ export async function commitEventMutationsInternal(
       );
     }
     if (raw === null) {
+      if (progressOutboxSnapshot) {
+        guards.push(progressOutboxSnapshotGuard(db, progressOutboxSnapshot));
+      }
       mutations.push(
         db
           .prepare(
@@ -555,32 +577,18 @@ export async function commitEventMutationsInternal(
       continue;
     }
     let record = validateEventProgressOutbox(outboxId, raw);
-    const stored = await db
-      .prepare(
-        `SELECT record_json FROM event_progress_outboxes
-         WHERE outbox_id = ? AND status = 'pending'`,
-      )
-      .bind(outboxId)
-      .first<{ record_json: string }>();
-    guards.push(
-      guardStatement(
-        db,
-        stored
-          ? `NOT EXISTS (
-               SELECT 1 FROM event_progress_outboxes
-               WHERE outbox_id = ? AND status = 'pending' AND record_json = ?
-             )`
-          : `EXISTS (
-               SELECT 1 FROM event_progress_outboxes
-               WHERE outbox_id = ? AND status = 'pending'
-             )`,
-        stored ? [outboxId, stored.record_json] : [outboxId],
-      ),
-    );
-    const previous = stored
-      ? await parseEventProgressOutbox(outboxId, decodeJson(stored.record_json))
-      : null;
-    if (stored && !previous) {
+    const stored =
+      progressOutboxSnapshot ??
+      (await readEventProgressOutboxSnapshot(db, outboxId));
+    guards.push(progressOutboxSnapshotGuard(db, stored));
+    const previous =
+      stored.recordJson !== null
+        ? await parseEventProgressOutbox(
+            outboxId,
+            decodeJson(stored.recordJson),
+          )
+        : null;
+    if (stored.recordJson !== null && !previous) {
       mutations.push(
         db
           .prepare(
@@ -600,7 +608,7 @@ export async function commitEventMutationsInternal(
                last_queued_at_ms = excluded.last_queued_at_ms,
                record_json = excluded.record_json`,
           )
-          .bind(nowMs, nowMs, outboxId, stored.record_json),
+          .bind(nowMs, nowMs, outboxId, stored.recordJson),
       );
     }
     if (
@@ -784,7 +792,9 @@ export async function commitEventMutationsInternal(
   }
 
   for (const [eventId, update] of telegramStateUpdates) {
-    const current = await readEventTelegramProjectionState(db, eventId);
+    const current = telegramProjectionSnapshot
+      ? telegramProjectionSnapshot.current
+      : await readEventTelegramProjectionState(db, eventId);
     const currentRevision = current?.revision || 0;
     const expectedRevision =
       options.expectedTelegramStateRevisions?.[eventId] ?? currentRevision;
