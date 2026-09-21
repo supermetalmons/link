@@ -5,6 +5,7 @@ import { readResolvedLoginMatchInviteId } from "./loginMatchDiscoveryD1.ts";
 export type MatchSyncTarget = { playerId: string; matchId: string };
 
 type MatchSyncNotificationOptions = InviteRoomNotificationOptions & {
+  coveredInviteIds?: readonly string[];
   resolveInvite?: (target: MatchSyncTarget) => Promise<string | null>;
 };
 
@@ -56,6 +57,7 @@ export async function notifyMatchSyncChanged(
     ).values(),
   ];
   if (!targets.length || !env.INVITE_REACTIONS) return;
+  const coveredInviteIds = new Set(options.coveredInviteIds);
   await boundedNotification(async (signal) => {
     const resolved = await Promise.all(
       targets.map(async (target) => ({
@@ -74,7 +76,12 @@ export async function notifyMatchSyncChanged(
     signal.throwIfAborted();
     const rooms = new Map<string, Set<string>>();
     for (const { target, inviteId } of resolved) {
-      if (!isSafeRecordKey(inviteId) || inviteId !== inviteId.trim()) continue;
+      if (
+        !isSafeRecordKey(inviteId) ||
+        inviteId !== inviteId.trim() ||
+        coveredInviteIds.has(inviteId)
+      )
+        continue;
       const matchIds = rooms.get(inviteId) || new Set<string>();
       matchIds.add(target.matchId);
       rooms.set(inviteId, matchIds);

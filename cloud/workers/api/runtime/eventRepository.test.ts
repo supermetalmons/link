@@ -73,6 +73,63 @@ function notificationEnv(
   };
 }
 
+function methodNotificationEnv(
+  notify: (
+    method: "metadata" | "matches" | "wagers",
+    inviteId: string,
+    matchIds?: string[],
+  ) => Promise<void>,
+): Env {
+  return {
+    ...testEnv,
+    INVITE_REACTIONS: new Proxy(testEnv.INVITE_REACTIONS, {
+      get(target, property) {
+        if (property === "getByName") {
+          return (name: string) =>
+            new Proxy(target.getByName(name), {
+              get(room, method) {
+                if (method === "notifyMetadataChanged")
+                  return (inviteId: string) => notify("metadata", inviteId);
+                if (method === "notifyMatchesChanged")
+                  return (inviteId: string, matchIds?: string[]) =>
+                    notify("matches", inviteId, matchIds);
+                if (method === "notifyWagersChanged")
+                  return (inviteId: string) => notify("wagers", inviteId);
+                const member = Reflect.get(room, method, room);
+                return typeof member === "function"
+                  ? (...args: unknown[]) => Reflect.apply(member, room, args)
+                  : member;
+              },
+            });
+        }
+        const member = Reflect.get(target, property, target);
+        return typeof member === "function" ? member.bind(target) : member;
+      },
+    }),
+  };
+}
+
+function notificationCreationEffects() {
+  return {
+    "invites/event-match": {
+      eventId,
+      eventOwned: true,
+      hostId: "login-one",
+      guestId: "login-two",
+    },
+    "players/login-one/matches/event-match": {
+      fen: "initial",
+      flatMovesString: "",
+      color: "white",
+    },
+    "players/login-two/matches/event-match": {
+      fen: "initial",
+      flatMovesString: "",
+      color: "black",
+    },
+  };
+}
+
 function eventRecord(status = "scheduled", recordEventId = eventId) {
   return {
     schemaVersion: 2,
@@ -1001,6 +1058,163 @@ describe("typed event repository", () => {
         blocked.resolve();
         errors.mockRestore();
       }
+    },
+  );
+
+  it.each(["commit", "recovery"] as const)(
+    "deduplicates overlapping notifications while retaining uncovered matches after %s",
+    async (mode) => {
+      const notify = vi.fn(
+        async (_method: string, _inviteId: string, _matchIds?: string[]) => {},
+      );
+      const scopedEnv = methodNotificationEnv(notify);
+      const f = eventTransitionFixture(scopedEnv);
+      const client = createEventStateRepository(scopedEnv, f.raw, f.raw);
+      await client.commitEventPlan([
+        { kind: "event", eventId, value: eventRecord() },
+      ]);
+      await captureLoginMatchDiscovery(
+        testEnv.PROFILE_GAMES_DB,
+        [
+          { matchId: "event-match1", inviteId: "event-match" },
+          { matchId: "claim-match", inviteId: "claim-invite" },
+          { matchId: "terminal-match", inviteId: "terminal-invite" },
+        ].map((route) => ({ ...route, loginUid: "login-one" })),
+        100,
+      );
+      const claim = (inviteId: string) => ({
+        inviteId,
+        playerId: "login-one",
+        opponentId: "login-two",
+        status: "claimed",
+        claimedAtMs: 200,
+      });
+      const effects = {
+        ...notificationCreationEffects(),
+        "matchTimerClaims/event-match1": claim("event-match"),
+        "players/login-one/matches/event-match1/timer": "gg",
+        "matchTimerClaims/claim-match": claim("claim-invite"),
+        "players/login-one/matches/claim-match/timer": "gg",
+        "players/login-one/matches/terminal-match/timer": "gg",
+      };
+      const canonicalUpdates = { [`events/${eventId}/status`]: "active" };
+      if (mode === "recovery") {
+        await createPendingIntent({
+          schemaVersion: 1,
+          transitionId: "deduplicated-notifications",
+          eventId,
+          expectedRevision: 1,
+          canonicalUpdates,
+          rtdbEffects: effects,
+          createdAtMs: 200,
+          updatedAtMs: 200,
+        });
+        await expect(
+          recoverEventTransitionIntents(scopedEnv, 100, f.raw),
+        ).resolves.toBe(1);
+      } else {
+        await client.commitEventPlan(
+          decodeEventUpdates({ ...canonicalUpdates, ...effects }),
+        );
+      }
+      expect(notify.mock.calls).toEqual([
+        ["metadata", "event-match"],
+        ["matches", "claim-invite", undefined],
+        ["matches", "terminal-invite", ["terminal-match"]],
+      ]);
+      expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toMatchObject({
+        event: { status: "active" },
+        revision: 2,
+      });
+      expect(await listPendingEventTransitionIntents(testEnv.EVENT_DB)).toEqual(
+        [],
+      );
+    },
+  );
+
+  it.each(["blocked", "rejected"] as const)(
+    "dispatches known metadata independently of %s match discovery",
+    async (failure) => {
+      const lookupStarted = deferred();
+      const releaseLookup = deferred();
+      const notify = vi.fn(async (_method: string, _inviteId: string) => {});
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      const scopedEnv = methodNotificationEnv(notify);
+      scopedEnv.PROFILE_GAMES_DB = new Proxy(testEnv.PROFILE_GAMES_DB, {
+        get(target, property) {
+          if (property === "withSession") {
+            return (constraint?: string) => {
+              const session = target.withSession(constraint);
+              return new Proxy(session, {
+                get(reader, method) {
+                  if (method === "prepare") {
+                    return (sql: string) => {
+                      if (
+                        sql ===
+                        "SELECT invite_id, resolution FROM login_match_discovery WHERE login_uid = ? AND match_id = ?"
+                      ) {
+                        return {
+                          bind: () => ({
+                            first: async () => {
+                              lookupStarted.resolve();
+                              if (failure === "blocked")
+                                await releaseLookup.promise;
+                              throw new Error("discovery-unavailable");
+                            },
+                          }),
+                        } as unknown as D1PreparedStatement;
+                      }
+                      return reader.prepare(sql);
+                    };
+                  }
+                  const member = Reflect.get(reader, method, reader);
+                  return typeof member === "function"
+                    ? member.bind(reader)
+                    : member;
+                },
+              });
+            };
+          }
+          const member = Reflect.get(target, property, target);
+          return typeof member === "function" ? member.bind(target) : member;
+        },
+      });
+      const f = eventTransitionFixture(scopedEnv);
+      const scheduled: Promise<void>[] = [];
+      const client = createEventStateRepository(
+        scopedEnv,
+        f.raw,
+        f.raw,
+        undefined,
+        { schedule: (work) => scheduled.push(work) },
+      );
+      try {
+        await client.commitEventPlan([
+          { kind: "event", eventId, value: eventRecord() },
+        ]);
+        await client.commitEventPlan(
+          decodeEventUpdates({
+            [`events/${eventId}/status`]: "active",
+            ...notificationCreationEffects(),
+          }),
+        );
+        await lookupStarted.promise;
+        expect(notify.mock.calls).toEqual([["metadata", "event-match"]]);
+        expect(
+          await readEventSnapshot(testEnv.EVENT_DB, eventId),
+        ).toMatchObject({
+          event: { status: "active" },
+          revision: 2,
+        });
+        expect(
+          await listPendingEventTransitionIntents(testEnv.EVENT_DB),
+        ).toEqual([]);
+      } finally {
+        releaseLookup.resolve();
+        await Promise.all(scheduled);
+        errors.mockRestore();
+      }
+      expect(notify.mock.calls).toEqual([["metadata", "event-match"]]);
     },
   );
 

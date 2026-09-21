@@ -116,6 +116,56 @@ test("missing discovery never guesses numeric invite suffixes and postfinalizati
   assert.deepEqual(notices, [["invite123", undefined]]);
 });
 
+test("covering notifications suppress only exact resolved rooms within the current operation", async () => {
+  const lookups: string[] = [];
+  const notices: unknown[] = [];
+  const env = environment({
+    resolve: async (playerId, matchId) => {
+      lookups.push(`${playerId}/${matchId}`);
+      if (matchId === "missing") return null;
+      return matchId === "invite-one12" ? "invite-one1" : "invite-one";
+    },
+    notify: async (inviteId, matchIds) => {
+      notices.push([inviteId, matchIds]);
+    },
+  });
+  await notifyMatchSyncChanged(
+    env,
+    [
+      { playerId: "host", matchId: "invite-one1" },
+      { playerId: "guest", matchId: "invite-one1" },
+      { playerId: "host", matchId: "invite-one12" },
+      { playerId: "host", matchId: "invite-one12" },
+      { playerId: "guest", matchId: "invite-one12" },
+      { playerId: "host", matchId: "missing" },
+    ],
+    {
+      coveredInviteIds: [
+        "invite-one",
+        "invite-one",
+        " invite-one1 ",
+        "invalid/key",
+      ],
+    },
+  );
+  assert.deepEqual(lookups, [
+    "host/invite-one1",
+    "guest/invite-one1",
+    "host/invite-one12",
+    "guest/invite-one12",
+    "host/missing",
+  ]);
+  assert.deepEqual(notices, [["invite-one1", ["invite-one12"]]]);
+
+  await notifyMatchSyncChanged(env, [
+    { playerId: "host", matchId: "invite-one1" },
+  ]);
+  assert.deepEqual(notices, [
+    ["invite-one1", ["invite-one12"]],
+    ["invite-one", ["invite-one1"]],
+  ]);
+});
+
 test("the notification deadline includes discovery and prevents late RPC dispatch", async () => {
   let resolveLookup: (value: string) => void = () => undefined;
   const lookup = new Promise<string>((resolve) => {

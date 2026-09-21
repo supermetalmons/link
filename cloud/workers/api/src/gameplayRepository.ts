@@ -7,7 +7,6 @@ import {
   createAutomatchPersistence,
   type AutomatchPersistence,
 } from "./automatchPersistence.ts";
-import { notifyMatchSyncInvites } from "./matchSyncNotifications.ts";
 import { prepareCreatedMatchPresentations } from "./matchPresentationRegistry.ts";
 import { measureAutomatchPhase } from "./automatchTelemetry.ts";
 import {
@@ -312,13 +311,10 @@ export function createGameplayRepository(
           await notifyInviteSessionCommitted(env, [inviteId]);
           return;
         }
-        await Promise.all([
-          notifyInviteSourceChanged(env, {
-            metadataInviteIds: [inviteId],
-            wagerInviteIds: [inviteId],
-          }),
-          notifyMatchSyncInvites(env, [inviteId]),
-        ]);
+        await notifyInviteSourceChanged(env, {
+          metadataInviteIds: [inviteId],
+          wagerInviteIds: [inviteId],
+        });
       }),
   });
   return {

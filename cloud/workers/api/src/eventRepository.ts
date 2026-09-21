@@ -1,4 +1,5 @@
 import * as eventD1 from "./eventD1.ts";
+import { normalizeRecordKey } from "@mons/shared/ids";
 import { isEventMutation } from "../../../runtime/eventCommands.js";
 import type { EventCommand } from "../../../runtime/eventCommands.js";
 import type { EventLeaseKey } from "../../../runtime/eventLeases.js";
@@ -408,25 +409,32 @@ async function notifyEventInviteEffects(
 ): Promise<void> {
   if (intent.schemaVersion !== 2) return;
   const effects = decodeEventUpdates(intent[STATE_EFFECTS_FIELD]);
-  await Promise.all([
-    notifyInviteSourceChanged(env, {
-      metadataInviteIds: intent.inviteMutations.map(
-        ({ current }) => current.inviteId,
-      ),
-      wagerInviteIds: intent.inviteMutations.map(
-        ({ current }) => current.inviteId,
-      ),
-    }),
-    notifyMatchSyncInvites(env, [
-      ...intent.inviteMutations.map(({ current }) => current.inviteId),
-      ...effects.flatMap((command) =>
+  const metadataInviteIds = new Set(
+    intent.inviteMutations
+      .map(({ current }) => current.inviteId)
+      .filter((inviteId) => normalizeRecordKey(inviteId) === inviteId),
+  );
+  const matchInviteIds = [
+    ...new Set(
+      effects.flatMap((command) =>
         command.kind === "match-timer-claim" &&
         isRecord(command.value) &&
         typeof command.value.inviteId === "string"
           ? [command.value.inviteId]
           : [],
       ),
-    ]),
+    ),
+  ].filter(
+    (inviteId) =>
+      normalizeRecordKey(inviteId) === inviteId &&
+      !metadataInviteIds.has(inviteId),
+  );
+  await Promise.all([
+    notifyInviteSourceChanged(env, {
+      metadataInviteIds: [...metadataInviteIds],
+      wagerInviteIds: [...metadataInviteIds],
+    }),
+    notifyMatchSyncInvites(env, matchInviteIds),
     notifyMatchSyncChanged(
       env,
       effects.flatMap((command) =>
@@ -435,6 +443,7 @@ async function notifyEventInviteEffects(
           ? [{ playerId: command.playerId, matchId: command.matchId }]
           : [],
       ),
+      { coveredInviteIds: [...metadataInviteIds, ...matchInviteIds] },
     ),
   ]);
 }

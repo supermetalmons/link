@@ -1,11 +1,13 @@
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
+import { createGameSessionMutationLockStore } from "../src/gameplayCoordinationD1.ts";
 import { normalizeInviteMetadata } from "../src/inviteMetadata.ts";
 import type { MatchStatePort } from "../src/repositoryContracts.ts";
 import { composeInviteWagerSource } from "../src/inviteWagerSource.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
+import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
@@ -103,7 +105,7 @@ function afterSourceRead(after: () => Promise<void> | void): D1Database {
 
 describe("gameplay invite metadata reads", () => {
   beforeAll(async () => {
-    await applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS);
+    await applyStrictMatchStateTestMigrations(db, testEnv.TEST_D1_MIGRATIONS);
     await applyRetiredProfileMigrations(
       env.PROFILE_DB,
       testEnv.TEST_PROFILE_D1_MIGRATIONS,
@@ -115,6 +117,8 @@ describe("gameplay invite metadata reads", () => {
     await db.batch([
       db.prepare("DELETE FROM game_session_transition_resources"),
       db.prepare("DELETE FROM game_session_transitions"),
+      db.prepare("DELETE FROM game_session_mutation_locks"),
+      db.prepare("DELETE FROM automatch_entries"),
       db.prepare("DELETE FROM invite_sources"),
       db.prepare("DELETE FROM automatch_runtime_control"),
       db.prepare(
@@ -150,6 +154,58 @@ describe("gameplay invite metadata reads", () => {
 
   it("returns null for a missing invite without accessing wagers", async () => {
     expect(await repository().readInviteMetadata(inviteId)).toBeNull();
+  });
+
+  it.each([
+    ["legacy", "notifyMetadataChanged"],
+    ["bootstrap", "notifySessionCommitted"],
+  ])("notifies a committed %s session once", async (mode, method) => {
+    const notifications: string[][] = [];
+    const workerEnv = new Proxy(env, {
+      get(target, property, receiver) {
+        if (property === "AUTOMATCH_DELIVERY_MODE") return mode;
+        if (property === "INVITE_REACTIONS") {
+          return {
+            getByName: (roomId: string) => {
+              const notify = (name: string) => async (incoming: string) => {
+                notifications.push([name, roomId, incoming]);
+              };
+              return {
+                notifyMetadataChanged: notify("notifyMetadataChanged"),
+                notifyWagersChanged: notify("notifyWagersChanged"),
+                notifyMatchesChanged: notify("notifyMatchesChanged"),
+                notifySessionCommitted: notify("notifySessionCommitted"),
+              };
+            },
+          };
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const gameplay = createGameplayRepository(workerEnv, {
+      d1: db,
+      stateClient: raw,
+    });
+    const locks = gameplay.automatchPersistence.decorateLocks(
+      createGameSessionMutationLockStore(db),
+    );
+    const lock = { lockId: inviteId, operationId: "notification-operation" };
+    await locks.acquire(lock, "notification-owner", Date.now());
+    try {
+      await gameplay.commitSessionChanges([
+        { kind: "invite-merge", inviteId, value: source },
+        {
+          kind: "automatch-entry",
+          inviteId,
+          value: { uid: source.hostId, timestamp: Date.now() },
+        },
+      ]);
+      expect(notifications).toEqual([]);
+    } finally {
+      await locks.release(lock, "notification-owner");
+    }
+    expect(await gameplay.readInviteMetadata(inviteId)).toEqual(source);
+    expect(notifications).toEqual([[method, inviteId, inviteId]]);
   });
 
   it("preserves explicit password presence and malformed field values", async () => {
