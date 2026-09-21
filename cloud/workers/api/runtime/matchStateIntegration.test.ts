@@ -248,19 +248,21 @@ describe("canonical match room integration", () => {
     const { room } = await fixture();
     await runInDurableObject(room, async (instance, state) => {
       const target = instance as unknown as {
-        scheduleInviteAlarm: (
-          atMs: number,
-          transaction?: DurableObjectTransaction,
-        ) => Promise<void>;
+        alarmCoordinator: {
+          schedule: (
+            atMs: number,
+            transaction?: DurableObjectTransaction,
+          ) => Promise<void>;
+        };
       };
       const earlier = Date.now() + 1_000;
       const later = earlier + 60_000;
       await Promise.all([
-        target.scheduleInviteAlarm(later),
+        target.alarmCoordinator.schedule(later),
         state.storage.transaction((transaction) =>
-          target.scheduleInviteAlarm(earlier, transaction),
+          target.alarmCoordinator.schedule(earlier, transaction),
         ),
-        target.scheduleInviteAlarm(later + 60_000),
+        target.alarmCoordinator.schedule(later + 60_000),
       ]);
       expect(await state.storage.getAlarm()).toBe(earlier);
     });

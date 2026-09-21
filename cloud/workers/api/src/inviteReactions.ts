@@ -2,14 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import {
   REACTION_HEARTBEAT_REQUEST,
   REACTION_HEARTBEAT_RESPONSE,
-  REACTION_PROTOCOL_VERSION,
-  REACTION_SOCKET_PROTOCOL,
-  REACTION_SOCKET_PROTOCOL_V2,
-  isInviteReaction,
   type InviteReaction,
-  type InviteReactionEvent,
-  type InviteReactionSnapshot,
-  type InviteRoomSnapshot,
 } from "@mons/shared/reactions";
 import type {
   MatchPresentationSnapshot,
@@ -24,7 +17,6 @@ import {
   type MatchPresentationUpdateResult,
 } from "./matchPresentationStore.ts";
 
-import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 import { createInviteSourceReader } from "./inviteSource.ts";
 import {
   createWagerStateD1Store,
@@ -52,17 +44,19 @@ import {
 } from "./matchEffectsDispatcher.ts";
 import {
   listMatchPresentationRegistrations,
-  selectRegisteredPresentations,
   type MatchPresentationRegistration,
   type MatchPresentationSeedRegistration,
   type RegisteredMatchPresentationSnapshot,
 } from "./matchPresentationRegistry.ts";
-import {
-  readSocketSession,
-  socketSessionCurrent,
-  SocketSessions,
-} from "./socketSession.ts";
+import { SocketSessions } from "./socketSession.ts";
 import { socketCapacityFull } from "./socketCapacity.ts";
+import { InviteAlarmCoordinator } from "./inviteAlarmCoordinator.ts";
+import {
+  ReactionChannel,
+  type InviteReactionPublishResult,
+} from "./reactionChannel.ts";
+
+export type { InviteReactionPublishResult } from "./reactionChannel.ts";
 
 export type {
   MatchPresentationSeeds,
@@ -94,23 +88,6 @@ const MAX_INVITE_ROOM_SPECTATOR_SOCKETS =
   MAX_INVITE_ROOM_SOCKETS -
   PARTICIPANT_SOCKET_TAGS.length * MAX_INVITE_REACTION_SOCKETS_PER_PARTICIPANT;
 
-type StoredReaction = {
-  sender_uid: string;
-  reaction_json: string;
-};
-
-function socketVersion(socket: WebSocket): 1 | 2 {
-  return socket.deserializeAttachment()?.schemaVersion === 2 ? 2 : 1;
-}
-
-function isReactionSocket(socket: WebSocket): boolean {
-  const channel = socket.deserializeAttachment()?.channel;
-  return channel === undefined || channel === "reaction";
-}
-
-export type InviteReactionPublishResult =
-  "published" | "duplicate" | "conflict" | "participant-limit";
-
 export class InviteReactions
   extends DurableObject<Env>
   implements MatchStateRpc
@@ -121,22 +98,29 @@ export class InviteReactions
   private readonly matchEffects: MatchEffectsDispatcher;
   private inviteReader: (inviteId: string) => Promise<unknown>;
   private wagerReader: (inviteId: string) => Promise<WagerStateSnapshot[]>;
-  private inviteAlarmSequence: Promise<void> = Promise.resolve();
+  private readonly alarmCoordinator: InviteAlarmCoordinator;
+  private readonly reactions: ReactionChannel;
   private readonly inviteChannels: InviteChannelsRoom;
   private readonly presentations: MatchPresentationStore;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.socketSessions = new SocketSessions(ctx);
-    this.ctx.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS latest_reactions (sender_uid TEXT PRIMARY KEY, reaction_json TEXT NOT NULL)",
-    );
+    this.alarmCoordinator = new InviteAlarmCoordinator(ctx.storage, {
+      expireSessions: () => this.socketSessions.nextExpiry(),
+      refreshInviteChannels: () => this.inviteChannels.alarm(),
+      refreshMatches: () => this.matchSync.alarm(),
+      dispatchEffects: () => this.matchEffects.dispatch(),
+      inviteDeadline: () => this.inviteChannels.nextAlarm(),
+      matchDeadline: () => this.matchSync.nextAlarm(),
+      effectDeadline: () => this.matchState.nextEffectAt(),
+    });
     this.inviteReader = createInviteSourceReader(env);
     this.wagerReader = createWagerStateD1Store(env.PROFILE_DB).readInvite;
     this.inviteChannels = new InviteChannelsRoom(ctx, {
       readInvite: (inviteId) => this.inviteReader(inviteId),
       readWagerStates: (inviteId) => this.wagerReader(inviteId),
-      scheduleAlarm: (atMs) => this.scheduleInviteAlarm(atMs),
+      scheduleAlarm: (atMs) => this.alarmCoordinator.schedule(atMs),
       capacityFull: (role) => this.roomCapacityFull(role),
       socketSessions: this.socketSessions,
       limits: INVITE_CHANNEL_SOCKET_LIMITS,
@@ -144,19 +128,33 @@ export class InviteReactions
     this.presentations = new MatchPresentationStore(ctx.storage, {
       pinInvite: (inviteId) => this.inviteChannels.pinInvite(inviteId),
     });
+    this.reactions = new ReactionChannel(ctx, {
+      presentations: this.presentations,
+      pinnedInviteId: () => this.inviteChannels.pinnedInviteId(),
+      readRegistrations: (inviteId, matchId) =>
+        listMatchPresentationRegistrations(
+          env.PROFILE_GAMES_DB,
+          inviteId,
+          matchId,
+        ),
+      scheduleAlarm: (atMs) => this.alarmCoordinator.schedule(atMs),
+      capacityFull: (role) => this.roomCapacityFull(role),
+      socketSessions: this.socketSessions,
+      limits: INVITE_CHANNEL_SOCKET_LIMITS,
+    });
     this.matchState = new MatchStateStore(ctx.storage, {
       timerStarts: createMatchTimerStartStore(env.PROFILE_GAMES_DB),
       newMatchTimerStorage: parseNewMatchTimerStorage(
         env.NEW_MATCH_TIMER_STORAGE,
       ),
       scheduleAlarm: (atMs, transaction) =>
-        this.scheduleInviteAlarm(atMs, transaction),
+        this.alarmCoordinator.schedule(atMs, transaction),
     });
     this.matchEffects = new MatchEffectsDispatcher(this.matchState, {
       deliver: createMatchEffectDelivery(env, (effect) =>
         this.matchState.cleanupLegacyTimerStarts(effect),
       ),
-      scheduleAlarm: (atMs) => this.scheduleInviteAlarm(atMs),
+      scheduleAlarm: (atMs) => this.alarmCoordinator.schedule(atMs),
     });
     this.matchSync = new MatchSyncRoom(ctx, {
       pinInvite: (inviteId) => {
@@ -167,7 +165,7 @@ export class InviteReactions
       inviteGeneration: () => this.inviteChannels.invalidationGeneration(),
       sourceEpoch: () => this.matchState.readSource().epoch,
       readPair: (metadata, matchId) => this.readMatchPair(metadata, matchId),
-      scheduleAlarm: (atMs) => this.scheduleInviteAlarm(atMs),
+      scheduleAlarm: (atMs) => this.alarmCoordinator.schedule(atMs),
       capacityFull: (role, ip) => this.matchRoomFull(role, ip),
       canReceive: canReceiveInvite,
       socketSessions: this.socketSessions,
@@ -190,184 +188,7 @@ export class InviteReactions
       return this.inviteChannels.fetch(request, "metadata");
     if (pathname === "/wagers/socket")
       return this.inviteChannels.fetch(request, "wagers");
-    const role = request.headers.get("X-Mons-Reaction-Role") || "spectator";
-    const ip = request.headers.get("X-Mons-Reaction-IP") || "unknown";
-    const protocol = request.headers.get("Sec-WebSocket-Protocol");
-    const version = protocol === REACTION_SOCKET_PROTOCOL_V2 ? 2 : 1;
-    let matchId: string | null = null;
-    try {
-      const encodedMatchId = request.headers.get("X-Mons-Presentation-Match");
-      if (encodedMatchId !== null) matchId = decodeURIComponent(encodedMatchId);
-    } catch {
-      return new Response("Invalid presentation match", { status: 400 });
-    }
-    if (
-      version === 2 &&
-      (!matchId || matchId !== matchId.trim() || !isSafeRecordKey(matchId))
-    ) {
-      return new Response("Invalid presentation match", { status: 400 });
-    }
-    let canonicalActors: string[] | null = null;
-    if (request.headers.get("X-Mons-Presentation-Canonical") === "1") {
-      try {
-        const value: unknown = JSON.parse(
-          decodeURIComponent(
-            request.headers.get("X-Mons-Presentation-Actors") || "",
-          ),
-        );
-        if (
-          version !== 2 ||
-          !Array.isArray(value) ||
-          !value.length ||
-          value.length > 2 ||
-          value.some((uid) => !isCanonicalLoginUid(uid))
-        ) {
-          return new Response("Invalid presentation actors", { status: 400 });
-        }
-        canonicalActors = value;
-      } catch {
-        return new Response("Invalid presentation actors", { status: 400 });
-      }
-    }
-    if (!["host", "guest", "spectator"].includes(role) || ip.length > 64) {
-      return new Response("Invalid reaction admission", { status: 400 });
-    }
-    const session = readSocketSession(request, role !== "spectator");
-    if (!session) return new Response("Session expired", { status: 401 });
-    if (session.authenticated)
-      await this.scheduleInviteAlarm(session.authExpiresAtMs);
-    let canonicalRegistrations: MatchPresentationRegistration[] | null = null;
-    if (canonicalActors) {
-      const inviteId = this.inviteChannels.pinnedInviteId();
-      const actors = canonicalActors;
-      const before = this.presentations.readPresentations(matchId!).players;
-      const read = async () =>
-        (
-          await listMatchPresentationRegistrations(
-            this.env.PROFILE_GAMES_DB,
-            inviteId,
-            matchId!,
-          )
-        ).filter((row) => actors.includes(row.actorUid));
-      canonicalRegistrations = await read();
-      if (!canonicalRegistrations.length)
-        throw new Error("match-presentation-unavailable");
-      const registeredActors = new Set(
-        canonicalRegistrations.map((row) => row.actorUid),
-      );
-      const missedUpdates = Object.values(
-        this.presentations.readPresentations(matchId!).players,
-      )
-        .filter(
-          (value) =>
-            actors.includes(value.actorUid) &&
-            !registeredActors.has(value.actorUid) &&
-            value.revision > (before[value.actorUid]?.revision ?? 0),
-        )
-        .map((value) => value.actorUid);
-      if (missedUpdates.length) {
-        canonicalRegistrations = await read();
-        const refreshedActors = new Set(
-          canonicalRegistrations.map((row) => row.actorUid),
-        );
-        if (missedUpdates.some((actorUid) => !refreshedActors.has(actorUid)))
-          throw new Error("match-presentation-unavailable");
-      }
-    }
-    if (!socketSessionCurrent(session))
-      return new Response("Session expired", { status: 401 });
-    const allSockets = this.ctx.getWebSockets();
-    const reactionSockets = allSockets.filter(isReactionSocket);
-    const roleCount = (value: string) =>
-      this.ctx.getWebSockets(`role:${value}`).length;
-    const spectatorCount =
-      reactionSockets.length - roleCount("host") - roleCount("guest");
-    const ipCount = this.ctx.getWebSockets(`spectator-ip:${ip}`).length;
-    if (
-      this.roomCapacityFull(role) ||
-      socketCapacityFull(
-        role,
-        {
-          sockets: reactionSockets.length,
-          spectators: spectatorCount,
-          spectatorsPerIp: ipCount,
-          socketsForRole: roleCount(role),
-        },
-        INVITE_CHANNEL_SOCKET_LIMITS,
-      )
-    ) {
-      return new Response("Reaction room is full", {
-        status: 429,
-        headers: { "Retry-After": "60" },
-      });
-    }
-    const reactions = Object.fromEntries(
-      this.ctx.storage.sql
-        .exec<StoredReaction>(
-          "SELECT sender_uid, reaction_json FROM latest_reactions ORDER BY sender_uid",
-        )
-        .toArray()
-        .map((row) => [row.sender_uid, JSON.parse(row.reaction_json)]),
-    );
-    const snapshot: InviteReactionSnapshot | InviteRoomSnapshot =
-      version === 2
-        ? {
-            schemaVersion: 2,
-            type: "snapshot",
-            reactions,
-            presentation: canonicalRegistrations
-              ? selectRegisteredPresentations(
-                  matchId!,
-                  canonicalRegistrations,
-                  this.presentations.registeredPresentationSnapshot(matchId!),
-                )
-              : this.presentations.readPresentations(matchId!),
-          }
-        : {
-            schemaVersion: REACTION_PROTOCOL_VERSION,
-            type: "snapshot",
-            reactions,
-          };
-    const pair = new WebSocketPair();
-    pair[1].serializeAttachment({
-      schemaVersion: version,
-      matchId: version === 2 ? matchId : null,
-      ...session,
-    });
-    this.ctx.acceptWebSocket(pair[1], [
-      `role:${role}`,
-      ...(role === "spectator" ? [`spectator-ip:${ip}`] : []),
-    ]);
-    this.socketSessions.send(pair[1], JSON.stringify(snapshot));
-    return new Response(null, {
-      status: 101,
-      webSocket: pair[0],
-      headers:
-        protocol === REACTION_SOCKET_PROTOCOL ||
-        protocol === REACTION_SOCKET_PROTOCOL_V2
-          ? { "Sec-WebSocket-Protocol": protocol }
-          : {},
-    });
-  }
-
-  private scheduleInviteAlarm(
-    atMs: number,
-    transaction?: Pick<DurableObjectTransaction, "getAlarm" | "setAlarm">,
-  ): Promise<void> {
-    const schedule = async (
-      storage: Pick<DurableObjectTransaction, "getAlarm" | "setAlarm">,
-    ) => {
-      const current = await storage.getAlarm();
-      if (current === null || current > atMs) {
-        await storage.setAlarm(atMs);
-      }
-    };
-    if (transaction) return schedule(transaction);
-    const pending = this.inviteAlarmSequence.then(() =>
-      this.ctx.storage.transaction(schedule),
-    );
-    this.inviteAlarmSequence = pending.catch(() => undefined);
-    return pending;
+    return this.reactions.fetch(request);
   }
 
   async readMetadata(inviteId: string): Promise<InviteMetadataReadResult> {
@@ -528,43 +349,7 @@ export class InviteReactions
   }
 
   async alarm(): Promise<void> {
-    const failures: unknown[] = [];
-    try {
-      for (const work of [
-        () => this.socketSessions.nextExpiry(),
-        () => this.inviteChannels.alarm(),
-        () => this.matchSync.alarm(),
-        () => this.socketSessions.nextExpiry(),
-        () => this.matchEffects.dispatch(),
-      ]) {
-        try {
-          await work();
-        } catch (error) {
-          failures.push(error);
-        }
-      }
-    } finally {
-      const due: number[] = [];
-      for (const readDeadline of [
-        () => this.inviteChannels.nextAlarm(),
-        () => this.matchSync.nextAlarm(),
-        () => this.matchState.nextEffectAt(),
-        () => this.socketSessions.nextExpiry(),
-      ]) {
-        try {
-          const deadline = readDeadline();
-          if (deadline !== null) due.push(deadline);
-        } catch (error) {
-          failures.push(error);
-        }
-      }
-      try {
-        if (due.length) await this.scheduleInviteAlarm(Math.min(...due));
-      } catch (error) {
-        failures.push(error);
-      }
-    }
-    if (failures.length) throw failures[0];
+    return this.alarmCoordinator.run();
   }
 
   private matchRoomFull(role: string, ip: string): boolean {
@@ -598,58 +383,7 @@ export class InviteReactions
     senderUid: string,
     reaction: InviteReaction,
   ): Promise<InviteReactionPublishResult> {
-    if (!isCanonicalLoginUid(senderUid) || !isInviteReaction(reaction)) {
-      throw new TypeError("invalid-reaction");
-    }
-    const normalized: InviteReaction = {
-      uuid: reaction.uuid,
-      kind: reaction.kind,
-      variation: reaction.variation,
-      matchId: reaction.matchId,
-    };
-    const serialized = JSON.stringify(normalized);
-    const [stored] = this.ctx.storage.sql
-      .exec<StoredReaction>(
-        "SELECT sender_uid, reaction_json FROM latest_reactions WHERE sender_uid = ?",
-        senderUid,
-      )
-      .toArray();
-    if (stored) {
-      const previous: InviteReaction = JSON.parse(stored.reaction_json);
-      if (previous.uuid === normalized.uuid) {
-        return stored.reaction_json === serialized ? "duplicate" : "conflict";
-      }
-    } else if (
-      this.ctx.storage.sql
-        .exec<{ count: number }>(
-          "SELECT COUNT(*) AS count FROM latest_reactions",
-        )
-        .one().count >= 2
-    ) {
-      return "participant-limit";
-    }
-    this.ctx.storage.sql.exec(
-      "INSERT INTO latest_reactions (sender_uid, reaction_json) VALUES (?, ?) ON CONFLICT(sender_uid) DO UPDATE SET reaction_json = excluded.reaction_json",
-      senderUid,
-      serialized,
-    );
-    const event: InviteReactionEvent = {
-      schemaVersion: REACTION_PROTOCOL_VERSION,
-      type: "reaction",
-      senderUid,
-      reaction: normalized,
-    };
-    const message = JSON.stringify(event);
-    const v2Message = JSON.stringify({ ...event, schemaVersion: 2 });
-    for (const socket of this.ctx.getWebSockets()) {
-      if (isReactionSocket(socket)) {
-        this.socketSessions.send(
-          socket,
-          socketVersion(socket) === 2 ? v2Message : message,
-        );
-      }
-    }
-    return "published";
+    return this.reactions.publish(senderUid, reaction);
   }
 
   async ensurePresentations(
@@ -709,20 +443,7 @@ export class InviteReactions
       request,
     );
     if (result.status === "updated") {
-      const message = JSON.stringify({
-        schemaVersion: 2,
-        type: "presentation",
-        presentation: result.presentation,
-      });
-      for (const socket of this.ctx.getWebSockets()) {
-        const attachment = socket.deserializeAttachment();
-        if (
-          isReactionSocket(socket) &&
-          attachment?.schemaVersion === 2 &&
-          attachment.matchId === matchId
-        )
-          this.socketSessions.send(socket, message);
-      }
+      this.reactions.broadcastPresentation(matchId, result.presentation);
     }
     return result;
   }
