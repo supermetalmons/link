@@ -56,6 +56,7 @@ test("canonical profile internals never import their public facade", () => {
 });
 
 for (const module of [
+  "automatch",
   "eventD1",
   "authIdentityCanonical",
   "profileGameProjection",

@@ -1,32 +1,35 @@
-import { createGameVariantHelpers } from "@mons/shared/game-variants";
+import type { RandomSource } from "@mons/shared/ids";
+import type { StartAutomatchResponse } from "@mons/shared/navigation";
 import {
-  buildAutoInviteId,
-  pickHostColor,
-  randomAlphanumeric,
-  type RandomSource,
-} from "@mons/shared/ids";
+  buildAutomatchProfileGameProjectionTask,
+  buildAutomatchProjectionTask,
+  buildMatchedAutomatchPlan,
+  buildPendingAutomatchPlan,
+  matchedAutomatchResponse,
+  pendingAutomatchResponse,
+  profileOrFallback,
+} from "./automatch/plans.ts";
 import {
-  CONTROLLER_VERSION,
-  buildFreshMatchRecord,
-} from "@mons/shared/match-protocol";
-import {
-  isStartAutomatchResponse,
-  type StartAutomatchRequest,
-  type StartAutomatchResponse,
-} from "@mons/shared/navigation";
-import * as monsRules from "mons-rules";
+  buildAutomatchReceiptChanges,
+  buildAutomatchReplayTasks,
+  matchesAutomatchReceiptRequest,
+  parseAutomatchReceipt,
+} from "./automatch/receipts.ts";
+import type {
+  AutomatchDependencies,
+  AutomatchPlanDependencies,
+  AutomatchReceipt,
+  AutomatchRequesterSnapshot,
+  QueuedAutomatch,
+  StartAutomatchOperationRequest,
+  SuccessfulStartAutomatchResponse,
+} from "./automatch/types.ts";
 import {
   TELEGRAM_AUTOMATCH_VERSION,
   buildAutomatchTelegramProjectionChanges,
   buildAutomatchTelegramLifecycleChanges,
-  buildMatchedAutomatchTelegramChanges,
-  buildPendingAutomatchTelegramSource,
 } from "../../../runtime/telegram/automatchSource.js";
-import {
-  AUTOMATCH_WAITING_EMOJI_ID,
-  getDisplayNameFromAddress,
-  getTelegramEmojiTag,
-} from "../../../runtime/telegramDisplay.js";
+import { getDisplayNameFromAddress } from "../../../runtime/telegramDisplay.js";
 import { AuthApiFailure } from "./authErrors.ts";
 import { isAutomatchQueueSelectionConflict } from "./automatchQueueD1.ts";
 import {
@@ -39,19 +42,11 @@ import {
   stateIncrement,
 } from "./stateCompatibility.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
-import type { GameplayProfile } from "./gameplayRepository.ts";
 import type { AutomatchRepository } from "./gameplayContracts.ts";
-import type { GameSessionMutationLockStore } from "./gameplayCoordinationD1.ts";
 import { requestAutomatchProfileProjection } from "./gameSessionProjectionChanges.ts";
 import type { GameSessionChange } from "./gameSessionContracts.ts";
-import type {
-  AutomatchProfileGameProjectionTask,
-  ProfileGameProjectionTask,
-} from "./profileGameProjectionTasks.ts";
-import type {
-  AutomatchTelegramProjectionTask,
-  TelegramProjectionTask,
-} from "./telegramProjectionTasks.ts";
+import type { AutomatchProfileGameProjectionTask } from "./profileGameProjectionTasks.ts";
+import type { AutomatchTelegramProjectionTask } from "./telegramProjectionTasks.ts";
 import {
   GameSessionMutationLeaseReleaseFailure,
   withGameSessionMutationLease,
@@ -69,7 +64,6 @@ import {
 const MAX_AUTOMATCH_RETRY_COUNT = 3;
 const MAX_AUTOMATCH_SELECTION_ATTEMPTS = 32;
 export const AUTOMATCH_TOTAL_TIMEOUT_MS = 20_000;
-const AUTOMATCH_PASSWORD_LENGTH = 15;
 const AUTOMATCH_OWNER_LOCK_MIN_RETRY_MS = 25;
 const AUTOMATCH_OWNER_LOCK_MAX_RETRY_MS = 1_000;
 const AUTOMATCH_UID_LOOKUP_LIMIT = 2;
@@ -77,96 +71,6 @@ const AUTOMATCH_OWNER_LOGIN_UID_LIMIT = 512;
 const AUTOMATCH_CANCELLATION_RECONCILE_TIMEOUT_MS = 1_000;
 const AUTOMATCH_CANCELLATION_RECONCILE_DELAY_MS = 50;
 const AUTOMATCH_CANCELLATION_FINAL_READ_TIMEOUT_MS = 250;
-const AUTOMATCH_RECEIPT_KIND = "automatch-start";
-const gameVariantHelpers = createGameVariantHelpers(monsRules);
-
-type AutomatchDependencies = {
-  assertMutationAllowed?: () => Promise<void>;
-  createProjectionRequestId?: () => string;
-  enqueueProfileGameProjection?: (
-    task: ProfileGameProjectionTask,
-  ) => Promise<void>;
-  enqueueTelegramProjection?: (task: TelegramProjectionTask) => Promise<void>;
-  logProfileFailure?: () => void;
-  logProfileGameProjectionFailure?: (
-    task: AutomatchProfileGameProjectionTask,
-  ) => void;
-  logProjectionFailure?: (task: AutomatchTelegramProjectionTask) => void;
-  mutationLocks: GameSessionMutationLockStore;
-  now?: () => number;
-  random?: RandomSource;
-  signal?: AbortSignal;
-  wait?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
-};
-
-export type StartAutomatchOperationRequest = StartAutomatchRequest & {
-  operationId: string;
-};
-
-export type QueuedAutomatch = {
-  data: Record<string, unknown>;
-  inviteId: string;
-};
-
-export type AutomatchRequesterSnapshot = Readonly<{
-  loginUids: readonly string[];
-  profile: GameplayProfile | null;
-}>;
-
-type SuccessfulStartAutomatchResponse = Extract<
-  StartAutomatchResponse,
-  { ok: true }
->;
-
-type AutomatchPlanDependencies = Pick<
-  AutomatchDependencies,
-  "createProjectionRequestId"
->;
-
-type AutomatchPlanInput = {
-  requesterUid: string;
-  request: StartAutomatchOperationRequest;
-  emojiId: GameplayProfile["emoji"];
-  aura: string | null;
-  name: string;
-};
-
-type AutomatchPlan = {
-  response: SuccessfulStartAutomatchResponse;
-  changes: GameSessionChange[];
-  profileGameProjectionTask: AutomatchProfileGameProjectionTask;
-  projectionTask: AutomatchTelegramProjectionTask | null;
-};
-
-type MatchedAutomatchPlan = AutomatchPlan & {
-  inviteChange: Extract<GameSessionChange, { kind: "invite-merge" }>;
-};
-
-type AutomatchReceipt = {
-  aura: string;
-  completedAtMs: number;
-  emojiId: number;
-  inviteId: string;
-  kind: typeof AUTOMATCH_RECEIPT_KIND;
-  operationId: string;
-  profileProjectionRequestId: string | null;
-  requesterUid: string;
-  response: SuccessfulStartAutomatchResponse;
-  schemaVersion: 1;
-  telegramProjection: boolean;
-};
-
-export function emptyAutomatchProfile(): GameplayProfile {
-  return {
-    aura: "",
-    emoji: "",
-    eth: "",
-    profileId: "",
-    rating: 0,
-    sol: "",
-    username: "",
-  };
-}
 
 function toRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -176,84 +80,6 @@ function toRecord(value: unknown): Record<string, unknown> | null {
 
 function normalizeString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
-}
-
-function parseAutomatchReceipt(value: unknown): AutomatchReceipt | null {
-  const receipt = toRecord(value);
-  const response = receipt?.response;
-  const profileProjectionRequestId =
-    receipt?.profileProjectionRequestId ?? null;
-  if (
-    receipt?.schemaVersion !== 1 ||
-    receipt.kind !== AUTOMATCH_RECEIPT_KIND ||
-    typeof receipt.completedAtMs !== "number" ||
-    !Number.isFinite(receipt.completedAtMs) ||
-    typeof receipt.emojiId !== "number" ||
-    !Number.isSafeInteger(receipt.emojiId) ||
-    typeof receipt.aura !== "string" ||
-    typeof receipt.operationId !== "string" ||
-    !isSafeRecordKey(receipt.operationId) ||
-    typeof receipt.requesterUid !== "string" ||
-    !receipt.requesterUid ||
-    typeof receipt.inviteId !== "string" ||
-    !isSafeRecordKey(receipt.inviteId) ||
-    !(
-      profileProjectionRequestId === null ||
-      (typeof profileProjectionRequestId === "string" &&
-        isSafeRecordKey(profileProjectionRequestId))
-    ) ||
-    typeof receipt.telegramProjection !== "boolean" ||
-    !isStartAutomatchResponse(response) ||
-    !response.ok ||
-    response.inviteId !== receipt.inviteId
-  ) {
-    return null;
-  }
-  return {
-    schemaVersion: 1,
-    aura: receipt.aura,
-    completedAtMs: Math.floor(receipt.completedAtMs),
-    emojiId: receipt.emojiId,
-    inviteId: receipt.inviteId,
-    kind: AUTOMATCH_RECEIPT_KIND,
-    operationId: receipt.operationId,
-    profileProjectionRequestId,
-    requesterUid: receipt.requesterUid,
-    response,
-    telegramProjection: receipt.telegramProjection,
-  };
-}
-
-function buildAutomatchReceiptChanges(
-  requesterUid: string,
-  request: StartAutomatchOperationRequest,
-  response: SuccessfulStartAutomatchResponse,
-  profileProjectionRequestId: string | null,
-  telegramProjection: boolean,
-): GameSessionChange[] {
-  const completedAtMs = STATE_SERVER_TIMESTAMP;
-  return [
-    {
-      kind: "mutation-receipt",
-      operationId: request.operationId,
-      value: {
-        schemaVersion: 1,
-        aura: request.aura,
-        completedAtMs,
-        emojiId: request.emojiId,
-        inviteId: response.inviteId,
-        kind: AUTOMATCH_RECEIPT_KIND,
-        operationId: request.operationId,
-        profileProjectionRequestId,
-        requesterUid,
-        response,
-        telegramProjection,
-      },
-      expiration: {
-        completedAtMs,
-      },
-    },
-  ];
 }
 
 async function readAutomatchReceipt(
@@ -269,10 +95,7 @@ async function readAutomatchReceipt(
   const receipt = parseAutomatchReceipt(rawReceipt);
   if (
     !receipt ||
-    receipt.operationId !== request.operationId ||
-    receipt.requesterUid !== requesterUid ||
-    receipt.emojiId !== request.emojiId ||
-    receipt.aura !== request.aura
+    !matchesAutomatchReceiptRequest(receipt, requesterUid, request)
   ) {
     throw new AuthApiFailure(409, "failed-precondition", "operation-conflict");
   }
@@ -443,24 +266,17 @@ export function createAutomatchProjectionTask(
     dependencies.createProjectionRequestId || (() => crypto.randomUUID())
   )(),
 ): AutomatchTelegramProjectionTask {
-  return {
-    kind: "automatch-telegram-projection",
-    inviteId,
-    requestId,
-  };
+  return buildAutomatchProjectionTask(inviteId, requestId);
 }
 
 export function createAutomatchProfileGameProjectionTask(
   inviteId: string,
   dependencies: AutomatchPlanDependencies,
 ): AutomatchProfileGameProjectionTask {
-  return {
-    kind: "automatch-profile-game-projection",
+  return buildAutomatchProfileGameProjectionTask(
     inviteId,
-    requestId: (
-      dependencies.createProjectionRequestId || (() => crypto.randomUUID())
-    )(),
-  };
+    (dependencies.createProjectionRequestId || (() => crypto.randomUUID()))(),
+  );
 }
 
 export async function enqueueAutomatchProjection(
@@ -525,20 +341,11 @@ async function replayAutomatchReceipt(
   dependencies: AutomatchDependencies,
 ): Promise<StartAutomatchResponse> {
   markAutomatchOutcome("replay");
-  if (receipt.profileProjectionRequestId) {
+  const tasks = buildAutomatchReplayTasks(receipt);
+  if (tasks) {
     await enqueueAutomatchProjections(
-      receipt.telegramProjection
-        ? createAutomatchProjectionTask(
-            receipt.inviteId,
-            dependencies,
-            receipt.profileProjectionRequestId,
-          )
-        : null,
-      {
-        kind: "automatch-profile-game-projection",
-        inviteId: receipt.inviteId,
-        requestId: receipt.profileProjectionRequestId,
-      },
+      tasks.projectionTask,
+      tasks.profileGameProjectionTask,
       dependencies,
     );
   }
@@ -968,41 +775,6 @@ export async function cancelOwnedQueuedAutomatches(
   );
 }
 
-function profileOrFallback(
-  profile: GameplayProfile | null,
-  request: StartAutomatchRequest,
-): GameplayProfile {
-  return (
-    profile || {
-      ...emptyAutomatchProfile(),
-      aura: request.aura,
-      emoji: request.emojiId,
-    }
-  );
-}
-
-function matchedAutomatchResponse(
-  inviteId: string,
-): SuccessfulStartAutomatchResponse {
-  return {
-    ok: true,
-    inviteId,
-    mode: "matched",
-    matchedImmediately: true,
-  };
-}
-
-function pendingAutomatchResponse(
-  inviteId: string,
-): SuccessfulStartAutomatchResponse {
-  return {
-    ok: true,
-    inviteId,
-    mode: "pending",
-    matchedImmediately: false,
-  };
-}
-
 function readAutomatchOperationIds(value: unknown): Record<string, string> {
   const operationIds = toRecord(value);
   if (!operationIds) return {};
@@ -1096,241 +868,6 @@ async function persistExistingAutomatchReceipt(
     }
   }
   return response;
-}
-
-function buildPendingAutomatchPlan(
-  {
-    requesterUid,
-    request,
-    profile,
-    emojiId,
-    aura,
-    name,
-    random,
-  }: AutomatchPlanInput & {
-    profile: GameplayProfile;
-    random: RandomSource;
-  },
-  dependencies: AutomatchPlanDependencies,
-): AutomatchPlan {
-  const inviteId = buildAutoInviteId(random);
-  const password = randomAlphanumeric(AUTOMATCH_PASSWORD_LENGTH, random);
-  const hostColor = pickHostColor(random);
-  const matchSeed = gameVariantHelpers.buildRandomGameSeed(random);
-  const timestamp = STATE_SERVER_TIMESTAMP;
-  const match = buildFreshMatchRecord({
-    color: hostColor,
-    emojiId,
-    aura,
-    seed: matchSeed,
-  });
-  const waitingText = `${name} is looking for a match https://mons.link ${getTelegramEmojiTag(AUTOMATCH_WAITING_EMOJI_ID)}`;
-  const canceledText = `<i>${name} canceled an automatch</i>`;
-  const response: SuccessfulStartAutomatchResponse = {
-    ok: true,
-    inviteId,
-    mode: "pending",
-    matchedImmediately: false,
-  };
-  const profileGameProjectionTask = createAutomatchProfileGameProjectionTask(
-    inviteId,
-    dependencies,
-  );
-  const projectionTask = createAutomatchProjectionTask(
-    inviteId,
-    dependencies,
-    profileGameProjectionTask.requestId,
-  );
-  const changes: GameSessionChange[] = [
-    {
-      kind: "match-create",
-      playerId: requesterUid,
-      matchId: inviteId,
-      value: match,
-    },
-    {
-      kind: "automatch-entry",
-      inviteId,
-      value: {
-        uid: requesterUid,
-        rating: profile.rating,
-        timestamp,
-        username: profile.username,
-        ethAddress: profile.eth,
-        solAddress: profile.sol,
-        profileId: profile.profileId,
-        hostColor,
-        password,
-        emojiId,
-        gameVariant: matchSeed.gameVariant,
-        telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION,
-      },
-    },
-    {
-      kind: "invite-merge",
-      inviteId,
-      value: {
-        version: CONTROLLER_VERSION,
-        hostId: requesterUid,
-        hostColor,
-        guestId: null,
-        password,
-        automatchStateHint: "pending",
-        automatchCanceledAt: null,
-        automatchOperationIds: {
-          [requesterUid]: request.operationId,
-        },
-        telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION,
-      },
-    },
-    {
-      kind: "telegram-source",
-      inviteId,
-      value: buildPendingAutomatchTelegramSource({
-        inviteId,
-        waitingText,
-        canceledText,
-        timestamp,
-      }),
-    },
-    ...buildAutomatchTelegramProjectionChanges({
-      inviteId,
-      requestId: projectionTask.requestId,
-      timestamp,
-    }),
-    ...requestAutomatchProfileProjection({
-      inviteId,
-      requestId: profileGameProjectionTask.requestId,
-      timestamp,
-    }),
-    ...buildAutomatchReceiptChanges(
-      requesterUid,
-      request,
-      response,
-      profileGameProjectionTask.requestId,
-      true,
-    ),
-  ];
-  return { response, changes, profileGameProjectionTask, projectionTask };
-}
-
-function buildMatchedAutomatchPlan(
-  {
-    requesterUid,
-    request,
-    queued,
-    existingUid,
-    emojiId,
-    aura,
-    name,
-  }: AutomatchPlanInput & {
-    queued: QueuedAutomatch;
-    existingUid: string;
-  },
-  dependencies: AutomatchPlanDependencies,
-): MatchedAutomatchPlan {
-  const matchSeed = gameVariantHelpers.buildGameSeedForStoredVariant(
-    queued.data.gameVariant,
-  );
-  const hostColor = normalizeString(queued.data.hostColor);
-  const existingPlayerName = getDisplayNameFromAddress(
-    queued.data.username,
-    queued.data.ethAddress,
-    queued.data.solAddress,
-    finiteNumber(queued.data.rating),
-    queued.data.emojiId,
-  );
-  const usesTelegramDeliveryV2 =
-    queued.data.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION;
-  const invite: Record<string, unknown> = {
-    version: CONTROLLER_VERSION,
-    hostId: existingUid,
-    hostColor,
-    guestId: requesterUid,
-    password: normalizeString(queued.data.password),
-    automatchStateHint: "matched",
-    automatchCanceledAt: null,
-    automatchOperationIds: {
-      [requesterUid]: request.operationId,
-    },
-    ...(usesTelegramDeliveryV2
-      ? { telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION }
-      : {}),
-  };
-  const match = buildFreshMatchRecord({
-    color: hostColor === "white" ? "black" : "white",
-    emojiId,
-    aura,
-    seed: matchSeed,
-  });
-  const matchedText = `${existingPlayerName} vs. ${name} https://mons.link/${queued.inviteId}`;
-  const inviteChange: MatchedAutomatchPlan["inviteChange"] = {
-    kind: "invite-merge",
-    inviteId: queued.inviteId,
-    value: invite,
-  };
-  const changes: GameSessionChange[] = [
-    { kind: "automatch-entry", inviteId: queued.inviteId, value: null },
-    inviteChange,
-    {
-      kind: "match-create",
-      playerId: requesterUid,
-      matchId: queued.inviteId,
-      value: match,
-    },
-  ];
-  const matchedResponse = matchedAutomatchResponse(queued.inviteId);
-  const profileGameProjectionTask = createAutomatchProfileGameProjectionTask(
-    queued.inviteId,
-    dependencies,
-  );
-  const projectionTask = usesTelegramDeliveryV2
-    ? createAutomatchProjectionTask(
-        queued.inviteId,
-        dependencies,
-        profileGameProjectionTask.requestId,
-      )
-    : null;
-  changes.push(
-    ...requestAutomatchProfileProjection({
-      inviteId: queued.inviteId,
-      requestId: profileGameProjectionTask.requestId,
-      timestamp: STATE_SERVER_TIMESTAMP,
-    }),
-  );
-  if (usesTelegramDeliveryV2) {
-    changes.push(
-      ...buildMatchedAutomatchTelegramChanges({
-        inviteId: queued.inviteId,
-        matchedText,
-        timestamp: STATE_SERVER_TIMESTAMP,
-        generation: stateIncrement(1),
-      }),
-    );
-    changes.push(
-      ...buildAutomatchTelegramProjectionChanges({
-        inviteId: queued.inviteId,
-        requestId: projectionTask?.requestId || "",
-        timestamp: STATE_SERVER_TIMESTAMP,
-      }),
-    );
-  }
-  changes.push(
-    ...buildAutomatchReceiptChanges(
-      requesterUid,
-      request,
-      matchedResponse,
-      profileGameProjectionTask.requestId,
-      usesTelegramDeliveryV2,
-    ),
-  );
-  return {
-    response: matchedResponse,
-    changes,
-    profileGameProjectionTask,
-    projectionTask,
-    inviteChange,
-  };
 }
 
 async function attemptAutomatch(
@@ -1454,7 +991,7 @@ async function attemptAutomatch(
           name,
           random,
         },
-        dependencies,
+        dependencies.createProjectionRequestId || (() => crypto.randomUUID()),
       );
     const inviteId = response.inviteId;
     let patchAttempted = false;
@@ -1540,7 +1077,7 @@ async function attemptAutomatch(
       aura,
       name,
     },
-    dependencies,
+    dependencies.createProjectionRequestId || (() => crypto.randomUUID()),
   );
   let matchResult: "matched" | "stale" = "stale";
   let patchAttempted = false;
@@ -1765,4 +1302,10 @@ export async function startAutomatch(
   }
 }
 
-export type { AutomatchDependencies };
+export { emptyAutomatchProfile } from "./automatch/plans.ts";
+export type {
+  AutomatchDependencies,
+  AutomatchRequesterSnapshot,
+  QueuedAutomatch,
+  StartAutomatchOperationRequest,
+} from "./automatch/types.ts";

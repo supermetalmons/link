@@ -132,6 +132,9 @@ test("legacy Telegram transport helpers stay removed", () => {
 test("a blocked Telegram client cannot delay latency-critical domain handlers", () => {
   const domainFiles = [
     path.join(repositoryRoot, "cloud/workers/api/src/automatch.ts"),
+    ...listRepositorySourceFiles(
+      path.join(repositoryRoot, "cloud/workers/api/src/automatch"),
+    ),
     path.join(repositoryRoot, "cloud/workers/api/src/ratingUpdate.ts"),
     path.join(runtimeRoot, "events.js"),
   ];
