@@ -8,6 +8,7 @@ import { STATE_VALUE_FIELD } from "./stateCompatibility.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import { validateTelegramTransactionDecision } from "./telegramTransaction.ts";
 import { classifyD1Failure } from "./d1Failure.ts";
+import { runOptimisticTransaction } from "./optimisticTransaction.ts";
 
 export const AUTOMATCH_RECORD_TABLES = {
   automatch: {
@@ -932,26 +933,36 @@ export function createAutomatchD1Store(
     signal?: AbortSignal,
   ): Promise<TransactionResult<unknown>> {
     const nowMs = now();
-    for (let attempt = 0; attempt < 25; attempt++) {
-      const current = await read(root, key, signal);
-      const decision = validateTelegramTransactionDecision(
-        update(structuredClone(current.value)),
-      );
-      if (!decision.commit)
-        return {
-          committed: false,
-          decision: decision.decision,
-          value: current.value,
+    return runOptimisticTransaction({
+      maxAttempts: 25,
+      async read() {
+        const current = await read(root, key, signal);
+        return { record: current.value, version: current.revision };
+      },
+      decide(current) {
+        const decision = validateTelegramTransactionDecision(
+          update(structuredClone(current)),
+        );
+        return decision.commit
+          ? { value: decision.value, decision: decision.decision }
+          : { commit: false, decision: decision.decision };
+      },
+      async write(current, next) {
+        const snapshot = {
+          root,
+          key,
+          value: current!.record,
+          revision: current!.version,
         };
-      const value = resolveAutomatchServerValues(
-        decision.value,
-        current.value,
-        nowMs,
-      );
-      if (await commit([{ current, value }], signal))
-        return { committed: true, decision: decision.decision, value };
-    }
-    throw new AutomatchD1Failure("automatch-transaction-contention");
+        const value = resolveAutomatchServerValues(next, snapshot.value, nowMs);
+        return {
+          applied: await commit([{ current: snapshot, value }], signal),
+          value,
+        };
+      },
+      conflictError: () =>
+        new AutomatchD1Failure("automatch-transaction-contention"),
+    });
   }
 
   async function expireReceipts(

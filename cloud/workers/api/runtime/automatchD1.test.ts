@@ -184,6 +184,49 @@ describe("D1 automatch state", () => {
     expect((await store.read("automatch", "invite")).revision).toBe(3);
   });
 
+  it("preserves revisions for typed null writes, deletions, and recreations", async () => {
+    const { store } = await writableStore();
+    const root = "telegramProjectionOutbox/automatch";
+    const absent = await store.read(root, "invite");
+    await expect(
+      store.transactAutomatchTelegramOutbox("invite", (current) => {
+        expect(current).toBeNull();
+        return { value: null, decision: "cleared" };
+      }),
+    ).resolves.toEqual({ committed: true, decision: "cleared", value: null });
+    expect(await store.read(root, "invite")).toMatchObject({
+      value: null,
+      revision: 1,
+    });
+    await store.transactAutomatchTelegramOutbox("invite", () => ({
+      value: { requestId: "first" },
+    }));
+    const beforeDelete = await store.read(root, "invite");
+    expect(beforeDelete.revision).toBe(2);
+    await expect(
+      store.transactAutomatchTelegramOutbox("invite", () => ({
+        value: null,
+        decision: "deleted",
+      })),
+    ).resolves.toEqual({ committed: true, decision: "deleted", value: null });
+    const deleted = await store.read(root, "invite");
+    expect(deleted).toMatchObject({ value: null, revision: 3 });
+    for (const current of [absent, beforeDelete]) {
+      expect(
+        await store.commit([{ current, value: { requestId: "stale" } }]),
+      ).toBe(false);
+    }
+    await store.transactAutomatchTelegramOutbox("invite", (current) => {
+      expect(current).toBeNull();
+      return { value: { requestId: "recreated" } };
+    });
+    expect(await store.read(root, "invite")).toMatchObject({
+      value: { requestId: "recreated" },
+      revision: 4,
+    });
+    expect(await store.commit([{ current: deleted, value: null }])).toBe(false);
+  });
+
   it("co-locates receipts and orphan expiration markers without coupling component revisions", async () => {
     const { store } = await writableStore();
     const receipt = await store.read("gameplayMutationReceipts", "operation");
@@ -667,33 +710,52 @@ describe("D1 automatch state", () => {
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
+    let clockMs = nowMs;
     const blocked = createAutomatchD1Store(blockingDb, {
+      now: () => clockMs++,
       writeGuards: () => automatchAdmissionGuardStatements(db, admission),
     });
-    let calls = 0;
+    const observedCounts: number[] = [];
     const pending = blocked.transactAutomatchTelegramOutbox(
       "invite",
       (current) => {
-        calls++;
         const input = current as { count: number; requestId: string };
-        return { value: { ...input, count: input.count + 1 } };
+        observedCounts.push(input.count);
+        input.count = 1_000;
+        return {
+          value: {
+            ...input,
+            count: { ".sv": { increment: 1 } },
+            updatedAtMs: { ".sv": "timestamp" },
+          },
+          decision: `increment-${input.requestId}`,
+        };
       },
     );
     await paused;
     await store.patchRoot({ [path]: { requestId: "second", count: 5 } });
     releaseFirst();
-    await expect(pending).resolves.toMatchObject({
+    const stored = { requestId: "second", count: 6, updatedAtMs: nowMs };
+    await expect(pending).resolves.toEqual({
       committed: true,
-      value: { requestId: "second", count: 6 },
+      decision: "increment-second",
+      value: stored,
     });
-    expect(calls).toBe(2);
+    expect(observedCounts).toEqual([1, 5]);
     await expect(
-      store.transactAutomatchTelegramOutbox("invite", (current) =>
-        (current as { requestId: string }).requestId === "first"
+      store.transactAutomatchTelegramOutbox("invite", (current) => {
+        const input = current as { count: number; requestId: string };
+        input.count = 1_000;
+        return input.requestId === "first"
           ? { value: null }
-          : { commit: false, decision: "stale" },
-      ),
-    ).resolves.toMatchObject({ committed: false, decision: "stale" });
+          : { commit: false, decision: "stale" };
+      }),
+    ).resolves.toEqual({
+      committed: false,
+      decision: "stale",
+      value: stored,
+    });
+    expect(await store.getPath(path)).toEqual(stored);
   });
 
   it("requires explicit write guards and fails closed without control", async () => {
