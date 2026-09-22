@@ -28,6 +28,7 @@ import {
   type SocketSessions,
 } from "./socketSession.ts";
 import { readSocketAdmission } from "./socketAdmission.ts";
+import { acceptRoomSocket, sendSocketSnapshot } from "./socketUpgrade.ts";
 import {
   socketCapacityFull,
   type SocketCapacityLimits,
@@ -612,9 +613,7 @@ export class InviteChannelsRoom {
           headers: { "Retry-After": "60" },
         });
       }
-      const pair = new WebSocketPair();
-      pair[1].serializeAttachment(attachment);
-      this.ctx.acceptWebSocket(pair[1], [
+      const pair = acceptRoomSocket(this.ctx, attachment, [
         `channel:${channel}`,
         `${channel}-role:${role}`,
         ...(role === "spectator" ? [`${channel}-ip:${ip}`] : []),
@@ -624,12 +623,12 @@ export class InviteChannelsRoom {
         type: "snapshot",
         snapshot: source.snapshot,
       };
-      this.dependencies.socketSessions.send(pair[1], JSON.stringify(message));
-      return new Response(null, {
-        status: 101,
-        webSocket: pair[0],
-        headers: { "Sec-WebSocket-Protocol": protocol },
-      });
+      return sendSocketSnapshot(
+        this.dependencies.socketSessions,
+        pair,
+        message,
+        protocol,
+      );
     }).finally(() => {
       if (channel === "wagers") this.pendingWagerAdmissions--;
     });

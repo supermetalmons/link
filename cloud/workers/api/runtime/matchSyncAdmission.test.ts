@@ -450,6 +450,59 @@ describe("live match socket admission", () => {
     );
   });
 
+  it("closes an accepted match socket and clears admission state when its welcome fails", async () => {
+    const { room, inviteId } = await fixture();
+    await room.readMatches(inviteId, inviteId);
+    const result = await runInDurableObject(room, async (instance, state) => {
+      const target = instance as unknown as {
+        matchSync: {
+          admissions: Map<string, number>;
+          dependencies: {
+            socketSessions: {
+              send: (socket: WebSocket, message: string) => void;
+            };
+          };
+        };
+      };
+      let accepted = false;
+      const send = vi
+        .spyOn(target.matchSync.dependencies.socketSessions, "send")
+        .mockImplementationOnce((socket) => {
+          accepted = state.getWebSockets("channel:matches").includes(socket);
+          throw new Error("welcome-unavailable");
+        });
+      try {
+        const response = await instance.fetch(request(inviteId));
+        return {
+          status: response.status,
+          message: await response.text(),
+          accepted,
+          open: state
+            .getWebSockets("channel:matches")
+            .filter((socket) => socket.readyState === WebSocket.OPEN).length,
+          admitting: target.matchSync.admissions.has(inviteId),
+          due: state.storage.sql
+            .exec<{ next_at_ms: number | null }>(
+              "SELECT next_at_ms FROM match_sync_snapshots WHERE match_id = ?",
+              inviteId,
+            )
+            .one().next_at_ms,
+        };
+      } finally {
+        send.mockRestore();
+      }
+    });
+    expect(result).toEqual({
+      status: 503,
+      message: "Match source unavailable",
+      accepted: true,
+      open: 0,
+      admitting: false,
+      due: null,
+    });
+    accept(await room.fetch(request(inviteId)));
+  });
+
   it("keeps recovery armed when an unchanged match is invalidated during admission", async () => {
     const { room, inviteId, source } = await fixture();
     await room.readMatches(inviteId, inviteId);

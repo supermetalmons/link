@@ -338,6 +338,24 @@ describe("canonical invite source", () => {
     await expect(store.read("one")).rejects.toThrow("invite-source-corrupt");
   });
 
+  it("retains invite source marker errors for malformed markers and overflow", async () => {
+    await activate();
+    await db
+      .prepare("INSERT INTO invite_sources VALUES ('one', ?, 1, 1)")
+      .bind(JSON.stringify({ hostId: "host", count: Number.MAX_VALUE }))
+      .run();
+    const store = createProductionInviteSourceD1Store(db);
+    for (const count of [
+      { ".sv": { increment: "1" } },
+      { ".sv": "timestamp", extra: true },
+      { ".sv": { increment: Number.MAX_VALUE } },
+    ]) {
+      await expect(
+        store.prepareChanges([{ inviteId: "one", value: { count } }], 345),
+      ).rejects.toThrow("invalid-invite-source-server-value");
+    }
+  });
+
   it("does no preparation I/O for empty changes or an already aborted request", async () => {
     const observed = observePreparationReads();
     const reason = new Error("preparation-canceled");

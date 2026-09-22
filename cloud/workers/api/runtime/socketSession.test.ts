@@ -145,9 +145,10 @@ async function connect(
   channel: Channel,
   inviteId: string,
   authExpiresAtMs: number | null,
+  overrides: Record<string, string | null> = {},
 ) {
   const response = await room.fetch(
-    request(channel, inviteId, authExpiresAtMs),
+    request(channel, inviteId, authExpiresAtMs, overrides),
   );
   expect(response.status).toBe(101);
   const socket = response.webSocket!;
@@ -169,8 +170,8 @@ async function connect(
     messages.length
       ? Promise.resolve(messages.shift()!)
       : new Promise<string>((resolve) => readers.push(resolve));
-  await read();
-  return { socket, messages, read, closed };
+  const welcome = await read();
+  return { socket, messages, read, closed, response, welcome };
 }
 
 afterEach(async () => {
@@ -198,6 +199,79 @@ afterEach(async () => {
 
 describe("socket session lifetime", () => {
   for (const channel of channels) {
+    it(`${channel} preserves its protocol, stored identity and capacity tags`, async () => {
+      const { room, inviteId } = await fixture();
+      const protocols: Record<Channel, string> = {
+        reactions: REACTION_SOCKET_PROTOCOL,
+        presentation: REACTION_SOCKET_PROTOCOL_V2,
+        metadata: INVITE_METADATA_SOCKET_PROTOCOL,
+        wagers: INVITE_WAGERS_SOCKET_PROTOCOL,
+        matches: MATCH_SYNC_SOCKET_PROTOCOL,
+      };
+      for (const expiry of [Date.now() + 300_000, null]) {
+        const client = await connect(room, channel, inviteId, expiry);
+        expect(client.response.headers.get("Sec-WebSocket-Protocol")).toBe(
+          protocols[channel],
+        );
+        expect(JSON.parse(client.welcome)).toMatchObject({
+          schemaVersion: channel === "presentation" ? 2 : 1,
+          type: "snapshot",
+        });
+        const authenticated = expiry !== null;
+        const role = authenticated ? "host" : "spectator";
+        const session = authenticated
+          ? {
+              authenticated: true,
+              sid: SOCKET_TEST_SESSION_ID,
+              authExpiresAtMs: expiry,
+            }
+          : { authenticated: false };
+        const reaction = channel === "reactions" || channel === "presentation";
+        const prefix = channel === "matches" ? "match" : channel;
+        expect(
+          await runInDurableObject(room, (_instance, state) => {
+            const socket = state
+              .getWebSockets()
+              .find(
+                (value) =>
+                  value.deserializeAttachment().authenticated === authenticated,
+              )!;
+            return {
+              attachment: socket.deserializeAttachment(),
+              tags: state.getTags(socket).sort(),
+            };
+          }),
+        ).toEqual({
+          attachment: reaction
+            ? {
+                schemaVersion: channel === "presentation" ? 2 : 1,
+                matchId: channel === "presentation" ? inviteId : null,
+                ...session,
+              }
+            : {
+                channel,
+                schemaVersion: 1,
+                inviteId,
+                ...(channel === "matches" ? { matchId: inviteId } : {}),
+                role,
+                actorUid: authenticated ? "host-login" : null,
+                ...session,
+              },
+          tags: (reaction
+            ? [
+                `role:${role}`,
+                ...(authenticated ? [] : ["spectator-ip:unknown"]),
+              ]
+            : [
+                `channel:${channel}`,
+                `${prefix}-role:${role}`,
+                ...(authenticated ? [] : [`${prefix}-ip:unknown`]),
+              ]
+          ).sort(),
+        });
+      }
+    });
+
     it(`${channel} admission requires a valid unexpired trusted session`, async () => {
       const { room, inviteId } = await fixture();
       const expiry = Date.now() + 300_000;
@@ -269,6 +343,22 @@ describe("socket session lifetime", () => {
       expect(participant.messages).toEqual([]);
     });
   }
+
+  it.each([null, "another-protocol"])(
+    "omits an unrecognized reaction protocol %s from the upgrade response",
+    async (protocol) => {
+      const { room, inviteId } = await fixture();
+      const client = await connect(room, "reactions", inviteId, null, {
+        "Sec-WebSocket-Protocol": protocol,
+      });
+      expect(client.response.headers.get("Sec-WebSocket-Protocol")).toBeNull();
+      expect(JSON.parse(client.welcome)).toEqual({
+        schemaVersion: 1,
+        type: "snapshot",
+        reactions: {},
+      });
+    },
+  );
 
   for (const channel of ["metadata", "wagers", "matches"] as const) {
     it(`${channel} validates targets and admission before session or source reads`, async () => {

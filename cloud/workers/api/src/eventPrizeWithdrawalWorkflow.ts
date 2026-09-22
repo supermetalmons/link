@@ -6,13 +6,15 @@ import {
 } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 import {
-  createEventPrizeRuntimeDependencies,
-  executeEventPrizeWithdrawal,
   parseEventPrizeWithdrawalWorkflowParams,
   type EventPrizeWithdrawalWorkflowFailure,
   type EventPrizeWithdrawalWorkflowInput,
   type EventPrizeWithdrawalWorkflowOutput,
-} from "./eventPrizeWithdrawal.ts";
+} from "./eventPrizeWithdrawal/contracts.ts";
+import {
+  createEventPrizeRuntimeDependencies,
+  executeEventPrizeWithdrawal,
+} from "./eventPrizeWithdrawal/runtime.ts";
 import { assertProfileBackgroundMutationsEnabled } from "./profileCanonicalActivation.ts";
 
 function toRecord(value: unknown): Record<string, unknown> | null {

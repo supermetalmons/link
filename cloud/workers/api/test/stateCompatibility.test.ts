@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   STATE_EFFECTS_FIELD,
   STATE_SERVER_TIMESTAMP,
+  evaluateStateValueMarker,
   stateIncrement,
 } from "../src/stateCompatibility.ts";
 import {
@@ -20,6 +21,49 @@ test("neutral state operations preserve stored server-value bytes and effect key
   );
   assert.throws(() => stateIncrement(Infinity), TypeError);
   assert.throws(() => stateIncrement(NaN), TypeError);
+});
+
+test("stored value markers retain timestamp and numeric increment behavior", () => {
+  assert.deepEqual(evaluateStateValueMarker("timestamp", 99, 123), {
+    ok: true,
+    value: 123,
+  });
+  assert.deepEqual(evaluateStateValueMarker({ increment: -0.5 }, 2, 123), {
+    ok: true,
+    value: 1.5,
+  });
+  for (const current of [null, undefined, "2", false, NaN, Infinity]) {
+    assert.deepEqual(evaluateStateValueMarker({ increment: 2 }, current, 123), {
+      ok: true,
+      value: 2,
+    });
+  }
+});
+
+test("malformed markers and increment overflow remain distinct", () => {
+  for (const marker of [
+    null,
+    "other",
+    [],
+    {},
+    { increment: "1" },
+    { increment: NaN },
+    { increment: Infinity },
+    { increment: 1, extra: true },
+  ]) {
+    assert.deepEqual(evaluateStateValueMarker(marker, 2, 123), {
+      ok: false,
+      reason: "invalid-marker",
+    });
+  }
+  assert.deepEqual(
+    evaluateStateValueMarker(
+      { increment: Number.MAX_VALUE },
+      Number.MAX_VALUE,
+      123,
+    ),
+    { ok: false, reason: "increment-overflow" },
+  );
 });
 
 test("repository errors retain their published compatibility messages", () => {

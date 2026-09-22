@@ -1,4 +1,7 @@
-import { STATE_VALUE_FIELD } from "./stateCompatibility.ts";
+import {
+  evaluateStateValueMarker,
+  STATE_VALUE_FIELD,
+} from "./stateCompatibility.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import type { MatchStateCreation } from "./matchStateTypes.ts";
 import type { GameSessionChange } from "./gameSessionContracts.ts";
@@ -151,20 +154,12 @@ export function resolveValue(
   }
   if (Object.hasOwn(value, STATE_VALUE_FIELD)) {
     if (Object.keys(value).length !== 1) return fail("invalid-server-value");
-    if (value[STATE_VALUE_FIELD] === "timestamp") return nowMs;
-    const server = value[STATE_VALUE_FIELD];
-    if (
-      record(server) &&
-      Object.keys(server).length === 1 &&
-      typeof server.increment === "number" &&
-      Number.isFinite(server.increment)
-    ) {
-      const next =
-        (typeof current === "number" && Number.isFinite(current)
-          ? current
-          : 0) + server.increment;
-      if (Number.isFinite(next)) return next;
-    }
+    const result = evaluateStateValueMarker(
+      value[STATE_VALUE_FIELD],
+      current,
+      nowMs,
+    );
+    if (result.ok) return result.value;
     return fail("invalid-server-value");
   }
   return Object.fromEntries(

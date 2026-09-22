@@ -922,6 +922,58 @@ test("duplicate starts preserve an active executor lease", async () => {
   );
 });
 
+for (const existingClaim of [false, true]) {
+  test(`failed Workflow dispatch ${existingClaim ? "preserves an existing" : "releases a newly acquired"} lease`, async () => {
+    const state = repository();
+    const withdrawalPath = `eventPrizeWithdrawals/${eventId}/${prizeId}`;
+    if (existingClaim) setRecoverableWithdrawal(state, "processing");
+    const originalWithdrawal = structuredClone(
+      state.values.get(withdrawalPath),
+    );
+    let dispatchAttempts = 0;
+    let dispatchedWithdrawal: Record<string, unknown> | undefined;
+    const binding = workflow(() => ({ status: "running" }), {
+      getMissing: true,
+      onCreate: () => {
+        dispatchAttempts += 1;
+        dispatchedWithdrawal = structuredClone(
+          state.values.get(withdrawalPath),
+        ) as Record<string, unknown> | undefined;
+        throw new Error("workflow-create-failed");
+      },
+    });
+    const response = await handleEventPrizeWithdrawalRoute(
+      request("/events/prizes/withdrawals", {
+        eventId,
+        prizeId,
+        solanaAddress: recipientAddress,
+      }),
+      {
+        ...TELEGRAM_TEST_ENV,
+        EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding,
+      },
+      context,
+      {
+        profileDb: canonicalProfileDb(),
+        repository: state.value,
+        withdrawalStore: state.withdrawalStore,
+        verifyIdentity,
+        workflow: binding,
+      },
+    );
+
+    assert.equal(response.status, 503);
+    assert.equal(dispatchAttempts, 1);
+    assert.equal(dispatchedWithdrawal?.status, "processing");
+    assert.equal(typeof dispatchedWithdrawal?.leaseId, "string");
+    assert.ok(dispatchedWithdrawal?.leaseId);
+    assert.deepEqual(
+      state.values.get(withdrawalPath),
+      existingClaim ? originalWithdrawal : undefined,
+    );
+  });
+}
+
 test("alternate logins preserve the canonical active intent", async () => {
   const state = repository();
   state.values.set(`eventPrizeWithdrawals/${eventId}/${prizeId}`, {

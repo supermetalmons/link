@@ -88,7 +88,9 @@ test("canonical profile internals never import their public facade", () => {
 
 for (const module of [
   "automatch",
+  "automatchD1",
   "eventD1",
+  "eventPrizeWithdrawal",
   "authIdentityCanonical",
   "profileGameProjection",
 ]) {
@@ -111,6 +113,22 @@ for (const module of [
     }
   });
 }
+
+test("withdrawal Workflows do not depend on HTTP or admission orchestration", () => {
+  const sourceRoot = resolve(import.meta.dirname, "../src");
+  const reachable = new Set(
+    reachableRuntimeFiles(
+      resolve(sourceRoot, "eventPrizeWithdrawalWorkflow.ts"),
+    ),
+  );
+  for (const dependency of [
+    "eventPrizeWithdrawal.ts",
+    "eventPrizeWithdrawal/route.ts",
+    "eventPrizeWithdrawal/admission.ts",
+  ]) {
+    assert.ok(!reachable.has(resolve(sourceRoot, dependency)), dependency);
+  }
+});
 
 test("projection processing and recovery have separate dependency boundaries", () => {
   const root = resolve(import.meta.dirname, "../src/profileGameProjection");

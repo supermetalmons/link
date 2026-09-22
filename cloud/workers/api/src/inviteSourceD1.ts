@@ -1,5 +1,8 @@
 import { RETIRED_STATE_BACKEND } from "./stateCompatibility.ts";
-import { STATE_VALUE_FIELD } from "./stateCompatibility.ts";
+import {
+  evaluateStateValueMarker,
+  STATE_VALUE_FIELD,
+} from "./stateCompatibility.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import { classifyD1Failure } from "./d1Failure.ts";
 
@@ -404,20 +407,12 @@ function resolveValue(
   if (Object.hasOwn(value, STATE_VALUE_FIELD)) {
     if (Object.keys(value).length !== 1)
       throw new TypeError("invalid-invite-source-server-value");
-    const marker = value[STATE_VALUE_FIELD];
-    if (marker === "timestamp") return nowMs;
-    if (
-      record(marker) &&
-      Object.keys(marker).length === 1 &&
-      typeof marker.increment === "number" &&
-      Number.isFinite(marker.increment)
-    ) {
-      const result =
-        (typeof current === "number" && Number.isFinite(current)
-          ? current
-          : 0) + marker.increment;
-      if (Number.isFinite(result)) return result;
-    }
+    const result = evaluateStateValueMarker(
+      value[STATE_VALUE_FIELD],
+      current,
+      nowMs,
+    );
+    if (result.ok) return result.value;
     throw new TypeError("invalid-invite-source-server-value");
   }
   return Object.fromEntries(

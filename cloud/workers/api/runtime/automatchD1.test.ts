@@ -488,6 +488,22 @@ describe("D1 automatch state", () => {
     });
   });
 
+  it("resolves repeated typed increments against the original snapshot", async () => {
+    const { store } = await writableStore();
+    await store.patchRoot({ "telegramAutomatches/invite": { generation: 5 } });
+    const prepared = await store.prepareChanges(
+      [2, 4].map((increment) => ({
+        kind: "telegram-source-merge" as const,
+        inviteId: "invite",
+        value: { generation: { ".sv": { increment } } },
+      })),
+      500,
+    );
+    expect(prepared).toHaveLength(1);
+    expect(prepared[0].current.value).toEqual({ generation: 5 });
+    expect(prepared[0].value).toEqual({ generation: 9 });
+  });
+
   it("preloads each physical record once in one primary batch and preserves mutation order", async () => {
     const observed = observeMutationReads();
     const prepared = await observed.store.prepareChanges(

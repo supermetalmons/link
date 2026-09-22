@@ -24,6 +24,7 @@ import {
   socketCapacityFull,
   type SocketCapacityLimits,
 } from "./socketCapacity.ts";
+import { acceptRoomSocket, sendSocketSnapshot } from "./socketUpgrade.ts";
 
 type ReactionChannelDependencies = {
   presentations: Pick<
@@ -207,26 +208,24 @@ export class ReactionChannel {
             type: "snapshot",
             reactions,
           };
-    const pair = new WebSocketPair();
-    pair[1].serializeAttachment({
-      schemaVersion: version,
-      matchId: version === 2 ? matchId : null,
-      ...session,
-    });
-    this.ctx.acceptWebSocket(pair[1], [
-      `role:${role}`,
-      ...(role === "spectator" ? [`spectator-ip:${ip}`] : []),
-    ]);
-    this.dependencies.socketSessions.send(pair[1], JSON.stringify(snapshot));
-    return new Response(null, {
-      status: 101,
-      webSocket: pair[0],
-      headers:
-        protocol === REACTION_SOCKET_PROTOCOL ||
+    const pair = acceptRoomSocket(
+      this.ctx,
+      {
+        schemaVersion: version,
+        matchId: version === 2 ? matchId : null,
+        ...session,
+      },
+      [`role:${role}`, ...(role === "spectator" ? [`spectator-ip:${ip}`] : [])],
+    );
+    return sendSocketSnapshot(
+      this.dependencies.socketSessions,
+      pair,
+      snapshot,
+      protocol === REACTION_SOCKET_PROTOCOL ||
         protocol === REACTION_SOCKET_PROTOCOL_V2
-          ? { "Sec-WebSocket-Protocol": protocol }
-          : {},
-    });
+        ? protocol
+        : undefined,
+    );
   }
 
   publish(

@@ -18,6 +18,7 @@ import {
   type SocketSessions,
 } from "./socketSession.ts";
 import { readSocketAdmission } from "./socketAdmission.ts";
+import { acceptRoomSocket, sendSocketSnapshot } from "./socketUpgrade.ts";
 import { GameSessionTransitionFailure } from "./gameSessionCodec.ts";
 import type { MatchStatePair } from "./matchStateTypes.ts";
 
@@ -466,27 +467,22 @@ export class MatchSyncRoom {
           status: 429,
           headers: { "Retry-After": "60" },
         });
-      const pair = new WebSocketPair();
-      pair[1].serializeAttachment(attachment);
-      this.ctx.acceptWebSocket(pair[1], [
+      const pair = acceptRoomSocket(this.ctx, attachment, [
         "channel:matches",
         `match-role:${role}`,
         ...(role === "spectator" ? [`match-ip:${ip}`] : []),
       ]);
       acceptedSocket = pair[1];
-      this.dependencies.socketSessions.send(
-        pair[1],
-        JSON.stringify({
+      return sendSocketSnapshot(
+        this.dependencies.socketSessions,
+        pair,
+        {
           schemaVersion: 1,
           type: "snapshot",
           snapshot: latest.snapshot,
-        }),
+        },
+        MATCH_SYNC_SOCKET_PROTOCOL,
       );
-      return new Response(null, {
-        status: 101,
-        webSocket: pair[0],
-        headers: { "Sec-WebSocket-Protocol": MATCH_SYNC_SOCKET_PROTOCOL },
-      });
     } catch {
       if (acceptedSocket) {
         acceptedSocket.close(1011, "Match admission failed");
