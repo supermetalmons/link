@@ -74,6 +74,35 @@ FIFO orders eligible waiting tickets by `(enqueued_at_ms, invite_id)`. A prepare
 
 Rollback must retain a Worker with conflict retries, journal recovery, and the installed projection schema. The bridge is compatible with the FIFO flag and maintains the same canonical state while restoring legacy delivery. Never roll back to a pre-support binary, drop the new tables or triggers, reset the Durable Object namespace, purge Queues, or restore source tables independently. Use the routine promotion and affected verification path, with no write freeze or Queue pause.
 
+## Recovery outbox ordering indexes
+
+Migration `0026_recovery_outbox_ordering.sql` replaces only `idx_automatch_telegram_projection_due` and `idx_game_session_projection_due` in `PROFILE_GAMES_DB`, retaining their names and adding the exact `keyOrderSql` expressions used by the existing recovery queries. Records, runtime queries, APIs, and Queue payloads remain unchanged. This is a migration-only release: keep writes and Queues active; no Worker upload, promotion, or Workflow publication is needed. Previous Worker versions remain compatible with the new indexes.
+
+Validate ordering, retained records, and the actual query plans locally:
+
+```sh
+npm run test:api:runtime -- automatchQueriesD1.test.ts recoveryOutboxOrderingMigration.test.ts
+```
+
+Inspect pending migrations first. `migrations apply` applies all pending migrations, so proceed only when `0026_recovery_outbox_ordering.sql` is the sole pending migration; review any other pending changes separately. If it is already applied, continue with verification.
+
+```sh
+npx wrangler d1 migrations list PROFILE_GAMES_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler d1 migrations apply PROFILE_GAMES_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler d1 execute PROFILE_GAMES_DB --remote --command "SELECT name, sql FROM sqlite_schema WHERE type = 'index' AND name IN ('idx_automatch_telegram_projection_due', 'idx_game_session_projection_due');" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+```
+
+Compare both returned definitions with the reviewed migration. Prepare a temporary, reviewed SQL file containing `EXPLAIN QUERY PLAN` for the two actual due queries captured by `observeReads()` in [automatchQueriesD1.test.ts](../cloud/workers/api/runtime/automatchQueriesD1.test.ts): `listDueAutomatchTelegramOutboxes` and `listDueAutomatchProfileOutboxes` from [automatchD1.ts](../cloud/workers/api/src/automatchD1.ts). Use the captured SQL with its expanded `keyOrderSql` expressions and substitute the numeric cutoff/limit bindings, preserving numbered `?1`/`?2` reuse. A simplified `ORDER BY record_key` does not verify these queries.
+
+Pass the reviewed SQL through `--command` so D1 returns the query-plan rows:
+
+```sh
+recovery_explain_sql_file="/absolute/path/to/reviewed-explain.sql"
+npx wrangler d1 execute PROFILE_GAMES_DB --remote --command "$(cat "$recovery_explain_sql_file")" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+```
+
+The Telegram plan must search `idx_automatch_telegram_projection_due` without a temporary ordering B-tree. The profile plan must search `idx_game_session_projection_due` in all four branches without branch-level ordering B-trees. Its final union sort remains intentional and bounded to at most four times the query limit; do not remove it. Finish after schema and plan verification pass, without waiting for a scheduled sweep. Retain these compatible indexes on Worker rollback; never rewrite the applied migration or clear outboxes to verify it.
+
 ## Canonical operators
 
 Status commands are read-only and use Cloudflare credentials. Completed migration phases and source-proof operations are retired and fail during argument validation.

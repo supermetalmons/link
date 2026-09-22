@@ -231,6 +231,36 @@ describe("explicit D1 automatch queries", () => {
     }
   });
 
+  it.each([
+    { name: "missing", value: undefined },
+    { name: "null", value: null },
+    { name: "false", value: false },
+    { name: "true", value: true },
+    { name: "numeric", value: 10.25 },
+  ])(
+    "preserves key ordering within the $name profile recovery branch",
+    async ({ value }) => {
+      await seed(
+        profileRoot,
+        numericKeys.map((key) => [
+          key,
+          { lastQueuedAtMs: value, requestId: key },
+        ]),
+      );
+      for (const limit of [1, 3, 12, 100]) {
+        expect(
+          await store.listDueAutomatchProfileOutboxes(10.25, limit),
+        ).toEqual(
+          await legacy.getPath(profileRoot, {
+            orderBy: "lastQueuedAtMs",
+            endAt: 10.25,
+            limitToFirst: limit,
+          }),
+        );
+      }
+    },
+  );
+
   it("matches legacy login selection and first-entry ordering, including numeric key boundaries", async () => {
     await seed("automatch", [
       ...numericKeys.map((key): [string, unknown] => [
@@ -346,7 +376,7 @@ describe("explicit D1 automatch queries", () => {
     },
   );
 
-  it("uses indexed searches for actual login and due queries", async () => {
+  it("uses indexed searches without sorting within due recovery branches", async () => {
     await seed("automatch", [["entry", { uid: "owner" }]]);
     await seed(telegramRoot, mixedOutboxes("updatedAtMs"));
     await seed(profileRoot, mixedOutboxes("lastQueuedAtMs"));
@@ -354,21 +384,27 @@ describe("explicit D1 automatch queries", () => {
     await observed.store.listAutomatchEntriesByLogin("owner", 2);
     await observed.store.listDueAutomatchTelegramOutboxes(10, 2);
     await observed.store.listDueAutomatchProfileOutboxes(10, 2);
+    await observed.store.listMalformedAutomatchProfileOutboxes(2);
     const plans: string[] = [];
+    const sorts: { parent: number; detail: string }[][] = [];
     for (const { sql, values } of observed.queries) {
       const result = await db
         .prepare(`EXPLAIN QUERY PLAN ${sql}`)
         .bind(...values)
-        .all<{ detail: string }>();
+        .all<{ parent: number; detail: string }>();
       plans.push(result.results.map(({ detail }) => detail).join("\n"));
+      sorts.push(
+        result.results.filter(({ detail }) => detail.includes("TEMP B-TREE")),
+      );
     }
-    expect(plans).toHaveLength(3);
+    expect(plans).toHaveLength(4);
     expect(plans[0]).toMatch(
       /SEARCH .* USING INDEX idx_automatch_entries_uid \(<expr>=\?\)/,
     );
     expect(plans[1]).toMatch(
       /SEARCH .* USING INDEX idx_automatch_telegram_projection_due \(<expr>>\? AND <expr><\?\)/,
     );
+    expect(sorts[1], plans[1]).toEqual([]);
     expect(
       plans[2].match(
         /SEARCH .* USING INDEX idx_game_session_projection_due \(<expr>/g,
@@ -378,5 +414,12 @@ describe("explicit D1 automatch queries", () => {
     expect(plans[2]).toMatch(
       /SEARCH .* USING INDEX idx_game_session_projection_due \(<expr><\?\)/,
     );
+    expect(sorts[2], plans[2]).toMatchObject([
+      { parent: 0, detail: "USE TEMP B-TREE FOR ORDER BY" },
+    ]);
+    expect(plans[3]).toMatch(
+      /SEARCH .* USING INDEX idx_game_session_projection_due \(<expr>>\?\)/,
+    );
+    expect(sorts[3], plans[3]).toHaveLength(1);
   });
 });
