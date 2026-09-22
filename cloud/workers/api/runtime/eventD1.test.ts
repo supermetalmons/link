@@ -1494,6 +1494,7 @@ describe("event D1 store", () => {
     function observe(
       kind: SnapshotKind,
       beforeBatch?: (attempt: number) => Promise<void>,
+      afterRead?: (read: number) => Promise<void>,
     ) {
       const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
         beforeBatch,
@@ -1505,9 +1506,33 @@ describe("event D1 store", () => {
           : "event_telegram_projection_state";
       const db: EventD1Connection = {
         prepare(query) {
-          if (/^\s*SELECT\b/i.test(query) && query.includes(`FROM ${table}`))
-            reads += 1;
-          return observed.database.prepare(query);
+          const statement = observed.database.prepare(query);
+          if (!/^\s*SELECT\b/i.test(query) || !query.includes(`FROM ${table}`))
+            return statement;
+          const read = ++reads;
+          if (!afterRead) return statement;
+          const wrap = (current: D1PreparedStatement): D1PreparedStatement =>
+            new Proxy(current, {
+              get(target, property) {
+                if (property === "bind")
+                  return (...values: unknown[]) => wrap(target.bind(...values));
+                if (property === "first")
+                  return async (...args: unknown[]) => {
+                    const result = await Reflect.apply(
+                      target.first,
+                      target,
+                      args,
+                    );
+                    await afterRead(read);
+                    return result;
+                  };
+                const member = Reflect.get(target, property, target);
+                return typeof member === "function"
+                  ? member.bind(target)
+                  : member;
+              },
+            });
+          return wrap(statement);
         },
         batch: (statements) => observed.database.batch(statements),
       };
@@ -1519,6 +1544,272 @@ describe("event D1 store", () => {
         },
       };
     }
+
+    it("marks progress dispatched with one read and retains raw JSON fields and the original announcement time", async () => {
+      const { outboxId, path, outbox } = await seed("progress");
+      const original = { ...outbox, unknownFutureField: { retained: [1, 2] } };
+      const raw = JSON.stringify(original, null, 2).replace(
+        '"firstQueuedAtMs": 100',
+        '"firstQueuedAtMs": 1e2',
+      );
+      await testEnv.EVENT_DB.prepare(
+        "UPDATE event_progress_outboxes SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
+      )
+        .bind(raw, outboxId)
+        .run();
+      const observed = observe("progress");
+      await withD1Admission((admission) =>
+        commitEventMutations(
+          observed.db,
+          [{ kind: "progress-dispatched", outboxId, value: 300 }],
+          { admission },
+        ),
+      );
+      expect(observed.reads).toBe(1);
+      expect(observed.batches).toHaveLength(1);
+      expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual({
+        ...original,
+        lastQueuedAtMs: 300,
+      });
+      expect(
+        await readEventOwnedPath(
+          testEnv.EVENT_DB,
+          `eventProgressOutboxDead/${outboxId}`,
+        ),
+      ).toBeNull();
+    });
+
+    it.each(["replacement", "deletion", "raw JSON change"] as const)(
+      "rejects a concurrent %s after the dispatch read without retrying or partially committing",
+      async (race) => {
+        const { outboxId, path, outbox } = await seed("progress");
+        const racedJson =
+          race === "deletion"
+            ? null
+            : race === "replacement"
+              ? JSON.stringify({
+                  ...outbox,
+                  firstQueuedAtMs: 50,
+                  concurrent: true,
+                })
+              : JSON.stringify(outbox, null, 2).replace(
+                  '"firstQueuedAtMs": 100',
+                  '"firstQueuedAtMs": 1e2',
+                );
+        const observed = observe("progress", undefined, async (read) => {
+          if (read !== 1) return;
+          if (racedJson === null) {
+            await testEnv.EVENT_DB.prepare(
+              "DELETE FROM event_progress_outboxes WHERE outbox_id = ? AND status = 'pending'",
+            )
+              .bind(outboxId)
+              .run();
+          } else {
+            await testEnv.EVENT_DB.prepare(
+              "UPDATE event_progress_outboxes SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
+            )
+              .bind(racedJson, outboxId)
+              .run();
+          }
+        });
+        await expect(
+          withD1Admission((admission) =>
+            commitEventMutations(
+              observed.db,
+              [
+                { kind: "progress-dispatched", outboxId, value: 300 },
+                {
+                  kind: "event-field",
+                  eventId,
+                  field: "status",
+                  value: "active",
+                },
+              ],
+              { admission },
+            ),
+          ),
+        ).rejects.toBeInstanceOf(EventD1Conflict);
+        expect(observed.reads).toBe(1);
+        expect(observed.batches).toHaveLength(1);
+        expect(
+          await testEnv.EVENT_DB.prepare(
+            "SELECT record_json FROM event_progress_outboxes WHERE outbox_id = ? AND status = 'pending'",
+          )
+            .bind(outboxId)
+            .first("record_json"),
+        ).toBe(racedJson);
+        expect(
+          await readEventSnapshot(testEnv.EVENT_DB, eventId),
+        ).toMatchObject({
+          event: { status: "scheduled" },
+          revision: 1,
+        });
+        expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(
+          racedJson === null ? null : JSON.parse(racedJson),
+        );
+        expect(
+          await readEventOwnedPath(
+            testEnv.EVENT_DB,
+            `eventProgressOutboxDead/${outboxId}`,
+          ),
+        ).toBeNull();
+      },
+    );
+
+    it("keeps progress dispatch snapshots separate across outboxes and repeated dispatches", async () => {
+      const first = await seed("progress");
+      const second = await buildEventProgressPlan(
+        {
+          eventId,
+          sourceKey: "dispatch-second:test",
+          reason: "sunday-mons-reminder",
+          runAtMs: 2_000,
+        },
+        150,
+      );
+      await patchEventOwnedPaths(testEnv.EVENT_DB, {
+        [`eventProgressOutbox/${second.outboxId}`]: second.outbox,
+      });
+      const observed = observe("progress");
+      await withD1Admission((admission) =>
+        commitEventMutations(
+          observed.db,
+          [
+            {
+              kind: "progress-dispatched",
+              outboxId: first.outboxId,
+              value: 200,
+            },
+            {
+              kind: "progress-dispatched",
+              outboxId: second.outboxId,
+              value: 300,
+            },
+            {
+              kind: "progress-dispatched",
+              outboxId: first.outboxId,
+              value: 400,
+            },
+          ],
+          { admission },
+        ),
+      );
+      expect(observed.reads).toBe(3);
+      expect(observed.batches).toHaveLength(1);
+      for (const [plan, timestamp] of [
+        [first, 400],
+        [second, 300],
+      ] as const) {
+        expect(
+          await readEventOwnedPath(
+            testEnv.EVENT_DB,
+            `eventProgressOutbox/${plan.outboxId}`,
+          ),
+        ).toEqual({ ...plan.outbox, lastQueuedAtMs: timestamp });
+      }
+    });
+
+    it.each([
+      ["replacement", "before"],
+      ["deletion", "before"],
+      ["replacement", "after"],
+      ["deletion", "after"],
+    ] as const)(
+      "preserves a direct %s %s a dispatch in the same plan",
+      async (kind, position) => {
+        const { outboxId, path, outbox } = await seed("progress");
+        const replacement = {
+          ...outbox,
+          firstQueuedAtMs: 400,
+          lastQueuedAtMs: 500,
+          replaced: true,
+        };
+        const direct: EventMutation = {
+          kind: "progress-outbox",
+          outboxId,
+          value: kind === "deletion" ? null : replacement,
+        };
+        const dispatched: EventMutation = {
+          kind: "progress-dispatched",
+          outboxId,
+          value: 300,
+        };
+        const observed = observe("progress", undefined, async (read) => {
+          if (position !== "after" || read !== 1) return;
+          await testEnv.EVENT_DB.prepare(
+            "UPDATE event_progress_outboxes SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
+          )
+            .bind(JSON.stringify({ ...outbox, firstQueuedAtMs: 50 }), outboxId)
+            .run();
+        });
+        await withD1Admission((admission) =>
+          commitEventMutations(
+            observed.db,
+            position === "before" ? [direct, dispatched] : [dispatched, direct],
+            { admission },
+          ),
+        );
+        expect(observed.reads).toBe(
+          position === "after" && kind === "replacement" ? 2 : 1,
+        );
+        expect(observed.batches).toHaveLength(1);
+        expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(
+          position === "before"
+            ? { ...outbox, lastQueuedAtMs: 300 }
+            : kind === "deletion"
+              ? null
+              : { ...replacement, firstQueuedAtMs: 50 },
+        );
+      },
+    );
+
+    it.each([
+      ["missing", null, "event-progress-not-found"],
+      ["JSON null", "null", "event-progress-not-found"],
+      [
+        "invalid record",
+        '{"schemaVersion":2,"eventId":"event-one","runAtMs":null}',
+        "invalid-event-progress-outbox",
+      ],
+      ["invalid JSON", "{", "invalid-event-json"],
+    ] as const)(
+      "rejects dispatch of a %s progress record before writing",
+      async (_name, recordJson, message) => {
+        let reads = 0;
+        const db: EventD1Connection = {
+          prepare() {
+            return {
+              bind() {
+                return this;
+              },
+              async first() {
+                reads += 1;
+                return recordJson === null ? null : { record_json: recordJson };
+              },
+            } as unknown as D1PreparedStatement;
+          },
+          batch() {
+            throw new Error("unexpected-database-write");
+          },
+        };
+        await expect(
+          withD1Admission((admission) =>
+            commitEventMutations(
+              db,
+              [
+                {
+                  kind: "progress-dispatched",
+                  outboxId: "outbox-one",
+                  value: 300,
+                },
+              ],
+              { admission },
+            ),
+          ),
+        ).rejects.toMatchObject({ message });
+        expect(reads).toBe(1);
+      },
+    );
 
     it.each([
       ["progress", "missing"],

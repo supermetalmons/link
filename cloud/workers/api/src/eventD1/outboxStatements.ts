@@ -31,6 +31,7 @@ export async function buildOutboxStatements(
   db: EventD1Connection,
   {
     progressOutboxSnapshot,
+    progressDispatchSnapshots,
     telegramProjectionSnapshot,
     progressUpdates,
     progressDeadUpdates,
@@ -40,6 +41,7 @@ export async function buildOutboxStatements(
   }: Pick<
     PreparedEventMutations,
     | "progressOutboxSnapshot"
+    | "progressDispatchSnapshots"
     | "telegramProjectionSnapshot"
     | "progressUpdates"
     | "progressDeadUpdates"
@@ -82,6 +84,7 @@ export async function buildOutboxStatements(
     let record = validateEventProgressOutbox(outboxId, raw);
     const stored =
       progressOutboxSnapshot ??
+      progressDispatchSnapshots.get(outboxId) ??
       (await readEventProgressOutboxSnapshot(db, outboxId));
     guards.push(progressOutboxSnapshotGuard(db, stored));
     const previous =

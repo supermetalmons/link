@@ -1,6 +1,7 @@
 import {
   isRecord,
   cloneJson,
+  decodeJson,
   validateEventAggregate,
   exactKey,
   validatePrizeSelection,
@@ -13,19 +14,22 @@ import {
   type EventMutationState,
   type ProfilePrizeMutationState,
   type EventMutationOptions,
+  type EventOutboxRecord,
+  type ProgressOutboxSnapshot,
 } from "./types.ts";
 import {
   readEventRecord,
   readSelections,
   readProfileEventPrizes,
   readProfilePrizeMutationSnapshots,
-  readEventProgressOutbox,
+  readEventProgressOutboxSnapshot,
   readEventProfileGameProjectionOutbox,
 } from "./reads.ts";
 import type { EventMutation } from "../../../../runtime/eventCommands.js";
 
 export type PreparedEventMutations = {
   progressOutboxSnapshot: EventMutationOptions["progressOutboxSnapshot"];
+  progressDispatchSnapshots: ReadonlyMap<string, ProgressOutboxSnapshot>;
   telegramProjectionSnapshot: EventMutationOptions["telegramProjectionSnapshot"];
   eventStates: ReadonlyMap<string, EventMutationState>;
   profileStates: ReadonlyMap<string, ProfilePrizeMutationState>;
@@ -180,6 +184,7 @@ export async function prepareEventMutations(
     snapshot ? new Map() : profilePrizeReadTargets(changes),
   );
   const progressUpdates = new Map<string, unknown>();
+  const progressDispatchSnapshots = new Map<string, ProgressOutboxSnapshot>();
   const progressDeadUpdates = new Map<string, unknown>();
   const profileProjectionUpdates = new Map<string, unknown>();
   const telegramProjectionUpdates = new Map<string, unknown>();
@@ -321,16 +326,24 @@ export async function prepareEventMutations(
         }
         break;
       }
-      case "progress-outbox":
-        progressUpdates.set(exactKey(change.outboxId), value);
+      case "progress-outbox": {
+        const outboxId = exactKey(change.outboxId);
+        progressUpdates.set(outboxId, value);
+        progressDispatchSnapshots.delete(outboxId);
         break;
+      }
       case "progress-dead":
         progressDeadUpdates.set(exactKey(change.outboxId), value);
         break;
       case "progress-dispatched": {
         const outboxId = exactKey(change.outboxId);
-        const current = await readEventProgressOutbox(db, outboxId);
+        const snapshot = await readEventProgressOutboxSnapshot(db, outboxId);
+        const current =
+          snapshot.recordJson === null
+            ? null
+            : (decodeJson(snapshot.recordJson) as EventOutboxRecord);
         if (!current) throw new EventD1Failure("event-progress-not-found");
+        progressDispatchSnapshots.set(outboxId, snapshot);
         progressUpdates.set(outboxId, {
           ...cloneJson(current),
           lastQueuedAtMs: value,
@@ -393,6 +406,7 @@ export async function prepareEventMutations(
 
   return {
     progressOutboxSnapshot,
+    progressDispatchSnapshots,
     telegramProjectionSnapshot,
     eventStates,
     profileStates,
