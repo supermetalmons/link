@@ -1,7 +1,12 @@
 import type { EventMutation } from "../../../runtime/eventCommands.js";
 import type { GameSessionChange } from "../../../runtime/gameSessionChanges.js";
 import type { EventStore } from "../src/eventStoreContracts.ts";
-import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import type {
+  GameplayRepository,
+  RatingCommitPlan,
+  RatingCompletionPatch,
+  RatingProfilePatch,
+} from "../src/gameplayRepository.ts";
 import type {
   AutomatchRepository,
   GameSessionRepository,
@@ -69,4 +74,75 @@ export type SessionRepositoryNeedsNoAutomatchCoordinator = Assert<
 >;
 export type ReceiptCleanupRequiresExpiryOperation = Assert<
   Rejects<{}, Parameters<typeof sweepGameSessionMutationReceipts>[0]>
+>;
+
+export type RatingProfilePatchAllowsPartialUpdates = Assert<
+  { rating: 0 } | { win: false } | null extends RatingCommitPlan["playerUpdate"]
+    ? true
+    : false
+>;
+export type RatingCommitPlanRejectsInvalidPatches = Assert<
+  | Rejects<{ rating: string }, RatingCommitPlan["playerUpdate"]>
+  | Rejects<{ unexpected: true }, RatingCommitPlan["opponentUpdate"]>
+  | Rejects<
+      Omit<RatingCompletionPatch, "status"> & { status: "processing" },
+      RatingCommitPlan["ratingUpdate"]
+    >
+>;
+export type RatingProfilePatchHasOnlyKnownFields = Assert<
+  Exclude<
+    keyof RatingProfilePatch,
+    "rating" | "nonce" | "win" | "totalManaPoints"
+  > extends never
+    ? true
+    : false
+>;
+export type RatingProfilePatchRejectsIncorrectValues = Assert<
+  | Rejects<{ rating: string }, RatingProfilePatch>
+  | Rejects<{ nonce: string }, RatingProfilePatch>
+  | Rejects<{ win: number }, RatingProfilePatch>
+  | Rejects<{ totalManaPoints: null }, RatingProfilePatch>
+>;
+export type RatingCompletionHasNoArbitraryFields = Assert<
+  string extends keyof RatingCompletionPatch ? false : true
+>;
+export type RatingCompletionRejectsUnknownField = Assert<
+  Rejects<"completedAt" | "arbitrary", keyof RatingCompletionPatch>
+>;
+export type RatingCompletionRejectsInvalidStatus = Assert<
+  | Rejects<"processing", RatingCompletionPatch["status"]>
+  | Rejects<"done", RatingCompletionPatch["telegramProjectionState"]>
+  | Rejects<"dead", RatingCompletionPatch["profileGameProjectionState"]>
+  | Rejects<"invalid", RatingCompletionPatch["eventProgressState"]>
+>;
+export type RatingCompletionRejectsIncorrectValues = Assert<
+  | Rejects<string, RatingCompletionPatch["completedAtMs"]>
+  | Rejects<string, RatingCompletionPatch["playerManaPoints"]>
+  | Rejects<null, RatingCompletionPatch["opponentManaPoints"]>
+  | Rejects<number, RatingCompletionPatch["eventId"]>
+>;
+export type RatingCompletionRequiresTimestamps = Assert<
+  | Rejects<Omit<RatingCompletionPatch, "completedAtMs">, RatingCompletionPatch>
+  | Rejects<Omit<RatingCompletionPatch, "updatedAtMs">, RatingCompletionPatch>
+  | Rejects<
+      Omit<RatingCompletionPatch, "leaseExpiresAtMs">,
+      RatingCompletionPatch
+    >
+>;
+export type RatingCompletionAllowsNullableMetadata = Assert<
+  {
+    status: "done";
+    completedAtMs: number;
+    updatedAtMs: number;
+    leaseExpiresAtMs: number;
+    eventId: null;
+    winnerNewRating: null;
+    loserNewRating: null;
+    telegramDeliveryVersion: null;
+    telegramProjectionReason: null;
+    profileGameProjectionReason: null;
+    eventProgressReason: null;
+  } extends RatingCompletionPatch
+    ? true
+    : false
 >;

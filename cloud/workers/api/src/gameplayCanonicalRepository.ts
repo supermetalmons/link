@@ -61,6 +61,7 @@ import type {
   RatingLeaseInput,
   RatingLeaseResult,
   RatingProfile,
+  RatingProfilePatch,
   RatingProfileGameProjectionRepository,
   RatingProjectionRepository,
   RatingUpdateData,
@@ -70,8 +71,20 @@ import type {
 import { mapCanonicalOwnershipSnapshot } from "./profileOwnershipMapping.ts";
 import { readRatingCompletion } from "./ratingCompletionD1.ts";
 
+export type GameplayRepositoryOperation =
+  | "applyWagerTransferOnce"
+  | "readProfileOwnershipSnapshot"
+  | "getMiningMaterials"
+  | "getMiningSnapshot"
+  | "tryAcquireRatingLease"
+  | "finalizeRatingUpdate"
+  | "applyFebruaryChallengeReplay";
+
 type CanonicalRepositoryOptions = {
-  createFailure(): Error;
+  createFailure(
+    operation: GameplayRepositoryOperation,
+    options?: ErrorOptions,
+  ): Error;
   maxAttempts: number;
   now(): number;
 };
@@ -217,7 +230,10 @@ function ratingProfileFromSnapshot(
 
 function patchCanonicalProfile(
   snapshot: CanonicalProfileSnapshot,
-  patch: Record<string, unknown>,
+  patch: RatingProfilePatch & {
+    feb2026UniqueOpponentsCount?: number;
+    mining?: unknown;
+  },
   updatedAtMs: number,
   miningSortKeys: readonly MiningMaterialName[] = MATERIAL_KEYS,
 ): CanonicalProfileValue {
@@ -412,8 +428,23 @@ function mergedRatingValue(
   });
 }
 
-function mapFailure(error: unknown, createFailure: () => Error): never {
-  throw error instanceof CanonicalProfileConflict ? createFailure() : error;
+function mapFailure(
+  error: unknown,
+  createFailure: CanonicalRepositoryOptions["createFailure"],
+  operation: GameplayRepositoryOperation,
+  cause = error,
+): never {
+  throw error instanceof CanonicalProfileConflict
+    ? createFailure(operation, { cause })
+    : error;
+}
+
+function reconciliationFailure(error: unknown, readError: unknown): Error {
+  return new AggregateError(
+    [error, readError],
+    "gameplay-write-reconciliation-failed",
+    { cause: error },
+  );
 }
 
 function replayWagerSettlement(
@@ -455,7 +486,7 @@ export function createCanonicalGameplayRepository(
         !Number.isSafeInteger(input.appliedAtMs) ||
         input.appliedAtMs < 0
       ) {
-        throw options.createFailure();
+        throw options.createFailure("applyWagerTransferOnce");
       }
       try {
         const existing = await readCanonicalWagerSettlement(
@@ -465,16 +496,17 @@ export function createCanonicalGameplayRepository(
         if (existing) {
           return replayWagerSettlement(existing, input.fingerprint);
         }
-      } catch {
-        throw options.createFailure();
+      } catch (error) {
+        throw options.createFailure("applyWagerTransferOnce", { cause: error });
       }
+      let lastConflict: CanonicalProfileConflict | undefined;
       for (let attempt = 0; attempt < attempts; attempt++) {
         try {
           const [winner, loser] = await Promise.all([
             resolveCanonicalProfile(db, input.winnerProfileId),
             resolveCanonicalProfile(db, input.loserProfileId),
           ]);
-          if (!winner || !loser) throw options.createFailure();
+          if (!winner || !loser) throw new Error("wager-profile-unavailable");
           const mutations: CanonicalMutation[] = [];
           const expectations: CanonicalExpectation[] = [
             { kind: "wager-settlement-absent", operationId: input.operationId },
@@ -575,15 +607,22 @@ export function createCanonicalGameplayRepository(
             if (existing) {
               return replayWagerSettlement(existing, input.fingerprint);
             }
-          } catch {
-            throw options.createFailure();
+          } catch (readError) {
+            throw options.createFailure("applyWagerTransferOnce", {
+              cause: reconciliationFailure(error, readError),
+            });
           }
           if (!(error instanceof CanonicalProfileConflict)) {
-            throw options.createFailure();
+            throw options.createFailure("applyWagerTransferOnce", {
+              cause: error,
+            });
           }
+          lastConflict = error;
         }
       }
-      throw options.createFailure();
+      throw options.createFailure("applyWagerTransferOnce", {
+        cause: lastConflict,
+      });
     },
 
     async readProfileOwnershipSnapshot(query) {
@@ -591,8 +630,10 @@ export function createCanonicalGameplayRepository(
         return mapCanonicalOwnershipSnapshot(
           await readCanonicalProfileOwnershipSnapshot(db, query),
         );
-      } catch {
-        throw options.createFailure();
+      } catch (error) {
+        throw options.createFailure("readProfileOwnershipSnapshot", {
+          cause: error,
+        });
       }
     },
 
@@ -600,8 +641,8 @@ export function createCanonicalGameplayRepository(
       try {
         const snapshot = await resolveCanonicalProfile(db, profileId);
         return normalizeMaterials(snapshot?.profile.mining.materials);
-      } catch {
-        throw options.createFailure();
+      } catch (error) {
+        throw options.createFailure("getMiningMaterials", { cause: error });
       }
     },
 
@@ -610,8 +651,8 @@ export function createCanonicalGameplayRepository(
         return (
           (await resolveCanonicalProfile(db, profileId))?.profile.mining || null
         );
-      } catch {
-        throw options.createFailure();
+      } catch (error) {
+        throw options.createFailure("getMiningSnapshot", { cause: error });
       }
     },
 
@@ -784,10 +825,11 @@ export function createCanonicalRatingRepository(
           data &&
           (data.inviteId !== input.inviteId || data.matchId !== input.matchId)
         ) {
-          throw options.createFailure();
+          throw options.createFailure("tryAcquireRatingLease");
         }
         return { status: "done", data };
       }
+      let lastConflict: CanonicalProfileConflict | undefined;
       for (let attempt = 0; attempt < attempts; attempt++) {
         const snapshot = await readCanonicalRatingUpdate(db, operationId);
         const data = snapshot ? ratingData(snapshot) : null;
@@ -795,7 +837,7 @@ export function createCanonicalRatingRepository(
           data &&
           (data.inviteId !== input.inviteId || data.matchId !== input.matchId)
         ) {
-          throw options.createFailure();
+          throw options.createFailure("tryAcquireRatingLease");
         }
         if (data?.status === "done") return { status: "done", data };
         const attemptNowMs = options.now();
@@ -845,8 +887,13 @@ export function createCanonicalRatingRepository(
           let durable: RatingUpdateData | null;
           try {
             durable = await readOperation(operationId);
-          } catch {
-            mapFailure(error, options.createFailure);
+          } catch (readError) {
+            mapFailure(
+              error,
+              options.createFailure,
+              "tryAcquireRatingLease",
+              reconciliationFailure(error, readError),
+            );
           }
           if (sameRatingOperation(durable, input)) {
             if (durable.status === "done") {
@@ -867,11 +914,14 @@ export function createCanonicalRatingRepository(
             }
           }
           if (!(error instanceof CanonicalProfileConflict)) {
-            mapFailure(error, options.createFailure);
+            mapFailure(error, options.createFailure, "tryAcquireRatingLease");
           }
+          lastConflict = error;
         }
       }
-      throw options.createFailure();
+      throw options.createFailure("tryAcquireRatingLease", {
+        cause: lastConflict,
+      });
     },
 
     async finalizeRatingUpdate(
@@ -881,6 +931,7 @@ export function createCanonicalRatingRepository(
         opponent: RatingProfile | null,
       ) => RatingCommitPlan,
     ): Promise<RatingFinalizeResult> {
+      let lastConflict: CanonicalProfileConflict | undefined;
       for (let attempt = 0; attempt < attempts; attempt++) {
         const operation = await readCanonicalRatingUpdate(
           db,
@@ -892,7 +943,7 @@ export function createCanonicalRatingRepository(
           data.inviteId !== input.inviteId ||
           data.matchId !== input.matchId
         ) {
-          throw options.createFailure();
+          throw options.createFailure("finalizeRatingUpdate");
         }
         if (data.status === "done") return { status: "replayed", data };
         if (
@@ -911,8 +962,11 @@ export function createCanonicalRatingRepository(
               opponentLoginUid: input.opponentId,
             }));
         } catch (error) {
-          if (error instanceof CanonicalProfileConflict) continue;
-          mapFailure(error, options.createFailure);
+          if (error instanceof CanonicalProfileConflict) {
+            lastConflict = error;
+            continue;
+          }
+          mapFailure(error, options.createFailure, "finalizeRatingUpdate");
         }
         const player = ratingProfileFromSnapshot(playerSnapshot);
         const opponent = ratingProfileFromSnapshot(opponentSnapshot);
@@ -949,7 +1003,7 @@ export function createCanonicalRatingRepository(
         const mutations: CanonicalMutation[] = [];
         const profileWrites = new Map<
           string,
-          { snapshot: CanonicalProfileSnapshot; patch: Record<string, unknown> }
+          { snapshot: CanonicalProfileSnapshot; patch: RatingProfilePatch }
         >();
         if (playerSnapshot && plan.playerUpdate) {
           profileWrites.set(playerSnapshot.profile.profileId, {
@@ -986,24 +1040,33 @@ export function createCanonicalRatingRepository(
           let replay: RatingUpdateData | null;
           try {
             replay = await readOperation(input.operationId);
-          } catch {
-            mapFailure(error, options.createFailure);
+          } catch (readError) {
+            mapFailure(
+              error,
+              options.createFailure,
+              "finalizeRatingUpdate",
+              reconciliationFailure(error, readError),
+            );
           }
           if (replay?.status === "done" && sameRatingOperation(replay, input)) {
             return { status: "replayed", data: replay };
           }
           if (!(error instanceof CanonicalProfileConflict)) {
-            mapFailure(error, options.createFailure);
+            mapFailure(error, options.createFailure, "finalizeRatingUpdate");
           }
+          lastConflict = error;
         }
       }
-      throw options.createFailure();
+      throw options.createFailure("finalizeRatingUpdate", {
+        cause: lastConflict,
+      });
     },
 
     async applyFebruaryChallengeReplay(playerProfileId, opponentProfileId) {
       if (!playerProfileId || !opponentProfileId) {
         return;
       }
+      let lastConflict: CanonicalProfileConflict | undefined;
       for (let attempt = 0; attempt < attempts; attempt++) {
         let resolvedProfileIds: Array<string | null>;
         try {
@@ -1012,7 +1075,11 @@ export function createCanonicalRatingRepository(
             opponentProfileId,
           ]);
         } catch (error) {
-          mapFailure(error, options.createFailure);
+          mapFailure(
+            error,
+            options.createFailure,
+            "applyFebruaryChallengeReplay",
+          );
         }
         const [resolvedPlayerProfileId, resolvedOpponentProfileId] =
           resolvedProfileIds;
@@ -1051,7 +1118,11 @@ export function createCanonicalRatingRepository(
             storedOpponentProfileIds,
           );
         } catch (error) {
-          mapFailure(error, options.createFailure);
+          mapFailure(
+            error,
+            options.createFailure,
+            "applyFebruaryChallengeReplay",
+          );
         }
         const canonicalOpponentByStoredId = new Map(
           storedOpponentProfileIds.map((storedProfileId, index) => [
@@ -1121,11 +1192,18 @@ export function createCanonicalRatingRepository(
           return;
         } catch (error) {
           if (!(error instanceof CanonicalProfileConflict)) {
-            mapFailure(error, options.createFailure);
+            mapFailure(
+              error,
+              options.createFailure,
+              "applyFebruaryChallengeReplay",
+            );
           }
+          lastConflict = error;
         }
       }
-      throw options.createFailure();
+      throw options.createFailure("applyFebruaryChallengeReplay", {
+        cause: lastConflict,
+      });
     },
 
     async claimRatingEventProgress(operationId, updateTime, claimedAtMs) {

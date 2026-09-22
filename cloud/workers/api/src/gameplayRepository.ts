@@ -28,7 +28,9 @@ import { createEventGameplayRepository } from "./eventRepository.ts";
 import {
   createCanonicalGameplayRepository,
   createCanonicalRatingRepository,
+  type GameplayRepositoryOperation,
 } from "./gameplayCanonicalRepository.ts";
+import { classifyD1Failure } from "./d1Failure.ts";
 import type {
   ProfileOwnershipProfile,
   ProfileOwnershipReader,
@@ -137,11 +139,60 @@ export type RatingLeaseResult = {
   status: "acquired" | "busy" | "done";
 };
 
+export type RatingProfilePatch = {
+  rating?: number;
+  nonce?: number;
+  win?: boolean;
+  totalManaPoints?: number;
+};
+
+export type RatingCompletionPatch = {
+  status: "done";
+  completedAtMs: number;
+  updatedAtMs: number;
+  leaseExpiresAtMs: number;
+  inviteId?: string;
+  matchId?: string;
+  playerId?: string;
+  opponentId?: string;
+  playerProfileId?: string;
+  opponentProfileId?: string;
+  historicalMatchArchiveVersion?: number;
+  historicalMatchPair?: HistoricalMatchPair;
+  result?: "gg" | "win";
+  canUpdateRatings?: boolean;
+  didApplyRatingDelta?: boolean;
+  winnerDisplayName?: string;
+  loserDisplayName?: string;
+  winnerNewRating?: number | null;
+  loserNewRating?: number | null;
+  playerManaPoints?: number;
+  opponentManaPoints?: number;
+  shouldUpdateFebruaryChallenge?: boolean;
+  updateRatingMessage?: string;
+  telegramDeliveryVersion?: number | null;
+  isEventMatch?: boolean;
+  eventOwned?: boolean;
+  eventId?: string | null;
+  profileGameProjectionVersion?: number;
+  profileGameProjectionState?: "pending";
+  profileGameProjectionUpdatedAtMs?: number;
+  profileGameProjectionReason?: string | null;
+  telegramProjectionVersion?: number;
+  telegramProjectionState?: "pending";
+  telegramProjectionUpdatedAtMs?: number;
+  telegramProjectionReason?: string | null;
+  eventProgressVersion?: number;
+  eventProgressState?: "pending";
+  eventProgressUpdatedAtMs?: number;
+  eventProgressReason?: string | null;
+};
+
 export type RatingCommitPlan = {
-  opponentUpdate: Record<string, unknown> | null;
-  playerUpdate: Record<string, unknown> | null;
+  opponentUpdate: RatingProfilePatch | null;
+  playerUpdate: RatingProfilePatch | null;
   repairData: RatingRepairData;
-  ratingUpdate: Record<string, unknown>;
+  ratingUpdate: RatingCompletionPatch;
 };
 
 export type RatingRepairData = Pick<
@@ -286,9 +337,26 @@ type RatingRepositoryDependencies = {
 };
 
 export class GameplayRepositoryFailure extends Error {
-  constructor() {
-    super("gameplay-repository-unavailable");
+  readonly operation: GameplayRepositoryOperation;
+
+  constructor(operation: GameplayRepositoryOperation, options?: ErrorOptions) {
+    super("gameplay-repository-unavailable", options);
+    this.operation = operation;
   }
+}
+
+function createGameplayRepositoryFailure(
+  operation: GameplayRepositoryOperation,
+  options?: ErrorOptions,
+): GameplayRepositoryFailure {
+  console.error(
+    JSON.stringify({
+      event: "gameplay_repository_failure",
+      operation,
+      failureKind: classifyD1Failure(options?.cause),
+    }),
+  );
+  return new GameplayRepositoryFailure(operation, options);
 }
 
 export function createGameplayRepository(
@@ -319,7 +387,7 @@ export function createGameplayRepository(
   });
   return {
     ...createCanonicalGameplayRepository(env.PROFILE_DB, d1, {
-      createFailure: () => new GameplayRepositoryFailure(),
+      createFailure: createGameplayRepositoryFailure,
       maxAttempts: MAX_WAGER_TRANSFER_TRANSACTION_ATTEMPTS,
       now,
     }),
@@ -347,7 +415,7 @@ export function createRatingRepository(
       : MAX_RATING_TRANSACTION_ATTEMPTS;
   return {
     ...createCanonicalRatingRepository(env.PROFILE_DB, gameplayRepository, {
-      createFailure: () => new GameplayRepositoryFailure(),
+      createFailure: createGameplayRepositoryFailure,
       maxAttempts: attempts,
       now,
     }),

@@ -35,7 +35,9 @@ import {
 import type { RequestIdentity } from "./requestIdentity.ts";
 import type {
   RatingCommitPlan,
+  RatingCompletionPatch,
   RatingProfile,
+  RatingProfilePatch,
   RatingRepairData,
   RatingRepository,
 } from "./gameplayRepository.ts";
@@ -388,24 +390,24 @@ function buildRatingPlan({
             nextPlayerNonce,
           );
   }
-  const playerUpdate = canUpdateRatings
+  const playerUpdate: RatingProfilePatch | null = canUpdateRatings
     ? {
         ...(shouldApplyRatingDelta
-          ? {
+          ? ({
               rating: result === "win" ? winnerNewRating : loserNewRating,
-            }
+            } satisfies RatingProfilePatch)
           : {}),
         nonce: storedPlayerNonce,
         win: result === "win",
         totalManaPoints: resolvedPlayer.totalManaPoints + playerManaPoints,
       }
     : null;
-  const opponentUpdate = canUpdateRatings
+  const opponentUpdate: RatingProfilePatch | null = canUpdateRatings
     ? {
         ...(shouldApplyRatingDelta
-          ? {
+          ? ({
               rating: result === "win" ? loserNewRating : winnerNewRating,
-            }
+            } satisfies RatingProfilePatch)
           : {}),
         nonce: storedOpponentNonce,
         win: result !== "win",
@@ -485,20 +487,20 @@ function buildRatingPlan({
       updateRatingMessage,
       telegramDeliveryVersion,
       ...(telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION
-        ? {
+        ? ({
             telegramProjectionVersion: TELEGRAM_PROJECTION_SCHEMA_VERSION,
             telegramProjectionState: "pending",
             telegramProjectionUpdatedAtMs: nowMs,
             telegramProjectionReason: null,
-          }
+          } satisfies Partial<RatingCompletionPatch>)
         : {}),
       ...(eventMetadata.eventOwned && eventMetadata.eventId
-        ? {
+        ? ({
             eventProgressVersion: 1,
             eventProgressState: "pending",
             eventProgressUpdatedAtMs: nowMs,
             eventProgressReason: null,
-          }
+          } satisfies Partial<RatingCompletionPatch>)
         : {}),
       ...eventMetadata,
       updatedAtMs: nowMs,

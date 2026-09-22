@@ -1,7 +1,7 @@
 import { matchTestPort } from "../test/gameSessionTestPorts.ts";
 import { env } from "cloudflare:workers";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CompletePlayerProfile } from "@mons/shared/profiles";
 import type { StateRepository } from "../test/stateRepositoryTestTypes.ts";
 import {
@@ -13,6 +13,7 @@ import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 import {
   createGameplayRepository,
   createRatingRepository,
+  GameplayRepositoryFailure,
 } from "../src/gameplayRepository.ts";
 import {
   commitCanonicalPlan,
@@ -485,6 +486,320 @@ async function resetCanonicalRows(db: D1Database): Promise<void> {
 }
 
 describe("canonical gameplay repositories", () => {
+  it.each([
+    "readProfileOwnershipSnapshot",
+    "getMiningMaterials",
+    "getMiningSnapshot",
+    "applyWagerTransferOnce",
+  ] as const)(
+    "retains the %s read cause in one safe diagnostic",
+    async (operation) => {
+      const cause = new Error("private-profile-value", {
+        cause: new Error("CHECK constraint failed: singleton = 1"),
+      });
+      const db = beforeMatchingBatch(
+        testEnv.PROFILE_DB,
+        () => false,
+        async () => {},
+        () => {
+          throw cause;
+        },
+      );
+      const repository = createGameplayRepository(
+        { ...testEnv, PROFILE_DB: db },
+        { stateClient: matchTestPort(state) },
+      );
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const result =
+          operation === "readProfileOwnershipSnapshot"
+            ? repository.readProfileOwnershipSnapshot({
+                loginUids: ["private-login"],
+                profileIds: [],
+              })
+            : operation === "applyWagerTransferOnce"
+              ? repository.applyWagerTransferOnce({
+                  operationId: "private-operation",
+                  fingerprint: "private-fingerprint",
+                  winnerProfileId: "private-winner",
+                  loserProfileId: "private-loser",
+                  material: "dust",
+                  count: 1,
+                  appliedAtMs: 3_000,
+                })
+              : repository[operation]("private-profile");
+        const failure = await result.catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(GameplayRepositoryFailure);
+        expect(failure).toMatchObject({
+          operation,
+          message: "gameplay-repository-unavailable",
+          cause,
+        });
+        expect((failure as Error).cause).toBe(cause);
+        expect(log.mock.calls).toEqual([
+          [
+            JSON.stringify({
+              event: "gameplay_repository_failure",
+              operation,
+              failureKind: "guard",
+            }),
+          ],
+        ]);
+      } finally {
+        log.mockRestore();
+      }
+    },
+  );
+
+  it("retains wager write and reconciliation failures without duplicate diagnostics", async () => {
+    await insertProfile("diagnostic-winner", null);
+    await insertProfile("diagnostic-loser", null);
+    const writeFailure = new Error("private-write-failure");
+    const readFailure = new Error("private-reconciliation-failure");
+    let writeFailed = false;
+    const db = beforeMatchingBatch(
+      testEnv.PROFILE_DB,
+      () => true,
+      async () => {
+        writeFailed = true;
+        throw writeFailure;
+      },
+      (query) => {
+        if (writeFailed && query.includes("FROM wager_settlements")) {
+          throw readFailure;
+        }
+      },
+    );
+    const repository = createGameplayRepository(
+      { ...testEnv, PROFILE_DB: db },
+      { stateClient: matchTestPort(state) },
+    );
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const failure = await repository
+        .applyWagerTransferOnce({
+          operationId: "diagnostic-wager",
+          fingerprint: "private-fingerprint",
+          winnerProfileId: "diagnostic-winner",
+          loserProfileId: "diagnostic-loser",
+          material: "dust",
+          count: 1,
+          appliedAtMs: 3_000,
+        })
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(GameplayRepositoryFailure);
+      const cause = (failure as Error).cause;
+      expect(cause).toBeInstanceOf(AggregateError);
+      expect((cause as AggregateError).cause).toBe(writeFailure);
+      expect((cause as AggregateError).errors).toEqual([
+        writeFailure,
+        readFailure,
+      ]);
+      expect(log.mock.calls).toEqual([
+        [
+          JSON.stringify({
+            event: "gameplay_repository_failure",
+            operation: "applyWagerTransferOnce",
+            failureKind: "unknown",
+          }),
+        ],
+      ]);
+      expect(
+        await readCanonicalWagerSettlement(
+          testEnv.PROFILE_DB,
+          "diagnostic-wager",
+        ),
+      ).toBeNull();
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it.each(["missing", "replayed"] as const)(
+    "only logs a terminal wager failure when profiles are %s",
+    async (outcome) => {
+      if (outcome === "replayed") {
+        await insertProfile("diagnostic-replay-winner", null);
+        await insertProfile("diagnostic-replay-loser", null);
+      }
+      const repository = createGameplayRepository(
+        { ...testEnv, PROFILE_DB: failAfterFirstWrite(testEnv.PROFILE_DB) },
+        { stateClient: matchTestPort(state) },
+      );
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const result = await repository
+          .applyWagerTransferOnce({
+            operationId: "diagnostic-replay-wager",
+            fingerprint: "private-fingerprint",
+            winnerProfileId: "diagnostic-replay-winner",
+            loserProfileId: "diagnostic-replay-loser",
+            material: "dust",
+            count: 1,
+            appliedAtMs: 3_000,
+          })
+          .catch((error: unknown) => error);
+        if (outcome === "replayed") {
+          expect(result).toBe("replayed");
+          expect(log).not.toHaveBeenCalled();
+        } else {
+          expect(result).toBeInstanceOf(GameplayRepositoryFailure);
+          expect(log).toHaveBeenCalledExactlyOnceWith(
+            JSON.stringify({
+              event: "gameplay_repository_failure",
+              operation: "applyWagerTransferOnce",
+              failureKind: "unknown",
+            }),
+          );
+        }
+      } finally {
+        log.mockRestore();
+      }
+    },
+  );
+
+  it.each(["wager", "rating"] as const)(
+    "retains the last %s conflict and logs only after retries exhaust",
+    async (kind) => {
+      await insertProfile("retry-winner", null);
+      await insertProfile("retry-loser", null);
+      const conflicts: CanonicalProfileConflict[] = [];
+      const db = new Proxy(testEnv.PROFILE_DB, {
+        get(target, property) {
+          if (property === "batch") {
+            return async () => {
+              const conflict = new CanonicalProfileConflict({
+                cause: new Error("private-conflict-value"),
+              });
+              conflicts.push(conflict);
+              throw conflict;
+            };
+          }
+          const member = Reflect.get(target, property, target);
+          return typeof member === "function" ? member.bind(target) : member;
+        },
+      });
+      const failureEnv = { ...testEnv, PROFILE_DB: db };
+      const gameplay = createGameplayRepository(failureEnv, {
+        stateClient: matchTestPort(state),
+      });
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const result =
+          kind === "wager"
+            ? gameplay.applyWagerTransferOnce({
+                operationId: "retry-wager",
+                fingerprint: "private-fingerprint",
+                winnerProfileId: "retry-winner",
+                loserProfileId: "retry-loser",
+                material: "dust",
+                count: 1,
+                appliedAtMs: 3_000,
+              })
+            : createRatingRepository(failureEnv, gameplay, {
+                maxTransactionAttempts: 3,
+                now: () => 3_000,
+              }).tryAcquireRatingLease({
+                inviteId: "retry-invite",
+                matchId: "retry-match",
+                playerId: "retry-player",
+                opponentId: "retry-opponent",
+                ownerUid: "retry-player",
+                ownerToken: "private-owner-token",
+                leaseMs: 30_000,
+              });
+        const failure = await result.catch((error: unknown) => error);
+        expect(conflicts).toHaveLength(kind === "wager" ? 5 : 3);
+        expect(failure).toBeInstanceOf(GameplayRepositoryFailure);
+        expect((failure as Error).cause).toBe(conflicts.at(-1));
+        expect(log.mock.calls).toEqual([
+          [
+            JSON.stringify({
+              event: "gameplay_repository_failure",
+              operation:
+                kind === "wager"
+                  ? "applyWagerTransferOnce"
+                  : "tryAcquireRatingLease",
+              failureKind: "unknown",
+            }),
+          ],
+        ]);
+      } finally {
+        log.mockRestore();
+      }
+    },
+  );
+
+  it.each(["conflict", "unavailable"] as const)(
+    "preserves rating %s semantics when reconciliation also fails",
+    async (kind) => {
+      const writeFailure =
+        kind === "conflict"
+          ? new CanonicalProfileConflict({
+              cause: new Error("private-write-value"),
+            })
+          : new Error("private-write-value");
+      const readFailure = new Error("private-reconciliation-value");
+      let writeFailed = false;
+      const db = beforeMatchingBatch(
+        testEnv.PROFILE_DB,
+        () => true,
+        async () => {
+          writeFailed = true;
+          throw writeFailure;
+        },
+        (query) => {
+          if (writeFailed && query.includes("FROM rating_updates")) {
+            throw readFailure;
+          }
+        },
+      );
+      const failureEnv = { ...testEnv, PROFILE_DB: db };
+      const gameplay = createGameplayRepository(failureEnv, {
+        stateClient: matchTestPort(state),
+      });
+      const rating = createRatingRepository(failureEnv, gameplay);
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const failure = await rating
+          .tryAcquireRatingLease({
+            inviteId: "dual-failure-invite",
+            matchId: "dual-failure-match",
+            playerId: "dual-failure-player",
+            opponentId: "dual-failure-opponent",
+            ownerUid: "dual-failure-player",
+            ownerToken: "private-owner-token",
+            leaseMs: 30_000,
+          })
+          .catch((error: unknown) => error);
+        if (kind === "unavailable") {
+          expect(failure).toBe(writeFailure);
+          expect(log).not.toHaveBeenCalled();
+          return;
+        }
+        expect(failure).toBeInstanceOf(GameplayRepositoryFailure);
+        const cause = (failure as Error).cause;
+        expect(cause).toBeInstanceOf(AggregateError);
+        expect((cause as AggregateError).cause).toBe(writeFailure);
+        expect((cause as AggregateError).errors).toEqual([
+          writeFailure,
+          readFailure,
+        ]);
+        expect(log.mock.calls).toEqual([
+          [
+            JSON.stringify({
+              event: "gameplay_repository_failure",
+              operation: "tryAcquireRatingLease",
+              failureKind: "unknown",
+            }),
+          ],
+        ]);
+      } finally {
+        log.mockRestore();
+      }
+    },
+  );
+
   it.each(["wager", "rating", "challenge"] as const)(
     "narrows %s profile writes without extra reads or changing retained fields",
     async (kind) => {
@@ -1780,12 +2095,36 @@ describe("canonical gameplay repositories", () => {
               completedAtMs: 2_000,
               updatedAtMs: 2_000,
               leaseExpiresAtMs: 2_000,
-              playerManaPoints: player,
-              opponentManaPoints: opponent,
+              playerManaPoints: typeof player === "number" ? player : undefined,
+              opponentManaPoints:
+                typeof opponent === "number" ? opponent : undefined,
             },
           }),
         ),
       ).resolves.toMatchObject({ status: "committed" });
+
+      if (
+        (player !== undefined && typeof player !== "number") ||
+        (opponent !== undefined && typeof opponent !== "number")
+      ) {
+        const stored = await testEnv.PROFILE_DB.prepare(
+          "SELECT payload_json FROM rating_updates WHERE operation_id = ?",
+        )
+          .bind(operationId)
+          .first<{ payload_json: string }>();
+        await testEnv.PROFILE_DB.prepare(
+          "UPDATE rating_updates SET payload_json = ? WHERE operation_id = ?",
+        )
+          .bind(
+            JSON.stringify({
+              ...JSON.parse(stored!.payload_json),
+              playerManaPoints: player,
+              opponentManaPoints: opponent,
+            }),
+            operationId,
+          )
+          .run();
+      }
 
       const update = await rating.readRatingUpdate(operationId);
       expect(update?.playerManaPoints).toBe(expectedPlayer);
