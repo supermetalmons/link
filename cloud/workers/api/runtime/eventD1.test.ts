@@ -2789,6 +2789,257 @@ describe("event D1 store", () => {
     ).toBe(intent.transitionId);
   });
 
+  it.each(["success", "Telegram revision race", "late SQL failure"] as const)(
+    "commits all event mutation families atomically: %s",
+    async (outcome) => {
+      const { outboxId, outbox: progress } = await buildEventProgressPlan(
+        {
+          eventId,
+          sourceKey: "mixed-family:test",
+          reason: "match-rating-updated",
+        },
+        100,
+      );
+      const profileOutbox = {
+        schemaVersion: 1,
+        status: "pending",
+        requestId: "profile-before",
+        lastQueuedAtMs: 100,
+      };
+      const telegramOutbox = {
+        schemaVersion: 1,
+        status: "pending",
+        requestId: "telegram-before",
+        firstQueuedAtMs: 100,
+        updatedAtMs: 100,
+      };
+      await patchEventOwnedPaths(
+        testEnv.EVENT_DB,
+        {
+          [`events/${eventId}`]: eventRecord(),
+          [`eventPrizeSelections/${eventId}/${profileId}`]: prizeId,
+          [`profileEventPrizes/${profileId}/${eventId}`]: assignment(),
+          [`eventProgressOutbox/${outboxId}`]: progress,
+          [`profileGameProjectionOutbox/event/${eventId}`]: profileOutbox,
+          [`telegramProjectionOutbox/event/${eventId}`]: telegramOutbox,
+          [`eventTelegramProjectionGenerations/${eventId}`]: 1,
+          [`eventTelegramProjections/${eventId}`]: { version: "before" },
+        },
+        { now: () => 100 },
+      );
+      const malformedProgress = { ...progress, schemaVersion: 2 };
+      await testEnv.EVENT_DB.prepare(
+        "UPDATE event_progress_outboxes SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
+      )
+        .bind(JSON.stringify(malformedProgress), outboxId)
+        .run();
+      const nextProgress = { ...progress, lastQueuedAtMs: 300 };
+      const nextProfileOutbox = {
+        ...profileOutbox,
+        requestId: "profile-after",
+        lastQueuedAtMs: 300,
+      };
+      const nextTelegramOutbox = {
+        ...telegramOutbox,
+        requestId: "telegram-after",
+        updatedAtMs: 300,
+      };
+      const nextAssignment = { ...assignment(), assignedAtMs: 300 };
+      const dead = {
+        deadAtMs: 300,
+        originalRecord: progress,
+        reason: "mixed-family-dead-letter",
+      };
+      const updates = {
+        [`events/${eventId}/status`]: "active",
+        [`eventPrizeSelections/${eventId}/${profileId}`]: "1514",
+        [`profileEventPrizes/${profileId}/${eventId}`]: nextAssignment,
+        [`eventProgressOutbox/${outboxId}`]: nextProgress,
+        "eventProgressOutboxDead/mixed-family-dead": dead,
+        [`profileGameProjectionOutbox/event/${eventId}`]: nextProfileOutbox,
+        [`telegramProjectionOutbox/event/${eventId}`]: nextTelegramOutbox,
+        [`eventTelegramProjectionGenerations/${eventId}`]: 2,
+        [`eventTelegramProjections/${eventId}`]: { version: "after" },
+      };
+      const intent = {
+        schemaVersion: 1 as const,
+        transitionId: "transition-mixed-family",
+        eventId,
+        expectedRevision: 1,
+        rtdbEffects: { "invites/mixed-family": { eventId } },
+        canonicalUpdates: updates,
+        createdAtMs: 200,
+        updatedAtMs: 200,
+      };
+      await createEventTransitionIntent(testEnv.EVENT_DB, intent);
+      const readStorage = async () => {
+        const prizes = await readPrizeStorage();
+        const results = await testEnv.EVENT_DB.batch<Record<string, unknown>>([
+          testEnv.EVENT_DB.prepare(
+            "SELECT * FROM event_profile_game_projection_outboxes ORDER BY event_id",
+          ),
+          testEnv.EVENT_DB.prepare(
+            "SELECT * FROM event_telegram_projection_outboxes ORDER BY event_id",
+          ),
+          testEnv.EVENT_DB.prepare(
+            "SELECT * FROM event_telegram_projection_state ORDER BY event_id",
+          ),
+          testEnv.EVENT_DB.prepare(
+            "SELECT * FROM event_transition_intents ORDER BY transition_id",
+          ),
+        ]);
+        return {
+          ...prizes,
+          profileOutboxes: results[0].results,
+          telegramOutboxes: results[1].results,
+          telegramState: results[2].results,
+          intents: results[3].results,
+        };
+      };
+      const before = await readStorage();
+      const writes = new WeakSet<D1PreparedStatement>();
+      let writeBatches = 0;
+      const db: EventD1Connection = {
+        prepare(query) {
+          const statement = testEnv.EVENT_DB.prepare(query);
+          if (!/^\s*(INSERT|UPDATE|DELETE)\b/i.test(query)) return statement;
+          const tracked = new Proxy(statement, {
+            get(target, property) {
+              if (property === "bind") {
+                return (...values: unknown[]) => {
+                  const bound = target.bind(...values);
+                  writes.add(bound);
+                  return bound;
+                };
+              }
+              const member = Reflect.get(target, property, target);
+              return typeof member === "function"
+                ? member.bind(target)
+                : member;
+            },
+          });
+          writes.add(tracked);
+          return tracked;
+        },
+        async batch(statements) {
+          if (statements.some((statement) => writes.has(statement))) {
+            writeBatches++;
+            if (outcome === "Telegram revision race") {
+              await testEnv.EVENT_DB.prepare(
+                `UPDATE event_telegram_projection_state
+                 SET generation = 7, revision = revision + 1,
+                     state_json = ?, updated_at_ms = 250
+                 WHERE event_id = ?`,
+              )
+                .bind(JSON.stringify({ version: "concurrent" }), eventId)
+                .run();
+            }
+          }
+          return testEnv.EVENT_DB.batch(statements);
+        },
+      };
+      if (outcome === "late SQL failure") {
+        await testEnv.EVENT_DB.prepare(
+          `CREATE TRIGGER mixed_family_telegram_failure
+           BEFORE UPDATE ON event_telegram_projection_state
+           BEGIN SELECT RAISE(ABORT, 'late-telegram-write-failed'); END`,
+        ).run();
+      }
+      try {
+        await withD1Admission(async (admission) => {
+          const commit = patchEventOwnedPathsRaw(db, updates, {
+            admission,
+            now: () => 300,
+            transition: { eventId, transitionId: intent.transitionId },
+          });
+          if (outcome === "success") {
+            await expect(commit).resolves.toEqual({
+              eventRevisions: { [eventId]: 2 },
+              profilePrizeRevisions: { [profileId]: 2 },
+            });
+          } else {
+            await expect(commit).rejects.toThrow(
+              outcome === "Telegram revision race"
+                ? "event-d1-conflict"
+                : "event-d1-integrity",
+            );
+          }
+        });
+      } finally {
+        if (outcome === "late SQL failure") {
+          await testEnv.EVENT_DB.prepare(
+            "DROP TRIGGER mixed_family_telegram_failure",
+          ).run();
+        }
+      }
+      expect(writeBatches).toBe(1);
+      const after = await readStorage();
+      if (outcome !== "success") {
+        expect(after).toEqual({
+          ...before,
+          ...(outcome === "Telegram revision race"
+            ? {
+                telegramState: [
+                  {
+                    ...before.telegramState[0],
+                    generation: 7,
+                    revision: 2,
+                    state_json: JSON.stringify({ version: "concurrent" }),
+                    updated_at_ms: 250,
+                  },
+                ],
+              }
+            : {}),
+        });
+        return;
+      }
+      expect(after.events[0]).toMatchObject({
+        status: "active",
+        revision: 2,
+        pending_transition_id: null,
+      });
+      expect(after.selections[0]).toMatchObject({
+        prize_id: "1514",
+        updated_at_ms: 300,
+      });
+      expect(after.prizes[0]).toMatchObject({
+        assignment_json: JSON.stringify(nextAssignment),
+        updated_at_ms: 300,
+      });
+      expect(after.profileRevisions[0]).toMatchObject({
+        revision: 2,
+        updated_at_ms: 300,
+      });
+      expect(after.outboxes).toHaveLength(3);
+      for (const [path, expected] of [
+        [`eventProgressOutbox/${outboxId}`, nextProgress],
+        [
+          `eventProgressOutboxDead/${outboxId}`,
+          {
+            deadAtMs: 300,
+            originalRecord: malformedProgress,
+            reason: "invalid-event-progress-outbox",
+          },
+        ],
+        ["eventProgressOutboxDead/mixed-family-dead", dead],
+        [`profileGameProjectionOutbox/event/${eventId}`, nextProfileOutbox],
+        [`telegramProjectionOutbox/event/${eventId}`, nextTelegramOutbox],
+      ] as const) {
+        expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(
+          expected,
+        );
+      }
+      expect(
+        await readEventTelegramProjectionState(testEnv.EVENT_DB, eventId),
+      ).toEqual({
+        generation: 2,
+        revision: 2,
+        state: { version: "after" },
+      });
+      expect(after.intents).toEqual([]);
+    },
+  );
+
   it("stores recoverable progress and projection outboxes plus fenced state", async () => {
     await patchEventOwnedPaths(testEnv.EVENT_DB, {
       [`events/${eventId}`]: eventRecord(),
