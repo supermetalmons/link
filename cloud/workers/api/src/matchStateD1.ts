@@ -459,21 +459,47 @@ export async function readLegacyMatchState(
   matchId: string,
   signal?: AbortSignal,
 ): Promise<unknown | null> {
+  return (
+    await readLegacyMatchStates(db, [{ playerId: actorUid, matchId }], signal)
+  )[0];
+}
+
+export async function readLegacyMatchStates(
+  db: D1Database,
+  inputs: readonly { playerId: string; matchId: string }[],
+  signal?: AbortSignal,
+): Promise<unknown[]> {
   signal?.throwIfAborted();
-  safeKey(actorUid);
-  safeKey(matchId);
-  const row = await db
-    .withSession("first-primary")
-    .prepare(
-      "SELECT record_json FROM match_state_legacy_records WHERE actor_uid = ? AND match_id = ?",
-    )
-    .bind(actorUid, matchId)
-    .first<{ record_json: string }>();
+  if (inputs.length === 0) return [];
+  for (const input of inputs) {
+    safeKey(input.playerId);
+    safeKey(input.matchId);
+  }
+  const session = db.withSession("first-primary");
+  const results = await session.batch<{ record_json: string }>(
+    inputs.map((input) =>
+      session
+        .prepare(
+          "SELECT record_json FROM match_state_legacy_records WHERE actor_uid = ? AND match_id = ?",
+        )
+        .bind(input.playerId, input.matchId),
+    ),
+  );
   signal?.throwIfAborted();
-  if (row) return JSON.parse(row.record_json);
-  const route = await readMatchStateRoute(db, actorUid, matchId);
-  signal?.throwIfAborted();
-  if (route?.kind === "legacy")
+  if (results.length !== inputs.length)
     throw new MatchStateD1Failure("legacy-record-unavailable");
-  return null;
+  const missing: { playerId: string; matchId: string }[] = [];
+  const values = results.map((result, index): unknown => {
+    const row = result.results[0];
+    if (row) return JSON.parse(row.record_json);
+    missing.push(inputs[index]);
+    return null;
+  });
+  if (missing.length > 0) {
+    const routes = await readMatchStateRoutes(db, missing);
+    signal?.throwIfAborted();
+    if (routes.some((route) => route?.kind === "legacy"))
+      throw new MatchStateD1Failure("legacy-record-unavailable");
+  }
+  return values;
 }

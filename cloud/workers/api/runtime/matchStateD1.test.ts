@@ -9,6 +9,7 @@ import {
   extendMatchStateAdmissionResources,
   markMatchStateAdmissionUncertain,
   readLegacyMatchState,
+  readLegacyMatchStates,
   readMatchStateControl,
   readMatchStateRoute,
 } from "../src/matchStateD1.ts";
@@ -221,6 +222,65 @@ describe("match state D1 authority and admissions", () => {
         )
         .run(),
     ).rejects.toThrow("immutable");
+  });
+
+  it("batches raw legacy records in order and distinguishes absent routes from missing records", async () => {
+    const records = [
+      { playerId: "host", matchId: "game", value: [1, { legacy: true }] },
+      { playerId: "host", matchId: "rematch", value: null },
+      { playerId: "guest", matchId: "game", value: false },
+    ];
+    const missing = { playerId: "missing", matchId: "game" };
+    await db.batch([
+      ...buildMatchStateRouteStatements(
+        db,
+        records.map(({ playerId, matchId }) => ({
+          actorUid: playerId,
+          matchId,
+          kind: "legacy",
+          inviteId: null,
+          epoch: 2,
+        })),
+      ),
+      ...records.map(({ playerId, matchId, value }) =>
+        db
+          .prepare(
+            "INSERT INTO match_state_legacy_records VALUES (?, ?, ?, ?, ?, ?)",
+          )
+          .bind(
+            playerId,
+            matchId,
+            JSON.stringify(value),
+            "a".repeat(64),
+            "import",
+            "malformed",
+          ),
+      ),
+    ]);
+    expect(
+      await readLegacyMatchStates(db, [
+        records[2],
+        records[0],
+        missing,
+        records[1],
+        records[2],
+        records[0],
+      ]),
+    ).toEqual([false, records[0].value, null, null, false, records[0].value]);
+    await db.batch(
+      buildMatchStateRouteStatements(db, [
+        {
+          actorUid: missing.playerId,
+          matchId: missing.matchId,
+          kind: "legacy",
+          inviteId: null,
+          epoch: 2,
+        },
+      ]),
+    );
+    await expect(
+      readLegacyMatchStates(db, [records[1], missing, records[2]]),
+    ).rejects.toThrow("legacy-record-unavailable");
   });
 
   it("requires verified evidence before authority changes and rejects rollback", async () => {

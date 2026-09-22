@@ -212,66 +212,81 @@ describe("routed match record batches", () => {
     });
   });
 
-  it.each([
-    { label: "array", value: [1, { legacy: true }] },
-    { label: "null", value: null },
-    { label: "boolean", value: false },
-  ])(
-    "mixes durable and raw $label legacy records while leaving unregistered DO records missing",
-    async ({ value }) => {
-      const fixture = await roomFixture();
-      await fixture.register([0]);
-      const legacy = {
-        playerId: "legacy-login",
-        matchId: `legacy-${crypto.randomUUID()}`,
-      };
-      await db.batch([
-        ...buildMatchStateRouteStatements(db, [
-          {
-            actorUid: legacy.playerId,
-            matchId: legacy.matchId,
-            kind: "legacy",
-            inviteId: null,
-            epoch: 2,
-          },
-        ]),
+  it("preserves mixed legacy values, duplicate requests and durable records in order", async () => {
+    const fixture = await roomFixture();
+    await fixture.register([0]);
+    const legacyValues = [[1, { legacy: true }], null, false];
+    const legacy = legacyValues.map(() => ({
+      playerId: "legacy-login",
+      matchId: `legacy-${crypto.randomUUID()}`,
+    }));
+    await db.batch([
+      ...buildMatchStateRouteStatements(
+        db,
+        legacy.map(({ playerId, matchId }) => ({
+          actorUid: playerId,
+          matchId,
+          kind: "legacy",
+          inviteId: null,
+          epoch: 2,
+        })),
+      ),
+      ...legacy.map(({ playerId, matchId }, index) =>
         db
           .prepare(
             "INSERT INTO match_state_legacy_records VALUES (?, ?, ?, ?, ?, ?)",
           )
           .bind(
-            legacy.playerId,
-            legacy.matchId,
-            JSON.stringify(value),
+            playerId,
+            matchId,
+            JSON.stringify(legacyValues[index]),
             "a".repeat(64),
             "record-batch-import",
             "malformed",
           ),
-      ]);
-      const network = vi
-        .spyOn(globalThis, "fetch")
-        .mockRejectedValue(new Error("unexpected-fetch"));
-      const { source, calls } = observedSource();
-      expect(
-        await source.readMatchRecords([
-          fixture.targets[0],
-          legacy,
-          fixture.targets[1],
-        ]),
-      ).toEqual([fixture.values[0], value, null]);
-      expect(await source.readMatchRecord(legacy)).toEqual(value);
-      expect(await source.readMatchRecord(fixture.targets[1])).toBeNull();
-      expect(
-        await source.readMatchRecord({
-          playerId: "missing-login",
-          matchId: `missing-${crypto.randomUUID()}`,
-        }),
-      ).toBeNull();
-      expect(calls).toHaveLength(1);
-      expect(calls[0].requests).toEqual([fixture.targets[0]]);
-      expect(network).not.toHaveBeenCalled();
-    },
-  );
+      ),
+    ]);
+    const network = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("unexpected-fetch"));
+    const { source, calls } = observedSource();
+    expect(
+      await source.readMatchRecords([
+        legacy[2],
+        fixture.targets[0],
+        legacy[0],
+        fixture.targets[1],
+        legacy[1],
+        legacy[2],
+        fixture.targets[0],
+        legacy[0],
+      ]),
+    ).toEqual([
+      false,
+      fixture.values[0],
+      legacyValues[0],
+      null,
+      null,
+      false,
+      fixture.values[0],
+      legacyValues[0],
+    ]);
+    for (let index = 0; index < legacy.length; index++) {
+      expect(await source.readMatchRecord(legacy[index])).toEqual(
+        legacyValues[index],
+      );
+    }
+    expect(await source.readMatchRecord(fixture.targets[1])).toBeNull();
+    expect(
+      await source.readMatchRecord({
+        playerId: "missing-login",
+        matchId: `missing-${crypto.randomUUID()}`,
+      }),
+    ).toBeNull();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].requests).toEqual([fixture.targets[0], fixture.targets[0]]);
+    expect(network).not.toHaveBeenCalled();
+  });
 
   it.each(["durable", "legacy"] as const)(
     "fails closed when a %s route has no physical record",

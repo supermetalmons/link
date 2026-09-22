@@ -1,6 +1,6 @@
 import { requireDurableMatchState } from "./matchStateAuthority.ts";
 import {
-  readLegacyMatchState,
+  readLegacyMatchStates,
   readMatchStateControl,
   readMatchStateRoutes,
   type MatchStateControl,
@@ -133,6 +133,8 @@ export async function readMatchStateRecords(
         string,
         Array<{ input: ReadMatchSnapshotRequest; index: number }>
       >();
+      const legacy: Array<{ input: ReadMatchSnapshotRequest; index: number }> =
+        [];
       const reads: Array<() => Promise<void>> = [];
       for (const [index, route] of routes.entries()) {
         if (!route) continue;
@@ -140,20 +142,24 @@ export async function readMatchStateRecords(
           throw new Error("match-state-route-epoch-conflict");
         const input = inputs[index];
         if (route.kind === "legacy") {
-          reads.push(async () => {
-            results[index] = await readLegacyMatchState(
-              env.PROFILE_GAMES_DB,
-              input.playerId,
-              input.matchId,
-              signal,
-            );
-          });
+          legacy.push({ input, index });
         } else {
           if (!route.inviteId) throw new Error("match-state-route-invalid");
           const entries = rooms.get(route.inviteId) || [];
           entries.push({ input, index });
           rooms.set(route.inviteId, entries);
         }
+      }
+      if (legacy.length > 0) {
+        reads.push(async () => {
+          const records = await readLegacyMatchStates(
+            env.PROFILE_GAMES_DB,
+            legacy.map(({ input }) => input),
+            signal,
+          );
+          for (const [offset, entry] of legacy.entries())
+            results[entry.index] = records[offset];
+        });
       }
       for (const [inviteId, entries] of rooms) {
         reads.push(async () => {
