@@ -212,7 +212,7 @@ export function createProfileGameProjectionRuntime(
     readAutomatchEntry: (inviteId) => state.readAutomatchEntry(inviteId),
     readInviteMetadata: (inviteId) => state.readInviteMetadata(inviteId),
 
-    async getMatchEmoji(inviteId, matchId, loginUid) {
+    async readMatchPresentation(inviteId, matchId) {
       const control = await readPresentationControl();
       if (control.phase !== "durable")
         throw new Error("match-presentation-authority-not-active");
@@ -226,9 +226,7 @@ export function createProfileGameProjectionRuntime(
       ) {
         throw new Error("projection-presentation-unavailable");
       }
-      return Object.hasOwn(snapshot.players, loginUid)
-        ? snapshot.players[loginUid].emojiId
-        : null;
+      return snapshot;
     },
 
     hasCompletedRatingUpdate: (inviteId, matchId) =>

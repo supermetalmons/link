@@ -265,38 +265,34 @@ const createProfileGamesProjectionCore = ({
     loginUid,
     latestMatchId,
     inviteId,
-    cache,
+    presentationCache,
   ) => {
     const normalizedLoginUid = normalizeString(loginUid);
-    if (!normalizedLoginUid) {
+    if (!normalizedLoginUid || !repository.readMatchPresentation) {
       return null;
     }
     const normalizedLatestMatchId = normalizeString(latestMatchId);
     const normalizedInviteId = normalizeString(inviteId);
-    const cacheKey = `${normalizedLoginUid}|${normalizedLatestMatchId || ""}|${normalizedInviteId || ""}`;
-    if (cache.has(cacheKey)) {
-      return cache.get(cacheKey);
-    }
     const candidateMatchIds = Array.from(
       new Set([normalizedLatestMatchId, normalizedInviteId].filter(Boolean)),
     );
     for (const candidateMatchId of candidateMatchIds) {
       try {
-        const emoji = repository.getMatchEmoji
-          ? getEmojiId(
-              await retry(() =>
-                repository.getMatchEmoji(
-                  normalizedInviteId,
-                  candidateMatchId,
-                  normalizedLoginUid,
-                ),
-              ),
-            )
+        if (!presentationCache.has(candidateMatchId)) {
+          const snapshot = await retry(() =>
+            repository.readMatchPresentation(
+              normalizedInviteId,
+              candidateMatchId,
+            ),
+          );
+          presentationCache.set(candidateMatchId, snapshot);
+        }
+        const snapshot = presentationCache.get(candidateMatchId);
+        const emoji = Object.hasOwn(snapshot.players, normalizedLoginUid)
+          ? getEmojiId(snapshot.players[normalizedLoginUid].emojiId)
           : null;
         if (emoji !== null) {
-          const summary = { name: null, emoji };
-          cache.set(cacheKey, summary);
-          return summary;
+          return { name: null, emoji };
         }
       } catch (error) {
         logger.error("projector:login-summary-read-failed", {
@@ -308,7 +304,6 @@ const createProfileGamesProjectionCore = ({
         throw error;
       }
     }
-    cache.set(cacheKey, null);
     return null;
   };
 
@@ -392,7 +387,7 @@ const createProfileGamesProjectionCore = ({
       automatchStateHint,
     });
     const sortBucket = getNavigationSortBucket(status);
-    const loginSummaryCache = new Map();
+    const matchPresentationCache = new Map();
 
     const existingDocs = await readExistingProjectionDocuments({
       inviteId: normalizedInviteId,
@@ -524,7 +519,7 @@ const createProfileGamesProjectionCore = ({
           ownerContext.opponentLoginId,
           latestMatchId,
           normalizedInviteId,
-          loginSummaryCache,
+          matchPresentationCache,
         );
         opponentEmojiFromLogin =
           summary && summary.emoji !== null && summary.emoji !== undefined

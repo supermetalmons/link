@@ -9,19 +9,38 @@ const {
 const inviteId = "presentation-invite";
 const guestMatchPath = `players/guest-login/matches/${inviteId}`;
 
-function fixture({ getMatchEmoji, guestProfile = null }) {
+function matchPresentation(matchId, emojis) {
+  return {
+    matchId,
+    players: Object.fromEntries(
+      Object.entries(emojis).map(([actorUid, emojiId]) => [
+        actorUid,
+        { matchId, actorUid, emojiId, aura: "", revision: 0 },
+      ]),
+    ),
+  };
+}
+
+function fixture({
+  readMatchPresentation,
+  hostProfile = { username: "host", emoji: 2 },
+  guestProfile = null,
+  rematches = "x",
+  beforeCommit = async () => undefined,
+}) {
   const writes = [];
   const reads = [];
   const presentationReads = [];
   const projections = new Map();
   const profiles = new Map([
-    ["host-profile", { username: "host", emoji: 2 }],
+    ["host-profile", hostProfile],
     ...(guestProfile ? [["guest-profile", guestProfile]] : []),
   ]);
   const core = createProfileGamesProjectionCore({
     logger: { error() {} },
     repository: {
       async commitProjectionWrites(nextWrites) {
+        await beforeCommit(nextWrites);
         for (const write of nextWrites) {
           writes.push(write);
           projections.set(write.profileId, {
@@ -41,8 +60,8 @@ function fixture({ getMatchEmoji, guestProfile = null }) {
         return {
           hostId: "host-login",
           guestId: "guest-login",
-          hostRematches: "x",
-          guestRematches: "x",
+          hostRematches: rematches,
+          guestRematches: rematches,
         };
       },
       async readAutomatchEntry(inviteId) {
@@ -52,9 +71,9 @@ function fixture({ getMatchEmoji, guestProfile = null }) {
         if (path === guestMatchPath) return { emojiId: 1, aura: "" };
         throw new Error(`unexpected-state-read:${path}`);
       },
-      async getMatchEmoji(...args) {
+      async readMatchPresentation(...args) {
         presentationReads.push(args);
-        return getMatchEmoji(...args);
+        return readMatchPresentation(...args);
       },
       readProfileOwnershipSnapshot: async () => ({
         profileDataById: profiles,
@@ -70,16 +89,20 @@ function fixture({ getMatchEmoji, guestProfile = null }) {
     reads,
     presentationReads,
     writes,
-    recompute: () =>
+    recompute: (options = {}) =>
       core.recomputeInviteProjection(inviteId, "rating-completed", {
         eventTimestampMs: 100,
+        ...options,
       }),
   };
 }
 
 test("recomputation replaces an anonymous opponent's seed emoji with live presentation", async () => {
   let emoji = 1;
-  const state = fixture({ getMatchEmoji: async () => emoji });
+  const state = fixture({
+    readMatchPresentation: async (_inviteId, matchId) =>
+      matchPresentation(matchId, { "guest-login": emoji }),
+  });
   await state.recompute();
   emoji = 7;
   await state.recompute();
@@ -89,8 +112,8 @@ test("recomputation replaces an anonymous opponent's seed emoji with live presen
     [1, 7],
   );
   assert.deepEqual(state.presentationReads, [
-    [inviteId, inviteId, "guest-login"],
-    [inviteId, inviteId, "guest-login"],
+    [inviteId, inviteId],
+    [inviteId, inviteId],
   ]);
   assert.equal(state.writes[1].data.status, "ended");
   assert.equal(state.reads.includes(guestMatchPath), false);
@@ -99,7 +122,7 @@ test("recomputation replaces an anonymous opponent's seed emoji with live presen
 test("canonical profile avatars retain precedence without reading match presentation", async () => {
   const state = fixture({
     guestProfile: { username: "guest", emoji: 3 },
-    getMatchEmoji: async () => {
+    readMatchPresentation: async () => {
       throw new Error("unexpected-presentation-read");
     },
   });
@@ -116,15 +139,15 @@ test("canonical profile avatars retain precedence without reading match presenta
 
 test("presentation failures retry without publishing a stale seed avatar", async () => {
   const state = fixture({
-    getMatchEmoji: async () => {
+    readMatchPresentation: async () => {
       throw new Error("presentation-unavailable");
     },
   });
 
   await assert.rejects(state.recompute(), /presentation-unavailable/);
   assert.deepEqual(state.presentationReads, [
-    [inviteId, inviteId, "guest-login"],
-    [inviteId, inviteId, "guest-login"],
+    [inviteId, inviteId],
+    [inviteId, inviteId],
   ]);
   assert.deepEqual(state.writes, []);
   assert.equal(state.reads.includes(guestMatchPath), false);
@@ -132,7 +155,8 @@ test("presentation failures retry without publishing a stale seed avatar", async
 
 test("durable presentation misses never read legacy seed avatars", async () => {
   const state = fixture({
-    getMatchEmoji: async () => null,
+    readMatchPresentation: async (_inviteId, matchId) =>
+      matchPresentation(matchId, {}),
   });
   await state.recompute();
   assert.equal(state.reads.includes(guestMatchPath), false);
@@ -141,11 +165,180 @@ test("durable presentation misses never read legacy seed avatars", async () => {
 
 test("appearance authority failures preserve projection state without legacy fallback", async () => {
   const state = fixture({
-    getMatchEmoji: async () => {
+    readMatchPresentation: async () => {
       throw new Error("authority-unavailable");
     },
   });
   await assert.rejects(state.recompute(), /authority-unavailable/);
   assert.equal(state.reads.includes(guestMatchPath), false);
   assert.deepEqual(state.writes, []);
+});
+
+test("both owner projections share one match appearance snapshot", async () => {
+  const state = fixture({
+    hostProfile: { username: "host" },
+    guestProfile: { username: "guest" },
+    readMatchPresentation: async (_inviteId, matchId) =>
+      matchPresentation(matchId, { "host-login": 4, "guest-login": 7 }),
+  });
+
+  await state.recompute();
+
+  assert.deepEqual(state.presentationReads, [[inviteId, inviteId]]);
+  assert.deepEqual(
+    state.writes.map(({ profileId, data }) => [profileId, data.opponentEmoji]),
+    [
+      ["host-profile", 7],
+      ["guest-profile", 4],
+    ],
+  );
+});
+
+for (const latestActor of ["host-login", "guest-login"]) {
+  test(`partial snapshots preserve latest appearance for ${latestActor} and fallback for the other player`, async () => {
+    const latestMatchId = `${inviteId}1`;
+    const state = fixture({
+      hostProfile: { username: "host" },
+      guestProfile: { username: "guest" },
+      rematches: "1x",
+      readMatchPresentation: async (_inviteId, matchId) =>
+        matchPresentation(
+          matchId,
+          matchId === latestMatchId
+            ? { [latestActor]: 7 }
+            : { "host-login": 4, "guest-login": 3 },
+        ),
+    });
+
+    await state.recompute();
+
+    assert.deepEqual(state.presentationReads, [
+      [inviteId, latestMatchId],
+      [inviteId, inviteId],
+    ]);
+    assert.deepEqual(
+      state.writes.map(({ profileId, data }) => [
+        profileId,
+        data.opponentEmoji,
+      ]),
+      [
+        ["host-profile", latestActor === "guest-login" ? 7 : 3],
+        ["guest-profile", latestActor === "host-login" ? 7 : 4],
+      ],
+    );
+  });
+}
+
+test("successful empty snapshots are shared between owner projections", async () => {
+  const state = fixture({
+    hostProfile: { username: "host" },
+    guestProfile: { username: "guest" },
+    readMatchPresentation: async (_inviteId, matchId) =>
+      matchPresentation(matchId, {}),
+  });
+
+  const result = await state.recompute();
+
+  assert.equal(result.blockedReason, "unresolved-opponent-emoji");
+  assert.deepEqual(state.presentationReads, [[inviteId, inviteId]]);
+  assert.deepEqual(state.writes, []);
+});
+
+test("a transient read failure retries the provider and shares the successful snapshot", async () => {
+  let attempts = 0;
+  const state = fixture({
+    hostProfile: { username: "host" },
+    guestProfile: { username: "guest" },
+    readMatchPresentation: async (_inviteId, matchId) => {
+      if (++attempts === 1) throw new Error("presentation-unavailable");
+      return matchPresentation(matchId, { "host-login": 4, "guest-login": 7 });
+    },
+  });
+
+  await state.recompute();
+
+  assert.deepEqual(state.presentationReads, [
+    [inviteId, inviteId],
+    [inviteId, inviteId],
+  ]);
+  assert.deepEqual(
+    state.writes.map(({ profileId, data }) => [profileId, data.opponentEmoji]),
+    [
+      ["host-profile", 7],
+      ["guest-profile", 4],
+    ],
+  );
+});
+
+test("exhausted fallback reads discard all prepared projection writes", async () => {
+  const latestMatchId = `${inviteId}1`;
+  const state = fixture({
+    hostProfile: { username: "host" },
+    guestProfile: { username: "guest" },
+    rematches: "1x",
+    readMatchPresentation: async (_inviteId, matchId) => {
+      if (matchId === inviteId) throw new Error("presentation-unavailable");
+      return matchPresentation(matchId, { "guest-login": 7 });
+    },
+  });
+
+  await assert.rejects(state.recompute(), /presentation-unavailable/);
+
+  assert.deepEqual(state.presentationReads, [
+    [inviteId, latestMatchId],
+    [inviteId, inviteId],
+    [inviteId, inviteId],
+  ]);
+  assert.deepEqual(state.writes, []);
+});
+
+test("concurrent recomputations on the same runtime use independent appearance snapshots", async () => {
+  const firstCommitStarted = Promise.withResolvers();
+  const releaseFirstCommit = Promise.withResolvers();
+  let commits = 0;
+  let emoji = 3;
+  const state = fixture({
+    hostProfile: { username: "host" },
+    guestProfile: { username: "guest" },
+    readMatchPresentation: async (_inviteId, matchId) =>
+      matchPresentation(matchId, {
+        "host-login": emoji,
+        "guest-login": emoji + 1,
+      }),
+    beforeCommit: async () => {
+      if (++commits === 1) {
+        firstCommitStarted.resolve();
+        await releaseFirstCommit.promise;
+      }
+    },
+  });
+
+  const first = state.recompute({ eventTimestampMs: 100 });
+  await firstCommitStarted.promise;
+  emoji = 7;
+  try {
+    await state.recompute({ eventTimestampMs: 200 });
+  } finally {
+    releaseFirstCommit.resolve();
+    await first;
+  }
+
+  assert.deepEqual(state.presentationReads, [
+    [inviteId, inviteId],
+    [inviteId, inviteId],
+  ]);
+  for (const [time, hostEmoji, guestEmoji] of [
+    [100, 3, 4],
+    [200, 7, 8],
+  ]) {
+    assert.deepEqual(
+      state.writes
+        .filter(({ data }) => data.lastEventAt === time)
+        .map(({ profileId, data }) => [profileId, data.opponentEmoji]),
+      [
+        ["host-profile", guestEmoji],
+        ["guest-profile", hostEmoji],
+      ],
+    );
+  }
 });

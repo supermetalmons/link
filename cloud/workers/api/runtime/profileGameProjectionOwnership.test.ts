@@ -52,9 +52,15 @@ function profile(id: string): CompletePlayerProfile {
   };
 }
 
-async function insertProfileOwner(profileId: string, loginUid: string) {
+async function insertProfileOwner(
+  profileId: string,
+  loginUid: string,
+  emojiPresent = true,
+) {
   const value = materializeCanonicalProfile({
     createdAtMs: 1,
+    emojiPresent,
+    ...(emojiPresent ? {} : { gameplayEmoji: "" }),
     profile: profile(profileId),
     updatedAtMs: 1,
   });
@@ -463,20 +469,35 @@ describe("D1-authoritative profile game projection ownership", () => {
     expect(guestSeed).toEqual({ emojiId: 1, aura: "" });
   });
 
-  it("canonical presentation projection never reads Firebase cosmetic copies", async () => {
+  it("shares one canonical presentation read across both owner projections without Firebase cosmetic reads", async () => {
     const inviteId = "canonical-presentation-projection";
     const hostLoginId = "canonical-presentation-host";
     const guestLoginId = "canonical-presentation-guest";
     const hostProfileId = "canonical-presentation-profile";
-    await insertProfileOwner(hostProfileId, hostLoginId);
+    const guestProfileId = "canonical-presentation-guest-profile";
+    await insertProfileOwner(hostProfileId, hostLoginId, false);
+    await insertProfileOwner(guestProfileId, guestLoginId, false);
     const reads: string[] = [];
+    let authorityReads = 0;
+    let presentationReads = 0;
     const runtime = createProfileGameProjectionRuntime(testEnv, {
-      readPresentationControl: async () => ({ phase: "durable" }),
+      readPresentationControl: async () => {
+        authorityReads++;
+        return { phase: "durable" };
+      },
       readRegisteredPresentations: async (_env, selectedInviteId, matchId) => {
+        presentationReads++;
         expect(selectedInviteId).toBe(inviteId);
         return {
           matchId,
           players: {
+            [hostLoginId]: {
+              matchId,
+              actorUid: hostLoginId,
+              emojiId: 3,
+              aura: "",
+              revision: 2,
+            },
             [guestLoginId]: {
               matchId,
               actorUid: guestLoginId,
@@ -516,8 +537,91 @@ describe("D1-authoritative profile game projection ownership", () => {
         inviteId,
       ),
     ).resolves.toMatchObject({ data: { opponentEmoji: 8 } });
+    await expect(
+      getProfileGameProjection(
+        testEnv.PROFILE_GAMES_DB,
+        guestProfileId,
+        inviteId,
+      ),
+    ).resolves.toMatchObject({ data: { opponentEmoji: 3 } });
+    expect(authorityReads).toBe(1);
+    expect(presentationReads).toBe(1);
     expect(reads.some((path) => path.startsWith("players/"))).toBe(false);
   });
+
+  it.each([
+    { kind: "malformed", phase: "durable" },
+    { kind: "wrong-match", phase: "durable" },
+    { kind: "legacy", phase: "legacy" },
+    { kind: "capture", phase: "capture" },
+  ] as const)(
+    "rejects $kind presentation reads without writing projections",
+    async ({ kind, phase }) => {
+      const inviteId = `rejected-presentation-${kind}`;
+      const hostLoginId = `${inviteId}-host`;
+      const guestLoginId = `${inviteId}-guest`;
+      const hostProfileId = `${inviteId}-profile`;
+      await insertProfileOwner(hostProfileId, hostLoginId);
+      let presentationReads = 0;
+      const runtime = createProfileGameProjectionRuntime(testEnv, {
+        logger: { error() {} },
+        readPresentationControl: async () => ({ phase }),
+        readRegisteredPresentations: async (
+          _env,
+          selectedInviteId,
+          matchId,
+        ) => {
+          presentationReads++;
+          expect(selectedInviteId).toBe(inviteId);
+          const selectedMatchId =
+            kind === "wrong-match" ? `${matchId}1` : matchId;
+          return {
+            matchId: selectedMatchId,
+            players: {
+              [guestLoginId]: {
+                matchId: selectedMatchId,
+                actorUid: guestLoginId,
+                emojiId: 8,
+                aura: "",
+                revision: kind === "malformed" ? -1 : 0,
+              },
+            },
+          };
+        },
+        state: {
+          async readInviteMetadata(candidateInviteId) {
+            expect(candidateInviteId).toBe(inviteId);
+            return {
+              hostId: hostLoginId,
+              guestId: guestLoginId,
+              hostRematches: "x",
+              guestRematches: "x",
+            };
+          },
+          readAutomatchEntry: async () => null,
+        },
+        wait: async () => undefined,
+      });
+
+      await expect(
+        runtime.recomputeInviteProjection(inviteId, "test", {
+          eventTimestampMs: 200,
+        }),
+      ).rejects.toThrow(
+        phase === "durable"
+          ? "projection-presentation-unavailable"
+          : "match-presentation-authority-not-active",
+      );
+      expect(presentationReads).toBe(phase === "durable" ? 2 : 0);
+      await expect(
+        getProfileGameProjection(
+          testEnv.PROFILE_GAMES_DB,
+          hostProfileId,
+          inviteId,
+        ),
+      ).resolves.toBeNull();
+    },
+  );
 
   it("ends event games from canonical D1 ratings and ignores Firebase markers", async () => {
     const hostLoginId = "rating-projection-host-login";

@@ -1,3 +1,5 @@
+import type { MatchPresentationSnapshot } from "@mons/shared/match-presentation";
+
 export type ProjectionDocument = {
   data: Record<string, unknown>;
   updateTime: string;
@@ -24,11 +26,10 @@ export type ProfileGamesProjectionRepository = {
   ): Promise<Map<string, ProjectionDocument>>;
   readAutomatchEntry(inviteId: string): Promise<unknown>;
   readInviteMetadata(inviteId: string): Promise<Record<string, unknown> | null>;
-  getMatchEmoji?(
+  readMatchPresentation?(
     inviteId: string,
     matchId: string,
-    loginUid: string,
-  ): Promise<number | null>;
+  ): Promise<MatchPresentationSnapshot>;
   hasCompletedRatingUpdate(inviteId: string, matchId: string): Promise<boolean>;
   readProfileOwnershipSnapshot(query: {
     loginUids: readonly string[];
