@@ -230,6 +230,70 @@ export async function readProfileEventPrizes(
   return result.snapshot;
 }
 
+const PROFILE_PRIZE_READ_BATCH_SIZE = 40;
+
+export async function readProfilePrizeMutationSnapshots(
+  db: EventD1Connection,
+  requested: ReadonlyMap<string, ReadonlySet<string>>,
+): Promise<Map<string, ProfileEventPrizeSnapshot>> {
+  const profiles = [...requested].map(([profileId, eventIds]) => {
+    if (!exactKey(profileId)) throw new EventD1Failure("invalid-profile-id");
+    const ids = [...eventIds];
+    if (ids.some((eventId) => !exactKey(eventId) || !eventId.isWellFormed()))
+      throw new EventD1Failure("invalid-event-id");
+    return { profileId, eventIds: ids };
+  });
+  const snapshots = new Map<string, ProfileEventPrizeSnapshot>();
+  for (
+    let offset = 0;
+    offset < profiles.length;
+    offset += PROFILE_PRIZE_READ_BATCH_SIZE
+  ) {
+    const batch = profiles.slice(
+      offset,
+      offset + PROFILE_PRIZE_READ_BATCH_SIZE,
+    );
+    const results = await db.batch<{
+      event_id: string | null;
+      assignment_json: string | null;
+      revision: number | null;
+    }>(
+      batch.map(({ profileId, eventIds }) =>
+        db
+          .prepare(
+            `SELECT prizes.event_id, prizes.assignment_json, revisions.revision
+         FROM (SELECT ? AS profile_id) requested
+         LEFT JOIN profile_event_prize_revisions revisions
+           ON revisions.profile_id = requested.profile_id
+         LEFT JOIN profile_event_prizes prizes
+           ON prizes.profile_id = requested.profile_id
+             AND prizes.event_id IN (SELECT value FROM json_each(?))`,
+          )
+          .bind(profileId, JSON.stringify(eventIds)),
+      ),
+    );
+    for (const [index, { profileId }] of batch.entries()) {
+      const rows = results[index]?.results;
+      const first = rows?.[0];
+      if (!first) throw new EventD1Failure();
+      const revision =
+        first.revision === null ? 0 : safeInteger(first.revision, 1);
+      const prizes: Record<string, EventPrizeAssignmentRecord> =
+        Object.create(null);
+      for (const row of rows) {
+        if (row.event_id === null) continue;
+        prizes[row.event_id] = parseStoredEventPrizeAssignment(
+          profileId,
+          row.event_id,
+          decodeJson(row.assignment_json),
+        );
+      }
+      snapshots.set(profileId, { profileId, prizes, revision });
+    }
+  }
+  return snapshots;
+}
+
 export async function readProfileEventPrizesIfChanged(
   db: EventD1Connection,
   profileId: string,

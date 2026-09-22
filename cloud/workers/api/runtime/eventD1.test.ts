@@ -1,5 +1,6 @@
 import { commitEventMutations } from "../src/eventD1.ts";
 import { commitEventMutationsInternal } from "../src/eventD1/commit.ts";
+import { readProfilePrizeMutationSnapshots } from "../src/eventD1/reads.ts";
 import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
 import { buildEventProgressPlan } from "../src/eventProgressCodec.ts";
 import type { EventMutation } from "../../../runtime/eventCommands.js";
@@ -97,6 +98,71 @@ function observeSnapshotReads() {
     },
   };
   return { db, batches, session };
+}
+
+function observePrizeMutationBatches(
+  afterReadBatch?: (count: number) => Promise<void>,
+) {
+  type Statement = {
+    query: string;
+    values: unknown[];
+    statement: D1PreparedStatement;
+  };
+  const statements = new WeakMap<D1PreparedStatement, Statement>();
+  const readBatches: Array<{
+    statements: Statement[];
+    results: D1Result<unknown>[];
+  }> = [];
+  const writeBatches: Statement[][] = [];
+  const wrap = (
+    statement: D1PreparedStatement,
+    query: string,
+    values: unknown[] = [],
+  ): D1PreparedStatement => {
+    const wrapped = new Proxy(statement, {
+      get(target, property) {
+        if (property === "bind") {
+          return (...bound: unknown[]) =>
+            wrap(target.bind(...bound), query, bound);
+        }
+        const member = Reflect.get(target, property, target);
+        return typeof member === "function" ? member.bind(target) : member;
+      },
+    });
+    statements.set(wrapped, { query, values, statement });
+    return wrapped;
+  };
+  const database = new Proxy(testEnv.EVENT_DB, {
+    get(target, property) {
+      if (property === "prepare") {
+        return (query: string) => wrap(target.prepare(query), query);
+      }
+      if (property === "batch") {
+        return async (input: D1PreparedStatement[]) => {
+          const prepared = input.map((statement) => {
+            const value = statements.get(statement);
+            if (!value) throw new Error("unknown-prize-statement");
+            return value;
+          });
+          const readOnly = prepared.every(({ query }) =>
+            /^\s*SELECT\b/i.test(query),
+          );
+          if (!readOnly) writeBatches.push(prepared);
+          const results = await target.batch(
+            prepared.map(({ statement }) => statement),
+          );
+          if (readOnly) {
+            readBatches.push({ statements: prepared, results });
+            await afterReadBatch?.(readBatches.length);
+          }
+          return results;
+        };
+      }
+      const member = Reflect.get(target, property, target);
+      return typeof member === "function" ? member.bind(target) : member;
+    },
+  });
+  return { database, readBatches, writeBatches };
 }
 
 async function readPrizeStorage() {
@@ -1941,6 +2007,347 @@ describe("event D1 store", () => {
       ).toBe(intent.transitionId);
     },
   );
+
+  describe("targeted profile prize mutation reads", () => {
+    it("groups repeated leaf updates and leaves malformed unrelated history untouched", async () => {
+      const { otherEventId } = await seedPrizeRows();
+      const malformedEventId = "malformed-prize-event";
+      await patchEventOwnedPaths(testEnv.EVENT_DB, {
+        [`events/${malformedEventId}`]: eventRecord({
+          eventId: malformedEventId,
+        }),
+      });
+      await testEnv.EVENT_DB.prepare(
+        `INSERT INTO profile_event_prizes (
+           profile_id, event_id, assignment_json, updated_at_ms
+         ) VALUES (?, ?, '{}', 200)`,
+      )
+        .bind(profileId, malformedEventId)
+        .run();
+      const before = await readPrizeStorage();
+      const observed = observePrizeMutationBatches();
+      const changed = { ...assignment(), assignedAtMs: 4_000 };
+      const otherProfileId = "profile-two";
+      const result = await withD1Admission((admission) =>
+        commitEventMutations(
+          observed.database,
+          [
+            {
+              kind: "profile-prize",
+              profileId,
+              eventId,
+              value: { ...assignment(), assignedAtMs: 3_000 },
+            },
+            {
+              kind: "profile-prize",
+              profileId: otherProfileId,
+              eventId,
+              value: assignment(otherProfileId),
+            },
+            {
+              kind: "profile-prize",
+              profileId,
+              eventId: otherEventId,
+              value: null,
+            },
+            { kind: "profile-prize", profileId, eventId, value: changed },
+          ],
+          { admission, now: () => 300 },
+        ),
+      );
+      expect(result.profilePrizeRevisions).toEqual({
+        [profileId]: 2,
+        [otherProfileId]: 1,
+      });
+      expect(observed.readBatches).toHaveLength(1);
+      expect(observed.readBatches[0].statements).toHaveLength(2);
+      expect(observed.readBatches[0].results[0].results).toHaveLength(2);
+      expect(observed.writeBatches).toHaveLength(1);
+      const after = await readPrizeStorage();
+      expect(
+        after.prizes.find((row) => row.event_id === malformedEventId),
+      ).toEqual(before.prizes.find((row) => row.event_id === malformedEventId));
+      expect(after.prizes.some((row) => row.event_id === otherEventId)).toBe(
+        false,
+      );
+      await expect(
+        readProfileEventPrizeAssignment(testEnv.EVENT_DB, profileId, eventId),
+      ).resolves.toEqual(changed);
+    });
+
+    it("keeps targeted reads indexed and bounded as unrelated prize history grows", async () => {
+      await seedPrizeRows();
+      const requested = new Map([[profileId, new Set([eventId])]]);
+      const baseline = observePrizeMutationBatches();
+      const expected = new Map([
+        [
+          profileId,
+          {
+            profileId,
+            revision: 1,
+            prizes: { [eventId]: assignment() },
+          },
+        ],
+      ]);
+      await expect(
+        readProfilePrizeMutationSnapshots(baseline.database, requested),
+      ).resolves.toEqual(expected);
+      const baselineRowsRead =
+        baseline.readBatches[0].results[0].meta.rows_read;
+      expect(baselineRowsRead).toBeGreaterThan(0);
+      await testEnv.EVENT_DB.batch([
+        testEnv.EVENT_DB.prepare(
+          `WITH RECURSIVE entries(n) AS (
+             SELECT 1 UNION ALL SELECT n + 1 FROM entries WHERE n < 512
+           )
+           INSERT INTO event_records (
+             event_id, status, start_at_ms, updated_at_ms, revision, record_json
+           )
+           SELECT 'prize-history-' || n, status, start_at_ms, updated_at_ms, 1,
+                  json_set(record_json, '$.eventId', 'prize-history-' || n)
+           FROM entries CROSS JOIN event_records WHERE event_id = ?`,
+        ).bind(eventId),
+        testEnv.EVENT_DB.prepare(
+          `INSERT INTO profile_event_prizes (
+             profile_id, event_id, assignment_json, updated_at_ms
+           )
+           SELECT ?, event_id, '{}', updated_at_ms FROM event_records
+           WHERE event_id LIKE 'prize-history-%'`,
+        ).bind(profileId),
+      ]);
+      const observed = observePrizeMutationBatches();
+      await expect(
+        readProfilePrizeMutationSnapshots(observed.database, requested),
+      ).resolves.toEqual(expected);
+      expect(observed.readBatches).toHaveLength(1);
+      expect(
+        observed.readBatches[0].results[0].meta.rows_read,
+      ).toBeLessThanOrEqual(baselineRowsRead);
+      const read = observed.readBatches[0].statements[0];
+      const plan = await testEnv.EVENT_DB.prepare(
+        `EXPLAIN QUERY PLAN ${read.query}`,
+      )
+        .bind(...read.values)
+        .all<{ detail: string }>();
+      expect(
+        plan.results.some(({ detail }) =>
+          /SEARCH .+ USING PRIMARY KEY \(profile_id=\? AND event_id=\?\)/.test(
+            detail,
+          ),
+        ),
+      ).toBe(true);
+    });
+
+    it.each([
+      { hasAssignment: false, hasRevision: false },
+      { hasAssignment: false, hasRevision: true },
+      { hasAssignment: true, hasRevision: false },
+      { hasAssignment: true, hasRevision: true },
+    ])(
+      "retains missing-row semantics for $hasAssignment assignments and $hasRevision revisions",
+      async ({ hasAssignment, hasRevision }) => {
+        await patchEventOwnedPaths(testEnv.EVENT_DB, {
+          [`events/${eventId}`]: eventRecord(),
+        });
+        if (hasAssignment) {
+          await testEnv.EVENT_DB.prepare(
+            `INSERT INTO profile_event_prizes (
+             profile_id, event_id, assignment_json, updated_at_ms
+           ) VALUES (?, ?, ?, 200)`,
+          )
+            .bind(profileId, eventId, JSON.stringify(assignment()))
+            .run();
+        }
+        if (hasRevision) {
+          await testEnv.EVENT_DB.prepare(
+            `INSERT INTO profile_event_prize_revisions (
+             profile_id, revision, updated_at_ms
+           ) VALUES (?, 7, 200)`,
+          )
+            .bind(profileId)
+            .run();
+        }
+        const snapshots = await readProfilePrizeMutationSnapshots(
+          testEnv.EVENT_DB,
+          new Map([[profileId, new Set([eventId, "absent-event"])]]),
+        );
+        expect(snapshots.get(profileId)).toEqual({
+          profileId,
+          revision: hasRevision ? 7 : 0,
+          prizes: hasAssignment ? { [eventId]: assignment() } : {},
+        });
+      },
+    );
+
+    it("rejects malformed touched assignments and unsafe revisions", async () => {
+      await seedPrizeRows();
+      const requested = new Map([[profileId, new Set([eventId])]]);
+      await testEnv.EVENT_DB.prepare(
+        "UPDATE profile_event_prizes SET assignment_json = '{}' WHERE profile_id = ? AND event_id = ?",
+      )
+        .bind(profileId, eventId)
+        .run();
+      await expect(
+        readProfilePrizeMutationSnapshots(testEnv.EVENT_DB, requested),
+      ).rejects.toThrow("invalid-event-prize-assignment");
+      await testEnv.EVENT_DB.batch([
+        testEnv.EVENT_DB.prepare(
+          "UPDATE profile_event_prizes SET assignment_json = ? WHERE profile_id = ? AND event_id = ?",
+        ).bind(JSON.stringify(assignment()), profileId, eventId),
+        testEnv.EVENT_DB.prepare(
+          "UPDATE profile_event_prize_revisions SET revision = 9007199254740992 WHERE profile_id = ?",
+        ).bind(profileId),
+      ]);
+      await expect(
+        readProfilePrizeMutationSnapshots(testEnv.EVENT_DB, requested),
+      ).rejects.toThrow("invalid-event-integer");
+    });
+
+    it("chunks 41 profiles without splitting scattered mutations for one profile", async () => {
+      const { otherEventId } = await seedPrizeRows();
+      const observed = observePrizeMutationBatches();
+      const changes: EventMutation[] = [
+        { kind: "profile-prize", profileId, eventId, value: null },
+        ...Array.from({ length: 40 }, (_, index): EventMutation => ({
+          kind: "profile-prize",
+          profileId: `batch-profile-${index}`,
+          eventId,
+          value: null,
+        })),
+        {
+          kind: "profile-prize",
+          profileId,
+          eventId: otherEventId,
+          value: null,
+        },
+        { kind: "profile-prize", profileId, eventId, value: null },
+      ];
+      const result = await withD1Admission((admission) =>
+        commitEventMutations(observed.database, changes, {
+          admission,
+          now: () => 300,
+        }),
+      );
+      expect(
+        observed.readBatches.map(({ statements }) => statements.length),
+      ).toEqual([40, 1]);
+      expect(observed.readBatches[0].results[0].results).toHaveLength(2);
+      expect(observed.writeBatches).toHaveLength(1);
+      expect(Object.keys(result.profilePrizeRevisions)).toHaveLength(41);
+      expect(result.profilePrizeRevisions[profileId]).toBe(2);
+      const stored = await readPrizeStorage();
+      expect(stored.prizes).toEqual([]);
+      expect(
+        stored.profileRevisions.find((row) => row.profile_id === profileId),
+      ).toEqual({
+        profile_id: profileId,
+        revision: 2,
+        updated_at_ms: 300,
+      });
+    });
+
+    it("rejects the entire plan when a sibling changes between read batches", async () => {
+      const { otherEventId, otherAssignment } = await seedPrizeRows();
+      const changedSibling = { ...otherAssignment, assignedAtMs: 4_000 };
+      let afterRace: Awaited<ReturnType<typeof readPrizeStorage>> | undefined;
+      const observed = observePrizeMutationBatches(async (count) => {
+        if (count !== 1) return;
+        await patchEventOwnedPaths(
+          testEnv.EVENT_DB,
+          {
+            [`profileEventPrizes/${profileId}/${otherEventId}`]: changedSibling,
+          },
+          { now: () => 300 },
+        );
+        afterRace = await readPrizeStorage();
+      });
+      const changes: EventMutation[] = [
+        { kind: "profile-prize", profileId, eventId, value: null },
+        ...Array.from({ length: 40 }, (_, index): EventMutation => ({
+          kind: "profile-prize",
+          profileId: `race-profile-${index}`,
+          eventId,
+          value: assignment(`race-profile-${index}`),
+        })),
+      ];
+      await expect(
+        withD1Admission((admission) =>
+          commitEventMutations(observed.database, changes, {
+            admission,
+            now: () => 400,
+          }),
+        ),
+      ).rejects.toBeInstanceOf(EventD1Conflict);
+      expect(
+        observed.readBatches.map(({ statements }) => statements.length),
+      ).toEqual([40, 1]);
+      expect(observed.writeBatches).toHaveLength(1);
+      expect(afterRace).toBeDefined();
+      expect(await readPrizeStorage()).toEqual(afterRace);
+    });
+
+    it("preserves Unicode keys and the full-read fallback for lone surrogates", async () => {
+      const { otherEventId } = await seedPrizeRows();
+      const unicodeEventId = "历史-😀";
+      await patchEventOwnedPaths(testEnv.EVENT_DB, {
+        [`events/${unicodeEventId}`]: eventRecord({ eventId: unicodeEventId }),
+      });
+      await testEnv.EVENT_DB.prepare(
+        `INSERT INTO profile_event_prizes (
+           profile_id, event_id, assignment_json, updated_at_ms
+         ) VALUES (?, ?, ?, 200)`,
+      )
+        .bind(
+          profileId,
+          unicodeEventId,
+          JSON.stringify({
+            ...assignment(),
+            eventId: unicodeEventId,
+          }),
+        )
+        .run();
+      const targeted = observePrizeMutationBatches();
+      await patchEventOwnedPaths(targeted.database, {
+        [`profileEventPrizes/${profileId}/${unicodeEventId}`]: null,
+      });
+      expect(targeted.readBatches).toHaveLength(1);
+      expect(targeted.readBatches[0].statements).toHaveLength(1);
+      await expect(
+        readProfileEventPrizeAssignment(
+          testEnv.EVENT_DB,
+          profileId,
+          unicodeEventId,
+        ),
+      ).resolves.toBeNull();
+      await testEnv.EVENT_DB.prepare(
+        "UPDATE profile_event_prizes SET assignment_json = '{}' WHERE profile_id = ? AND event_id = ?",
+      )
+        .bind(profileId, otherEventId)
+        .run();
+      const before = await readPrizeStorage();
+      const fallback = observePrizeMutationBatches();
+      await expect(
+        withD1Admission((admission) =>
+          commitEventMutations(
+            fallback.database,
+            [
+              {
+                kind: "profile-prize",
+                profileId,
+                eventId: "\ud800",
+                value: null,
+              },
+            ],
+            { admission },
+          ),
+        ),
+      ).rejects.toThrow("invalid-event-prize-assignment");
+      expect(fallback.readBatches).toHaveLength(1);
+      expect(fallback.readBatches[0].statements).toHaveLength(2);
+      expect(fallback.writeBatches).toHaveLength(0);
+      expect(await readPrizeStorage()).toEqual(before);
+    });
+  });
 
   it("transacts one profile prize in one read despite a malformed sibling", async () => {
     const { otherEventId, otherAssignment } = await seedPrizeRows();

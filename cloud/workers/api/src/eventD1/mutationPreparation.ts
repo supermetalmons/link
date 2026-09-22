@@ -18,6 +18,7 @@ import {
   readEventRecord,
   readSelections,
   readProfileEventPrizes,
+  readProfilePrizeMutationSnapshots,
   readEventProgressOutbox,
   readEventProfileGameProjectionOutbox,
 } from "./reads.ts";
@@ -90,16 +91,27 @@ async function ensureSelections(
   return state.selections;
 }
 
-async function readProfilePrizeMutationState(
-  db: EventD1Connection,
-  profileId: string,
-): Promise<ProfilePrizeMutationState> {
-  const snapshot = await readProfileEventPrizes(db, profileId);
-  return {
-    originalPrizes: snapshot.prizes,
-    prizes: { ...snapshot.prizes },
-    revision: snapshot.revision,
-  };
+function profilePrizeReadTargets(changes: readonly EventMutation[]) {
+  const targets = new Map<string, Set<string>>();
+  const fullProfiles = new Set<string>();
+  for (const change of changes) {
+    if (change.kind !== "profile-prize" && change.kind !== "profile-prizes")
+      continue;
+    const profileId = exactKey(change.profileId);
+    if (!profileId) throw new EventD1Failure("invalid-event-path");
+    if (change.kind === "profile-prizes") {
+      fullProfiles.add(profileId);
+      continue;
+    }
+    const eventId = exactKey(change.eventId);
+    if (!eventId) throw new EventD1Failure("invalid-event-path");
+    if (!eventId.isWellFormed()) fullProfiles.add(profileId);
+    const eventIds = targets.get(profileId) || new Set<string>();
+    eventIds.add(eventId);
+    targets.set(profileId, eventIds);
+  }
+  for (const profileId of fullProfiles) targets.delete(profileId);
+  return targets;
 }
 
 export async function prepareEventMutations(
@@ -163,6 +175,10 @@ export async function prepareEventMutations(
       revision: snapshot.revision,
     });
   }
+  const profilePrizeSnapshots = await readProfilePrizeMutationSnapshots(
+    db,
+    snapshot ? new Map() : profilePrizeReadTargets(changes),
+  );
   const progressUpdates = new Map<string, unknown>();
   const progressDeadUpdates = new Map<string, unknown>();
   const profileProjectionUpdates = new Map<string, unknown>();
@@ -274,7 +290,14 @@ export async function prepareEventMutations(
         if (!profileId) throw new EventD1Failure("invalid-event-path");
         let state = profileStates.get(profileId);
         if (!state) {
-          state = await readProfilePrizeMutationState(db, profileId);
+          const stored =
+            profilePrizeSnapshots.get(profileId) ||
+            (await readProfileEventPrizes(db, profileId));
+          state = {
+            originalPrizes: stored.prizes,
+            prizes: Object.assign(Object.create(null), stored.prizes),
+            revision: stored.revision,
+          };
           profileStates.set(profileId, state);
         }
         if (change.kind === "profile-prizes") {
