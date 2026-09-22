@@ -22,7 +22,7 @@ import {
   prepareCreatedMatchPresentations,
 } from "../src/matchPresentationRegistry.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
-import { resolveInviteRole } from "../src/gameSessionMutations.ts";
+import { resolveInviteRole } from "../src/inviteAccess.ts";
 import type { StateRepository } from "../test/stateRepositoryTestTypes.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 import { activateDurableMatchPresentationTestState } from "./matchPresentationTestFixture.ts";

@@ -23,7 +23,7 @@ import {
   createGameplayRepository,
   type GameplayRepository,
 } from "./gameplayRepository.ts";
-import { resolveInviteRole } from "./gameSessionMutations.ts";
+import { resolveInviteRole } from "./inviteAccess.ts";
 import { readBoundedJson } from "./http.ts";
 import type { InviteReactions } from "./inviteReactions.ts";
 import { socketSessionHeaders } from "./socketSession.ts";

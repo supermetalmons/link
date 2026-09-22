@@ -27,11 +27,11 @@ import {
   proposeRematch as proposeRematchImpl,
   refreshGameSessionMutationLease as refreshGameSessionMutationLeaseImpl,
   releaseGameSessionMutationLease as releaseGameSessionMutationLeaseImpl,
-  resolveInviteRole,
   sweepGameSessionMutationReceipts,
   withGameSessionMutationLease,
   type GameSessionMutationDependencies,
 } from "../src/gameSessionMutations.ts";
+import { resolveInviteRole } from "../src/inviteAccess.ts";
 import {
   GameSessionMutationLockFailure,
   type GameSessionMutationLockStore,
@@ -1433,6 +1433,54 @@ test("does not propose a rematch between one canonical profile", async () => {
       error.message === "rematch-unavailable",
   );
   assert.equal(state.patches.length, 0);
+});
+
+test("linked rematch participants reuse one ownership snapshot for the original actor", async () => {
+  for (const role of ["host", "guest"] as const) {
+    const actorUid = `${role}-login`;
+    const state = repository({
+      "invites/abcdefghijk": {
+        hostId: "host-login",
+        hostColor: "white",
+        guestId: "guest-login",
+      },
+    });
+    const ownershipReads: ProfileOwnershipQuery[] = [];
+    state.repository.readProfileOwnershipSnapshot = async (query) => {
+      ownershipReads.push(query);
+      assert.equal(ownershipReads.length, 1);
+      return ownershipSnapshot(query, {
+        "alternate-login": `profile-${role}`,
+        "host-login": "profile-host",
+        "guest-login": "profile-guest",
+      });
+    };
+
+    const response = await proposeRematch(
+      { uid: "alternate-login" },
+      {
+        operationId: ids.propose,
+        inviteId: "abcdefghijk",
+        ...presentation(),
+      },
+      state.repository,
+      { createOwnerId: () => "owner", now: () => 1_000 },
+    );
+
+    assert.equal(response.actorUid, actorUid);
+    assert.deepEqual(ownershipReads, [
+      {
+        loginUids: ["alternate-login", "host-login", "guest-login"],
+        profileIds: [],
+      },
+    ]);
+    assert.ok(state.patches[0][`players/${actorUid}/matches/abcdefghijk1`]);
+    assert.equal(state.patches[0][`invites/abcdefghijk/${role}Rematches`], "1");
+    assert.equal(
+      state.patches[0]["players/alternate-login/matches/abcdefghijk1"],
+      undefined,
+    );
+  }
 });
 
 test("ensures a missing match for an alternate login on the same profile", async () => {

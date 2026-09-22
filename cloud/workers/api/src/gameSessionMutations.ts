@@ -16,8 +16,6 @@ import {
   type JoinInviteResponse,
   type ProposeRematchRequest,
   type ProposeRematchResponse,
-  type ResolveInviteRoleRequest,
-  type ResolveInviteRoleResponse,
 } from "@mons/shared/game-sessions";
 import { isEventOwnedInvite } from "@mons/shared/events";
 import { createGameVariantHelpers } from "@mons/shared/game-variants";
@@ -46,12 +44,10 @@ import {
   STATE_SERVER_TIMESTAMP,
   stateIncrement,
 } from "./stateCompatibility.ts";
-import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import type { GameplayProfile } from "./gameplayRepository.ts";
-import type {
-  GameSessionRepository,
-  InviteAccessRepository,
-} from "./gameplayContracts.ts";
+import type { GameSessionRepository } from "./gameplayContracts.ts";
+import { resolveInviteParticipant } from "./inviteAccess.ts";
 import type { AutomatchPersistence } from "./automatchPersistence.ts";
 import {
   GameSessionMutationLockFailure,
@@ -70,7 +66,6 @@ import {
   loginsShareProfile,
   requireProfileOwnershipSnapshot,
   type ProfileOwnershipSnapshot,
-  type ProfileOwnershipReader,
 } from "./profileOwnership.ts";
 
 const GAME_SESSION_MUTATION_RECEIPT_ROOT = "gameplayMutationReceipts";
@@ -132,13 +127,6 @@ type GameSessionMutationDependencies = {
   now?: () => number;
   random?: () => number;
   wait?: (milliseconds: number) => Promise<void>;
-};
-
-type ParticipantResolution = {
-  actorUid: string;
-  opponentUid: string;
-  ownership: ProfileOwnershipSnapshot | null;
-  role: "guest" | "host";
 };
 
 function toRecord(value: unknown): Record<string, unknown> | null {
@@ -558,145 +546,6 @@ async function runGameSessionMutation<T extends GameSessionResponse>(
   return outcome.response;
 }
 
-export async function resolveInviteRole(
-  identity: RequestIdentity,
-  request: ResolveInviteRoleRequest,
-  repository: InviteAccessRepository,
-): Promise<ResolveInviteRoleResponse> {
-  const storedInvite = await repository.readInviteMetadata(request.inviteId);
-  return resolveInviteRoleFromSnapshot(
-    identity,
-    request,
-    storedInvite,
-    repository,
-  );
-}
-
-export async function resolveInviteRoleFromSnapshot(
-  identity: RequestIdentity,
-  request: ResolveInviteRoleRequest,
-  storedInvite: unknown,
-  repository: ProfileOwnershipReader,
-): Promise<ResolveInviteRoleResponse> {
-  if (storedInvite === null || storedInvite === undefined) {
-    throw new AuthApiFailure(404, "not-found", "invite-not-found");
-  }
-  const invite = toRecord(storedInvite);
-  if (!invite) {
-    throw failedPrecondition("invite-invalid");
-  }
-  const hostId = readStoredString(invite.hostId);
-  const storedGuestId = invite.guestId;
-  const guestId =
-    storedGuestId === null || storedGuestId === undefined
-      ? null
-      : readStoredString(storedGuestId);
-  const passwordProtected = Object.hasOwn(invite, "password");
-  if (
-    !isCanonicalLoginUid(hostId) ||
-    (guestId !== null && (!isCanonicalLoginUid(guestId) || guestId === hostId))
-  ) {
-    throw failedPrecondition("invite-invalid");
-  }
-  const response = (
-    actorUid: string | null,
-    role: "host" | "guest" | "watch",
-  ): ResolveInviteRoleResponse => {
-    if (passwordProtected && guestId === null && role === "watch") {
-      throw new AuthApiFailure(403, "permission-denied", "permission-denied");
-    }
-    return {
-      ok: true,
-      inviteId: request.inviteId,
-      hostId,
-      guestId,
-      actorUid,
-      role,
-    };
-  };
-  if (identity.uid === hostId) {
-    return response(hostId, "host");
-  }
-  if (guestId && identity.uid === guestId) {
-    return response(guestId, "guest");
-  }
-  const ownershipUids = guestId
-    ? [identity.uid, hostId, guestId]
-    : [identity.uid, hostId];
-  const ownership = await requireProfileOwnershipSnapshot(repository, {
-    loginUids: ownershipUids,
-    profileIds: [],
-  });
-  const identityProfileId = getLoginProfileId(ownership, identity.uid);
-  const hostProfileId = getLoginProfileId(ownership, hostId);
-  const guestProfileId = guestId ? getLoginProfileId(ownership, guestId) : null;
-  if (!identityProfileId) {
-    return response(null, "watch");
-  }
-  if (hostProfileId === identityProfileId) {
-    return response(hostId, "host");
-  }
-  if (guestId && guestProfileId === identityProfileId) {
-    return response(guestId, "guest");
-  }
-  return response(null, "watch");
-}
-
-async function resolveParticipant(
-  identity: RequestIdentity,
-  invite: Record<string, unknown>,
-  repository: ProfileOwnershipReader,
-): Promise<ParticipantResolution> {
-  const hostUid = readStoredString(invite.hostId);
-  const guestUid = readStoredString(invite.guestId);
-  if (!isSafeRecordKey(hostUid) || !isSafeRecordKey(guestUid)) {
-    throw failedPrecondition("missing-opponent");
-  }
-  if (identity.uid === hostUid) {
-    return {
-      actorUid: hostUid,
-      opponentUid: guestUid,
-      ownership: null,
-      role: "host",
-    };
-  }
-  if (identity.uid === guestUid) {
-    return {
-      actorUid: guestUid,
-      opponentUid: hostUid,
-      ownership: null,
-      role: "guest",
-    };
-  }
-  const ownership = await requireProfileOwnershipSnapshot(repository, {
-    loginUids: [identity.uid, hostUid, guestUid],
-    profileIds: [],
-  });
-  const identityProfileId = getLoginProfileId(ownership, identity.uid);
-  const hostProfileId = getLoginProfileId(ownership, hostUid);
-  const guestProfileId = getLoginProfileId(ownership, guestUid);
-  if (!identityProfileId) {
-    throw new AuthApiFailure(403, "permission-denied", "permission-denied");
-  }
-  if (hostProfileId === identityProfileId) {
-    return {
-      actorUid: hostUid,
-      opponentUid: guestUid,
-      ownership,
-      role: "host",
-    };
-  }
-  if (guestProfileId === identityProfileId) {
-    return {
-      actorUid: guestUid,
-      opponentUid: hostUid,
-      ownership,
-      role: "guest",
-    };
-  }
-  throw new AuthApiFailure(403, "permission-denied", "permission-denied");
-}
-
 function ensureMutableInvite(invite: Record<string, unknown>): void {
   if (isEventOwnedInvite(invite)) {
     throw failedPrecondition("event-owned-invite");
@@ -1054,7 +903,7 @@ export async function proposeRematch(
         throw new AuthApiFailure(404, "not-found", "invite-not-found");
       }
       ensureMutableInvite(invite);
-      const participant = await resolveParticipant(
+      const participant = await resolveInviteParticipant(
         identity,
         invite,
         repository,
@@ -1189,7 +1038,7 @@ export async function endRematchSeries(
         throw new AuthApiFailure(404, "not-found", "invite-not-found");
       }
       ensureMutableInvite(invite);
-      const participant = await resolveParticipant(
+      const participant = await resolveInviteParticipant(
         identity,
         invite,
         repository,
@@ -1273,7 +1122,7 @@ export async function ensureParticipantMatch(
       if (index === null || index > getLatestRematchIndex(invite)) {
         throw failedPrecondition("match-not-current");
       }
-      const participant = await resolveParticipant(
+      const participant = await resolveInviteParticipant(
         identity,
         invite,
         repository,

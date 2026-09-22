@@ -18,7 +18,7 @@ import {
   type WorkerExecutionContext,
 } from "./sessionAuth.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
-import { resolveInviteRoleFromSnapshot } from "./gameSessionMutations.ts";
+import { resolveInviteRoleFromSnapshot } from "./inviteAccess.ts";
 import {
   createGameplayRepository,
   type GameplayRepository,

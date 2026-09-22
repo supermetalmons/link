@@ -18,7 +18,7 @@ import {
   createGameplayRepository,
   type GameplayRepository,
 } from "./gameplayRepository.ts";
-import { resolveInviteRoleFromSnapshot } from "./gameSessionMutations.ts";
+import { resolveInviteRoleFromSnapshot } from "./inviteAccess.ts";
 import { readBoundedJson } from "./http.ts";
 import type { InviteReactions } from "./inviteReactions.ts";
 import {

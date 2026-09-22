@@ -14,8 +14,8 @@ import {
   ensureParticipantMatch,
   joinInvite,
   proposeRematch,
-  resolveInviteRole,
 } from "../gameSessionMutations.ts";
+import { resolveInviteRole } from "../inviteAccess.ts";
 import { defineGameplayRoute, validateBody } from "./definition.ts";
 import { createGameplayRuntime } from "./runtime.ts";
 

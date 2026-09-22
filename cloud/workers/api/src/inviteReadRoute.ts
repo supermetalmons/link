@@ -15,7 +15,7 @@ import {
   isAllowedAuthOrigin,
 } from "./authHttp.ts";
 import { cancelResponseBody } from "./boundedStreams.ts";
-import { resolveInviteRoleFromSnapshot } from "./gameSessionMutations.ts";
+import { resolveInviteRoleFromSnapshot } from "./inviteAccess.ts";
 import {
   createGameplayRepository,
   type GameplayRepository,
