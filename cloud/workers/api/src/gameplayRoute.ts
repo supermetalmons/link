@@ -1,18 +1,8 @@
 import { WAGER_FROZEN_READ_PATH } from "@mons/shared/wagers";
-import {
-  AuthApiFailure,
-  authErrorResponse,
-  isProfileWritesDisabledFailure,
-} from "./authErrors.ts";
-import {
-  authJsonResponse,
-  authPreflightResponse,
-  getAuthCorsHeaders,
-} from "./authHttp.ts";
-import {
-  verifySessionRequest,
-  type WorkerExecutionContext,
-} from "./sessionAuth.ts";
+import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
+import { authJsonResponse, getAuthCorsHeaders } from "./authHttp.ts";
+import { authenticatedPost } from "./authenticatedPost.ts";
+import type { WorkerExecutionContext } from "./sessionAuth.ts";
 import {
   GameSessionMutationLockFailure,
   MatchTimerStartStoreFailure,
@@ -136,106 +126,90 @@ async function handleGameplayRequest(
   ctx: WorkerExecutionContext,
   dependencies: GameplayRouteDependencies = {},
 ): Promise<Response> {
-  let corsHeaders: Record<string, string> = { Vary: "Origin" };
-  try {
-    corsHeaders = getAuthCorsHeaders(request);
-    if (request.method === "OPTIONS") {
-      return authPreflightResponse(corsHeaders);
-    }
-    if (request.method !== "POST") {
-      throw new AuthApiFailure(405, "method-not-allowed", "method-not-allowed");
-    }
-    const pathname = new URL(request.url).pathname;
-    const route = gameplayRoutes.get(pathname);
-    if (!route) {
-      throw new AuthApiFailure(404, "not-found", "not-found");
-    }
-    const identity = await measureAutomatchPhase("auth", () =>
-      (dependencies.verifyIdentity || verifySessionRequest)(request, env, ctx),
-    );
-    const repository =
-      dependencies.repository || createEventGameplayRepository(env);
-    const isWagerMutation =
-      pathname.startsWith("/wagers/") && pathname !== WAGER_FROZEN_READ_PATH;
-    const reservations =
-      isWagerMutation || pathname === WAGER_FROZEN_READ_PATH
-        ? dependencies.wagerReservations ||
-          createWagerReservationRuntime(env, repository)
-        : null;
-    if (isWagerMutation) await reservations?.assertClientVersion(request);
-    const automatchOperationId =
-      pathname === "/automatch/start"
-        ? readAutomatchOperationId(request)
-        : null;
-    if (!route.readOnly) {
-      await assertProfileMutationAllowed(env);
-    }
-    if (pathname === "/wagers/outcomes/resolve") {
-      await enforceWagerOutcomeRateLimit(env.AUTH_RATE_LIMITER, identity.uid);
-    }
-    const prepared = await prepareGameplayRoute(request, route);
-    const response = await prepared.execute({
-      request,
-      env,
-      ctx,
-      dependencies,
-      pathname,
-      identity,
-      repository,
-      reservations,
-      automatchOperationId,
-    });
-    return authJsonResponse(response, 200, corsHeaders);
-  } catch (error) {
-    if (error instanceof WagerClientUpdateRequired) {
-      return authJsonResponse(
-        {
-          ok: false,
-          error: "client-update-required",
-          message: error.message,
-        },
-        409,
-        corsHeaders,
-      );
-    }
-    if (
-      error instanceof GameSessionMutationLockFailure ||
-      error instanceof MatchTimerStartStoreFailure
-    ) {
-      (
-        dependencies.logCoordinationFailure ||
-        ((record) =>
-          console.error(
-            JSON.stringify({
-              event: "gameplay_coordination_failure",
-              ...record,
-            }),
-          ))
-      )({
-        operation: error.operation,
-        store:
-          error instanceof GameSessionMutationLockFailure
-            ? "mutation-lock"
-            : "timer-start",
-      });
-    }
-    const failure =
-      error instanceof AuthApiFailure
-        ? error
-        : new AuthApiFailure(
-            503,
-            "unavailable",
-            "gameplay-service-unavailable",
+  return authenticatedPost(
+    request,
+    env,
+    ctx,
+    {
+      failureMessage: "gameplay-service-unavailable",
+      failureEvent: "gameplay_route_failure",
+      logFailure: dependencies.logFailure,
+      verifyIdentity: dependencies.verifyIdentity,
+      errorResponse: (error, corsHeaders) => {
+        if (error instanceof WagerClientUpdateRequired) {
+          return authJsonResponse(
+            {
+              ok: false,
+              error: "client-update-required",
+              message: error.message,
+            },
+            409,
+            corsHeaders,
           );
-    if (failure.status >= 500 && !isProfileWritesDisabledFailure(failure)) {
-      (
-        dependencies.logFailure ||
-        ((kind) =>
-          console.error(
-            JSON.stringify({ event: "gameplay_route_failure", kind }),
-          ))
-      )(failure.message);
-    }
-    return authErrorResponse(failure, corsHeaders);
-  }
+        }
+        if (
+          error instanceof GameSessionMutationLockFailure ||
+          error instanceof MatchTimerStartStoreFailure
+        ) {
+          (
+            dependencies.logCoordinationFailure ||
+            ((record) =>
+              console.error(
+                JSON.stringify({
+                  event: "gameplay_coordination_failure",
+                  ...record,
+                }),
+              ))
+          )({
+            operation: error.operation,
+            store:
+              error instanceof GameSessionMutationLockFailure
+                ? "mutation-lock"
+                : "timer-start",
+          });
+        }
+        return null;
+      },
+    },
+    async ({ pathname, corsHeaders, authenticate }) => {
+      const route = gameplayRoutes.get(pathname);
+      if (!route) {
+        throw new AuthApiFailure(404, "not-found", "not-found");
+      }
+      const identity = await measureAutomatchPhase("auth", authenticate);
+      const repository =
+        dependencies.repository || createEventGameplayRepository(env);
+      const isWagerMutation =
+        pathname.startsWith("/wagers/") && pathname !== WAGER_FROZEN_READ_PATH;
+      const reservations =
+        isWagerMutation || pathname === WAGER_FROZEN_READ_PATH
+          ? dependencies.wagerReservations ||
+            createWagerReservationRuntime(env, repository)
+          : null;
+      if (isWagerMutation) await reservations?.assertClientVersion(request);
+      const automatchOperationId =
+        pathname === "/automatch/start"
+          ? readAutomatchOperationId(request)
+          : null;
+      if (!route.readOnly) {
+        await assertProfileMutationAllowed(env);
+      }
+      if (pathname === "/wagers/outcomes/resolve") {
+        await enforceWagerOutcomeRateLimit(env.AUTH_RATE_LIMITER, identity.uid);
+      }
+      const prepared = await prepareGameplayRoute(request, route);
+      const response = await prepared.execute({
+        request,
+        env,
+        ctx,
+        dependencies,
+        pathname,
+        identity,
+        repository,
+        reservations,
+        automatchOperationId,
+      });
+      return authJsonResponse(response, 200, corsHeaders);
+    },
+  );
 }

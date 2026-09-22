@@ -229,6 +229,7 @@ test("old wager clients fail before write gates, rate limits, body parsing, or m
     .map((action) => `/wagers/proposals/${action}`)
     .concat("/wagers/outcomes/resolve")) {
     const value = fixture();
+    const logs: unknown[] = [];
     value.reservations.assertClientVersion = async () => {
       throw new WagerClientUpdateRequired();
     };
@@ -244,14 +245,24 @@ test("old wager clients fail before write gates, rate limits, body parsing, or m
       request({}, path),
       guardedEnv,
       context,
-      value.dependencies,
+      {
+        ...value.dependencies,
+        logFailure: (kind) => logs.push(kind),
+        logCoordinationFailure: (record) => logs.push(record),
+      },
     );
     assert.equal(response.status, 409);
+    assert.equal(
+      response.headers.get("Access-Control-Allow-Origin"),
+      "https://mons.link",
+    );
+    assert.equal(response.headers.get("Cache-Control"), "no-store");
     assert.deepEqual(await response.json(), {
       ok: false,
       error: "client-update-required",
       message: "Reload this page to continue wagering.",
     });
+    assert.deepEqual(logs, []);
   }
 });
 

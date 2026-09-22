@@ -3,12 +3,18 @@ import test from "node:test";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { EventWritesDisabled } from "../src/eventD1.ts";
 import { handleEventRoute } from "../src/eventRoute.ts";
+import { handleGameplayRoute } from "../src/gameplayRoute.ts";
 import { handleMiningRoute } from "../src/miningRoute.ts";
 import { handleProfileRoute } from "../src/profileRoute.ts";
 import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
 
 const ctx = { waitUntil: () => undefined };
 const routes = [
+  {
+    domain: "gameplay",
+    path: "/automatch/cancel",
+    handle: handleGameplayRoute,
+  },
   { domain: "profile", path: "/profiles/custom", handle: handleProfileRoute },
   {
     domain: "event",

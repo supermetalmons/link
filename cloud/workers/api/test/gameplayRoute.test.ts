@@ -13,7 +13,10 @@ import {
   type SubmitMoveRequest,
 } from "@mons/shared/game-sessions";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import { GameSessionMutationLockFailure } from "../src/gameplayCoordinationD1.ts";
+import {
+  GameSessionMutationLockFailure,
+  MatchTimerStartStoreFailure,
+} from "../src/gameplayCoordinationD1.ts";
 import {
   cancelAutomatch as cancelAutomatchImpl,
   handleGameplayRoute as handleGameplayRouteImpl,
@@ -973,12 +976,64 @@ test("routes authenticated CORS and rejects methods before authentication", asyn
     },
   );
   assert.equal(started.status, 200);
+  assert.match(started.headers.get("Server-Timing") || "", /\bauth;dur=\d/);
+  assert.match(started.headers.get("Server-Timing") || "", /\btotal;dur=\d/);
+  assert.match(
+    started.headers.get("Server-Timing") || "",
+    /\bd1;desc="\d+ calls"/,
+  );
+  assert.equal(started.headers.get("Timing-Allow-Origin"), "https://mons.link");
+  assert.equal(
+    started.headers.get("Access-Control-Expose-Headers"),
+    "Retry-After, Server-Timing",
+  );
   assert.deepEqual(await started.json(), {
     ok: true,
     inviteId: "auto_existing",
     mode: "pending",
     matchedImmediately: false,
   });
+});
+
+test("automatch authentication failures retain timing headers without parsing the body", async () => {
+  const input = new Request("https://api.mons.link/automatch/start", {
+    method: "POST",
+    headers: { Origin: "https://mons.link" },
+    body: "invalid-json",
+  });
+  let verifications = 0;
+  const response = await handleGameplayRoute(input, env, context(), {
+    verifyIdentity: async () => {
+      verifications++;
+      throw new AuthApiFailure(
+        401,
+        "unauthenticated",
+        "authentication-required",
+      );
+    },
+  });
+  assert.equal(response.status, 401);
+  assert.equal(verifications, 1);
+  assert.equal(input.bodyUsed, false);
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    error: "unauthenticated",
+    message: "authentication-required",
+  });
+  assert.match(response.headers.get("Server-Timing") || "", /\bauth;dur=\d/);
+  assert.match(response.headers.get("Server-Timing") || "", /\btotal;dur=\d/);
+  assert.match(
+    response.headers.get("Server-Timing") || "",
+    /\bd1;desc="\d+ calls"/,
+  );
+  assert.equal(
+    response.headers.get("Timing-Allow-Origin"),
+    "https://mons.link",
+  );
+  assert.equal(
+    response.headers.get("Access-Control-Expose-Headers"),
+    "Retry-After, Server-Timing",
+  );
 });
 
 test("rejects invalid automatch operation IDs before rate limiting", async () => {
@@ -1282,6 +1337,7 @@ test("routes strict authenticated structural game-session mutations", async () =
 
 test("logs typed coordination failures while keeping responses sanitized", async () => {
   const failures: Array<{ operation: string; store: string }> = [];
+  const routeFailures: string[] = [];
   const coordination = createMemoryGameplayCoordinationStores();
   coordination.mutationLocks.acquire = async () => {
     throw new GameSessionMutationLockFailure("acquire");
@@ -1300,6 +1356,7 @@ test("logs typed coordination failures while keeping responses sanitized", async
     {
       coordination,
       logCoordinationFailure: (record) => failures.push(record),
+      logFailure: (kind) => routeFailures.push(kind),
       repository: repository(),
       verifyIdentity: async () => identity,
     },
@@ -1313,6 +1370,7 @@ test("logs typed coordination failures while keeping responses sanitized", async
   assert.deepEqual(failures, [
     { operation: "acquire", store: "mutation-lock" },
   ]);
+  assert.deepEqual(routeFailures, ["gameplay-service-unavailable"]);
 
   const releaseCoordination = createMemoryGameplayCoordinationStores();
   releaseCoordination.mutationLocks.release = async () => {
@@ -1336,6 +1394,7 @@ test("logs typed coordination failures while keeping responses sanitized", async
         random: () => 0,
       },
       logCoordinationFailure: (record) => failures.push(record),
+      logFailure: (kind) => routeFailures.push(kind),
       repository: repository(),
       verifyIdentity: async () => identity,
     },
@@ -1346,10 +1405,59 @@ test("logs typed coordination failures while keeping responses sanitized", async
     error: "unavailable",
     message: "gameplay-service-unavailable",
   });
-  assert.deepEqual(failures.at(-1), {
-    operation: "release",
-    store: "mutation-lock",
+  assert.deepEqual(failures, [
+    { operation: "acquire", store: "mutation-lock" },
+    { operation: "release", store: "mutation-lock" },
+  ]);
+  assert.deepEqual(routeFailures, [
+    "gameplay-service-unavailable",
+    "gameplay-service-unavailable",
+  ]);
+
+  const timerResponse = await handleGameplayRoute(
+    request("/matches/timer/start", {
+      body: {
+        playerId: identity.uid,
+        opponentId: "opponent-uid",
+        matchId: "match-1",
+        inviteId: "match-1",
+      },
+    }),
+    env,
+    context(),
+    {
+      logCoordinationFailure: (record) => failures.push(record),
+      logFailure: (kind) => routeFailures.push(kind),
+      repository: repository({
+        readState: async () => ({
+          hostId: identity.uid,
+          guestId: "opponent-uid",
+        }),
+      }),
+      timer: {
+        startCanonical: async () => {
+          throw new MatchTimerStartStoreFailure("get-or-advance");
+        },
+      },
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(timerResponse.status, 503);
+  assert.deepEqual(await timerResponse.json(), {
+    ok: false,
+    error: "unavailable",
+    message: "gameplay-service-unavailable",
   });
+  assert.deepEqual(failures, [
+    { operation: "acquire", store: "mutation-lock" },
+    { operation: "release", store: "mutation-lock" },
+    { operation: "get-or-advance", store: "timer-start" },
+  ]);
+  assert.deepEqual(routeFailures, [
+    "gameplay-service-unavailable",
+    "gameplay-service-unavailable",
+    "gameplay-service-unavailable",
+  ]);
 });
 
 test("routes authoritative invite role reads without mutation rate limiting", async () => {
