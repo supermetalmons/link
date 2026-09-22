@@ -9,13 +9,18 @@ import type {
   ClaimMatchVictoryByTimerRequest,
 } from "@mons/shared/timers";
 
-export async function canonicalMatchOperations(env: Env) {
-  const control = await requireActiveDurableMatchState(env.PROFILE_GAMES_DB);
+export async function canonicalMatchOperations(
+  env: Env,
+  admittedEpoch?: number,
+) {
+  const epoch =
+    admittedEpoch ??
+    (await requireActiveDurableMatchState(env.PROFILE_GAMES_DB)).epoch;
   const execute = async <T>(
     work: (epoch: number) => Promise<T>,
   ): Promise<T> => {
-    await requireActiveDurableMatchState(env.PROFILE_GAMES_DB, control.epoch);
-    return work(control.epoch);
+    await requireActiveDurableMatchState(env.PROFILE_GAMES_DB, epoch);
+    return work(epoch);
   };
   return {
     submitCanonical: (request: SubmitMoveRequest) =>

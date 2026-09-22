@@ -286,73 +286,108 @@ describe("strict match runtime", () => {
     });
   }
 
-  for (const control of [
-    { state: "frozen", epoch: 2, message: "match-state-writes-disabled" },
-    {
-      state: "active",
-      epoch: 3,
-      message: "match-state-durable-authority-required",
-    },
-  ]) {
-    it(`rechecks ${control.state} authority at epoch ${control.epoch} before every canonical command`, async () => {
-      const before = await admissions();
-      let changed = false;
-      const authorityDb = new Proxy(db, {
-        get(target, property, receiver) {
-          if (property === "withSession")
-            return () => ({
-              prepare: (query: string) => ({
-                first: async () => {
-                  const row = await db
-                    .withSession("first-primary")
-                    .prepare(query)
-                    .first();
-                  return changed
-                    ? { ...row, state: control.state, epoch: control.epoch }
-                    : row;
-                },
-              }),
-            });
-          return Reflect.get(target, property, receiver);
-        },
-      });
-      const getByName = vi.fn(() => {
-        throw new Error("unexpected-do-call");
-      });
-      const workerEnv = new Proxy(
-        strictEnv({ PROFILE_GAMES_DB: authorityDb }),
-        {
+  for (const admittedEpoch of [undefined, 2]) {
+    for (const control of [
+      {
+        name: "frozen",
+        row: { state: "frozen" },
+        message: "match-state-writes-disabled",
+      },
+      {
+        name: "draining",
+        row: { state: "draining" },
+        message: "match-state-writes-disabled",
+      },
+      {
+        name: "changed epoch",
+        row: { epoch: 3 },
+        message: "match-state-durable-authority-required",
+      },
+      {
+        name: "changed backend",
+        row: { backend: "rtdb" },
+        message: "match-state-durable-authority-required",
+      },
+      {
+        name: "unreadable",
+        row: null,
+        message: "match-state-control-unavailable",
+      },
+    ]) {
+      const mode = admittedEpoch === undefined ? "fallback" : "admitted epoch";
+      it(`rechecks ${control.name} authority before every canonical command with ${mode}`, async () => {
+        const before = await admissions();
+        let changed = false;
+        let reads = 0;
+        const authorityDb = new Proxy(db, {
           get(target, property, receiver) {
-            if (property === "INVITE_REACTIONS") return { getByName };
+            if (property === "withSession")
+              return (constraint: D1SessionBookmark) => {
+                expect(constraint).toBe("first-primary");
+                return {
+                  prepare: (query: string) => ({
+                    first: async () => {
+                      reads++;
+                      expect(query).toContain("match_state_control");
+                      if (changed && control.row === null) {
+                        throw new Error("injected-authority-unavailable");
+                      }
+                      const row = await db
+                        .withSession("first-primary")
+                        .prepare(query)
+                        .first();
+                      return changed ? { ...row, ...control.row } : row;
+                    },
+                  }),
+                };
+              };
             return Reflect.get(target, property, receiver);
           },
-        },
-      );
-      const operations = await canonicalMatchOperations(workerEnv);
-      changed = true;
-      const request = input();
-      const timerRequest = { ...request, opponentId: "strict-opponent" };
-      for (const execute of [
-        () =>
-          operations.submitCanonical({
-            ...request,
-            previousFlatMovesString: "",
-            flatMovesString: "a",
-            fen: "first",
-          }),
-        () => operations.surrenderCanonical(request),
-        () => operations.startCanonical(timerRequest),
-        () =>
-          operations.claimCanonical(timerRequest, {
-            eventOwned: true,
-            eventId: "event-one",
-          }),
-      ]) {
-        await expect(execute()).rejects.toThrow(control.message);
-      }
-      expect(getByName).not.toHaveBeenCalled();
-      expect(await admissions()).toEqual(before);
-    });
+        });
+        const getByName = vi.fn(() => {
+          throw new Error("unexpected-do-call");
+        });
+        const workerEnv = new Proxy(
+          strictEnv({ PROFILE_GAMES_DB: authorityDb }),
+          {
+            get(target, property, receiver) {
+              if (property === "INVITE_REACTIONS") return { getByName };
+              return Reflect.get(target, property, receiver);
+            },
+          },
+        );
+        const operations = await canonicalMatchOperations(
+          workerEnv,
+          admittedEpoch,
+        );
+        let expectedReads = admittedEpoch === undefined ? 1 : 0;
+        expect(reads).toBe(expectedReads);
+        changed = true;
+        const request = input();
+        const timerRequest = { ...request, opponentId: "strict-opponent" };
+        for (const execute of [
+          () =>
+            operations.submitCanonical({
+              ...request,
+              previousFlatMovesString: "",
+              flatMovesString: "a",
+              fen: "first",
+            }),
+          () => operations.surrenderCanonical(request),
+          () => operations.startCanonical(timerRequest),
+          () =>
+            operations.claimCanonical(timerRequest, {
+              eventOwned: true,
+              eventId: "event-one",
+            }),
+        ]) {
+          await expect(execute()).rejects.toThrow(control.message);
+          expect(reads).toBe(++expectedReads);
+          expect(getByName).not.toHaveBeenCalled();
+        }
+        expect(await admissions()).toEqual(before);
+      });
+    }
   }
 
   it("guards route registration after creation and leaves a failed registration replayable", async () => {

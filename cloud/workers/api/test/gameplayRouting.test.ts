@@ -442,7 +442,12 @@ test("top-level router dispatches every gameplay endpoint to its domain behavior
   }
 });
 
-function withMatchControl(state: "frozen" | "unreadable") {
+type MatchControlState = "active" | "draining" | "frozen" | "unreadable";
+
+function withMatchControl(
+  state: MatchControlState | (() => MatchControlState),
+  epoch = () => 2,
+) {
   let reads = 0;
   const base = TELEGRAM_TEST_ENV.PROFILE_GAMES_DB;
   const prepare = (query: string): D1PreparedStatement => {
@@ -455,11 +460,13 @@ function withMatchControl(state: "frozen" | "unreadable") {
       run: statement.run.bind(statement),
       first: async <T>() => {
         reads += 1;
-        if (state === "unreadable") throw new Error("database-unavailable");
+        const currentState = typeof state === "function" ? state() : state;
+        if (currentState === "unreadable")
+          throw new Error("database-unavailable");
         return {
           backend: "durable",
-          state,
-          epoch: 2,
+          state: currentState,
+          epoch: epoch(),
           freeze_generation: 0,
         } as T;
       },
@@ -478,6 +485,167 @@ function withMatchControl(state: "frozen" | "unreadable") {
     env: { ...TELEGRAM_TEST_ENV, PROFILE_GAMES_DB: db },
     reads: () => reads,
   };
+}
+
+for (const changeEpoch of [false, true]) {
+  test(
+    changeEpoch
+      ? "match mutations reject an authority epoch change during authentication"
+      : "match mutations use two authority reads and preserve the admitted epoch",
+    async (t) => {
+      const cases = [
+        {
+          path: "/matches/move",
+          method: "submitCanonicalMove",
+          result: {
+            ok: true,
+            inviteId: "invite",
+            matchId: "invite",
+            actorUid: uid,
+            outcome: "applied",
+          },
+        },
+        {
+          path: "/matches/surrender",
+          method: "surrenderCanonicalMatch",
+          result: {
+            ok: true,
+            inviteId: "invite",
+            matchId: "invite",
+            actorUid: uid,
+          },
+        },
+        {
+          path: "/matches/timer/start",
+          method: "startCanonicalMatchTimer",
+          result: { ok: true, timer: "1;100000", duration: 90_000 },
+        },
+        {
+          path: "/matches/timer/claim",
+          method: "claimCanonicalMatchTimer",
+          result: { ok: true },
+        },
+      ];
+      for (const entry of cases) {
+        await t.test(entry.path, async () => {
+          const route = routes.find(({ path }) => path === entry.path);
+          assert.ok(route);
+          const f = fixture(route);
+          let epoch = 2;
+          const control = withMatchControl("active", () => epoch);
+          const calls: unknown[] = [];
+          let roomCalls = 0;
+          const env: Env = {
+            ...control.env,
+            INVITE_REACTIONS: new Proxy(control.env.INVITE_REACTIONS, {
+              get(target, property, receiver) {
+                if (property === "getByName") {
+                  return (inviteId: string) => {
+                    roomCalls++;
+                    assert.equal(inviteId, "invite");
+                    return {
+                      [entry.method]: async (input: unknown) => {
+                        calls.push(input);
+                        return { ok: true, value: entry.result };
+                      },
+                    };
+                  };
+                }
+                return Reflect.get(target, property, receiver);
+              },
+            }),
+          };
+          const response = await handleRequest(
+            request(route.path, route.body),
+            env,
+            {
+              gameplay: {
+                ...f.dependencies,
+                move: undefined,
+                surrender: undefined,
+                timer: undefined,
+                verifyIdentity: async () => {
+                  if (changeEpoch) epoch = 3;
+                  return { uid };
+                },
+              },
+            },
+            f.context,
+          );
+          await Promise.all(f.pending);
+          assert.equal(control.reads(), 2);
+          assert.equal(response.status, changeEpoch ? 503 : 200);
+          assert.deepEqual(
+            await response.json(),
+            changeEpoch
+              ? {
+                  ok: false,
+                  error: "unavailable",
+                  message: "gameplay-service-unavailable",
+                }
+              : entry.result,
+          );
+          assert.equal(roomCalls, changeEpoch ? 0 : 1);
+          assert.deepEqual(
+            calls,
+            changeEpoch
+              ? []
+              : [
+                  {
+                    ...route.body,
+                    epoch: 2,
+                    ...(entry.path === "/matches/timer/claim"
+                      ? { eventId: null }
+                      : {}),
+                  },
+                ],
+          );
+        });
+      }
+    },
+  );
+}
+
+for (const state of ["frozen", "draining", "unreadable"] as const) {
+  test(`match ensure rejects ${state} authority after authentication before committing a receipt`, async () => {
+    const route = routes.find(({ path }) => path === "/matches/ensure");
+    assert.ok(route);
+    const f = fixture(route);
+    let authenticated = false;
+    let committed = false;
+    const control = withMatchControl(() => (authenticated ? state : "active"));
+    const response = await handleRequest(
+      request(route.path, route.body),
+      control.env,
+      {
+        gameplay: {
+          ...f.dependencies,
+          verifyIdentity: async () => {
+            authenticated = true;
+            return { uid };
+          },
+          repository: {
+            ...f.dependencies.repository!,
+            readMutationReceipt: async () => null,
+            readMatchRecord: async () => match,
+            commitSessionChanges: async () => {
+              committed = true;
+            },
+          },
+        },
+      },
+      f.context,
+    );
+    await Promise.all(f.pending);
+    assert.equal(response.status, 503);
+    assert.equal(control.reads(), 2);
+    assert.equal(committed, false);
+    assert.deepEqual(await response.json(), {
+      ok: false,
+      error: "unavailable",
+      message: "gameplay-service-unavailable",
+    });
+  });
 }
 
 const readPaths = new Set([

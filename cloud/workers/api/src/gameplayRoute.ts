@@ -100,8 +100,14 @@ async function handleGameplayRouteInternal(
   )
     return handleGameplayRequest(request, env, ctx, dependencies);
   try {
-    await requireActiveDurableMatchState(env.PROFILE_GAMES_DB);
-    return await handleGameplayRequest(request, env, ctx, dependencies);
+    const control = await requireActiveDurableMatchState(env.PROFILE_GAMES_DB);
+    return await handleGameplayRequest(
+      request,
+      env,
+      ctx,
+      dependencies,
+      control.epoch,
+    );
   } catch (error) {
     let headers: Record<string, string> = { Vary: "Origin" };
     try {
@@ -125,6 +131,7 @@ async function handleGameplayRequest(
   env: Env,
   ctx: WorkerExecutionContext,
   dependencies: GameplayRouteDependencies = {},
+  admittedMatchEpoch?: number,
 ): Promise<Response> {
   return authenticatedPost(
     request,
@@ -208,6 +215,7 @@ async function handleGameplayRequest(
         repository,
         reservations,
         automatchOperationId,
+        admittedMatchEpoch,
       });
       return authJsonResponse(response, 200, corsHeaders);
     },

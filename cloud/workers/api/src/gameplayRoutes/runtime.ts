@@ -68,6 +68,7 @@ export type GameplayRequestContext = {
   repository: GameplayRepository;
   reservations: WagerReservationRuntime | null;
   automatchOperationId: string | null;
+  admittedMatchEpoch?: number;
 };
 
 export type GameplayRuntime = Awaited<ReturnType<typeof createGameplayRuntime>>;
@@ -167,7 +168,10 @@ export async function createGameplayRuntime(context: GameplayRequestContext) {
     mutationLocks: coordination.mutationLocks,
   };
   const canonical = pathname.startsWith("/matches/")
-    ? await canonicalMatchOperations(env)
+    ? await canonicalMatchOperations(
+        env,
+        pathname === "/matches/ensure" ? undefined : context.admittedMatchEpoch,
+      )
     : null;
   return {
     ...context,
