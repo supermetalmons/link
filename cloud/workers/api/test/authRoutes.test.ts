@@ -875,7 +875,9 @@ test("falls back unsafe X return URLs and sanitizes repository failures", async 
       logFailure: (kind) => stateLogs.push(kind),
       stateRepository: stateRepository({
         createAuthIntent: async () => {
-          throw new AuthStateFailure();
+          throw new AuthStateFailure({
+            cause: new Error("private-binding-session-token"),
+          });
         },
       }),
       verifyIdentity,
@@ -883,6 +885,11 @@ test("falls back unsafe X return URLs and sanitizes repository failures", async 
   );
   assert.equal(stateFailed.status, 503);
   assert.deepEqual(stateLogs, ["auth-state-unavailable"]);
+  assert.deepEqual(await responseJson(stateFailed), {
+    ok: false,
+    error: "unavailable",
+    message: "auth-service-unavailable",
+  });
 });
 
 test("rate limits and dispatches auth mutations after session authentication", async () => {

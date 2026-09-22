@@ -18,6 +18,28 @@ const testEnv = env as Env & {
   TEST_AUTH_STATE_D1_MIGRATIONS: D1Migration[];
 };
 
+function failingDatabase(error: Error): D1Database {
+  const fail = async () => {
+    throw error;
+  };
+  const statement: D1PreparedStatement = {
+    bind: () => statement,
+    first: fail,
+    run: fail,
+    all: fail,
+    raw: fail,
+  };
+  return {
+    batch: fail,
+    dump: fail,
+    exec: fail,
+    prepare: () => statement,
+    withSession: () => {
+      throw error;
+    },
+  };
+}
+
 function authIntent(
   overrides: Partial<AuthIntentDocument> = {},
 ): AuthIntentDocument {
@@ -266,7 +288,7 @@ describe("auth state D1 repository", () => {
     });
   });
 
-  it("fails closed on malformed rows and binding failures", async () => {
+  it("fails closed on malformed rows", () => {
     expect(() =>
       decodeIntent({
         consumed_at_ms: null,
@@ -288,24 +310,72 @@ describe("auth state D1 repository", () => {
         result_op_id: null,
       } as never),
     ).toThrow(AuthStateFailure);
-
-    const failingDb = {
-      batch: async () => [],
-      dump: async () => new ArrayBuffer(0),
-      exec: async () => {
-        throw new Error("private-binding-detail");
-      },
-      prepare: () => {
-        throw new Error("private-binding-detail");
-      },
-      withSession: () => {
-        throw new Error("private-binding-detail");
-      },
-    } satisfies D1Database;
-    await expect(
-      createAuthStateRepository(failingDb).getAuthIntent("intent"),
-    ).rejects.toBeInstanceOf(AuthStateFailure);
   });
+
+  it.each([
+    [
+      "intent read",
+      (db: D1Database) => createAuthStateRepository(db).getAuthIntent("intent"),
+    ],
+    [
+      "flow read",
+      (db: D1Database) => createAuthStateRepository(db).getXFlow("flow"),
+    ],
+    [
+      "intent creation",
+      (db: D1Database) =>
+        createAuthStateRepository(db).createAuthIntent(authIntent()),
+    ],
+    [
+      "flow creation",
+      (db: D1Database) => createAuthStateRepository(db).createXFlow(xFlow()),
+    ],
+    [
+      "intent consumption",
+      (db: D1Database) =>
+        createAuthStateRepository(db).consumeAuthIntent({
+          consumedAtMs: 1_100_000,
+          consumedByOpId: "operation-1",
+          intentId: "intent",
+          method: "x",
+          uid: "login-uid",
+        }),
+    ],
+    [
+      "flow update",
+      (db: D1Database) =>
+        createAuthStateRepository(db).updateXFlow(
+          "flow",
+          { status: "processing" },
+          1,
+        ),
+    ],
+    [
+      "expiry sweep",
+      (db: D1Database) =>
+        sweepExpiredAuthState(db, AUTH_STATE_NONTERMINAL_RETENTION_MS + 1),
+    ],
+  ] as const)(
+    "preserves the original failure through %s",
+    async (_, operation) => {
+      const cause = new Error("private-binding-detail");
+      const failure: unknown = await operation(failingDatabase(cause)).catch(
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(AuthStateFailure);
+      expect(failure).toHaveProperty("message", "auth-state-unavailable");
+      expect(failure instanceof Error && failure.cause).toBe(cause);
+
+      for (const domainFailure of [
+        new AuthStateFailure({ cause }),
+        new AuthStateConflict({ cause }),
+      ]) {
+        await expect(operation(failingDatabase(domainFailure))).rejects.toBe(
+          domainFailure,
+        );
+      }
+    },
+  );
 
   it("removes expired nonterminal state without deleting terminal replays", async () => {
     const repository = createAuthStateRepository(testEnv.AUTH_STATE_DB);

@@ -346,18 +346,18 @@ export async function handleTelegramProjectionMessage(
     dependencies.enqueueDelivery ||
     ((input: InitialTelegramDelivery) =>
       enqueueInitialTelegramDelivery(env, input));
-  const storageMode = await (
-    dependencies.readStorageMode || readTelegramStorageMode
-  )(env.TELEGRAM_DB);
-  if (storageMode === "frozen") {
-    retryQueueMessage(message, 60, {
-      entry: { event: "telegram_projection_queue_frozen" },
-      level: "info",
-      logger,
-    });
-    return;
-  }
   try {
+    const storageMode = await (
+      dependencies.readStorageMode || readTelegramStorageMode
+    )(env.TELEGRAM_DB);
+    if (storageMode === "frozen") {
+      retryQueueMessage(message, 60, {
+        entry: { event: "telegram_projection_queue_frozen" },
+        level: "info",
+        logger,
+      });
+      return;
+    }
     const state = createStateRepository(env);
     const createRating =
       dependencies.createRating ||

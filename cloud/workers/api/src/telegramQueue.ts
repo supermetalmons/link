@@ -22,6 +22,7 @@ import {
   type TelegramStorageMode,
 } from "./telegramD1.ts";
 import { parseWagerSettlementRetryTask } from "./wagerSettlementQueue.ts";
+import { ackQueueMessage, retryQueueMessage } from "./queueMessage.ts";
 import {
   infrastructureRetryDelaySeconds,
   MAX_INFRASTRUCTURE_RETRY_DELAY_SECONDS,
@@ -111,49 +112,67 @@ export async function handleTelegramQueueMessage(
   if (raw?.kind === "wager-settlement") {
     const task = parseWagerSettlementRetryTask(raw);
     if (!task) {
-      message.ack();
-      logger.error(
-        JSON.stringify({ event: "wager_settlement_queue_invalid_message" }),
-      );
+      ackQueueMessage(message, {
+        entry: { event: "wager_settlement_queue_invalid_message" },
+        level: "error",
+        logger,
+      });
       return;
     }
     try {
       await env.WAGER_SETTLEMENT_QUEUE.send(task);
-      message.ack();
-      logger.info(
-        JSON.stringify({
+      ackQueueMessage(message, {
+        entry: {
           event: "wager_settlement_queue_forwarded",
           operationId: task.operationId,
-        }),
-      );
-    } catch (error) {
-      message.retry({
-        delaySeconds: infrastructureRetryDelaySeconds(message.attempts),
+        },
+        level: "info",
+        logger,
       });
-      logger.error(
-        JSON.stringify({
-          event: "wager_settlement_queue_forward_failed",
-          operationId: task.operationId,
-          code: error instanceof Error ? error.message : "unknown",
-        }),
+    } catch (error) {
+      retryQueueMessage(
+        message,
+        infrastructureRetryDelaySeconds(message.attempts),
+        {
+          entry: {
+            event: "wager_settlement_queue_forward_failed",
+            operationId: task.operationId,
+            code: error instanceof Error ? error.message : "unknown",
+          },
+          level: "error",
+          logger,
+        },
       );
     }
     return;
   }
-  const storageMode = await (readStorageMode || readTelegramStorageMode)(
-    env.TELEGRAM_DB,
-  );
-  if (storageMode === "frozen") {
-    message.retry({ delaySeconds: TELEGRAM_FROZEN_RETRY_SECONDS });
-    logger.info(JSON.stringify({ event: "telegram_queue_frozen" }));
-    return;
-  }
-  const startedAtMs = now();
-  let payloadValidated = false;
+  let startedAtMs: number | null = null;
   let messageKey = "unknown";
   try {
-    const payload = normalizeTaskPayload(message.body);
-    payloadValidated = true;
+    const storageMode = await (readStorageMode || readTelegramStorageMode)(
+      env.TELEGRAM_DB,
+    );
+    if (storageMode === "frozen") {
+      retryQueueMessage(message, TELEGRAM_FROZEN_RETRY_SECONDS, {
+        entry: { event: "telegram_queue_frozen" },
+        level: "info",
+        logger,
+      });
+      return;
+    }
+    startedAtMs = now();
+    let payload: TelegramTaskPayload;
+    try {
+      payload = normalizeTaskPayload(message.body);
+    } catch (error) {
+      if (!(error instanceof TypeError)) throw error;
+      ackQueueMessage(message, {
+        entry: { event: "telegram_queue_invalid_message" },
+        level: "error",
+        logger,
+      });
+      return;
+    }
     messageKey = payload.messageKey;
     const engine = createEngine({
       repository: createRepository
@@ -187,34 +206,35 @@ export async function handleTelegramQueueMessage(
     if (result.status === "retryable" && !result.scheduled) {
       throw new Error("telegram-retry-not-scheduled");
     }
-    message.ack();
-    logger.info(
-      JSON.stringify({
+    ackQueueMessage(message, {
+      entry: {
         event: "telegram_queue_processed",
         messageKey,
         status: result.status,
-      }),
-    );
+      },
+      level: "info",
+      logger,
+    });
   } catch (error) {
-    if (!payloadValidated && error instanceof TypeError) {
-      message.ack();
-      logger.error(JSON.stringify({ event: "telegram_queue_invalid_message" }));
-    } else {
-      message.retry({
-        delaySeconds: infrastructureRetryDelaySeconds(message.attempts),
-      });
-      logger.error(
-        JSON.stringify({
+    retryQueueMessage(
+      message,
+      infrastructureRetryDelaySeconds(message.attempts),
+      {
+        entry: {
           event: "telegram_queue_failed",
           messageKey,
           code: error instanceof Error ? error.message : "unknown",
-        }),
-      );
-    }
+        },
+        level: "error",
+        logger,
+      },
+    );
   } finally {
-    const remainingMs = MIN_DISPATCH_INTERVAL_MS - (now() - startedAtMs);
-    if (remainingMs > 0) {
-      await sleep(remainingMs);
+    if (startedAtMs !== null) {
+      const remainingMs = MIN_DISPATCH_INTERVAL_MS - (now() - startedAtMs);
+      if (remainingMs > 0) {
+        await sleep(remainingMs);
+      }
     }
   }
 }

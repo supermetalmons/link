@@ -17,6 +17,7 @@ import type {
 import {
   automatchSweepTasks,
   handleTelegramProjectionMessage,
+  handleTelegramProjectionQueue,
   processAutomatchTask,
   processRatingTask,
   projectionRetryDelaySeconds,
@@ -552,6 +553,98 @@ test("projection queue acknowledges poison tasks and retries transient failures"
       attempts: 4,
     },
   ]);
+});
+
+test("projection queue retries storage checks including TypeError", async () => {
+  for (const failure of [
+    new Error("storage-unavailable"),
+    new TypeError("storage-unavailable"),
+  ]) {
+    const queued = queueMessage(
+      {
+        kind: "automatch-telegram-projection",
+        inviteId: "auto_example",
+        requestId: "request-1",
+      },
+      4,
+    );
+    const errors: unknown[] = [];
+    await handleTelegramProjectionMessage(queued.message, PROJECTION_TEST_ENV, {
+      readStorageMode: async () => {
+        throw failure;
+      },
+      createStateRepository: () => {
+        assert.fail("unexpected-repository");
+      },
+      logger: {
+        info() {},
+        error: (entry: string) => errors.push(JSON.parse(entry)),
+      },
+    });
+    assert.equal(queued.acknowledgements(), 0);
+    assert.deepEqual(queued.retries, [{ delaySeconds: 8 }]);
+    assert.deepEqual(errors, [
+      {
+        event: "telegram_projection_queue_failed",
+        kind: "automatch-telegram-projection",
+        code: "storage-unavailable",
+        messageId: queued.message.id,
+        attempts: 4,
+      },
+    ]);
+  }
+});
+
+test("projection queue defers frozen storage without processing the task", async () => {
+  const queued = queueMessage({
+    kind: "automatch-telegram-projection",
+    inviteId: "auto_example",
+    requestId: "request-1",
+  });
+  await handleTelegramProjectionMessage(queued.message, PROJECTION_TEST_ENV, {
+    readStorageMode: async () => "frozen",
+    createStateRepository: () => {
+      assert.fail("unexpected-repository");
+    },
+    logger: { info() {}, error() {} },
+  });
+  assert.equal(queued.acknowledgements(), 0);
+  assert.deepEqual(queued.retries, [{ delaySeconds: 60 }]);
+});
+
+test("projection queue continues the batch after a storage binding failure", async () => {
+  const failed = queueMessage(
+    {
+      kind: "automatch-telegram-projection",
+      inviteId: "auto_example",
+      requestId: "request-1",
+    },
+    3,
+  );
+  const invalid = queueMessage({ nope: true });
+  await handleTelegramProjectionQueue(
+    {
+      queue: "mons-link-telegram-projection",
+      messages: [failed.message, invalid.message],
+      metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+      ackAll() {
+        assert.fail("unexpected-batch-ack");
+      },
+      retryAll() {
+        assert.fail("unexpected-batch-retry");
+      },
+    },
+    {
+      ...PROJECTION_TEST_ENV,
+      get TELEGRAM_DB(): D1Database {
+        throw new TypeError("binding-unavailable");
+      },
+    },
+  );
+  assert.equal(failed.acknowledgements(), 0);
+  assert.deepEqual(failed.retries, [{ delaySeconds: 4 }]);
+  assert.equal(invalid.acknowledgements(), 1);
+  assert.deepEqual(invalid.retries, []);
 });
 
 test("scheduled recovery batches both pending outbox kinds", async () => {

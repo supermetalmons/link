@@ -160,8 +160,8 @@ const FLOW_COLUMNS: Record<Exclude<keyof XFlowUpdate, "result">, string> = {
 };
 
 export class AuthStateFailure extends Error {
-  constructor() {
-    super("auth-state-unavailable");
+  constructor(options?: ErrorOptions) {
+    super("auth-state-unavailable", options);
   }
 }
 
@@ -272,7 +272,7 @@ function decodeFlow(row: XFlowRow): XRedirectFlow {
 
 function stateFailure(error: unknown): never {
   if (error instanceof AuthStateFailure) throw error;
-  throw new AuthStateFailure();
+  throw new AuthStateFailure({ cause: error });
 }
 
 export function createAuthStateRepository(db: D1Database): AuthStateRepository {

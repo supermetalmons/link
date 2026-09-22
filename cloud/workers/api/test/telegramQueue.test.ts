@@ -3,6 +3,7 @@ import test from "node:test";
 import type { TelegramRepository } from "../../../runtime/telegram/deliveryEngine.js";
 import { MAX_RECORD_KEY_BYTES } from "../src/recordKeys.ts";
 import {
+  handleTelegramQueue,
   handleTelegramQueueMessage,
   infrastructureRetryDelaySeconds,
   logicalDelaySeconds,
@@ -146,6 +147,96 @@ test("retries failures for the valid message key named invalid", async () => {
   );
   assert.equal(queued.acknowledgements(), 0);
   assert.deepEqual(queued.retries, [{ delaySeconds: 2 }]);
+});
+
+test("retries storage check failures without treating TypeError as a poison message", async () => {
+  for (const failure of [
+    new Error("storage-unavailable"),
+    new TypeError("storage-unavailable"),
+  ]) {
+    const queued = queueMessage(task, 4);
+    const errors: unknown[] = [];
+    await handleTelegramQueueMessage(queued.message, TELEGRAM_TEST_ENV, {
+      readStorageMode: async () => {
+        throw failure;
+      },
+      createEngine: () => {
+        throw new Error("unexpected-engine");
+      },
+      logger: {
+        info() {},
+        error: (entry: string) => errors.push(JSON.parse(entry)),
+      },
+      sleep: async () => {
+        assert.fail("unexpected-pacing");
+      },
+    });
+    assert.equal(queued.acknowledgements(), 0);
+    assert.deepEqual(queued.retries, [{ delaySeconds: 8 }]);
+    assert.deepEqual(errors, [
+      {
+        event: "telegram_queue_failed",
+        messageKey: "unknown",
+        code: "storage-unavailable",
+        messageId: queued.message.id,
+        attempts: 4,
+      },
+    ]);
+  }
+});
+
+test("keeps frozen delivery retries ahead of payload validation without pacing", async () => {
+  const queued = queueMessage({ nope: true });
+  await handleTelegramQueueMessage(queued.message, TELEGRAM_TEST_ENV, {
+    readStorageMode: async () => "frozen",
+    createEngine: () => {
+      assert.fail("unexpected-engine");
+    },
+    logger: { info() {}, error() {} },
+    sleep: async () => {
+      assert.fail("unexpected-pacing");
+    },
+  });
+  assert.equal(queued.acknowledgements(), 0);
+  assert.deepEqual(queued.retries, [{ delaySeconds: 60 }]);
+});
+
+test("continues a delivery batch after a storage binding failure", async () => {
+  const failed = queueMessage(task, 3);
+  const forwarded = queueMessage(wagerTask);
+  const sent: unknown[] = [];
+  const environment: Env = {
+    ...TELEGRAM_TEST_ENV,
+    get TELEGRAM_DB(): D1Database {
+      throw new TypeError("binding-unavailable");
+    },
+    WAGER_SETTLEMENT_QUEUE: {
+      ...TELEGRAM_TEST_ENV.WAGER_SETTLEMENT_QUEUE,
+      send: async (body) => {
+        sent.push(body);
+        return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
+      },
+    },
+  };
+  await handleTelegramQueue(
+    {
+      queue: "mons-link-telegram-delivery",
+      messages: [failed.message, forwarded.message],
+      metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+      ackAll() {
+        assert.fail("unexpected-batch-ack");
+      },
+      retryAll() {
+        assert.fail("unexpected-batch-retry");
+      },
+    },
+    environment,
+  );
+  assert.equal(failed.acknowledgements(), 0);
+  assert.deepEqual(failed.retries, [{ delaySeconds: 4 }]);
+  assert.equal(forwarded.acknowledgements(), 1);
+  assert.deepEqual(forwarded.retries, []);
+  assert.deepEqual(sent, [wagerTask]);
 });
 
 test("treats unscheduled logical retries as infrastructure failures", async () => {

@@ -22,7 +22,7 @@ const MATCH_TIMER_START_INVITE_CANDIDATE_LIMIT = 17;
 
 type MatchTimerStartSweepRepository = Pick<
   GameplayRepository,
-  "readMatchRecord" | "readInviteMetadata"
+  "readMatchRecord" | "readMatchRecords" | "readInviteMetadata"
 >;
 
 export type MatchTimerStartSweepDependencies = {
@@ -198,12 +198,12 @@ async function reconcileMarker(
       assertMutationAllowed,
     );
   }
-  const [playerValue, opponentValue] = await Promise.all([
-    repository.readMatchRecord(playerKey),
-    repository.readMatchRecord({
+  const [playerValue, opponentValue] = await repository.readMatchRecords([
+    playerKey,
+    {
       playerId: marker.opponentId,
       matchId: marker.matchId,
-    }),
+    },
   ]);
   return reconcileKnownMatch(
     marker,

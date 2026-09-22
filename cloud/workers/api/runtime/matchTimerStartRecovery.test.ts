@@ -7,6 +7,8 @@ import {
 } from "../src/gameplayCoordinationD1.ts";
 import { requireActiveDurableMatchState } from "../src/matchStateAuthority.ts";
 import { createMatchStateSource } from "../src/matchStateSource.ts";
+import { getMatchStateRpc } from "../src/matchStateRpc.ts";
+import type { MatchStateRecordsRequest } from "../src/matchStateTypes.ts";
 import { sweepMatchTimerStarts } from "../src/matchTimerStartSweep.ts";
 import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 
@@ -43,11 +45,12 @@ function timer(
     .bind(playerId, matchId, opponentId, updatedAtMs);
 }
 
-function sweep(nowMs: number) {
+function sweep(nowMs: number, matchSource = source) {
   return sweepMatchTimerStarts(
     store,
     {
-      readMatchRecord: source.readMatchRecord,
+      readMatchRecord: matchSource.readMatchRecord,
+      readMatchRecords: matchSource.readMatchRecords,
       async readInviteMetadata() {
         throw new Error("unexpected-invite-read-for-known-opponent");
       },
@@ -71,6 +74,66 @@ beforeEach(async () => {
 });
 
 describe("timer reconciliation through canonical match routing", () => {
+  it("reads both durable players in one ordered RPC before deleting a terminal marker", async () => {
+    const inviteId = `batched-recovery-${crypto.randomUUID()}`;
+    await source.createMatchRecords({
+      inviteId,
+      transitionId: "create",
+      records: [
+        {
+          playerId: "host",
+          matchId: inviteId,
+          marker: "host-created",
+          value: { color: "white", fen: "initial" },
+        },
+        {
+          playerId: "guest",
+          matchId: inviteId,
+          marker: "guest-created",
+          value: { color: "black", fen: "initial", timer: "gg" },
+        },
+      ],
+    });
+    await timer("host", "guest", inviteId).run();
+    const calls: MatchStateRecordsRequest[] = [];
+    const observedEnv = new Proxy(env, {
+      get(target, property, receiver) {
+        if (property === "INVITE_REACTIONS")
+          return {
+            getByName: (roomId: string) => ({
+              readCanonicalMatchRecords: (input: MatchStateRecordsRequest) => {
+                expect(input.inviteId).toBe(roomId);
+                calls.push(structuredClone(input));
+                return getMatchStateRpc(env, roomId).readCanonicalMatchRecords(
+                  input,
+                );
+              },
+            }),
+          };
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    expect(await sweep(1_000, createMatchStateSource(observedEnv))).toEqual({
+      deleted: 1,
+      failed: 0,
+      retained: 0,
+      scanned: 1,
+      stale: 0,
+    });
+    expect(calls).toEqual([
+      {
+        inviteId,
+        epoch: 2,
+        requests: [
+          { playerId: "host", matchId: inviteId },
+          { playerId: "guest", matchId: inviteId },
+        ],
+      },
+    ]);
+    expect(await store.listOldest()).toEqual([]);
+  });
+
   it.each([
     { value: "retained-scalar" },
     { value: 7 },

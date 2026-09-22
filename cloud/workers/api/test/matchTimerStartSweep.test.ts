@@ -23,13 +23,22 @@ function match(
 
 function repository(
   records: Readonly<Record<string, unknown>>,
-): Pick<GameplayRepository, "readMatchRecord" | "readInviteMetadata"> {
+): Pick<
+  GameplayRepository,
+  "readMatchRecord" | "readMatchRecords" | "readInviteMetadata"
+> {
+  const readMatchRecord: GameplayRepository["readMatchRecord"] = async ({
+    playerId,
+    matchId,
+  }) => {
+    const path = `players/${playerId}/matches/${matchId}`;
+    assert.ok(!path.startsWith("invites/"));
+    return (records[path] ?? null) as MatchStateRecord | null;
+  };
   return {
-    readMatchRecord: async ({ playerId, matchId }) => {
-      const path = `players/${playerId}/matches/${matchId}`;
-      assert.ok(!path.startsWith("invites/"));
-      return (records[path] ?? null) as MatchStateRecord | null;
-    },
+    readMatchRecord,
+    readMatchRecords: async (inputs) =>
+      Promise.all(inputs.map((input) => readMatchRecord(input))),
     readInviteMetadata: async (inviteId) =>
       (records[`invites/${inviteId}`] ?? null) as Record<
         string,
@@ -38,7 +47,7 @@ function repository(
   };
 }
 
-test("reconciles terminal and obsolete markers while retaining recoverable deadlines", async () => {
+test("reconciles terminal and obsolete markers while retaining recoverable deadlines", async (t) => {
   const stores = createMemoryGameplayCoordinationStores();
   const markers = [
     ["terminal", "terminal-peer"],
@@ -91,21 +100,20 @@ test("reconciles terminal and obsolete markers while retaining recoverable deadl
     }),
     "players/legacy-live-peer/matches/legacy-live-match": match("white"),
   };
-  const result = await sweepMatchTimerStarts(
-    stores.timerStarts,
-    repository(records),
-    {
-      assertMutationAllowed: async () => undefined,
-      logger: { error: () => undefined, info: () => undefined },
-      now: () => 1_000,
-      resolveGame: (player) => ({
-        activeColor: "white",
-        historyValid: true,
-        turnNumber: 3,
-        winner: player.status === "winner-test" ? "white" : undefined,
-      }),
-    },
-  );
+  const reads = repository(records);
+  const batches = t.mock.method(reads, "readMatchRecords");
+  const singles = t.mock.method(reads, "readMatchRecord");
+  const result = await sweepMatchTimerStarts(stores.timerStarts, reads, {
+    assertMutationAllowed: async () => undefined,
+    logger: { error: () => undefined, info: () => undefined },
+    now: () => 1_000,
+    resolveGame: (player) => ({
+      activeColor: "white",
+      historyValid: true,
+      turnNumber: 3,
+      winner: player.status === "winner-test" ? "white" : undefined,
+    }),
+  });
   assert.deepEqual(result, {
     deleted: 4,
     failed: 0,
@@ -129,6 +137,17 @@ test("reconciles terminal and obsolete markers while retaining recoverable deadl
     assert.equal(stores.timerRows.get(key)?.updatedAtMs, 1_000);
   }
   assert.equal(stores.timerRows.get("same/match")?.timer, "3;3000");
+  assert.equal(batches.mock.callCount(), markers.length);
+  for (const [playerId, opponentId] of markers) {
+    const batch = batches.mock.calls.find(
+      ({ arguments: [inputs] }) => inputs[0].playerId === playerId,
+    );
+    assert.deepEqual(batch?.arguments[0], [
+      { playerId, matchId: "match" },
+      { playerId: opponentId, matchId: "match" },
+    ]);
+  }
+  assert.equal(singles.mock.callCount(), 3);
 });
 
 test("cleans legacy markers from owner-only terminal and later-turn proof", async () => {
@@ -153,6 +172,7 @@ test("cleans legacy markers from owner-only terminal and later-turn proof", asyn
       stores.timerStarts,
       {
         readInviteMetadata: async () => assert.fail("unexpected-invite-read"),
+        readMatchRecords: async () => assert.fail("unexpected-match-batch"),
         readMatchRecord: async ({ playerId, matchId }) => {
           const path = `players/${playerId}/matches/${matchId}`;
           assert.ok(!path.startsWith("invites/"));
@@ -243,6 +263,7 @@ test("backfills one bounded legacy invite match without guessing ambiguous oppon
   const result = await sweepMatchTimerStarts(
     stores.timerStarts,
     {
+      readMatchRecords: async () => assert.fail("unexpected-match-batch"),
       readInviteMetadata: async (inviteId) => {
         paths.push(`invites/${inviteId}`);
         return (records[`invites/${inviteId}`] ?? null) as Record<
@@ -388,7 +409,8 @@ test("fails the sweep with a bounded sanitized summary", async () => {
         stores.timerStarts,
         {
           readInviteMetadata: async () => assert.fail("unexpected-invite-read"),
-          readMatchRecord: async () => {
+          readMatchRecord: async () => assert.fail("unexpected-single-read"),
+          readMatchRecords: async () => {
             throw new Error("private-state-detail");
           },
         },
@@ -411,6 +433,11 @@ test("fails the sweep with a bounded sanitized summary", async () => {
     retained: 0,
     scanned: 1,
     stale: 0,
+  });
+  assert.deepEqual(stores.timerRows.get("private-player/match"), {
+    timer: "3;3000",
+    turnNumber: 3,
+    updatedAtMs: 100,
   });
 
   logs.length = 0;
