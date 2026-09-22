@@ -11,12 +11,14 @@ import { INVITE_METADATA_SOCKET_PROTOCOL } from "@mons/shared/invite-metadata";
 import { INVITE_WAGERS_SOCKET_PROTOCOL } from "@mons/shared/invite-wagers";
 import type { InviteReactions } from "../src/inviteReactions.ts";
 import type { MatchSyncMetadata } from "../src/matchSync.ts";
+import type { MatchStatePair } from "../src/matchStateTypes.ts";
 
 type Room = DurableObjectStub<InviteReactions>;
 type Source = {
   invite: Record<string, unknown>;
   reads: number;
   fen: string;
+  revision: number;
 };
 
 const rooms: Room[] = [];
@@ -32,7 +34,7 @@ async function install(room: Room, source: Source) {
         readPair: (
           metadata: MatchSyncMetadata,
           matchId: string,
-        ) => Promise<[unknown, unknown]>;
+        ) => Promise<MatchStatePair>;
       };
     };
     mutable.inviteReader = async () => structuredClone(source.invite);
@@ -51,12 +53,20 @@ async function install(room: Room, source: Source) {
         timer: "",
       };
     };
-    mutable.matchSync.readPair = async (metadata) => [
-      readMatch(metadata.snapshot.hostId),
-      metadata.snapshot.guestId === null
-        ? null
-        : readMatch(metadata.snapshot.guestId),
-    ];
+    mutable.matchSync.readPair = async (metadata, matchId) => ({
+      inviteId: metadata.snapshot.inviteId,
+      epoch: 0,
+      matchId,
+      playerId: metadata.snapshot.hostId,
+      opponentId: metadata.snapshot.guestId,
+      revision: source.revision,
+      playerMatch: readMatch(metadata.snapshot.hostId),
+      opponentMatch:
+        metadata.snapshot.guestId === null
+          ? null
+          : readMatch(metadata.snapshot.guestId),
+      claim: null,
+    });
   });
 }
 
@@ -71,6 +81,7 @@ async function fixture(paired = true) {
     },
     reads: 0,
     fen: "initial",
+    revision: 1,
   };
   rooms.push(room);
   await install(room, source);
@@ -186,6 +197,7 @@ describe("live match socket admission", () => {
     const { room, inviteId, source } = await fixture();
     expect((await room.readMatches(inviteId, inviteId)).status).toBe("ok");
     source.fen = "new-state";
+    source.revision++;
     await room.notifyMatchesChanged(inviteId, [inviteId]);
     expect((await room.fetch(request(inviteId))).status).toBe(409);
     source.invite.password = "private";
@@ -489,6 +501,7 @@ describe("live match socket admission", () => {
       ),
     );
     source.fen = "missed-notification";
+    source.revision++;
     vi.spyOn(Date, "now").mockReturnValue(Math.max(Date.now(), scheduled.due!));
     expect(await runDurableObjectAlarm(room)).toBe(true);
     expect(JSON.parse(await changed).snapshot).toMatchObject({

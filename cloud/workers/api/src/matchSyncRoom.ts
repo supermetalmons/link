@@ -19,6 +19,7 @@ import {
 } from "./socketSession.ts";
 import { readSocketAdmission } from "./socketAdmission.ts";
 import { GameSessionTransitionFailure } from "./gameSessionCodec.ts";
+import type { MatchStatePair } from "./matchStateTypes.ts";
 
 export const MATCH_SYNC_REPAIR_MS = 5_000;
 
@@ -44,6 +45,12 @@ type MatchReadState = {
   checkedAt: number;
   inviteGeneration: number;
   sourceEpoch: number;
+  projection?: {
+    sourceEpoch: number;
+    matchRevision: number;
+    metadataRevision: number;
+    snapshot: MatchSyncSnapshot;
+  };
   result?: Extract<MatchSyncReadResult, { status: "ok" }>;
 };
 
@@ -55,7 +62,7 @@ type MatchRoomDependencies = {
   readPair: (
     metadata: MatchSyncMetadata,
     matchId: string,
-  ) => Promise<[unknown, unknown]>;
+  ) => Promise<MatchStatePair>;
   scheduleAlarm: (atMs: number) => Promise<void>;
   capacityFull: (role: string, ip: string) => boolean;
   canReceive: (
@@ -149,7 +156,16 @@ export class MatchSyncRoom {
     const message = changed
       ? JSON.stringify({ schemaVersion: 1, type: "snapshot", snapshot: next })
       : null;
-    for (const socket of this.sockets(next.matchId)) {
+    this.updateSubscribers(next.matchId, metadata, message);
+    return next;
+  }
+
+  private updateSubscribers(
+    matchId: string,
+    metadata: MatchSyncMetadata,
+    message: string | null,
+  ): void {
+    for (const socket of this.sockets(matchId)) {
       const attachment =
         socket.deserializeAttachment() as MatchSocketAttachment;
       if (!this.dependencies.canReceive(attachment, metadata)) {
@@ -158,7 +174,6 @@ export class MatchSyncRoom {
         this.dependencies.socketSessions.send(socket, message);
       }
     }
-    return next;
   }
 
   private async scheduleMatch(
@@ -207,20 +222,52 @@ export class MatchSyncRoom {
         const metadata = await this.dependencies.readMetadata(inviteId);
         if (!current()) continue;
         if (metadata.status !== "ok") {
+          state.projection = undefined;
           this.close(matchId, 1008, "Invite unavailable");
           return metadata;
         }
         if (!isRegisteredSyncMatch(metadata, matchId)) {
+          state.projection = undefined;
           this.close(matchId, 1008, "Match unavailable");
           return { status: "missing" };
         }
-        const [hostValue, guestValue] = await this.readPair(metadata, matchId);
+        const pair = await this.readPair(metadata, matchId);
         if (!current()) continue;
         readingSource = false;
-        const snapshot = this.apply(
-          createMatchSyncSnapshot(metadata, matchId, hostValue, guestValue),
-          metadata,
-        );
+        if (
+          pair.epoch !== sourceEpoch ||
+          !Number.isSafeInteger(pair.revision) ||
+          pair.revision < 0
+        ) {
+          throw new Error("match-sync-source-invalid");
+        }
+        const projection = state.projection;
+        let snapshot: MatchSyncSnapshot;
+        if (
+          projection &&
+          projection.sourceEpoch === pair.epoch &&
+          projection.matchRevision === pair.revision &&
+          projection.metadataRevision === metadata.snapshot.revision
+        ) {
+          snapshot = projection.snapshot;
+          this.updateSubscribers(matchId, metadata, null);
+        } else {
+          snapshot = this.apply(
+            createMatchSyncSnapshot(
+              metadata,
+              matchId,
+              pair.playerMatch,
+              pair.opponentMatch,
+            ),
+            metadata,
+          );
+          state.projection = {
+            sourceEpoch: pair.epoch,
+            matchRevision: pair.revision,
+            metadataRevision: metadata.snapshot.revision,
+            snapshot,
+          };
+        }
         const result = { status: "ok" as const, snapshot, metadata };
         state.result = result;
         state.checkedAt = Date.now();
@@ -235,6 +282,7 @@ export class MatchSyncRoom {
       } catch (error) {
         if (!current()) continue;
         state.result = undefined;
+        state.projection = undefined;
         if (readingSource && attempt < 2) continue;
         if (
           readingSource &&
@@ -249,6 +297,7 @@ export class MatchSyncRoom {
       }
     }
     state.result = undefined;
+    state.projection = undefined;
     throw new Error("match-sync-source-kept-changing");
   }
 
@@ -284,6 +333,7 @@ export class MatchSyncRoom {
     for (const state of this.states.values()) {
       state.generation++;
       state.result = undefined;
+      state.projection = undefined;
     }
   }
 

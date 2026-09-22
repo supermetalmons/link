@@ -16,6 +16,7 @@ import {
 } from "@mons/shared/reactions";
 import type { InviteReactions } from "../src/inviteReactions.ts";
 import type { MatchSyncMetadata } from "../src/matchSync.ts";
+import type { MatchStatePair } from "../src/matchStateTypes.ts";
 import { SOCKET_TEST_SESSION_ID } from "../test/socketTestSession.ts";
 
 type Channel = "reactions" | "presentation" | "metadata" | "wagers" | "matches";
@@ -39,7 +40,10 @@ async function fixture() {
       inviteReader: () => Promise<unknown>;
       wagerReader: () => Promise<[]>;
       matchSync: {
-        readPair: (metadata: MatchSyncMetadata) => Promise<[unknown, unknown]>;
+        readPair: (
+          metadata: MatchSyncMetadata,
+          matchId: string,
+        ) => Promise<MatchStatePair>;
       };
     };
     mutable.inviteReader = async () => ({
@@ -59,12 +63,20 @@ async function fixture() {
       flatMovesString: "",
       timer: "",
     });
-    mutable.matchSync.readPair = async (metadata) => [
-      readMatch(metadata.snapshot.hostId),
-      metadata.snapshot.guestId === null
-        ? null
-        : readMatch(metadata.snapshot.guestId),
-    ];
+    mutable.matchSync.readPair = async (metadata, matchId) => ({
+      inviteId: metadata.snapshot.inviteId,
+      epoch: 0,
+      matchId,
+      playerId: metadata.snapshot.hostId,
+      opponentId: metadata.snapshot.guestId,
+      revision: 1,
+      playerMatch: readMatch(metadata.snapshot.hostId),
+      opponentMatch:
+        metadata.snapshot.guestId === null
+          ? null
+          : readMatch(metadata.snapshot.guestId),
+      claim: null,
+    });
   });
   await room.ensurePresentations(inviteId, {
     "host-login": { emojiId: 1, aura: "" },

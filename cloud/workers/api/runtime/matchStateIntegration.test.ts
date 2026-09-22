@@ -10,7 +10,10 @@ import { formatMatchTimer, MATCH_TIMER_TERMINAL } from "@mons/shared/timers";
 import { MATCH_SYNC_SOCKET_PROTOCOL } from "@mons/shared/match-sync";
 import type { InviteReactions } from "../src/inviteReactions.ts";
 import type { MatchSyncMetadata } from "../src/matchSync.ts";
-import type { MatchStateEffect } from "../src/matchStateTypes.ts";
+import type {
+  MatchStateEffect,
+  MatchStatePair,
+} from "../src/matchStateTypes.ts";
 import { getMatchStateRpc, unwrapMatchStateRpc } from "../src/matchStateRpc.ts";
 import { resolveMatchTimerGame } from "../src/matchTimer.ts";
 import { socketTestSessionHeaders } from "../test/socketTestSession.ts";
@@ -313,13 +316,20 @@ describe("canonical match room integration", () => {
           readPair: (
             metadata: MatchSyncMetadata,
             matchId: string,
-          ) => Promise<[unknown, unknown]>;
+          ) => Promise<MatchStatePair>;
         };
       };
-      target.matchSync.readPair = async () => [
-        match,
-        { ...match, color: "black" },
-      ];
+      target.matchSync.readPair = async (metadata, matchId) => ({
+        inviteId: metadata.snapshot.inviteId,
+        epoch: 0,
+        matchId,
+        playerId: metadata.snapshot.hostId,
+        opponentId: metadata.snapshot.guestId,
+        revision: 1,
+        playerMatch: match,
+        opponentMatch: { ...match, color: "black" },
+        claim: null,
+      });
     });
     const initial = await room.readMatches(inviteId, inviteId);
     if (initial.status !== "ok") throw new Error("missing-fixture");
@@ -351,12 +361,12 @@ describe("canonical match room integration", () => {
           readPair: (
             metadata: MatchSyncMetadata,
             matchId: string,
-          ) => Promise<[unknown, unknown]>;
+          ) => Promise<MatchStatePair>;
           dependencies: {
             readPair: (
               metadata: MatchSyncMetadata,
               matchId: string,
-            ) => Promise<[unknown, unknown]>;
+            ) => Promise<MatchStatePair>;
           };
         };
       };

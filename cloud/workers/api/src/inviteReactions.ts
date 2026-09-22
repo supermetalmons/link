@@ -33,6 +33,7 @@ import type {
   MatchStateCreateRequest,
   MatchStateEventEffectsRequest,
   MatchStateMoveRequest,
+  MatchStatePair,
   MatchStatePairRequest,
   MatchStateRecordRequest,
   MatchStateRecordsRequest,
@@ -216,19 +217,15 @@ export class InviteReactions
   private async readMatchPair(
     metadata: MatchSyncMetadata,
     matchId: string,
-  ): Promise<[unknown, unknown]> {
-    const local = () => {
-      const source = this.matchState.readSource();
-      const pair = this.matchState.readPair({
-        inviteId: metadata.snapshot.inviteId,
-        epoch: source.epoch,
-        matchId,
-        playerId: metadata.snapshot.hostId,
-        opponentId: metadata.snapshot.guestId,
-      });
-      return [pair.playerMatch, pair.opponentMatch] as [unknown, unknown];
-    };
-    return local();
+  ): Promise<MatchStatePair> {
+    const source = this.matchState.readSource();
+    return this.matchState.readPair({
+      inviteId: metadata.snapshot.inviteId,
+      epoch: source.epoch,
+      matchId,
+      playerId: metadata.snapshot.hostId,
+      opponentId: metadata.snapshot.guestId,
+    });
   }
 
   async readCanonicalMatchRecord(input: MatchStateRecordRequest) {
