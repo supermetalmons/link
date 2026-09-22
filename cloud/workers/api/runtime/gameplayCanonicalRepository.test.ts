@@ -1,3 +1,4 @@
+import { createEventProgressOutboxWriter } from "../src/eventRepository.ts";
 import { matchTestPort } from "../test/gameSessionTestPorts.ts";
 import { env } from "cloudflare:workers";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
@@ -7,14 +8,12 @@ import type { StateRepository } from "../test/stateRepositoryTestTypes.ts";
 import {
   canonicalProfileFields,
   createCanonicalGameplayRepository,
-  createCanonicalRatingRepository,
 } from "../src/gameplayCanonicalRepository.ts";
+import { createCanonicalRatingRepository } from "../src/ratingCanonicalRepository.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
-import {
-  createGameplayRepository,
-  createRatingRepository,
-  GameplayRepositoryFailure,
-} from "../src/gameplayRepository.ts";
+import { createGameplayRepository } from "../src/gameplayRepository.ts";
+import { createRatingRepository } from "../src/ratingRepository.ts";
+import { GameplayRepositoryFailure } from "../src/gameplayRepositoryPolicy.ts";
 import {
   commitCanonicalPlan,
   materializeCanonicalProfile,
@@ -696,10 +695,15 @@ describe("canonical gameplay repositories", () => {
                 count: 1,
                 appliedAtMs: 3_000,
               })
-            : createRatingRepository(failureEnv, gameplay, {
-                maxTransactionAttempts: 3,
-                now: () => 3_000,
-              }).tryAcquireRatingLease({
+            : createRatingRepository(
+                failureEnv.PROFILE_DB,
+                gameplay,
+                createEventProgressOutboxWriter(failureEnv.EVENT_DB),
+                {
+                  maxTransactionAttempts: 3,
+                  now: () => 3_000,
+                },
+              ).tryAcquireRatingLease({
                 inviteId: "retry-invite",
                 matchId: "retry-match",
                 playerId: "retry-player",
@@ -758,7 +762,11 @@ describe("canonical gameplay repositories", () => {
       const gameplay = createGameplayRepository(failureEnv, {
         stateClient: matchTestPort(state),
       });
-      const rating = createRatingRepository(failureEnv, gameplay);
+      const rating = createRatingRepository(
+        failureEnv.PROFILE_DB,
+        gameplay,
+        createEventProgressOutboxWriter(failureEnv.EVENT_DB),
+      );
       const log = vi.spyOn(console, "error").mockImplementation(() => {});
       try {
         const failure = await rating
@@ -1319,7 +1327,11 @@ describe("canonical gameplay repositories", () => {
     const gameplay = createGameplayRepository(testEnv, {
       stateClient: matchTestPort(state),
     });
-    const rating = createRatingRepository(testEnv, gameplay);
+    const rating = createRatingRepository(
+      testEnv.PROFILE_DB,
+      gameplay,
+      createEventProgressOutboxWriter(testEnv.EVENT_DB),
+    );
     const gameplayOwnership = await gameplay.readProfileOwnershipSnapshot({
       loginUids: [loginUid],
       profileIds: [],
@@ -1537,9 +1549,14 @@ describe("canonical gameplay repositories", () => {
     const gameplay = createGameplayRepository(testEnv, {
       stateClient: matchTestPort(state),
     });
-    const rating = createRatingRepository(testEnv, gameplay, {
-      now: () => 3_000,
-    });
+    const rating = createRatingRepository(
+      testEnv.PROFILE_DB,
+      gameplay,
+      createEventProgressOutboxWriter(testEnv.EVENT_DB),
+      {
+        now: () => 3_000,
+      },
+    );
     await expect(
       rating.applyFebruaryChallengeReplay(sourceProfileId, opponentProfileId),
     ).resolves.toBeUndefined();
@@ -1566,9 +1583,14 @@ describe("canonical gameplay repositories", () => {
     const gameplay = createGameplayRepository(testEnv, {
       stateClient: matchTestPort(state),
     });
-    const rating = createRatingRepository(testEnv, gameplay, {
-      now: () => 3_000,
-    });
+    const rating = createRatingRepository(
+      testEnv.PROFILE_DB,
+      gameplay,
+      createEventProgressOutboxWriter(testEnv.EVENT_DB),
+      {
+        now: () => 3_000,
+      },
+    );
 
     await rating.applyFebruaryChallengeReplay(
       playerProfileId,
@@ -1605,9 +1627,14 @@ describe("canonical gameplay repositories", () => {
     const gameplay = createGameplayRepository(testEnv, {
       stateClient: matchTestPort(state),
     });
-    await createRatingRepository(testEnv, gameplay, {
-      now: () => 2_000,
-    }).applyFebruaryChallengeReplay(playerProfileId, sourceOpponentProfileId);
+    await createRatingRepository(
+      testEnv.PROFILE_DB,
+      gameplay,
+      createEventProgressOutboxWriter(testEnv.EVENT_DB),
+      {
+        now: () => 2_000,
+      },
+    ).applyFebruaryChallengeReplay(playerProfileId, sourceOpponentProfileId);
     const racedDb = beforeMatchingBatch(
       testEnv.PROFILE_DB,
       (queries) =>
@@ -1860,8 +1887,9 @@ describe("canonical gameplay repositories", () => {
       },
     );
     const rating = createRatingRepository(
-      { ...testEnv, PROFILE_DB: observedDb },
+      observedDb,
       gameplay,
+      createEventProgressOutboxWriter(testEnv.EVENT_DB),
       {
         now: () => 2_000,
       },
@@ -2059,9 +2087,14 @@ describe("canonical gameplay repositories", () => {
       const gameplay = createGameplayRepository(testEnv, {
         stateClient: matchTestPort(state),
       });
-      const rating = createRatingRepository(testEnv, gameplay, {
-        now: () => 2_000,
-      });
+      const rating = createRatingRepository(
+        testEnv.PROFILE_DB,
+        gameplay,
+        createEventProgressOutboxWriter(testEnv.EVENT_DB),
+        {
+          now: () => 2_000,
+        },
+      );
       const inviteId = `d1-event-score-${label}`;
       const identity = {
         inviteId,
@@ -2803,9 +2836,14 @@ describe("canonical gameplay repositories", () => {
       opponentId: "d1-edit-opponent-login",
     };
     const operationId = `${identity.inviteId}__${identity.matchId}`;
-    const baseRating = createRatingRepository(testEnv, gameplay, {
-      now: () => 3_000,
-    });
+    const baseRating = createRatingRepository(
+      testEnv.PROFILE_DB,
+      gameplay,
+      createEventProgressOutboxWriter(testEnv.EVENT_DB),
+      {
+        now: () => 3_000,
+      },
+    );
     await baseRating.tryAcquireRatingLease({
       ...identity,
       ownerUid: identity.playerId,
@@ -2965,9 +3003,14 @@ describe("canonical gameplay repositories", () => {
     const gameplay = createGameplayRepository(testEnv, {
       stateClient: matchTestPort(state),
     });
-    const baseRating = createRatingRepository(testEnv, gameplay, {
-      now: () => 2_000,
-    });
+    const baseRating = createRatingRepository(
+      testEnv.PROFILE_DB,
+      gameplay,
+      createEventProgressOutboxWriter(testEnv.EVENT_DB),
+      {
+        now: () => 2_000,
+      },
+    );
     await baseRating.tryAcquireRatingLease({
       ...identity,
       ownerUid: identity.playerId,

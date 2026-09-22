@@ -1,8 +1,9 @@
+import { createGameplayRepository } from "../gameplayRepository.ts";
+import { createRatingRepository } from "../ratingRepository.ts";
 import {
-  createGameplayRepository,
-  createRatingRepository,
-} from "../gameplayRepository.ts";
-import { createEventGameplayRepository } from "../eventRepository.ts";
+  createEventGameplayRepository,
+  createEventProgressOutboxWriter,
+} from "../eventRepository.ts";
 import { isSafeRecordKey } from "../recordKeys.ts";
 import {
   parseAutomatchProfileGameProjectionOutbox,
@@ -349,7 +350,11 @@ export async function sweepRatingProfileGameProjections(
   const rating = (
     dependencies.createRating ||
     ((workerEnv: Env) =>
-      createRatingRepository(workerEnv, createGameplayRepository(workerEnv)))
+      createRatingRepository(
+        workerEnv.PROFILE_DB,
+        createGameplayRepository(workerEnv),
+        createEventProgressOutboxWriter(workerEnv.EVENT_DB),
+      ))
   )(env);
   const nowMs = now();
   const records = await rating.listDueRatingProfileGameProjections(

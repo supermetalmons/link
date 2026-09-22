@@ -28,7 +28,7 @@ import {
 import type {
   RatingProjectionRepository,
   RatingUpdateData,
-} from "../src/gameplayRepository.ts";
+} from "../src/ratingContracts.ts";
 import type { TelegramProjectionTask } from "../src/telegramProjectionTasks.ts";
 import { handleTelegramProjectionMessage } from "../src/telegramProjection.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";

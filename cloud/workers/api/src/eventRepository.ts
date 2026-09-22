@@ -3,7 +3,10 @@ import { normalizeRecordKey } from "@mons/shared/ids";
 import { isEventMutation } from "../../../runtime/eventCommands.js";
 import type { EventCommand } from "../../../runtime/eventCommands.js";
 import type { EventLeaseKey } from "../../../runtime/eventLeases.js";
-import type { EventStore } from "./eventStoreContracts.ts";
+import type {
+  EventProgressOutboxWriter,
+  EventStore,
+} from "./eventStoreContracts.ts";
 import type { MatchStatePort } from "./repositoryContracts.ts";
 import {
   encodeEventUpdates,
@@ -105,6 +108,21 @@ async function withEventWriteAdmission<T>(
       );
     }
   }
+}
+
+export function createEventProgressOutboxWriter(
+  db: D1Database,
+): EventProgressOutboxWriter {
+  return {
+    putEventProgressOutbox: (outboxId, record) =>
+      withEventWriteAdmission(db, "event-root-patch", async (admission) => {
+        await commitEventMutations(
+          db,
+          [{ kind: "progress-outbox", outboxId, value: record }],
+          { admission },
+        );
+      }),
+  };
 }
 
 function canonicalJson(value: unknown): string {

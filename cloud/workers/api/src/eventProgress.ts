@@ -12,10 +12,8 @@ import type {
   WorkflowStepConfig,
 } from "cloudflare:workers";
 import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
-import {
-  createRatingRepository,
-  type RatingEventProgressRepository,
-} from "./gameplayRepository.ts";
+import { createRatingRepository } from "./ratingRepository.ts";
+import type { RatingEventProgressRepository } from "./ratingContracts.ts";
 import { PROFILE_BACKGROUND_SWEEP_LIMIT } from "./profileBackgroundLimits.ts";
 import { createWorkerEventRuntime } from "./workerEventRuntime.ts";
 import {
@@ -409,14 +407,20 @@ async function sweepAdmittedEventProgress(
   dependencies: EventProgressSweepDependencies,
   admission: EventWriteAdmission,
 ): Promise<void> {
-  const repository =
-    dependencies.repository || createEventGameplayRepository(env);
+  let defaultRepository: EventGameplayRepository | undefined;
+  const getDefaultRepository = () =>
+    (defaultRepository ||= createEventGameplayRepository(env));
+  const repository = dependencies.repository || getDefaultRepository();
   const now = dependencies.now || Date.now;
   const ratingRepository =
     dependencies.ratingRepository === null
       ? null
       : dependencies.ratingRepository ||
-        createRatingRepository(env, createEventGameplayRepository(env));
+        createRatingRepository(
+          env.PROFILE_DB,
+          getDefaultRepository(),
+          getDefaultRepository(),
+        );
   const execute = createEventProgressWorkExecutor();
   const results = await Promise.allSettled([
     sweepPersistedEventProgressOutboxes(env, repository, now, execute),

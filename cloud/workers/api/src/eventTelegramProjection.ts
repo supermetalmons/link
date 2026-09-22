@@ -14,7 +14,7 @@ import { createEventLockManagerCore } from "../../../runtime/events/lockManagerC
 import type { EventStore } from "./eventStoreContracts.ts";
 import type { EventOutboxReads } from "./eventOutboxReadRepository.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
-import type { RatingProjectionRepository } from "./gameplayRepository.ts";
+import type { RatingProjectionRepository } from "./ratingContracts.ts";
 import { EVENT_TELEGRAM_PROJECTION_SCHEMA_VERSION } from "./eventTelegramProjectionProducer.ts";
 import type {
   EventTelegramProjectionTask,

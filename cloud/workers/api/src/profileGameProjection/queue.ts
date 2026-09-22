@@ -1,9 +1,10 @@
 import { ackQueueMessage, retryQueueMessage } from "../queueMessage.ts";
+import { createGameplayRepository } from "../gameplayRepository.ts";
+import { createRatingRepository } from "../ratingRepository.ts";
 import {
-  createGameplayRepository,
-  createRatingRepository,
-} from "../gameplayRepository.ts";
-import { createEventGameplayRepository } from "../eventRepository.ts";
+  createEventGameplayRepository,
+  createEventProgressOutboxWriter,
+} from "../eventRepository.ts";
 import {
   createEventProfileGameProjectionRuntime,
   createProfileGameProjectionRuntime,
@@ -146,8 +147,9 @@ export async function handleProfileGameProjectionMessage(
           dependencies.createRating ||
           ((workerEnv: Env) =>
             createRatingRepository(
-              workerEnv,
+              workerEnv.PROFILE_DB,
               createGameplayRepository(workerEnv),
+              createEventProgressOutboxWriter(workerEnv.EVENT_DB),
             ))
         )(env),
         runtime,
@@ -192,7 +194,7 @@ async function handleProjectionQueue(
   forwardEventTasks: boolean,
 ): Promise<void> {
   const state = createEventGameplayRepository(env);
-  const rating = createRatingRepository(env, state);
+  const rating = createRatingRepository(env.PROFILE_DB, state, state);
   const runtime = createProfileGameProjectionRuntime(env, { state });
   const eventRuntime = createEventProfileGameProjectionRuntime(env, { state });
   const locks = createProfileGameProjectionLockStore(env.PROFILE_GAMES_DB);

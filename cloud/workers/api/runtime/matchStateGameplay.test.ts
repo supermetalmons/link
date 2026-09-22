@@ -19,10 +19,8 @@ import {
   MATCH_TIMER_TERMINAL,
   parseStrictMatchTimer,
 } from "@mons/shared/timers";
-import {
-  createGameplayRepository,
-  createRatingRepository,
-} from "../src/gameplayRepository.ts";
+import { createGameplayRepository } from "../src/gameplayRepository.ts";
+import { createRatingRepository } from "../src/ratingRepository.ts";
 import { createEventGameplayRepository } from "../src/eventRepository.ts";
 import { handleGameplayRoute } from "../src/gameplayRoute.ts";
 import { handleMatchSnapshotRoute } from "../src/matchSnapshotRoute.ts";
@@ -285,7 +283,11 @@ describe("gameplay with canonical Durable Object storage", () => {
       opponentId: guest,
     });
     const operationId = `${inviteId}__${inviteId}`;
-    const rating = createRatingRepository(workerEnv, repository);
+    const rating = createRatingRepository(
+      workerEnv.PROFILE_DB,
+      repository,
+      repository,
+    );
     expect(await rating.readRatingUpdate(operationId)).toMatchObject({
       status: "done",
       historicalMatchPair: {
@@ -350,7 +352,7 @@ describe("gameplay with canonical Durable Object storage", () => {
     const { inviteId, host, guest } = await series(post);
     const gameplay = createGameplayRepository(workerEnv);
     const events = createEventGameplayRepository(workerEnv);
-    const rating = createRatingRepository(workerEnv, events);
+    const rating = createRatingRepository(workerEnv.PROFILE_DB, events, events);
     const pairRequest = {
       inviteId,
       matchId: inviteId,

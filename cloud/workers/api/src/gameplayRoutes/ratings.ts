@@ -1,7 +1,8 @@
 import { isRatingUpdateRequest } from "@mons/shared/ratings";
 import { isSafeRecordKey } from "../recordKeys.ts";
 import { isSafeOperationId } from "../operationIds.ts";
-import { createRatingRepository } from "../gameplayRepository.ts";
+import { createRatingRepository } from "../ratingRepository.ts";
+import { createEventProgressOutboxWriter } from "../eventRepository.ts";
 import { updateRatings } from "../ratingUpdate.ts";
 import {
   defineGameplayRoute,
@@ -40,7 +41,11 @@ export const ratingRoutes = [
         identity,
         body,
         dependencies.ratingRepository ||
-          createRatingRepository(env, repository),
+          createRatingRepository(
+            env.PROFILE_DB,
+            repository,
+            createEventProgressOutboxWriter(env.EVENT_DB),
+          ),
         ratingDependencies,
       ),
   }),

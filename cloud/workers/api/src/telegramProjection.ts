@@ -18,11 +18,9 @@ import type { EventStore } from "./eventStoreContracts.ts";
 import type { GameSessionPort } from "./gameSessionContracts.ts";
 import { createEventGameplayRepository } from "./eventRepository.ts";
 import type { EventOutboxReads } from "./eventOutboxReadRepository.ts";
-import {
-  createGameplayRepository,
-  createRatingRepository,
-  type RatingProjectionRepository,
-} from "./gameplayRepository.ts";
+import { createGameplayRepository } from "./gameplayRepository.ts";
+import { createRatingRepository } from "./ratingRepository.ts";
+import type { RatingProjectionRepository } from "./ratingContracts.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import {
   parseTelegramProjectionTask,
@@ -344,10 +342,6 @@ export async function handleTelegramProjectionMessage(
   const createStateRepository =
     dependencies.createStateRepository ||
     ((workerEnv: Env) => createEventGameplayRepository(workerEnv));
-  const createRating =
-    dependencies.createRating ||
-    ((workerEnv: Env) =>
-      createRatingRepository(workerEnv, createGameplayRepository(workerEnv)));
   const enqueueDelivery =
     dependencies.enqueueDelivery ||
     ((input: InitialTelegramDelivery) =>
@@ -365,6 +359,14 @@ export async function handleTelegramProjectionMessage(
   }
   try {
     const state = createStateRepository(env);
+    const createRating =
+      dependencies.createRating ||
+      ((workerEnv: Env) =>
+        createRatingRepository(
+          workerEnv.PROFILE_DB,
+          createGameplayRepository(workerEnv),
+          state,
+        ));
     const telegram = dependencies.createTelegram
       ? dependencies.createTelegram(env)
       : createD1TelegramRepository(env.TELEGRAM_DB, { now });
@@ -429,7 +431,7 @@ export async function handleTelegramProjectionQueue(
   env: Env,
 ): Promise<void> {
   const state = createEventGameplayRepository(env);
-  const rating = createRatingRepository(env, createGameplayRepository(env));
+  const rating = createRatingRepository(env.PROFILE_DB, state, state);
   for (const message of batch.messages) {
     await handleTelegramProjectionMessage(message, env, {
       createStateRepository: () => state,
@@ -641,12 +643,16 @@ export async function sweepTelegramProjections(
   const createStateRepository =
     dependencies.createStateRepository ||
     ((workerEnv: Env) => createEventGameplayRepository(workerEnv));
+  const nowMs = now();
+  const state = createStateRepository(env);
   const createRating =
     dependencies.createRating ||
     ((workerEnv: Env) =>
-      createRatingRepository(workerEnv, createGameplayRepository(workerEnv)));
-  const nowMs = now();
-  const state = createStateRepository(env);
+      createRatingRepository(
+        workerEnv.PROFILE_DB,
+        createGameplayRepository(workerEnv),
+        state,
+      ));
   const rating = createRating(env);
   const [automatch, event, ratingCount] = await Promise.allSettled([
     sweepAutomatchProjections(env, state, logger, nowMs),

@@ -40,7 +40,7 @@ import type {
   RatingProfilePatch,
   RatingRepairData,
   RatingRepository,
-} from "./gameplayRepository.ts";
+} from "./ratingContracts.ts";
 import {
   TELEGRAM_PROJECTION_SCHEMA_VERSION,
   type RatingTelegramProjectionTask,

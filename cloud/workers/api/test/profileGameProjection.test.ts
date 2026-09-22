@@ -7,7 +7,7 @@ import { createEventLockManagerCore } from "../../../runtime/events/lockManagerC
 import type {
   RatingProfileGameProjectionRepository,
   RatingUpdateData,
-} from "../src/gameplayRepository.ts";
+} from "../src/ratingContracts.ts";
 import type { EventStore } from "../src/eventStoreContracts.ts";
 import {
   claimAutomatchSweepCandidate,

@@ -20,10 +20,8 @@ import {
   removeNavigationGame,
 } from "../src/gameplayRoute.ts";
 import type { RequestIdentity } from "../src/requestIdentity.ts";
-import type {
-  GameplayProfile,
-  RatingRepository,
-} from "../src/gameplayRepository.ts";
+import type { GameplayProfile } from "../src/gameplayRepository.ts";
+import type { RatingRepository } from "../src/ratingContracts.ts";
 import type {
   ProfileOwnershipQuery,
   ProfileOwnershipSnapshot,

@@ -1,4 +1,9 @@
 import {
+  MATERIAL_KEYS,
+  normalizeMiningSnapshot,
+  type MiningMaterialName,
+} from "@mons/shared/mining";
+import {
   CanonicalProfileCorruption,
   commitCanonicalPlan,
   materializeCanonicalProfile,
@@ -63,6 +68,63 @@ export function materializeCanonicalProfileUpdate(
     emojiPresent,
     gameplayEmoji,
   });
+}
+
+type CanonicalGameplayProfilePatch = {
+  rating?: number;
+  nonce?: number;
+  win?: boolean;
+  totalManaPoints?: number;
+  feb2026UniqueOpponentsCount?: number;
+  mining?: unknown;
+};
+
+export function patchCanonicalProfile(
+  snapshot: CanonicalProfileSnapshot,
+  patch: CanonicalGameplayProfilePatch,
+  updatedAtMs: number,
+  miningSortKeys: readonly MiningMaterialName[] = MATERIAL_KEYS,
+): CanonicalProfileValue {
+  const profile = { ...snapshot.profile };
+  const sortUpdates: Partial<Record<CanonicalSortKey, number>> = {};
+  if (typeof patch.rating === "number" && Number.isFinite(patch.rating)) {
+    profile.rating = patch.rating;
+    sortUpdates.rating = patch.rating;
+  }
+  if (typeof patch.nonce === "number" && Number.isFinite(patch.nonce)) {
+    profile.nonce = patch.nonce;
+    sortUpdates.nonce = patch.nonce;
+  }
+  if (
+    typeof patch.totalManaPoints === "number" &&
+    Number.isFinite(patch.totalManaPoints)
+  ) {
+    profile.totalManaPoints = patch.totalManaPoints;
+    sortUpdates.mp = patch.totalManaPoints;
+  }
+  let winPresent = snapshot.winPresent;
+  if (typeof patch.win === "boolean") {
+    profile.win = patch.win;
+    winPresent = true;
+  }
+  if (
+    typeof patch.feb2026UniqueOpponentsCount === "number" &&
+    Number.isFinite(patch.feb2026UniqueOpponentsCount)
+  ) {
+    profile.feb2026UniqueOpponentsCount = patch.feb2026UniqueOpponentsCount;
+  }
+  if (patch.mining !== undefined) {
+    profile.mining = normalizeMiningSnapshot(patch.mining);
+    for (const material of miningSortKeys) {
+      sortUpdates[material] = profile.mining.materials[material];
+    }
+  }
+  return materializeCanonicalProfileUpdate(
+    snapshot,
+    profile,
+    Math.max(snapshot.updatedAtMs, updatedAtMs),
+    { sortUpdates, winPresent },
+  );
 }
 
 export function commitCanonicalProfileUpdate(

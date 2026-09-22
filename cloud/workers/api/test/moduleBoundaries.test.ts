@@ -27,6 +27,7 @@ test("canonical D1 modules have no direct Firestore runtime dependency", () => {
   for (const filename of [
     "authIdentityCanonical.ts",
     "gameplayCanonicalRepository.ts",
+    "ratingCanonicalRepository.ts",
     "profileCanonicalD1.ts",
   ]) {
     for (const path of reachableRuntimeFiles(
@@ -36,6 +37,36 @@ test("canonical D1 modules have no direct Firestore runtime dependency", () => {
         readFileSync(path, "utf8"),
         /(?:authFirestore|firestoreRest|createGoogleAccessToken|firestore\.googleapis\.com)/,
         relative(repositoryRoot, path),
+      );
+    }
+  }
+});
+
+test("gameplay and ratings repositories keep their factory boundaries", () => {
+  const sourceRoot = resolve(import.meta.dirname, "../src");
+  const boundaries = [
+    [
+      "gameplayRepository.ts",
+      [
+        "ratingRepository.ts",
+        "ratingCanonicalRepository.ts",
+        "eventRepository.ts",
+      ],
+    ],
+    ["ratingRepository.ts", ["gameplayRepository.ts", "eventRepository.ts"]],
+    [
+      "ratingCanonicalRepository.ts",
+      ["gameplayRepository.ts", "eventRepository.ts", "ratingRepository.ts"],
+    ],
+  ] as const;
+  for (const [entry, forbidden] of boundaries) {
+    const reachable = new Set(
+      reachableRuntimeFiles(resolve(sourceRoot, entry)),
+    );
+    for (const dependency of forbidden) {
+      assert.ok(
+        !reachable.has(resolve(sourceRoot, dependency)),
+        `${entry} depends on ${dependency}`,
       );
     }
   }

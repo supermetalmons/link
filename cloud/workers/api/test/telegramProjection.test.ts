@@ -13,7 +13,7 @@ import { eventReadFixture } from "./eventReadFixture.ts";
 import type {
   RatingProjectionRepository,
   RatingUpdateData,
-} from "../src/gameplayRepository.ts";
+} from "../src/ratingContracts.ts";
 import {
   automatchSweepTasks,
   handleTelegramProjectionMessage,

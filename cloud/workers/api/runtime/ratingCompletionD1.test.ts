@@ -1,11 +1,10 @@
+import { createEventProgressOutboxWriter } from "../src/eventRepository.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { readRatingCompletion } from "../src/ratingCompletionD1.ts";
-import {
-  createGameplayRepository,
-  createRatingRepository,
-} from "../src/gameplayRepository.ts";
+import { createGameplayRepository } from "../src/gameplayRepository.ts";
+import { createRatingRepository } from "../src/ratingRepository.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
 const testEnv = env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] };
@@ -102,8 +101,9 @@ describe("D1 rating completion evidence", () => {
       ),
     ).toBe(false);
     const rating = createRatingRepository(
-      testEnv,
+      testEnv.PROFILE_DB,
       createGameplayRepository(testEnv),
+      createEventProgressOutboxWriter(testEnv.EVENT_DB),
     );
     await expect(
       rating.tryAcquireRatingLease({
@@ -134,7 +134,11 @@ describe("D1 rating completion evidence", () => {
       ),
     ).toBe(false);
     const gameplay = createGameplayRepository(testEnv);
-    const rating = createRatingRepository(testEnv, gameplay);
+    const rating = createRatingRepository(
+      testEnv.PROFILE_DB,
+      gameplay,
+      createEventProgressOutboxWriter(testEnv.EVENT_DB),
+    );
     await expect(
       rating.tryAcquireRatingLease({
         inviteId: "legacy-invite",

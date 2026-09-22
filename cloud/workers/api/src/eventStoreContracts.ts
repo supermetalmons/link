@@ -92,3 +92,8 @@ export type EventStore = EventReads &
     transactEventTelegramProjectionOutbox: EventRecordTransaction;
     transactEventTelegramProjectionState: EventRecordTransaction;
   };
+
+export type EventProgressOutboxWriter = Pick<
+  EventStore,
+  "putEventProgressOutbox"
+>;

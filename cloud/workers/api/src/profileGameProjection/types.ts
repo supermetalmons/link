@@ -1,7 +1,5 @@
-import type {
-  GameplayRepository,
-  RatingProfileGameProjectionRepository,
-} from "../gameplayRepository.ts";
+import type { GameplayRepository } from "../gameplayRepository.ts";
+import type { RatingProfileGameProjectionRepository } from "../ratingContracts.ts";
 import type { EventStore } from "../eventStoreContracts.ts";
 import type { EventOutboxReads } from "../eventOutboxReadRepository.ts";
 import type {

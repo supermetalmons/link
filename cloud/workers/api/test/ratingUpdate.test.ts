@@ -17,7 +17,7 @@ import type {
   RatingProfile,
   RatingRepository,
   RatingUpdateData,
-} from "../src/gameplayRepository.ts";
+} from "../src/ratingContracts.ts";
 import type {
   ProfileOwnershipQuery,
   ProfileOwnershipSnapshot,

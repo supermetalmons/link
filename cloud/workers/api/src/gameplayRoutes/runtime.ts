@@ -4,10 +4,8 @@ import {
   createGameplayCoordinationStores,
   type GameplayCoordinationStores,
 } from "../gameplayCoordinationD1.ts";
-import type {
-  GameplayRepository,
-  RatingRepository,
-} from "../gameplayRepository.ts";
+import type { GameplayRepository } from "../gameplayRepository.ts";
+import type { RatingRepository } from "../ratingContracts.ts";
 import type {
   StartMatchTimerDependencies,
   ClaimMatchVictoryByTimerDependencies,

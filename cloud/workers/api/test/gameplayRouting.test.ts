@@ -6,10 +6,8 @@ import {
   readGameplayBody,
   type GameplayRouteDependencies,
 } from "../src/gameplayRoute.ts";
-import type {
-  GameplayRepository,
-  RatingRepository,
-} from "../src/gameplayRepository.ts";
+import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import type { RatingRepository } from "../src/ratingContracts.ts";
 import { handleRequest } from "../src/router.ts";
 import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
 import { createAutomatchPersistenceStub } from "./automatchPersistenceTestUtils.ts";

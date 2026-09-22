@@ -1,12 +1,12 @@
 import type { EventMutation } from "../../../runtime/eventCommands.js";
 import type { GameSessionChange } from "../../../runtime/gameSessionChanges.js";
 import type { EventStore } from "../src/eventStoreContracts.ts";
+import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import type {
-  GameplayRepository,
   RatingCommitPlan,
   RatingCompletionPatch,
   RatingProfilePatch,
-} from "../src/gameplayRepository.ts";
+} from "../src/ratingContracts.ts";
 import type {
   AutomatchRepository,
   GameSessionRepository,

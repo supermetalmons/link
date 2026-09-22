@@ -1,6 +1,6 @@
 import { createEventLockManagerCore } from "../../../../runtime/events/lockManagerCore.js";
 import { HISTORICAL_MATCH_ARCHIVE_VERSION } from "../historicalMatches.ts";
-import type { RatingProfileGameProjectionRepository } from "../gameplayRepository.ts";
+import type { RatingProfileGameProjectionRepository } from "../ratingContracts.ts";
 import { isSafeRecordKey } from "../recordKeys.ts";
 import {
   parseAutomatchProfileGameProjectionOutbox,
