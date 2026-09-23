@@ -102,6 +102,10 @@ import {
   transitionToHome,
 } from "../session/sessionTransitionPort";
 import { getSessionGuard } from "./matchSession";
+import {
+  createRematchHistory,
+  HISTORICAL_MATCH_RETRY_DELAY_MS as historicalMatchPairRetryDelayMs,
+} from "./rematchHistory";
 import { syncOwnProfileMiningState } from "../services/ownProfileMiningHydration";
 import { sessionAuth } from "../session/sessionAuth";
 import {
@@ -504,17 +508,13 @@ let boardRenderSessionId = 0;
 let moveHistoryFlipOverrideSessionId: number | null = null;
 let moveHistoryFlipOverrideEnabled = false;
 let moveHistoryFlipOverrideBaseBoardFlipped: boolean | null = null;
-const historicalMatchPairCache = new Map<string, HistoricalMatchPair | null>();
-const provisionalHistoricalMatchIds = new Set<string>();
-const historicalScoreCache = new Map<
-  string,
-  { white: number; black: number }
->();
-const historicalMatchPairMissUntilByMatchId = new Map<string, number>();
-const historicalMatchPairMissCooldownMs = 3000;
-const historicalMatchPairRetryDelayMs = 250;
-let rematchScorePrefetchPromise: Promise<boolean> | null = null;
-let rematchScorePrefetchSignature = "";
+const rematchHistory = createRematchHistory({
+  loadMatchPair: (matchId) => connection.loadHistoricalMatchPair(matchId),
+  scoreFromPair: getScoreFromHistoricalPair,
+  createSessionGuard: getSessionGuard,
+  setTimeout: setManagedGameTimeout,
+  clearTimeout: clearManagedGameTimeout,
+});
 let localRematchSeriesIdSeed = 1;
 let localRematchSeriesInviteId: string | null = null;
 let localActiveRematchMatchId: string | null = null;
@@ -1057,12 +1057,7 @@ function shouldPreserveHistoricalViewForCurrentInvite(): boolean {
 }
 
 function clearRematchHistoryCaches() {
-  historicalMatchPairCache.clear();
-  provisionalHistoricalMatchIds.clear();
-  historicalScoreCache.clear();
-  historicalMatchPairMissUntilByMatchId.clear();
-  rematchScorePrefetchSignature = "";
-  rematchScorePrefetchPromise = null;
+  rematchHistory.reset();
   resetLocalRematchSeriesState();
 }
 
@@ -1204,7 +1199,7 @@ function snapshotCurrentLocalMatchForHistory() {
     resignedColor: localColorFromMonsColor(resignedColor),
   };
   localRematchSnapshotsByMatchId.set(snapshot.matchId, snapshot);
-  historicalScoreCache.set(snapshot.matchId, {
+  rematchHistory.setScore(snapshot.matchId, {
     white: snapshot.whiteScore,
     black: snapshot.blackScore,
   });
@@ -1226,7 +1221,7 @@ function advanceLocalRematchSeriesToNextMatch() {
   );
   localActiveRematchMatchId = nextMatchId;
   localRematchMatchIds.push(nextMatchId);
-  historicalScoreCache.delete(nextMatchId);
+  rematchHistory.deleteScore(nextMatchId);
 }
 
 function baseBoardShouldBeFlipped(): boolean {
@@ -1487,26 +1482,6 @@ function getScoreFromHistoricalPair(
   };
 }
 
-function cacheHistoricalScore(
-  matchId: string,
-  pair: HistoricalMatchPair,
-): boolean {
-  const score = getScoreFromHistoricalPair(matchId, pair);
-  if (!score) {
-    return false;
-  }
-  const previous = historicalScoreCache.get(matchId);
-  if (
-    previous &&
-    previous.white === score.white &&
-    previous.black === score.black
-  ) {
-    return false;
-  }
-  historicalScoreCache.set(matchId, score);
-  return true;
-}
-
 function mergeHistoricalMatchPresentation(
   pair: HistoricalMatchPair,
   archivedPair: HistoricalMatchPair,
@@ -1532,105 +1507,28 @@ function mergeHistoricalMatchPresentation(
   return merged;
 }
 
-function cacheProvisionalHistoricalMatchPair(pair: HistoricalMatchPair): void {
-  if (
-    historicalMatchPairCache.get(pair.matchId) &&
-    !provisionalHistoricalMatchIds.has(pair.matchId)
-  )
-    return;
-  historicalMatchPairCache.set(pair.matchId, pair);
-  provisionalHistoricalMatchIds.add(pair.matchId);
-  historicalMatchPairMissUntilByMatchId.delete(pair.matchId);
-}
-
 function scheduleHistoricalMatchArchiveRefresh(
   matchId: string,
   viewId: number,
-  delayMs = historicalMatchPairRetryDelayMs,
 ): void {
-  if (!isOnlineGame || !provisionalHistoricalMatchIds.has(matchId)) return;
-  const sessionGuard = getSessionGuard();
-  const isSelected = () =>
-    sessionGuard() &&
-    displayedHistoryViewId === viewId &&
-    boardViewMode === "historicalView" &&
-    viewedRematchMatchId === matchId;
-  setManagedGameTimeout(
-    () => {
-      void ensureHistoricalMatchPair(matchId, { forceRefresh: true })
-        .then((pair) => {
-          if (!isSelected()) return;
-          if (provisionalHistoricalMatchIds.has(matchId)) {
-            scheduleHistoricalMatchArchiveRefresh(
-              matchId,
-              viewId,
-              historicalMatchPairMissCooldownMs,
-            );
-            return;
-          }
-          if (!pair || !viewedRematchPair) return;
-          viewedRematchPair = mergeHistoricalMatchPresentation(
-            viewedRematchPair,
-            pair,
-          );
-          refreshDisplayedMatchPresentation();
-          triggerMoveHistoryPopupReload();
-        })
-        .catch((error) =>
-          console.error("Error refreshing historical match appearance:", error),
-        );
+  if (!isOnlineGame) return;
+  rematchHistory.refreshArchive(matchId, {
+    isCurrent: () =>
+      displayedHistoryViewId === viewId &&
+      boardViewMode === "historicalView" &&
+      viewedRematchMatchId === matchId,
+    onRefresh: (pair) => {
+      if (!viewedRematchPair) return;
+      viewedRematchPair = mergeHistoricalMatchPresentation(
+        viewedRematchPair,
+        pair,
+      );
+      refreshDisplayedMatchPresentation();
+      triggerMoveHistoryPopupReload();
     },
-    delayMs,
-    isSelected,
-  );
-}
-
-async function ensureHistoricalMatchPair(
-  matchId: string,
-  options?: { forceRefresh?: boolean },
-): Promise<HistoricalMatchPair | null> {
-  const forceRefresh = options?.forceRefresh === true;
-  const cachedPair = historicalMatchPairCache.get(matchId) ?? null;
-  const provisional = provisionalHistoricalMatchIds.has(matchId);
-  if (!forceRefresh && historicalMatchPairCache.has(matchId) && !provisional) {
-    return cachedPair;
-  }
-  if (!forceRefresh) {
-    const now = Date.now();
-    const missUntil = historicalMatchPairMissUntilByMatchId.get(matchId);
-    if (missUntil !== undefined) {
-      if (missUntil > now) {
-        return provisional ? cachedPair : null;
-      }
-      historicalMatchPairMissUntilByMatchId.delete(matchId);
-    }
-  }
-  let pair: HistoricalMatchPair | null = null;
-  const sessionGuard = getSessionGuard();
-  try {
-    pair = await connection.loadHistoricalMatchPair(matchId);
-  } catch {
-    pair = null;
-  }
-  if (!sessionGuard()) return null;
-  if (pair) {
-    historicalMatchPairCache.set(matchId, pair);
-    provisionalHistoricalMatchIds.delete(matchId);
-    historicalMatchPairMissUntilByMatchId.delete(matchId);
-    cacheHistoricalScore(matchId, pair);
-    return pair;
-  }
-  const latestCachedPair = historicalMatchPairCache.get(matchId) ?? null;
-  if (latestCachedPair && !provisionalHistoricalMatchIds.has(matchId))
-    return latestCachedPair;
-  historicalMatchPairMissUntilByMatchId.set(
-    matchId,
-    Date.now() + historicalMatchPairMissCooldownMs,
-  );
-  if (!forceRefresh) {
-    return provisional ? latestCachedPair : null;
-  }
-  return latestCachedPair;
+    onError: (error) =>
+      console.error("Error refreshing historical match appearance:", error),
+  });
 }
 
 function getMatchMovesByColor(
@@ -1830,7 +1728,7 @@ export function getRematchSeriesNavigatorItems(): RematchSeriesNavigatorItem[] {
           whiteScore = localSnapshot.whiteScore;
           blackScore = localSnapshot.blackScore;
         }
-        const cachedScore = historicalScoreCache.get(descriptorItem.matchId);
+        const cachedScore = rematchHistory.getScore(descriptorItem.matchId);
         if (!localSnapshot && cachedScore) {
           whiteScore = cachedScore.white;
           blackScore = cachedScore.black;
@@ -1866,52 +1764,11 @@ export async function preloadRematchSeriesScores(): Promise<boolean> {
       (descriptorItem) => descriptorItem.matchId !== descriptor.activeMatchId,
     )
     .map((descriptorItem) => descriptorItem.matchId);
-  const signature = `${descriptor.activeMatchId ?? ""}|${targetMatchIds.join("|")}`;
-  if (
-    rematchScorePrefetchPromise &&
-    rematchScorePrefetchSignature === signature
-  ) {
-    return rematchScorePrefetchPromise;
-  }
-  rematchScorePrefetchSignature = signature;
-  rematchScorePrefetchPromise = (async () => {
-    let didChange = false;
-    const pendingMatchIds = targetMatchIds.filter(
-      (matchId) => !historicalScoreCache.has(matchId),
-    );
-    if (pendingMatchIds.length === 0) {
-      return false;
-    }
-    let nextIndex = 0;
-    const worker = async () => {
-      while (nextIndex < pendingMatchIds.length) {
-        const currentIndex = nextIndex;
-        nextIndex += 1;
-        const matchId = pendingMatchIds[currentIndex];
-        if (!matchId || historicalScoreCache.has(matchId)) {
-          continue;
-        }
-        const hadScoreBefore = historicalScoreCache.has(matchId);
-        const pair = await ensureHistoricalMatchPair(matchId);
-        if (!pair) {
-          continue;
-        }
-        const hasScoreAfterEnsure = historicalScoreCache.has(matchId);
-        const didChangeScore = cacheHistoricalScore(matchId, pair);
-        if ((!hadScoreBefore && hasScoreAfterEnsure) || didChangeScore) {
-          didChange = true;
-          triggerMoveHistoryPopupReload();
-        }
-      }
-    };
-    await Promise.all([worker(), worker()]);
-    return didChange;
-  })();
-  try {
-    return await rematchScorePrefetchPromise;
-  } finally {
-    rematchScorePrefetchPromise = null;
-  }
+  return rematchHistory.prefetchScores(
+    descriptor.activeMatchId,
+    targetMatchIds,
+    triggerMoveHistoryPopupReload,
+  );
 }
 
 export async function didSelectRematchSeriesMatch(
@@ -1953,8 +1810,8 @@ export async function didSelectRematchSeriesMatch(
   }
   if (isOnlineGame) {
     const hadRecentMissBeforeLookup =
-      (historicalMatchPairMissUntilByMatchId.get(matchId) ?? 0) > Date.now();
-    let pair = await ensureHistoricalMatchPair(matchId);
+      rematchHistory.hasRecentMiss(matchId);
+    let pair = await rematchHistory.load(matchId);
     if (!pair && !hadRecentMissBeforeLookup) {
       if (
         requestToken !== viewedRematchRequestToken ||
@@ -1962,7 +1819,7 @@ export async function didSelectRematchSeriesMatch(
       ) {
         return false;
       }
-      pair = await ensureHistoricalMatchPair(matchId, { forceRefresh: true });
+      pair = await rematchHistory.load(matchId, { forceRefresh: true });
     }
     if (
       requestToken !== viewedRematchRequestToken ||
@@ -1988,7 +1845,7 @@ export async function didSelectRematchSeriesMatch(
       ) {
         return false;
       }
-      const refreshedPair = await ensureHistoricalMatchPair(matchId, {
+      const refreshedPair = await rematchHistory.load(matchId, {
         forceRefresh: true,
       });
       if (
@@ -2014,7 +1871,7 @@ export async function didSelectRematchSeriesMatch(
         ) {
           pair = refreshedPair;
           historicalGame = refreshedHistoricalGame;
-        } else if (!provisionalHistoricalMatchIds.has(matchId)) {
+        } else if (!rematchHistory.isProvisional(matchId)) {
           pair = mergeHistoricalMatchPresentation(pair, refreshedPair);
         }
       }
@@ -2688,10 +2545,10 @@ export function didJustCreateRematchProposalSuccessfully(
     previousMatchPair?.hostMatch && previousMatchPair?.guestMatch
   );
   if (previousMatchId && previousMatchPair && hasCompleteHistoricalPair) {
-    cacheProvisionalHistoricalMatchPair(previousMatchPair);
+    rematchHistory.seedProvisional(previousMatchPair);
   }
   if (previousMatchId) {
-    historicalScoreCache.set(previousMatchId, {
+    rematchHistory.setScore(previousMatchId, {
       white: game.scores[MonsRules.Color.White],
       black: game.scores[MonsRules.Color.Black],
     });
@@ -2938,7 +2795,7 @@ function navigateFromWaitingLiveToLastCompletedMatch() {
       : null;
   let didNavigate = false;
   if (lastMatch) {
-    const cachedPair = historicalMatchPairCache.get(lastMatch.matchId);
+    const cachedPair = rematchHistory.getCachedPair(lastMatch.matchId);
     if (cachedPair) {
       const historicalGame = buildHistoricalGameModel(
         lastMatch.matchId,

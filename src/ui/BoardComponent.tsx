@@ -474,6 +474,85 @@ const useVideoReactionSlot = (
   };
 };
 
+type BoardVideoReactionProps = Pick<
+  ReturnType<typeof useVideoReactionSlot>,
+  | "appearing"
+  | "fadeOutInstance"
+  | "fading"
+  | "id"
+  | "instance"
+  | "scheduleLifetimeTimeout"
+  | "setElementRef"
+  | "visible"
+>;
+
+const BoardVideoReaction: React.FC<BoardVideoReactionProps> = ({
+  appearing,
+  fadeOutInstance,
+  fading,
+  id,
+  instance,
+  scheduleLifetimeTimeout,
+  setElementRef,
+  visible,
+}) => {
+  if (!visible || id === null) {
+    return null;
+  }
+
+  return (
+    <video
+      key={`${id}-${instance}`}
+      ref={setElementRef}
+      style={{
+        position: "absolute",
+        left: "50%",
+        top: "50%",
+        transform: appearing
+          ? "translate(-50%, -50%) scale(0.3) rotate(-10deg)"
+          : fading
+            ? "translate(-50%, -50%) scale(0.8) rotate(0deg)"
+            : "translate(-50%, -50%) scale(1) rotate(0deg)",
+        width: "100%",
+        height: "100%",
+        opacity: appearing ? 0 : fading ? 0 : 1,
+        transition: appearing
+          ? "opacity 0.3s ease-out, transform 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55)"
+          : fading
+            ? "opacity 0.2s ease-in, transform 0.2s ease-in"
+            : "opacity 0.3s ease-out, transform 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55)",
+      }}
+      autoPlay
+      muted
+      preload="auto"
+      playsInline
+      onEnded={() => {
+        fadeOutInstance(instance);
+      }}
+      onError={(event) => {
+        if (isVideoReactionElementError(event)) {
+          fadeOutInstance(instance);
+        }
+      }}
+      onPlaying={(event) => {
+        scheduleLifetimeTimeout(
+          getVideoReactionPlaybackLifetimeMs(event.currentTarget),
+          instance,
+        );
+      }}
+    >
+      <source
+        src={`https://cdn.lil.org/mons/emojipack/swagpack/video/${id}.mov`}
+        type='video/quicktime; codecs="hvc1"'
+      />
+      <source
+        src={`https://cdn.lil.org/mons/emojipack/swagpack/video/${id}.webm`}
+        type="video/webm"
+      />
+    </video>
+  );
+};
+
 const toOverlayFontSizePx = (
   svgFontSize: number,
   boardViewportRect: BoardViewportRect,
@@ -2331,61 +2410,16 @@ const BoardComponent: React.FC = () => {
                 pointerEvents: "none",
               }}
             />
-            {opponentVideoVisible && opponentVideoId !== null && (
-              <video
-                key={`${opponentVideoId}-${opponentVideoInstance}`}
-                ref={setOpponentVideoElementRef}
-                style={{
-                  position: "absolute",
-                  left: "50%",
-                  top: "50%",
-                  transform: opponentVideoAppearing
-                    ? "translate(-50%, -50%) scale(0.3) rotate(-10deg)"
-                    : opponentVideoFading
-                      ? "translate(-50%, -50%) scale(0.8) rotate(0deg)"
-                      : "translate(-50%, -50%) scale(1) rotate(0deg)",
-                  width: "100%",
-                  height: "100%",
-                  opacity: opponentVideoAppearing
-                    ? 0
-                    : opponentVideoFading
-                      ? 0
-                      : 1,
-                  transition: opponentVideoAppearing
-                    ? "opacity 0.3s ease-out, transform 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55)"
-                    : opponentVideoFading
-                      ? "opacity 0.2s ease-in, transform 0.2s ease-in"
-                      : "opacity 0.3s ease-out, transform 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55)",
-                }}
-                autoPlay
-                muted
-                preload="auto"
-                playsInline
-                onEnded={() => {
-                  fadeOutOpponentVideoInstance(opponentVideoInstance);
-                }}
-                onError={(event) => {
-                  if (isVideoReactionElementError(event)) {
-                    fadeOutOpponentVideoInstance(opponentVideoInstance);
-                  }
-                }}
-                onPlaying={(event) => {
-                  scheduleOpponentVideoLifetimeTimeout(
-                    getVideoReactionPlaybackLifetimeMs(event.currentTarget),
-                    opponentVideoInstance,
-                  );
-                }}
-              >
-                <source
-                  src={`https://cdn.lil.org/mons/emojipack/swagpack/video/${opponentVideoId}.mov`}
-                  type='video/quicktime; codecs="hvc1"'
-                />
-                <source
-                  src={`https://cdn.lil.org/mons/emojipack/swagpack/video/${opponentVideoId}.webm`}
-                  type="video/webm"
-                />
-              </video>
-            )}
+            <BoardVideoReaction
+              appearing={opponentVideoAppearing}
+              fadeOutInstance={fadeOutOpponentVideoInstance}
+              fading={opponentVideoFading}
+              id={opponentVideoId}
+              instance={opponentVideoInstance}
+              scheduleLifetimeTimeout={scheduleOpponentVideoLifetimeTimeout}
+              setElementRef={setOpponentVideoElementRef}
+              visible={opponentVideoVisible}
+            />
           </div>
           <div
             style={{
@@ -2411,57 +2445,16 @@ const BoardComponent: React.FC = () => {
                 pointerEvents: "none",
               }}
             />
-            {playerVideoVisible && playerVideoId !== null && (
-              <video
-                key={`${playerVideoId}-${playerVideoInstance}`}
-                ref={setPlayerVideoElementRef}
-                style={{
-                  position: "absolute",
-                  left: "50%",
-                  top: "50%",
-                  transform: playerVideoAppearing
-                    ? "translate(-50%, -50%) scale(0.3) rotate(-10deg)"
-                    : playerVideoFading
-                      ? "translate(-50%, -50%) scale(0.8) rotate(0deg)"
-                      : "translate(-50%, -50%) scale(1) rotate(0deg)",
-                  width: "100%",
-                  height: "100%",
-                  opacity: playerVideoAppearing ? 0 : playerVideoFading ? 0 : 1,
-                  transition: playerVideoAppearing
-                    ? "opacity 0.3s ease-out, transform 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55)"
-                    : playerVideoFading
-                      ? "opacity 0.2s ease-in, transform 0.2s ease-in"
-                      : "opacity 0.3s ease-out, transform 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55)",
-                }}
-                autoPlay
-                muted
-                preload="auto"
-                playsInline
-                onEnded={() => {
-                  fadeOutPlayerVideoInstance(playerVideoInstance);
-                }}
-                onError={(event) => {
-                  if (isVideoReactionElementError(event)) {
-                    fadeOutPlayerVideoInstance(playerVideoInstance);
-                  }
-                }}
-                onPlaying={(event) => {
-                  schedulePlayerVideoLifetimeTimeout(
-                    getVideoReactionPlaybackLifetimeMs(event.currentTarget),
-                    playerVideoInstance,
-                  );
-                }}
-              >
-                <source
-                  src={`https://cdn.lil.org/mons/emojipack/swagpack/video/${playerVideoId}.mov`}
-                  type='video/quicktime; codecs="hvc1"'
-                />
-                <source
-                  src={`https://cdn.lil.org/mons/emojipack/swagpack/video/${playerVideoId}.webm`}
-                  type="video/webm"
-                />
-              </video>
-            )}
+            <BoardVideoReaction
+              appearing={playerVideoAppearing}
+              fadeOutInstance={fadeOutPlayerVideoInstance}
+              fading={playerVideoFading}
+              id={playerVideoId}
+              instance={playerVideoInstance}
+              scheduleLifetimeTimeout={schedulePlayerVideoLifetimeTimeout}
+              setElementRef={setPlayerVideoElementRef}
+              visible={playerVideoVisible}
+            />
           </div>
           {overlayState.svgElement && (
             <div

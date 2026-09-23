@@ -20,6 +20,8 @@ registerHooks({
 
 const { countRecordedMovesInHistoricalPair, getTrustedGameFromMatchPair } =
   await import("../src/game/historicalMatchModels.ts");
+const { createRematchHistory, HISTORICAL_MATCH_RETRY_DELAY_MS } =
+  await import("../src/game/rematchHistory.ts");
 
 const source = ts.createSourceFile(
   "gameController.ts",
@@ -31,9 +33,7 @@ const source = ts.createSourceFile(
   true,
 );
 const functions = [
-  "cacheProvisionalHistoricalMatchPair",
   "mergeHistoricalMatchPresentation",
-  "ensureHistoricalMatchPair",
   "scheduleHistoricalMatchArchiveRefresh",
   "enterHistoricalView",
   "clearViewedRematchState",
@@ -70,34 +70,39 @@ const deferred = () => {
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 function harness(load = async () => null, buildGame = () => ({})) {
-  const cache = new Map();
-  const provisional = new Set();
   const timers = [];
   const retryWaits = [];
+  let nextTimerId = 0;
   let loads = 0;
   let paints = 0;
   let sessionVersion = 1;
+  const getSessionGuard = () => {
+    const captured = sessionVersion;
+    return () => captured === sessionVersion;
+  };
+  const rematchHistory = createRematchHistory({
+    loadMatchPair: async (matchId) => {
+      loads++;
+      return load(matchId);
+    },
+    scoreFromPair: () => null,
+    createSessionGuard: getSessionGuard,
+    setTimeout: (callback, delay) => {
+      const id = ++nextTimerId;
+      timers.push({ id, callback, delay });
+      return id;
+    },
+    clearTimeout: (id) => {
+      const index = timers.findIndex((timer) => timer.id === id);
+      if (index !== -1) timers.splice(index, 1);
+    },
+  });
   const dependencies = {
-    historicalMatchPairCache: cache,
-    provisionalHistoricalMatchIds: provisional,
-    historicalMatchPairMissUntilByMatchId: new Map(),
-    historicalMatchPairMissCooldownMs: 3000,
-    historicalMatchPairRetryDelayMs: 250,
+    rematchHistory,
+    historicalMatchPairRetryDelayMs: HISTORICAL_MATCH_RETRY_DELAY_MS,
     isOnlineGame: true,
-    connection: {
-      loadHistoricalMatchPair: async (matchId) => {
-        loads++;
-        return load(matchId);
-      },
-      setWagerViewMatchId: () => {},
-    },
-    getSessionGuard: () => {
-      const captured = sessionVersion;
-      return () => captured === sessionVersion;
-    },
-    cacheHistoricalScore: () => {},
-    setManagedGameTimeout: (callback, delay, guard) =>
-      timers.push({ callback, delay, guard }),
+    connection: { setWagerViewMatchId: () => {} },
+    getSessionGuard,
     refreshDisplayedMatchPresentation: () => {
       paints++;
     },
@@ -149,8 +154,8 @@ function harness(load = async () => null, buildGame = () => ({})) {
   const api = new Function(
     ...Object.keys(dependencies),
     `${outputText}; return {
-    provisional: cacheProvisionalHistoricalMatchPair,
-    load: ensureHistoricalMatchPair,
+    provisional: rematchHistory.seedProvisional,
+    load: rematchHistory.load,
     select: (pair) => enterHistoricalView(pair.matchId, pair, {}, boardRenderSessionId),
     navigate: didSelectRematchSeriesMatch,
     displayed: () => viewedRematchPair,
@@ -160,8 +165,7 @@ function harness(load = async () => null, buildGame = () => ({})) {
   )(...Object.values(dependencies));
   return {
     ...api,
-    cache,
-    provisionalIds: provisional,
+    history: rematchHistory,
     timers,
     retryWaits,
     loads: () => loads,
@@ -169,13 +173,12 @@ function harness(load = async () => null, buildGame = () => ({})) {
     runTimer: async () => {
       const timer = timers.shift();
       assert.ok(timer);
-      if (timer.guard()) timer.callback();
+      timer.callback();
       await flush();
     },
     invalidate: () => {
       sessionVersion++;
-      cache.clear();
-      provisional.clear();
+      rematchHistory.reset();
     },
   };
 }
@@ -247,8 +250,8 @@ test("short takeback history adopts refreshed archive cosmetics without replacin
   assert.deepEqual(h.retryWaits, [250]);
   assert.deepEqual(h.displayed(), archived);
   assert.equal(h.displayedGame(), selectedGame);
-  assert.equal(h.cache.get(seed.matchId), archived);
-  assert.equal(h.provisionalIds.has(seed.matchId), false);
+  assert.equal(h.history.getCachedPair(seed.matchId), archived);
+  assert.equal(h.history.isProvisional(seed.matchId), false);
   assert.equal(h.timers.length, 0);
 });
 
@@ -278,7 +281,7 @@ test("short takeback history still selects a refreshed model with more gameplay"
   assert.equal(await h.navigate(seed.matchId), true);
   assert.equal(h.displayed(), archived);
   assert.equal(h.displayedGame(), refreshedGame);
-  assert.equal(h.provisionalIds.has(seed.matchId), false);
+  assert.equal(h.history.isProvisional(seed.matchId), false);
   assert.equal(h.timers.length, 0);
 });
 
@@ -300,8 +303,8 @@ test("short takeback history remains provisional when the archive is absent or f
     assert.equal(h.loads(), 2);
     assert.equal(h.displayed(), seed);
     assert.equal(h.displayedGame(), selectedGame);
-    assert.equal(h.cache.get(seed.matchId), seed);
-    assert.equal(h.provisionalIds.has(seed.matchId), true);
+    assert.equal(h.history.getCachedPair(seed.matchId), seed);
+    assert.equal(h.history.isProvisional(seed.matchId), true);
     assert.equal(h.timers.length, 1);
   }
 });
@@ -310,10 +313,10 @@ test("pre-proposal legacy pairs fetch the authoritative archive and never overwr
   const archived = pair(1001);
   const h = harness(async () => archived);
   h.provisional(pair());
-  assert.equal(h.provisionalIds.has("invite"), true);
+  assert.equal(h.history.isProvisional("invite"), true);
   assert.deepEqual(await h.load("invite"), archived);
   assert.equal(h.loads(), 1);
-  assert.equal(h.provisionalIds.has("invite"), false);
+  assert.equal(h.history.isProvisional("invite"), false);
   h.provisional(pair(9));
   assert.deepEqual(await h.load("invite"), archived);
   assert.equal(h.loads(), 1);
@@ -342,7 +345,7 @@ test("instant provisional history retries archival and refreshes frozen cosmetic
     emojiId: 1001,
     aura: "rainbow",
   });
-  assert.deepEqual(h.cache.get("invite"), archived);
+  assert.deepEqual(h.history.getCachedPair("invite"), archived);
 });
 
 test("archive completion cannot repaint a different board view", async () => {
@@ -428,11 +431,13 @@ test("session invalidation stops a queued historical archive refresh before it l
   h.provisional(pair());
   h.select(pair());
   const paints = h.paints();
+  const queued = h.timers[0];
   h.invalidate();
-  await h.runTimer();
+  queued.callback();
+  await flush();
   assert.equal(h.loads(), 0);
   assert.equal(h.paints(), paints);
-  assert.equal(h.cache.size, 0);
+  assert.equal(h.history.getCachedPair("invite"), null);
   assert.equal(h.timers.length, 0);
 });
 
@@ -444,8 +449,8 @@ test("archive reads cannot repopulate a torn-down session's history cache", asyn
   h.invalidate();
   pending.resolve(pair(1001));
   assert.equal(await reading, null);
-  assert.equal(h.cache.size, 0);
-  assert.equal(h.provisionalIds.size, 0);
+  assert.equal(h.history.getCachedPair("invite"), null);
+  assert.equal(h.history.isProvisional("invite"), false);
 });
 
 test("an overlapping older archive miss cannot reinstate provisional cosmetics after archival succeeds", async () => {
@@ -460,5 +465,5 @@ test("an overlapping older archive miss cannot reinstate provisional cosmetics a
   assert.deepEqual(await h.load("invite"), archived);
   older.resolve(null);
   assert.deepEqual(await first, archived);
-  assert.equal(h.provisionalIds.has("invite"), false);
+  assert.equal(h.history.isProvisional("invite"), false);
 });

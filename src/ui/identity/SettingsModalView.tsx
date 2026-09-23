@@ -5,7 +5,6 @@ import React, {
   useRef,
   useState,
 } from "react";
-import type { AuthVerificationResponse } from "@mons/shared/auth";
 import styled from "styled-components";
 import {
   ModalOverlay,
@@ -38,6 +37,8 @@ import {
   subscribeSettingsAppleFlowProgress,
 } from "./authFlowState";
 import { useAppleAuthFlow } from "./useAppleAuthFlow";
+import { useWalletAuthFlow } from "./useWalletAuthFlow";
+import type { WalletAuthFlowOptions } from "./walletAuthFlowController";
 
 const SettingsPopup = styled(ModalPopup)`
   padding: 20px;
@@ -282,7 +283,6 @@ const InlineAuthError = styled.div`
 `;
 
 type MethodKey = "apple" | "eth" | "sol" | "x";
-type NonAppleMethodKey = Exclude<MethodKey, "apple">;
 type LinkedMethods = Record<MethodKey, boolean>;
 type PendingDisconnectStep = "remove" | "confirm";
 type PendingDisconnectState = {
@@ -313,8 +313,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [busyMethod, setBusyMethod] = useState<MethodKey | null>(null);
   const [pendingDisconnectState, setPendingDisconnectState] =
     useState<PendingDisconnectState | null>(null);
-  const [solanaConnectText, setSolanaConnectText] = useState<string>("Connect");
-  const [ethConnectText, setEthConnectText] = useState<string>("Connect");
   const { requestWalletSelection, pickerElement } = useEthereumWalletPicker();
   const [isGlobalAppleFlowInProgress, setIsGlobalAppleFlowInProgress] =
     useState<boolean>(getSettingsAppleFlowInProgress);
@@ -324,8 +322,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const isMountedRef = useRef(true);
   const previousGlobalAppleFlowRef = useRef(getSettingsAppleFlowInProgress());
   const pendingDisconnectTimeoutRef = useRef<number | null>(null);
-  const solanaNotFoundTimeoutRef = useRef<number | null>(null);
-  const ethNotFoundTimeoutRef = useRef<number | null>(null);
+  const activeWalletMethodRef = useRef<"sol" | "eth" | null>(null);
   const hasLoadedLinkedMethodsRef = useRef(false);
   const shouldRefreshAfterAppleFlowLoadRef = useRef(false);
   const appliedXInlineMessageIdRef = useRef<number | null>(
@@ -401,19 +398,57 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     },
   });
 
-  const clearSolanaNotFoundTimeout = useCallback(() => {
-    if (solanaNotFoundTimeoutRef.current !== null) {
-      window.clearTimeout(solanaNotFoundTimeoutRef.current);
-      solanaNotFoundTimeoutRef.current = null;
-    }
-  }, []);
-
-  const clearEthNotFoundTimeout = useCallback(() => {
-    if (ethNotFoundTimeoutRef.current !== null) {
-      window.clearTimeout(ethNotFoundTimeoutRef.current);
-      ethNotFoundTimeoutRef.current = null;
-    }
-  }, []);
+  const walletFlowOptions = (method: "sol" | "eth"): WalletAuthFlowOptions => ({
+    canStart: () =>
+      !isLoading &&
+      busyMethod === null &&
+      activeWalletMethodRef.current === null,
+    onStart: () => {
+      activeWalletMethodRef.current = method;
+      setAuthMessage("");
+      setBusyMethod(method);
+    },
+    onVerified: (result, mounted) => {
+      if (!mounted) return;
+      if (result.ok === true && handleLoginSuccess(result)) {
+        setAuthMessage("");
+        setAuthStatusGlobally("authenticated");
+      }
+    },
+    onError: (error) => {
+      console.error(`Failed to connect ${method}:`, error);
+      const cooldownMessage = formatAuthCooldownErrorMessage(error);
+      if (cooldownMessage) setAuthMessage(cooldownMessage);
+    },
+    onSettled: async (mounted) => {
+      if (activeWalletMethodRef.current === method) {
+        activeWalletMethodRef.current = null;
+      }
+      if (mounted) {
+        setBusyMethod((current) => (current === method ? null : current));
+        await refreshLinkedMethods();
+      }
+    },
+  });
+  const { state: solanaState, start: runSolanaConnectFlow } = useWalletAuthFlow(
+    {
+      ...walletFlowOptions("sol"),
+      method: "sol",
+      requestWalletSelection,
+      notFoundDurationMs: 650,
+    },
+  );
+  const { state: ethereumState, start: runEthereumConnectFlow } =
+    useWalletAuthFlow({
+      ...walletFlowOptions("eth"),
+      method: "eth",
+      requestWalletSelection,
+      notFoundDurationMs: 650,
+    });
+  const solanaConnectText =
+    solanaState === "not-found" ? "Not Found" : "Connect";
+  const ethConnectText =
+    ethereumState === "not-found" ? "Not Found" : "Connect";
 
   const clearPendingDisconnectTimeout = useCallback(() => {
     if (pendingDisconnectTimeoutRef.current !== null) {
@@ -427,14 +462,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     return () => {
       isMountedRef.current = false;
       clearPendingDisconnectTimeout();
-      clearSolanaNotFoundTimeout();
-      clearEthNotFoundTimeout();
     };
-  }, [
-    clearPendingDisconnectTimeout,
-    clearSolanaNotFoundTimeout,
-    clearEthNotFoundTimeout,
-  ]);
+  }, [clearPendingDisconnectTimeout]);
 
   useEffect(() => {
     if (
@@ -468,32 +497,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }, 1500);
     return clearPendingDisconnectTimeout;
   }, [busyMethod, clearPendingDisconnectTimeout, pendingDisconnectState]);
-
-  useEffect(() => {
-    if (solanaConnectText !== "Not Found") {
-      clearSolanaNotFoundTimeout();
-      return;
-    }
-    clearSolanaNotFoundTimeout();
-    solanaNotFoundTimeoutRef.current = window.setTimeout(() => {
-      solanaNotFoundTimeoutRef.current = null;
-      setSolanaConnectText("Connect");
-    }, 650);
-    return clearSolanaNotFoundTimeout;
-  }, [clearSolanaNotFoundTimeout, solanaConnectText]);
-
-  useEffect(() => {
-    if (ethConnectText !== "Not Found") {
-      clearEthNotFoundTimeout();
-      return;
-    }
-    clearEthNotFoundTimeout();
-    ethNotFoundTimeoutRef.current = window.setTimeout(() => {
-      ethNotFoundTimeoutRef.current = null;
-      setEthConnectText("Connect");
-    }, 650);
-    return clearEthNotFoundTimeout;
-  }, [clearEthNotFoundTimeout, ethConnectText]);
 
   useEffect(() => {
     return subscribeSettingsAppleFlowProgress((inProgress) => {
@@ -581,109 +584,35 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
-  const runConnectFlow = useCallback(
-    async (method: NonAppleMethodKey) => {
-      setAuthMessage("");
-      setBusyMethod(method);
-      let didStartXRedirect = false;
-      try {
-        let result: AuthVerificationResponse | null = null;
-        if (method === "eth") {
-          const choice = await requestWalletSelection();
-          if (choice.status === "cancelled") {
-            return;
-          }
-          const { connectToEthereumAndSign } =
-            await import("../../connection/ethereumConnection");
-          const { message, signature, intentId } =
-            await connectToEthereumAndSign(choice.wallet);
-          clearEthNotFoundTimeout();
-          result = await connection.verifyEthAddress(
-            message,
-            signature,
-            intentId,
-          );
-        } else if (method === "sol") {
-          const { connectToSolana } =
-            await import("../../connection/solanaConnection");
-          const { publicKey, signature, intentId } = await connectToSolana();
-          clearSolanaNotFoundTimeout();
-          result = await connection.verifySolanaAddress(
-            publicKey,
-            signature,
-            intentId,
-          );
-        } else if (method === "x") {
-          const intent = await connection.beginAuthIntent("x");
-          didStartXRedirect = true;
-          await startXRedirectAuth({
-            intentId: intent.intentId,
-            consentSource: "settings",
-          });
-        }
-        if (!isMountedRef.current) {
-          return;
-        }
-
-        if (result && result.ok === true && handleLoginSuccess(result)) {
-          setAuthMessage("");
-          setAuthStatusGlobally("authenticated");
-        }
-        if (method === "sol") {
-          setSolanaConnectText("Connect");
-        }
-        if (method === "eth") {
-          setEthConnectText("Connect");
-        }
-      } catch (error) {
-        console.error(`Failed to connect ${method}:`, error);
-        if (!isMountedRef.current) {
-          return;
-        }
-        const cooldownMessage = formatAuthCooldownErrorMessage(error);
-        if (cooldownMessage) {
-          setAuthMessage(cooldownMessage);
-        } else if (method === "x") {
-          if (isXRedirectStartedError(error)) {
-            setAuthMessage("");
-          } else {
-            setAuthMessage(formatXAuthErrorMessage(error, "link"));
-          }
-        }
-        if (method === "sol") {
-          const errorMessage = error instanceof Error ? error.message : "";
-          if (errorMessage === "not found") {
-            setSolanaConnectText("Not Found");
-          } else {
-            setSolanaConnectText("Connect");
-          }
-        }
-        if (method === "eth") {
-          const errorMessage = error instanceof Error ? error.message : "";
-          if (errorMessage === "not found") {
-            setEthConnectText("Not Found");
-          } else {
-            setEthConnectText("Connect");
-          }
-        }
-      } finally {
-        if (didStartXRedirect) {
-          if (isMountedRef.current) {
-            setBusyMethod(null);
-          }
-        } else if (isMountedRef.current) {
-          setBusyMethod(null);
-          await refreshLinkedMethods();
-        }
+  const runXConnectFlow = useCallback(async () => {
+    setAuthMessage("");
+    setBusyMethod("x");
+    let didStartXRedirect = false;
+    try {
+      const intent = await connection.beginAuthIntent("x");
+      didStartXRedirect = true;
+      await startXRedirectAuth({
+        intentId: intent.intentId,
+        consentSource: "settings",
+      });
+    } catch (error) {
+      console.error("Failed to connect x:", error);
+      if (!isMountedRef.current) return;
+      const cooldownMessage = formatAuthCooldownErrorMessage(error);
+      if (cooldownMessage) {
+        setAuthMessage(cooldownMessage);
+      } else if (isXRedirectStartedError(error)) {
+        setAuthMessage("");
+      } else {
+        setAuthMessage(formatXAuthErrorMessage(error, "link"));
       }
-    },
-    [
-      clearEthNotFoundTimeout,
-      clearSolanaNotFoundTimeout,
-      refreshLinkedMethods,
-      requestWalletSelection,
-    ],
-  );
+    } finally {
+      if (isMountedRef.current) {
+        setBusyMethod(null);
+        if (!didStartXRedirect) await refreshLinkedMethods();
+      }
+    }
+  }, [refreshLinkedMethods]);
 
   const handleConnectClick = useCallback(
     (method: MethodKey) => {
@@ -692,9 +621,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         void runAppleConnectFlow();
         return;
       }
-      void runConnectFlow(method);
+      if (method === "sol") {
+        void runSolanaConnectFlow();
+      } else if (method === "eth") {
+        void runEthereumConnectFlow();
+      } else {
+        void runXConnectFlow();
+      }
     },
-    [runAppleConnectFlow, runConnectFlow],
+    [
+      runAppleConnectFlow,
+      runSolanaConnectFlow,
+      runEthereumConnectFlow,
+      runXConnectFlow,
+    ],
   );
 
   const runDisconnectFlow = useCallback(

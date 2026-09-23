@@ -62,6 +62,8 @@ import {
   getXButtonLabel,
 } from "./authFlowState";
 import { useAppleAuthFlow } from "./useAppleAuthFlow";
+import { useWalletAuthFlow } from "./useWalletAuthFlow";
+import type { WalletAuthFlowOptions } from "./walletAuthFlowController";
 import {
   type ProfileSignInApi,
   type ProfileSignInPopupMode,
@@ -240,8 +242,6 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
     const eventModalState = getEventModalState();
     return eventModalState.isOpen && !!eventModalState.eventId;
   });
-  const [solanaText, setSolanaText] = useState("Solana");
-  const [ethereumText, setEthereumText] = useState("Ethereum");
   const [inlineAuthError, setInlineAuthError] = useState("");
   const [xButtonState, setXButtonState] = useState<XButtonUiState>("idle");
   const [isPendingXSignInRedirect, setIsPendingXSignInRedirect] =
@@ -250,8 +250,6 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
     });
   const [isPendingXSignInRedirectStale, setIsPendingXSignInRedirectStale] =
     useState(false);
-  const [isSolanaConnecting, setIsSolanaConnecting] = useState(false);
-  const [isEthereumConnecting, setIsEthereumConnecting] = useState(false);
   const { requestWalletSelection, pickerElement, closePicker } =
     useEthereumWalletPicker();
   const [profileDisplayName, setProfileDisplayName] = useState(
@@ -334,6 +332,49 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
     },
   });
   const appleText = getAppleButtonLabel(appleButtonState);
+  const walletFlowOptions: WalletAuthFlowOptions = {
+    canStart: () => true,
+    onStart: () => setInlineAuthError(""),
+    onVerified: (result, mounted) => {
+      if (result.ok === true && handleLoginSuccess(result)) {
+        setAuthStatusGlobally("authenticated");
+        if (mounted) {
+          setInlineAuthError("");
+          setIsOpen(false);
+          hideShinyCard();
+        }
+      }
+    },
+    onError: (error) => {
+      const cooldownMessage = formatAuthCooldownErrorMessage(error);
+      if (cooldownMessage) setInlineAuthError(cooldownMessage);
+    },
+  };
+  const { state: solanaState, start: handleSolanaClick } = useWalletAuthFlow({
+    ...walletFlowOptions,
+    method: "sol",
+    requestWalletSelection,
+    notFoundDurationMs: 500,
+  });
+  const { state: ethereumState, start: handleEthereumClick } =
+    useWalletAuthFlow({
+      ...walletFlowOptions,
+      method: "eth",
+      requestWalletSelection,
+      notFoundDurationMs: 500,
+    });
+  const solanaText =
+    solanaState === "not-found"
+      ? "Not Found"
+      : solanaState === "verifying"
+        ? "Verifying..."
+        : "Solana";
+  const ethereumText =
+    ethereumState === "not-found"
+      ? "Not Found"
+      : ethereumState === "verifying"
+        ? "Verifying..."
+        : "Ethereum";
   const xText = getXButtonLabel(xButtonState);
   const isXBusy = xButtonState === "connecting";
   const isPendingXSignInRedirectBlockingUi =
@@ -989,92 +1030,6 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
         clearXRedirectVisibilityRecovery();
         setXButtonState("idle");
       }
-    }
-  };
-
-  const handleSolanaClick = async () => {
-    if (isSolanaConnecting) return;
-
-    setInlineAuthError("");
-    setIsSolanaConnecting(true);
-    try {
-      const { connectToSolana } =
-        await import("../../connection/solanaConnection");
-      const { publicKey, signature, intentId } = await connectToSolana();
-      setSolanaText("Verifying...");
-
-      const res = await connection.verifySolanaAddress(
-        publicKey,
-        signature,
-        intentId,
-      );
-      if (res && res.ok === true && handleLoginSuccess(res)) {
-        setInlineAuthError("");
-        setAuthStatusGlobally("authenticated");
-        setIsOpen(false);
-        hideShinyCard();
-      }
-
-      setSolanaText("Solana");
-    } catch (error) {
-      const cooldownMessage = formatAuthCooldownErrorMessage(error);
-      if (cooldownMessage) {
-        setInlineAuthError(cooldownMessage);
-      }
-      if ((error as Error).message === "not found") {
-        setSolanaText("Not Found");
-        setTimeout(() => setSolanaText("Solana"), 500);
-      } else {
-        setSolanaText("Solana");
-      }
-    } finally {
-      setIsSolanaConnecting(false);
-    }
-  };
-
-  const handleEthereumClick = async () => {
-    if (isEthereumConnecting) return;
-
-    setInlineAuthError("");
-    setIsEthereumConnecting(true);
-    try {
-      const choice = await requestWalletSelection();
-      if (choice.status === "cancelled") {
-        return;
-      }
-      const { connectToEthereumAndSign } =
-        await import("../../connection/ethereumConnection");
-      const { message, signature, intentId } = await connectToEthereumAndSign(
-        choice.wallet,
-      );
-      setEthereumText("Verifying...");
-
-      const res = await connection.verifyEthAddress(
-        message,
-        signature,
-        intentId,
-      );
-      if (res && res.ok === true && handleLoginSuccess(res)) {
-        setInlineAuthError("");
-        setAuthStatusGlobally("authenticated");
-        setIsOpen(false);
-        hideShinyCard();
-      }
-
-      setEthereumText("Ethereum");
-    } catch (error) {
-      const cooldownMessage = formatAuthCooldownErrorMessage(error);
-      if (cooldownMessage) {
-        setInlineAuthError(cooldownMessage);
-      }
-      if ((error as Error).message === "not found") {
-        setEthereumText("Not Found");
-        setTimeout(() => setEthereumText("Ethereum"), 500);
-      } else {
-        setEthereumText("Ethereum");
-      }
-    } finally {
-      setIsEthereumConnecting(false);
     }
   };
 
