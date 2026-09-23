@@ -8,7 +8,6 @@ import type {
 } from "./profileOwnership.ts";
 
 export type RatingProfile = ProfileOwnershipProfile & {
-  feb2026UniqueOpponents: string[];
   nonce: number;
   totalManaPoints: number;
 };

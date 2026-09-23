@@ -32,7 +32,7 @@ import {
   patchCanonicalProfile,
   readCanonicalChallengeReplayProfiles,
   readCanonicalRatingProfiles,
-  type CanonicalRatingProfileSnapshot,
+  type CanonicalProfileMutationSnapshot,
 } from "./profileMutationD1.ts";
 import type {
   RatingGameplayReader,
@@ -115,7 +115,7 @@ async function canonicalProfileIds(
 }
 
 function ratingProfileFromSnapshot(
-  value: CanonicalRatingProfileSnapshot | null,
+  value: CanonicalProfileMutationSnapshot | null,
 ): RatingProfile | null {
   if (!value) return null;
   const snapshot = value.profile;
@@ -124,7 +124,6 @@ function ratingProfileFromSnapshot(
     aura: profile.aura || "",
     emoji: snapshot.gameplayEmoji,
     eth: profile.eth || "",
-    feb2026UniqueOpponents: value.februaryOpponentProfileIds,
     nonce: snapshot.sortPresence.nonce ? (snapshot.sortValues.nonce ?? 0) : -1,
     profileId: profile.id,
     rating:
@@ -584,8 +583,8 @@ export function createCanonicalRatingRepository(
         ) {
           return { status: "lost" };
         }
-        let playerSnapshot: CanonicalRatingProfileSnapshot | null;
-        let opponentSnapshot: CanonicalRatingProfileSnapshot | null;
+        let playerSnapshot: CanonicalProfileMutationSnapshot | null;
+        let opponentSnapshot: CanonicalProfileMutationSnapshot | null;
         try {
           ({ player: playerSnapshot, opponent: opponentSnapshot } =
             await readCanonicalRatingProfiles(db, {

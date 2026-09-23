@@ -3,101 +3,29 @@ import {
   type SurrenderMatchRequest,
   type SurrenderMatchResponse,
 } from "@mons/shared/game-sessions";
-import {
-  parseInviteMatchIndex,
-  parseRematchIndices,
-} from "@mons/shared/rematches";
 import { AuthApiFailure } from "./authErrors.ts";
-import { isCanonicalLoginUid } from "./recordKeys.ts";
-import type { GameplayRepository } from "./gameplayRepository.ts";
 import {
-  getLoginProfileId,
-  requireProfileOwnershipSnapshot,
-} from "./profileOwnership.ts";
+  authorizeMatchMutation,
+  type MatchMutationAdmissionDependencies,
+  type MatchMutationRepository,
+} from "./matchMutationAdmission.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 
-type SurrenderRepository = Pick<
-  GameplayRepository,
-  "readInviteMetadata" | "readProfileOwnershipSnapshot"
->;
-
-export type SurrenderMatchDependencies = {
+export type SurrenderMatchDependencies = MatchMutationAdmissionDependencies & {
   surrenderCanonical: (
     request: SurrenderMatchRequest,
   ) => Promise<SurrenderMatchResponse>;
-  assertMutationAllowed?: () => Promise<void>;
-  signal?: AbortSignal;
 };
-
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
 
 export async function surrenderMatch(
   identity: RequestIdentity,
   request: SurrenderMatchRequest,
-  repository: SurrenderRepository,
+  repository: MatchMutationRepository,
   dependencies: SurrenderMatchDependencies,
 ): Promise<SurrenderMatchResponse> {
   if (!isSurrenderMatchRequest(request)) {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
   }
-  const timeout = AbortSignal.timeout(20_000);
-  const signal = dependencies.signal
-    ? AbortSignal.any([dependencies.signal, timeout])
-    : timeout;
-  signal.throwIfAborted();
-  const inviteValue = await repository.readInviteMetadata(
-    request.inviteId,
-    signal,
-  );
-  if (inviteValue === null || inviteValue === undefined) {
-    throw new AuthApiFailure(404, "not-found", "invite-not-found");
-  }
-  const invite = toRecord(inviteValue);
-  if (
-    !invite ||
-    !isCanonicalLoginUid(invite.hostId) ||
-    (invite.guestId !== null &&
-      invite.guestId !== undefined &&
-      (!isCanonicalLoginUid(invite.guestId) ||
-        invite.guestId === invite.hostId))
-  ) {
-    throw new AuthApiFailure(409, "failed-precondition", "invite-invalid");
-  }
-  if (
-    request.playerId !== invite.hostId &&
-    request.playerId !== invite.guestId
-  ) {
-    throw new AuthApiFailure(403, "permission-denied", "permission-denied");
-  }
-  if (identity.uid !== request.playerId) {
-    const ownership = await requireProfileOwnershipSnapshot(repository, {
-      loginUids: [identity.uid, request.playerId],
-      profileIds: [],
-    });
-    const profileId = getLoginProfileId(ownership, identity.uid);
-    if (
-      !profileId ||
-      profileId !== getLoginProfileId(ownership, request.playerId)
-    ) {
-      throw new AuthApiFailure(403, "permission-denied", "permission-denied");
-    }
-  }
-  const index = parseInviteMatchIndex(request.inviteId, request.matchId);
-  if (
-    index === null ||
-    (index !== 0 &&
-      ![
-        ...parseRematchIndices(invite.hostRematches),
-        ...parseRematchIndices(invite.guestRematches),
-      ].includes(index))
-  ) {
-    throw new AuthApiFailure(404, "not-found", "match-not-found");
-  }
-  signal.throwIfAborted();
-  await dependencies.assertMutationAllowed?.();
+  await authorizeMatchMutation(identity, request, repository, dependencies);
   return dependencies.surrenderCanonical(request);
 }

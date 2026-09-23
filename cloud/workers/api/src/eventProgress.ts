@@ -15,6 +15,7 @@ import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
 import { createRatingRepository } from "./ratingRepository.ts";
 import type { RatingEventProgressRepository } from "./ratingContracts.ts";
 import { PROFILE_BACKGROUND_SWEEP_LIMIT } from "./profileBackgroundLimits.ts";
+import { runRecoveryItems } from "./recoveryRunner.ts";
 import { createWorkerEventRuntime } from "./workerEventRuntime.ts";
 import {
   createEventGameplayRepository,
@@ -131,35 +132,6 @@ async function deadLetterOutbox(
   ]);
 }
 
-async function forEachConcurrent<T>(
-  values: readonly T[],
-  limit: number,
-  operation: (value: T) => Promise<void>,
-): Promise<void> {
-  let index = 0;
-  const failures: unknown[] = [];
-  const runners = Array.from(
-    { length: Math.min(limit, values.length) },
-    async () => {
-      while (index < values.length) {
-        const value = values[index];
-        index += 1;
-        try {
-          await operation(value);
-        } catch (error) {
-          failures.push(error);
-        }
-      }
-    },
-  );
-  const results = await Promise.allSettled(runners);
-  failures.push(...rejectedReasons(results));
-  if (failures.length === 1) throw failures[0];
-  if (failures.length > 1) {
-    throw new AggregateError(failures, "event-progress-records-failed");
-  }
-}
-
 async function reconcileScheduledEvents(
   env: Env,
   repository: EventProgressSweepRepository,
@@ -241,11 +213,10 @@ async function reconcileScheduledEvents(
       const rows = await recovery.listUrgent(
         discoveredAtMs + maxLeadMs + SCHEDULED_EVENT_RECOVERY_MARGIN_MS,
       );
-      await forEachConcurrent(
-        rows,
-        EVENT_PROGRESS_SWEEP_CONCURRENCY,
-        recoverCandidate,
-      );
+      await runRecoveryItems(rows, recoverCandidate, {
+        concurrency: EVENT_PROGRESS_SWEEP_CONCURRENCY,
+        aggregateErrorMessage: "event-progress-records-failed",
+      });
     })(),
     (async () => {
       const snapshot = await recovery.readCursor();
@@ -258,11 +229,10 @@ async function reconcileScheduledEvents(
   } else {
     const { snapshot, rows } = background.value;
     const page = rows.slice(0, SCHEDULED_EVENT_RECOVERY_PAGE_SIZE);
-    await forEachConcurrent(
-      page,
-      EVENT_PROGRESS_SWEEP_CONCURRENCY,
-      recoverCandidate,
-    );
+    await runRecoveryItems(page, recoverCandidate, {
+      concurrency: EVENT_PROGRESS_SWEEP_CONCURRENCY,
+      aggregateErrorMessage: "event-progress-records-failed",
+    });
     if (urgent.status === "fulfilled") {
       const nextCursor =
         rows.length > SCHEDULED_EVENT_RECOVERY_PAGE_SIZE
@@ -292,9 +262,8 @@ async function recoverRatingEventProgress(
     nowMs,
     EVENT_PROGRESS_SWEEP_LIMIT,
   );
-  await forEachConcurrent(
+  await runRecoveryItems(
     records,
-    EVENT_PROGRESS_RATING_CONCURRENCY,
     async (record) => {
       const claimed = await ratingRepository.claimRatingEventProgress(
         record.operationId,
@@ -343,6 +312,10 @@ async function recoverRatingEventProgress(
         );
       });
     },
+    {
+      concurrency: EVENT_PROGRESS_RATING_CONCURRENCY,
+      aggregateErrorMessage: "event-progress-records-failed",
+    },
   );
 }
 
@@ -372,9 +345,8 @@ async function sweepPersistedEventProgressOutboxes(
     Number.MAX_SAFE_INTEGER,
     EVENT_PROGRESS_SWEEP_LIMIT,
   );
-  await forEachConcurrent(
+  await runRecoveryItems(
     records,
-    EVENT_PROGRESS_OUTBOX_CONCURRENCY,
     async ({ outboxId: rawOutboxId, record }) => {
       const outboxId = String(rawOutboxId);
       const plan = await parseEventProgressOutbox(outboxId, record);
@@ -398,6 +370,10 @@ async function sweepPersistedEventProgressOutboxes(
           await deadLetterOutbox(repository, outboxId, record, now());
         }
       }
+    },
+    {
+      concurrency: EVENT_PROGRESS_OUTBOX_CONCURRENCY,
+      aggregateErrorMessage: "event-progress-records-failed",
     },
   );
 }

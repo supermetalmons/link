@@ -269,7 +269,6 @@ function emptyProfile(): RatingProfile {
     aura: "",
     emoji: "",
     eth: "",
-    feb2026UniqueOpponents: [],
     nonce: 0,
     profileId: "",
     rating: 0,

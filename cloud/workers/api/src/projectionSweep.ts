@@ -1,3 +1,5 @@
+import { runRecoveryItems } from "./recoveryRunner.ts";
+
 export async function sendQueueTasks<T>(
   queue: Pick<Queue<T>, "sendBatch">,
   tasks: readonly T[],
@@ -24,7 +26,7 @@ export async function collectProjectionRepairs<Entry, Task = never>(
   const repairedTasks: Task[] = [];
   let removedCount = 0;
   const failures: Error[] = [];
-  for (const entry of entries) {
+  await runRecoveryItems(entries, async (entry) => {
     try {
       const result = await repair(entry);
       if (result?.kind === "repaired") {
@@ -37,7 +39,7 @@ export async function collectProjectionRepairs<Entry, Task = never>(
         error instanceof Error ? error : new Error(fallbackErrorMessage),
       );
     }
-  }
+  });
   return { repairedTasks, removedCount, failures };
 }
 
@@ -48,7 +50,7 @@ export async function collectSuccessfulClaims<T>(
 ): Promise<{ claimed: T[]; failure: Error | null; failures: Error[] }> {
   const claimed: T[] = [];
   const failures: Error[] = [];
-  for (const item of items) {
+  await runRecoveryItems(items, async (item) => {
     try {
       if (await claim(item)) {
         claimed.push(item);
@@ -58,7 +60,7 @@ export async function collectSuccessfulClaims<T>(
         error instanceof Error ? error : new Error(fallbackErrorMessage),
       );
     }
-  }
+  });
   return { claimed, failure: failures[0] ?? null, failures };
 }
 

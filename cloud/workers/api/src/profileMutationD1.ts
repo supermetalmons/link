@@ -25,11 +25,6 @@ import { flag, nonempty } from "./profileCanonical/validation.ts";
 
 export type CanonicalProfileMutationSnapshot = CanonicalOwnedProfileSnapshot;
 
-export type CanonicalRatingProfileSnapshot =
-  CanonicalProfileMutationSnapshot & {
-    februaryOpponentProfileIds: string[];
-  };
-
 export type CanonicalChallengeReplayProfileSnapshot = {
   profile: CanonicalProfileSnapshot | null;
   februaryOpponentProfileIds: string[];
@@ -185,23 +180,6 @@ export async function readCanonicalProfileMutationByLogin(
   return parseCanonicalOwnedProfileRow(row, loginUid);
 }
 
-function parseCanonicalRatingProfile(
-  row: Record<string, unknown> | undefined,
-  opponents: readonly Record<string, unknown>[],
-  loginUid: string,
-): CanonicalRatingProfileSnapshot | null {
-  const snapshot = parseCanonicalOwnedProfileRow(row, loginUid);
-  if (!snapshot) return null;
-  const februaryOpponentProfileIds = opponents.map((opponent) => {
-    const profileId = opponent?.opponent_profile_id;
-    if (typeof profileId !== "string" || profileId === "") {
-      throw new CanonicalProfileCorruption();
-    }
-    return profileId;
-  });
-  return { ...snapshot, februaryOpponentProfileIds };
-}
-
 export async function readCanonicalRatingProfiles(
   db: D1Database,
   {
@@ -209,31 +187,18 @@ export async function readCanonicalRatingProfiles(
     opponentLoginUid,
   }: { playerLoginUid: string; opponentLoginUid: string },
 ): Promise<{
-  player: CanonicalRatingProfileSnapshot | null;
-  opponent: CanonicalRatingProfileSnapshot | null;
+  player: CanonicalProfileMutationSnapshot | null;
+  opponent: CanonicalProfileMutationSnapshot | null;
 }> {
-  const statements = [playerLoginUid, opponentLoginUid].flatMap((loginUid) => [
+  const statements = [playerLoginUid, opponentLoginUid].map((loginUid) =>
     canonicalProfileMutationStatement(db, loginUid),
-    db
-      .prepare(
-        `SELECT opponent_profile_id FROM profile_february_opponents
-         WHERE profile_id = (
-           SELECT profile_id FROM profile_login_owners WHERE login_uid = ?
-         ) ORDER BY opponent_profile_id ASC`,
-      )
-      .bind(loginUid),
-  ]);
-  const [player, playerOpponents, opponent, opponentOpponents] =
+  );
+  const [player, opponent] =
     await db.batch<Record<string, unknown>>(statements);
   return {
-    player: parseCanonicalRatingProfile(
-      player.results[0],
-      playerOpponents.results,
-      playerLoginUid,
-    ),
-    opponent: parseCanonicalRatingProfile(
+    player: parseCanonicalOwnedProfileRow(player.results[0], playerLoginUid),
+    opponent: parseCanonicalOwnedProfileRow(
       opponent.results[0],
-      opponentOpponents.results,
       opponentLoginUid,
     ),
   };

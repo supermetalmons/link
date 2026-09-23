@@ -978,7 +978,7 @@ describe("canonical gameplay repositories", () => {
       }
       expect(
         queries.filter((query) => /^\s*(?:SELECT|WITH)\b/i.test(query)),
-      ).toHaveLength({ wager: 3, rating: 5, challenge: 8 }[kind]);
+      ).toHaveLength({ wager: 3, rating: 3, challenge: 8 }[kind]);
       expect(writes).toHaveLength(2);
       for (const [index, profileId] of [playerId, opponentId].entries()) {
         const write = writes.find(
@@ -1967,7 +1967,7 @@ describe("canonical gameplay repositories", () => {
       queries.every((query) => /^\s*SELECT\b/i.test(query)),
     );
     expect(snapshotBatches).toHaveLength(1);
-    expect(snapshotBatches[0]).toHaveLength(4);
+    expect(snapshotBatches[0]).toHaveLength(2);
     expect(
       preparedQueries.filter(
         (query) =>
@@ -1975,7 +1975,7 @@ describe("canonical gameplay repositories", () => {
       ),
     ).toEqual(snapshotBatches[0]);
     expect(snapshotBatches[0].join("\n")).not.toMatch(
-      /profile_auth_|profile_recovery_|profile_wallet_/,
+      /profile_february_opponents|profile_auth_|profile_recovery_|profile_wallet_/,
     );
     expect(
       await readCanonicalProfile(testEnv.PROFILE_DB, "d1-rating-player"),

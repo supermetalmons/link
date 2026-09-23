@@ -125,7 +125,6 @@ function profile(
     aura: "",
     emoji: 1,
     eth: "",
-    feb2026UniqueOpponents: [],
     nonce: 4,
     profileId,
     rating: profileId.endsWith("player") ? 1500 : 1400,

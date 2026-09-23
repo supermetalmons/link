@@ -18,6 +18,7 @@ import {
 } from "../profileGameProjectionTasks.ts";
 import { createProfileGameProjectionLockStore } from "../profileGameProjectionLocksD1.ts";
 import { createProfileLinkCatchupStore } from "../profileLinkCatchupD1.ts";
+import { runRecoveryItems } from "../recoveryRunner.ts";
 import {
   claimAndEnqueueProjectionTasks,
   collectProjectionRepairs,
@@ -323,24 +324,6 @@ export async function sendProfileGameProjectionTasks(
   return sendQueueTasks(queue, tasks);
 }
 
-async function forEachConcurrent<T>(
-  items: readonly T[],
-  concurrency: number,
-  worker: (item: T) => Promise<void>,
-): Promise<void> {
-  let index = 0;
-  const runners = Array.from(
-    { length: Math.min(concurrency, items.length) },
-    async () => {
-      while (index < items.length) {
-        const current = index++;
-        await worker(items[current]);
-      }
-    },
-  );
-  await Promise.all(runners);
-}
-
 export async function sweepRatingProfileGameProjections(
   env: Env,
   dependencies: RatingRecoveryDependencies = {},
@@ -363,9 +346,8 @@ export async function sweepRatingProfileGameProjections(
   );
   const tasks: ProfileGameProjectionTask[] = [];
   let firstFailure: unknown;
-  await forEachConcurrent(
+  await runRecoveryItems(
     records,
-    PROFILE_GAME_PROJECTION_SWEEP_CONCURRENCY,
     async (record) => {
       try {
         const claimed = await rating.claimRatingProfileGameProjection(
@@ -404,6 +386,7 @@ export async function sweepRatingProfileGameProjections(
         );
       }
     },
+    { concurrency: PROFILE_GAME_PROJECTION_SWEEP_CONCURRENCY },
   );
   await sendProfileGameProjectionTasks(
     env.PROFILE_GAME_PROJECTION_QUEUE,
