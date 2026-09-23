@@ -51,7 +51,7 @@ function sweep(nowMs: number, matchSource = source) {
     {
       readMatchRecord: matchSource.readMatchRecord,
       readMatchRecords: matchSource.readMatchRecords,
-      async readInviteMetadata() {
+      async readInviteMetadataMany() {
         throw new Error("unexpected-invite-read-for-known-opponent");
       },
     },

@@ -25,7 +25,10 @@ function repository(
   records: Readonly<Record<string, unknown>>,
 ): Pick<
   GameplayRepository,
-  "readMatchRecord" | "readMatchRecords" | "readInviteMetadata"
+  | "readMatchRecord"
+  | "readMatchRecords"
+  | "readInviteMetadata"
+  | "readInviteMetadataMany"
 > {
   const readMatchRecord: GameplayRepository["readMatchRecord"] = async ({
     playerId,
@@ -44,6 +47,14 @@ function repository(
         string,
         unknown
       > | null,
+    readInviteMetadataMany: async (inviteIds) =>
+      inviteIds.map(
+        (inviteId) =>
+          (records[`invites/${inviteId}`] ?? null) as Record<
+            string,
+            unknown
+          > | null,
+      ),
   };
 }
 
@@ -103,6 +114,8 @@ test("reconciles terminal and obsolete markers while retaining recoverable deadl
   const reads = repository(records);
   const batches = t.mock.method(reads, "readMatchRecords");
   const singles = t.mock.method(reads, "readMatchRecord");
+  const inviteBatches = t.mock.method(reads, "readInviteMetadataMany");
+  const inviteSingles = t.mock.method(reads, "readInviteMetadata");
   const result = await sweepMatchTimerStarts(stores.timerStarts, reads, {
     assertMutationAllowed: async () => undefined,
     logger: { error: () => undefined, info: () => undefined },
@@ -148,6 +161,11 @@ test("reconciles terminal and obsolete markers while retaining recoverable deadl
     ]);
   }
   assert.equal(singles.mock.callCount(), 3);
+  assert.deepEqual(
+    inviteBatches.mock.calls.map(({ arguments: [inviteIds] }) => inviteIds),
+    [["legacy-live-match"]],
+  );
+  assert.equal(inviteSingles.mock.callCount(), 0);
 });
 
 test("cleans legacy markers from owner-only terminal and later-turn proof", async () => {
@@ -171,7 +189,8 @@ test("cleans legacy markers from owner-only terminal and later-turn proof", asyn
     await sweepMatchTimerStarts(
       stores.timerStarts,
       {
-        readInviteMetadata: async () => assert.fail("unexpected-invite-read"),
+        readInviteMetadataMany: async () =>
+          assert.fail("unexpected-invite-batch"),
         readMatchRecords: async () => assert.fail("unexpected-match-batch"),
         readMatchRecord: async ({ playerId, matchId }) => {
           const path = `players/${playerId}/matches/${matchId}`;
@@ -260,16 +279,20 @@ test("backfills one bounded legacy invite match without guessing ambiguous oppon
     "invites/amb": { hostId: "ambiguous", guestId: "peer-2" },
   };
   const paths: string[] = [];
+  const inviteBatches: (readonly string[])[] = [];
   const result = await sweepMatchTimerStarts(
     stores.timerStarts,
     {
       readMatchRecords: async () => assert.fail("unexpected-match-batch"),
-      readInviteMetadata: async (inviteId) => {
-        paths.push(`invites/${inviteId}`);
-        return (records[`invites/${inviteId}`] ?? null) as Record<
-          string,
-          unknown
-        > | null;
+      readInviteMetadataMany: async (inviteIds) => {
+        inviteBatches.push([...inviteIds]);
+        return inviteIds.map((inviteId) => {
+          paths.push(`invites/${inviteId}`);
+          return (records[`invites/${inviteId}`] ?? null) as Record<
+            string,
+            unknown
+          > | null;
+        });
       },
       readMatchRecord: async ({ playerId, matchId }) => {
         const path = `players/${playerId}/matches/${matchId}`;
@@ -311,6 +334,13 @@ test("backfills one bounded legacy invite match without guessing ambiguous oppon
     null,
   );
   assert.ok(paths.includes("invites/series"));
+  assert.deepEqual(inviteBatches, [
+    ["amb12", "amb1", "amb"],
+    Array.from({ length: 17 }, (_, index) =>
+      boundedMatchId.slice(0, boundedMatchId.length - index),
+    ),
+    ["series12", "series1", "series"],
+  ]);
   assert.ok(paths.includes("players/resolved-peer/matches/series12"));
   assert.ok(paths.filter((path) => path.startsWith("invites/x")).length <= 17);
   assert.deepEqual(
@@ -408,7 +438,8 @@ test("fails the sweep with a bounded sanitized summary", async () => {
       sweepMatchTimerStarts(
         stores.timerStarts,
         {
-          readInviteMetadata: async () => assert.fail("unexpected-invite-read"),
+          readInviteMetadataMany: async () =>
+            assert.fail("unexpected-invite-batch"),
           readMatchRecord: async () => assert.fail("unexpected-single-read"),
           readMatchRecords: async () => {
             throw new Error("private-state-detail");

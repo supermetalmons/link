@@ -54,6 +54,10 @@ export type GameSessionPort = AutomatchProjectionPort & {
     inviteId: string,
     signal?: AbortSignal,
   ): Promise<Record<string, unknown> | null>;
+  readInviteMetadataMany(
+    inviteIds: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<Array<Record<string, unknown> | null>>;
   readAutomatchEntry(inviteId: string, signal?: AbortSignal): Promise<unknown>;
   listAutomatchEntriesByLogin(
     uid: string,

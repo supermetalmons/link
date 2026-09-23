@@ -995,7 +995,7 @@ describe("D1-authoritative profile game projection ownership", () => {
     await insertProfileOwner(profileId, loginUid);
     const runtime = createEventProfileGameProjectionRuntime(testEnv, {
       state: {
-        async readInviteMetadata() {
+        async readInviteMetadataMany() {
           throw new Error("unexpected-invite-metadata-read");
         },
         async readMatchRecords() {

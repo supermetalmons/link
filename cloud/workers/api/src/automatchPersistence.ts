@@ -34,6 +34,7 @@ import {
 import {
   assertAutomatchBackend,
   readAutomatchResourceSnapshot,
+  readInviteMetadataMany,
 } from "./automatchReadD1.ts";
 import {
   isFifoAutomatchQueue,
@@ -213,6 +214,8 @@ export function createAutomatchPersistence(
         string,
         unknown
       > | null,
+    readInviteMetadataMany: (inviteIds, signal) =>
+      readInviteMetadataMany(db, inviteIds, signal),
     readAutomatchEntry: (inviteId, signal) =>
       readResource(inviteId, "automatch", inviteId, signal),
     listAutomatchEntriesByLogin: async (uid, limit, signal) => {

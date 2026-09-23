@@ -275,7 +275,7 @@ export function createEventProfileGameProjectionRuntime(
   dependencies: Omit<ProfileGameProjectionDependencies, "state"> & {
     state?: Pick<
       EventGameplayRepository,
-      "readMatchRecords" | "readInviteMetadata" | "readEvent"
+      "readMatchRecords" | "readInviteMetadataMany" | "readEvent"
     >;
   } = {},
 ): EventProfileGameProjectionRuntime {

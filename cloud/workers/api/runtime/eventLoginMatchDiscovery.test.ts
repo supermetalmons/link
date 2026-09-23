@@ -99,6 +99,7 @@ function stateFixture(initial: Record<string, unknown> = {}) {
   const patches: Record<string, unknown>[] = [];
   const reads: string[] = [];
   const metadataReads: string[] = [];
+  const metadataBatches: (readonly string[])[] = [];
   const matchBatches: Parameters<MatchStatePort["readMatchRecords"]>[0][] = [];
   const read = async (path: string, query?: StateQuery) => {
     reads.push(path);
@@ -147,10 +148,25 @@ function stateFixture(initial: Record<string, unknown> = {}) {
         unknown
       > | null;
     },
+    async readInviteMetadataMany(
+      inviteIds: readonly string[],
+      signal?: AbortSignal,
+    ) {
+      signal?.throwIfAborted();
+      metadataBatches.push([...inviteIds]);
+      return inviteIds.map(
+        (inviteId) =>
+          (values.get(`invites/${inviteId}`) ?? null) as Record<
+            string,
+            unknown
+          > | null,
+      );
+    },
   };
   return {
     client,
     matchBatches,
+    metadataBatches,
     metadataReads,
     patches,
     reader,
@@ -334,6 +350,7 @@ describe("event login-match discovery", () => {
     expect(batchSizes).toEqual([3]);
     expect(fixture.reads).toEqual([]);
     expect(fixture.metadataReads).toEqual([]);
+    expect(fixture.metadataBatches).toEqual([]);
     expect(fixture.matchBatches).toEqual([]);
   });
 
@@ -368,7 +385,8 @@ describe("event login-match discovery", () => {
         fixture.reader,
         [coveredId, inviteId],
       );
-      expect(fixture.metadataReads).toEqual([inviteId]);
+      expect(fixture.metadataBatches).toEqual([[inviteId]]);
+      expect(fixture.metadataReads).toEqual([]);
       expect(fixture.reads.sort()).toEqual(
         [hostUid, guestUid]
           .map((uid) => `players/${uid}/matches/${inviteId}`)
@@ -405,7 +423,8 @@ describe("event login-match discovery", () => {
         inviteId,
       ]),
     ).rejects.toThrow();
-    expect(fixture.metadataReads).toEqual([inviteId]);
+    expect(fixture.metadataBatches).toEqual([[inviteId]]);
+    expect(fixture.metadataReads).toEqual([]);
     expect(
       (await indexedRows()).find((row) => row.login_uid === guestUid)
         ?.invite_id,
@@ -441,6 +460,7 @@ describe("event login-match discovery", () => {
         inviteId,
       ]),
     ).rejects.toThrow("resource-pending");
+    expect(fixture.metadataBatches).toEqual([]);
     expect(fixture.metadataReads).toEqual([]);
     expect(fixture.reads).toEqual([]);
   });
@@ -456,6 +476,7 @@ describe("event login-match discovery", () => {
         inviteId,
       ]),
     ).rejects.toThrow("invite-source-backend-retired");
+    expect(fixture.metadataBatches).toEqual([]);
     expect(fixture.metadataReads).toEqual([]);
   });
 
@@ -483,6 +504,7 @@ describe("event login-match discovery", () => {
           ? "automatch-control-unavailable"
           : "automatch-persistence-backend-retired",
       );
+      expect(fixture.metadataBatches).toEqual([]);
       expect(fixture.metadataReads).toEqual([]);
       expect(fixture.reads).toEqual([]);
     },
@@ -608,7 +630,8 @@ describe("event login-match discovery", () => {
       expect(fixture.reads).not.toContain(
         `players/changed-bracket-login/matches/${inviteId}`,
       );
-      expect(fixture.metadataReads).toContain(inviteId);
+      expect(fixture.metadataBatches.flat()).toContain(inviteId);
+      expect(fixture.metadataReads).toEqual([]);
       for (const uid of [hostUid, guestUid]) {
         expect(fixture.reads).toContain(`players/${uid}/matches/${inviteId}`);
       }
@@ -651,11 +674,11 @@ describe("event login-match discovery", () => {
     expect(await indexedRows()).toEqual([]);
   });
 
-  it("captures each four-invite chunk with one ordered match batch", async () => {
+  it("captures each four-invite chunk with one metadata batch and one ordered match batch", async () => {
     const fixture = captureFixture(5);
     const readMatchRecords = fixture.reader.readMatchRecords;
     fixture.reader.readMatchRecords = async (inputs, signal) => {
-      expect(fixture.metadataReads).toHaveLength(
+      expect(fixture.metadataBatches.flat()).toHaveLength(
         fixture.matchBatches.length === 0 ? 4 : 5,
       );
       expect(await indexedRows()).toHaveLength(
@@ -668,6 +691,11 @@ describe("event login-match discovery", () => {
       fixture.reader,
       fixture.ids,
     );
+    expect(fixture.metadataBatches).toEqual([
+      fixture.ids.slice(0, 4),
+      fixture.ids.slice(4),
+    ]);
+    expect(fixture.metadataReads).toEqual([]);
     expect(fixture.matchBatches.map((batch) => batch.length)).toEqual([8, 2]);
     expect(fixture.matchBatches.flat()).toEqual(
       fixture.ids.flatMap((matchId) =>
@@ -688,7 +716,66 @@ describe("event login-match discovery", () => {
       ),
     ).rejects.toThrow("event-match-discovery-match-unavailable");
     expect(fixture.matchBatches.map((batch) => batch.length)).toEqual([8, 8]);
-    expect(fixture.metadataReads).toEqual(fixture.ids.slice(0, 8));
+    expect(fixture.metadataBatches).toEqual([
+      fixture.ids.slice(0, 4),
+      fixture.ids.slice(4, 8),
+    ]);
+    expect(fixture.metadataReads).toEqual([]);
+    const captured = await indexedRows();
+    expect(captured).toHaveLength(8);
+    expect(new Set(captured.map((row) => row.match_id))).toEqual(
+      new Set(fixture.ids.slice(0, 4)),
+    );
+  });
+
+  it("keeps completed chunks but captures no part of an incomplete metadata batch", async () => {
+    const fixture = captureFixture(9);
+    fixture.values.delete(`invites/${fixture.ids[5]}`);
+    await expect(
+      captureEventMatchDiscovery(
+        testEnv.PROFILE_GAMES_DB,
+        fixture.reader,
+        fixture.ids,
+      ),
+    ).rejects.toThrow("event-match-discovery-invite-unavailable");
+    expect(fixture.metadataBatches).toEqual([
+      fixture.ids.slice(0, 4),
+      fixture.ids.slice(4, 8),
+    ]);
+    expect(fixture.metadataReads).toEqual([]);
+    expect(fixture.matchBatches.map((batch) => batch.length)).toEqual([8]);
+    const captured = await indexedRows();
+    expect(captured).toHaveLength(8);
+    expect(new Set(captured.map((row) => row.match_id))).toEqual(
+      new Set(fixture.ids.slice(0, 4)),
+    );
+  });
+
+  it("stops before match reads when cancellation follows a metadata batch", async () => {
+    const fixture = captureFixture(9);
+    const controller = new AbortController();
+    const reason = new Error("discovery-cancelled");
+    const readInviteMetadataMany = fixture.reader.readInviteMetadataMany;
+    fixture.reader.readInviteMetadataMany = async (inviteIds, signal) => {
+      expect(signal).toBe(controller.signal);
+      const invites = await readInviteMetadataMany(inviteIds, signal);
+      if (fixture.metadataBatches.length === 2) controller.abort(reason);
+      return invites;
+    };
+    await expect(
+      captureEventMatchDiscovery(
+        testEnv.PROFILE_GAMES_DB,
+        fixture.reader,
+        fixture.ids,
+        controller.signal,
+      ),
+    ).rejects.toBe(reason);
+    expect(fixture.metadataBatches).toEqual([
+      fixture.ids.slice(0, 4),
+      fixture.ids.slice(4, 8),
+    ]);
+    expect(fixture.metadataReads).toEqual([]);
+    expect(fixture.matchBatches.map((batch) => batch.length)).toEqual([8]);
     const captured = await indexedRows();
     expect(captured).toHaveLength(8);
     expect(new Set(captured.map((row) => row.match_id))).toEqual(
@@ -716,7 +803,11 @@ describe("event login-match discovery", () => {
       ),
     ).rejects.toBe(reason);
     expect(fixture.matchBatches.map((batch) => batch.length)).toEqual([8, 8]);
-    expect(fixture.metadataReads).toEqual(fixture.ids.slice(0, 8));
+    expect(fixture.metadataBatches).toEqual([
+      fixture.ids.slice(0, 4),
+      fixture.ids.slice(4, 8),
+    ]);
+    expect(fixture.metadataReads).toEqual([]);
     const captured = await indexedRows();
     expect(captured).toHaveLength(8);
     expect(new Set(captured.map((row) => row.match_id))).toEqual(
@@ -773,6 +864,7 @@ describe("event login-match discovery", () => {
       ),
     ).rejects.toThrow("event-match-discovery-invalid-invites");
     expect(fixture.reads).toEqual([]);
+    expect(fixture.metadataBatches).toEqual([]);
     expect(fixture.metadataReads).toEqual([]);
     await expect(
       ensureEventMatchDiscovery(
@@ -782,6 +874,7 @@ describe("event login-match discovery", () => {
       ),
     ).rejects.toThrow("event-match-discovery-invalid-invites");
     expect(fixture.reads).toEqual([]);
+    expect(fixture.metadataBatches).toEqual([]);
     expect(fixture.metadataReads).toEqual([]);
   });
 });

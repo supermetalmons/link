@@ -19,7 +19,7 @@ const EVENT_MATCH_DISCOVERY_CONCURRENCY = 4;
 
 type EventMatchDiscoveryRepository = Pick<
   GameplayRepository,
-  "readMatchRecords" | "readInviteMetadata"
+  "readMatchRecords" | "readInviteMetadataMany"
 >;
 
 type EventMatchDiscoveryCoverageRow = {
@@ -100,30 +100,32 @@ export async function captureEventMatchDiscovery(
     offset += EVENT_MATCH_DISCOVERY_CONCURRENCY
   ) {
     signal?.throwIfAborted();
-    const inviteRows = await Promise.all(
-      inviteIds
-        .slice(offset, offset + EVENT_MATCH_DISCOVERY_CONCURRENCY)
-        .map(async (inviteId) => {
-          const invite = record(
-            await repository.readInviteMetadata(inviteId, signal),
-          );
-          const hostId = invite?.hostId;
-          const guestId = invite?.guestId;
-          if (
-            !isCanonicalLoginUid(hostId) ||
-            !isCanonicalLoginUid(guestId) ||
-            hostId === guestId
-          ) {
-            throw new Error("event-match-discovery-invite-unavailable");
-          }
-          return [hostId, guestId].map((loginUid) => ({
-            loginUid,
-            matchId: inviteId,
-            inviteId,
-          }));
-        }),
+    const chunk = inviteIds.slice(
+      offset,
+      offset + EVENT_MATCH_DISCOVERY_CONCURRENCY,
     );
+    const invites = await repository.readInviteMetadataMany(chunk, signal);
     signal?.throwIfAborted();
+    if (invites.length !== chunk.length) {
+      throw new Error("event-match-discovery-invite-unavailable");
+    }
+    const inviteRows = chunk.map((inviteId, index) => {
+      const invite = record(invites[index]);
+      const hostId = invite?.hostId;
+      const guestId = invite?.guestId;
+      if (
+        !isCanonicalLoginUid(hostId) ||
+        !isCanonicalLoginUid(guestId) ||
+        hostId === guestId
+      ) {
+        throw new Error("event-match-discovery-invite-unavailable");
+      }
+      return [hostId, guestId].map((loginUid) => ({
+        loginUid,
+        matchId: inviteId,
+        inviteId,
+      }));
+    });
     const rows = inviteRows.flat();
     const matches = await repository.readMatchRecords(
       rows.map(({ loginUid, matchId }) => ({ playerId: loginUid, matchId })),

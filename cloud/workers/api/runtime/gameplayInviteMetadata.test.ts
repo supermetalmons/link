@@ -40,6 +40,11 @@ function repository(database = db, profileDb?: D1Database) {
   return createGameplayRepository(
     {
       ...env,
+      INVITE_REACTIONS: new Proxy(env.INVITE_REACTIONS, {
+        get() {
+          throw new Error("unexpected-invite-durable-object-access");
+        },
+      }),
       PROFILE_DB:
         profileDb ??
         new Proxy(env.PROFILE_DB, {
@@ -52,13 +57,16 @@ function repository(database = db, profileDb?: D1Database) {
   );
 }
 
-async function insertSource(value: Record<string, unknown> = source) {
+async function insertSource(
+  value: Record<string, unknown> = source,
+  targetInviteId = inviteId,
+) {
   await db
     .prepare(
       `INSERT INTO invite_sources (invite_id, source_json, revision, updated_at_ms)
        VALUES (?, ?, 1, 1)`,
     )
-    .bind(inviteId, JSON.stringify(value))
+    .bind(targetInviteId, JSON.stringify(value))
     .run();
 }
 
@@ -101,6 +109,55 @@ function afterSourceRead(after: () => Promise<void> | void): D1Database {
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
+}
+
+function observeBulkReads(after?: () => Promise<void> | void) {
+  const constraints: Array<
+    D1SessionConstraint | D1SessionBookmark | undefined
+  > = [];
+  const queries: Array<{ sql: string; bindings: unknown[] }> = [];
+  const batchSizes: number[] = [];
+  const database = new Proxy(db, {
+    get(target, property) {
+      if (property !== "withSession")
+        throw new Error(`unexpected-database-access:${String(property)}`);
+      return (constraint?: D1SessionConstraint | D1SessionBookmark) => {
+        constraints.push(constraint);
+        return new Proxy(target.withSession(constraint), {
+          get(session, key) {
+            if (key === "prepare")
+              return (sql: string) => {
+                expect(sql.trim()).toMatch(/^(SELECT|WITH)\b/i);
+                const query = { sql, bindings: [] as unknown[] };
+                queries.push(query);
+                return new Proxy(session.prepare(sql), {
+                  get(statement, method) {
+                    if (method === "bind")
+                      return (...bindings: unknown[]) => {
+                        query.bindings = bindings;
+                        return statement.bind(...bindings);
+                      };
+                    const value = Reflect.get(statement, method, statement);
+                    return typeof value === "function"
+                      ? value.bind(statement)
+                      : value;
+                  },
+                });
+              };
+            if (key === "batch")
+              return async (statements: D1PreparedStatement[]) => {
+                batchSizes.push(statements.length);
+                const results = await session.batch(statements);
+                await after?.();
+                return results;
+              };
+            throw new Error(`unexpected-session-access:${String(key)}`);
+          },
+        });
+      };
+    },
+  });
+  return { database, constraints, queries, batchSizes };
 }
 
 describe("gameplay invite metadata reads", () => {
@@ -335,4 +392,245 @@ describe("gameplay invite metadata reads", () => {
       expect(reads).toBe(when === "before" ? 0 : 1);
     },
   );
+
+  describe("bulk reads", () => {
+    it("uses one read-only snapshot for ordered, missing and independently decoded duplicate results", async () => {
+      await insertSource();
+      const secondId = "metadata-second";
+      const second = { ...source, hostId: "second-host", password: null };
+      await insertSource(second, secondId);
+      const observed = observeBulkReads();
+      const values = await repository(observed.database).readInviteMetadataMany(
+        [secondId, "metadata-missing", inviteId, secondId],
+      );
+      expect(values).toEqual([second, null, source, second]);
+      expect(values[0]).not.toBe(values[3]);
+      expect(values[0]!.customMetadata).not.toBe(values[3]!.customMetadata);
+      (values[0]!.customMetadata as { retained: boolean }).retained = false;
+      expect(values[3]!.customMetadata).toEqual({ retained: true });
+      expect(observed.constraints).toEqual(["first-primary"]);
+      expect(observed.batchSizes).toEqual([3]);
+      expect(observed.queries).toHaveLength(3);
+      expect(JSON.parse(String(observed.queries[2].bindings[0]))).toEqual([
+        secondId,
+        "metadata-missing",
+        inviteId,
+      ]);
+    });
+
+    it("returns an empty result without opening a database session", async () => {
+      const observed = observeBulkReads();
+      expect(
+        await repository(observed.database).readInviteMetadataMany([]),
+      ).toEqual([]);
+      expect(observed.constraints).toEqual([]);
+      expect(observed.queries).toEqual([]);
+      expect(observed.batchSizes).toEqual([]);
+    });
+
+    it("accepts exactly 32 requested IDs in one snapshot", async () => {
+      await insertSource();
+      const ids = Array.from({ length: 32 }, (_, index) =>
+        index === 31 ? inviteId : `metadata-missing-${index}`,
+      );
+      const observed = observeBulkReads();
+      expect(
+        await repository(observed.database).readInviteMetadataMany(ids),
+      ).toEqual([...Array.from({ length: 31 }, () => null), source]);
+      expect(observed.constraints).toEqual(["first-primary"]);
+      expect(observed.batchSizes).toEqual([3]);
+      expect(observed.queries).toHaveLength(3);
+    });
+
+    it.each([
+      [
+        "oversized unique input",
+        Array.from({ length: 33 }, (_, i) => `id-${i}`),
+      ],
+      ["oversized duplicate input", Array.from({ length: 33 }, () => inviteId)],
+      ["empty key", [inviteId, ""]],
+      ["invalid key", [inviteId, "invalid/key"]],
+      ["non-string key", [inviteId, 7]],
+      ["non-array input", inviteId],
+    ])("rejects %s before database access", async (_, ids) => {
+      const observed = observeBulkReads();
+      await expect(
+        repository(observed.database).readInviteMetadataMany(
+          ids as unknown as readonly string[],
+        ),
+      ).rejects.toBeInstanceOf(TypeError);
+      expect(observed.constraints).toEqual([]);
+      expect(observed.queries).toEqual([]);
+      expect(observed.batchSizes).toEqual([]);
+    });
+
+    it.each(["automatch_runtime_control", "invite_source_control"])(
+      "allows reads while %s is frozen",
+      async (table) => {
+        await insertSource();
+        await db.prepare(`UPDATE ${table} SET state = 'frozen'`).run();
+        expect(await repository().readInviteMetadataMany([inviteId])).toEqual([
+          source,
+        ]);
+      },
+    );
+
+    it.each(["automatch", "invite"])(
+      "rejects the retired %s backend without fallback",
+      async (backend) => {
+        await insertSource();
+        if (backend === "automatch") {
+          await db.batch([
+            db.prepare("DELETE FROM automatch_runtime_control"),
+            db.prepare(
+              `INSERT INTO automatch_runtime_control
+               (singleton, backend, state, epoch, freeze_generation)
+               VALUES (1, 'rtdb', 'active', 1, 0)`,
+            ),
+          ]);
+        } else {
+          await db
+            .prepare(
+              `UPDATE invite_source_control SET backend = 'rtdb', epoch = 0,
+               verified_at_ms = NULL, activated_at_ms = NULL`,
+            )
+            .run();
+        }
+        const observed = observeBulkReads();
+        await expect(
+          repository(observed.database).readInviteMetadataMany([inviteId]),
+        ).rejects.toThrow("backend-retired");
+        expect(observed.constraints).toEqual(["first-primary"]);
+        expect(observed.batchSizes).toEqual([3]);
+        expect(observed.queries).toHaveLength(3);
+      },
+    );
+
+    it.each(["automatch_runtime_control", "invite_source_control"])(
+      "rejects missing %s",
+      async (table) => {
+        await db.prepare(`DELETE FROM ${table}`).run();
+        await expect(
+          repository().readInviteMetadataMany([inviteId]),
+        ).rejects.toThrow("control-unavailable");
+      },
+    );
+
+    it.each([
+      ["automatch_runtime_control", "epoch = 1.5"],
+      ["invite_source_control", "verified_at_ms = NULL"],
+    ])("rejects malformed %s", async (table, assignment) => {
+      await db.prepare(`UPDATE ${table} SET ${assignment}`).run();
+      await expect(
+        repository().readInviteMetadataMany([inviteId]),
+      ).rejects.toThrow("control-unavailable");
+    });
+
+    it.each([
+      ["retired fields", { ...source, wagers: {} }],
+      ["invalid source keys", { ...source, "invalid/key": true }],
+    ])("rejects corrupt source with %s", async (_, value) => {
+      await insertSource(value);
+      await expect(
+        repository().readInviteMetadataMany(["metadata-missing", inviteId]),
+      ).rejects.toThrow("invite-source-corrupt");
+    });
+
+    it.each(["pending", "completed"])(
+      "leaves retained %s transition resources untouched and rejects before decoding that source",
+      async (status) => {
+        await insertSource({ ...source, wagers: {} });
+        await reserveInvite();
+        await db
+          .prepare("UPDATE game_session_transitions SET status = ?")
+          .bind(status)
+          .run();
+        const before = await db
+          .prepare("SELECT * FROM game_session_transitions")
+          .all();
+        const observed = observeBulkReads();
+        await expect(
+          repository(observed.database).readInviteMetadataMany([
+            "metadata-missing",
+            inviteId,
+          ]),
+        ).rejects.toThrow("resource-pending");
+        expect(observed.constraints).toEqual(["first-primary"]);
+        expect(observed.batchSizes).toEqual([3]);
+        expect(observed.queries).toHaveLength(3);
+        expect(
+          (await db.prepare("SELECT * FROM game_session_transitions").all())
+            .results,
+        ).toEqual(before.results);
+        expect(
+          await db
+            .prepare("SELECT * FROM game_session_transition_resources")
+            .all(),
+        ).toMatchObject({
+          results: [
+            { resource_key: inviteId, transition_id: "metadata-transition" },
+          ],
+        });
+      },
+    );
+
+    it.each(["before", "during"])(
+      "honors cancellation %s the batch",
+      async (when) => {
+        await insertSource();
+        const controller = new AbortController();
+        const reason = new Error("bulk-metadata-read-cancelled");
+        const observed = observeBulkReads(() => controller.abort(reason));
+        if (when === "before") controller.abort(reason);
+        await expect(
+          repository(observed.database).readInviteMetadataMany(
+            [inviteId],
+            controller.signal,
+          ),
+        ).rejects.toBe(reason);
+        expect(observed.constraints).toEqual(
+          when === "before" ? [] : ["first-primary"],
+        );
+        expect(observed.batchSizes).toEqual(when === "before" ? [] : [3]);
+      },
+    );
+
+    it("reads a fresh snapshot on subsequent calls without caching the first value", async () => {
+      await insertSource();
+      const observed = observeBulkReads();
+      const gameplay = repository(observed.database);
+      expect(await gameplay.readInviteMetadataMany([inviteId])).toEqual([
+        source,
+      ]);
+      const changed = { ...source, guestId: "updated-guest" };
+      await db
+        .prepare(
+          "UPDATE invite_sources SET source_json = ?, revision = revision + 1 WHERE invite_id = ?",
+        )
+        .bind(JSON.stringify(changed), inviteId)
+        .run();
+      expect(await gameplay.readInviteMetadataMany([inviteId])).toEqual([
+        changed,
+      ]);
+      expect(observed.constraints).toEqual(["first-primary", "first-primary"]);
+      expect(observed.batchSizes).toEqual([3, 3]);
+    });
+
+    it("returns its committed snapshot before a later transition and fences the next call", async () => {
+      await insertSource();
+      let batches = 0;
+      const observed = observeBulkReads(async () => {
+        if (++batches === 1) await reserveInvite();
+      });
+      const gameplay = repository(observed.database);
+      expect(await gameplay.readInviteMetadataMany([inviteId])).toEqual([
+        source,
+      ]);
+      await expect(gameplay.readInviteMetadataMany([inviteId])).rejects.toThrow(
+        "resource-pending",
+      );
+      expect(observed.constraints).toEqual(["first-primary", "first-primary"]);
+      expect(observed.batchSizes).toEqual([3, 3]);
+    });
+  });
 });

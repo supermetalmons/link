@@ -153,6 +153,9 @@ export function gameplayTestPort(
         string,
         unknown
       > | null,
+    async readInviteMetadataMany(ids, signal) {
+      return Promise.all(ids.map((id) => this.readInviteMetadata(id, signal)));
+    },
     readAutomatchEntry: (id, signal) =>
       state.getPath(`automatch/${id}`, undefined, signal),
     listAutomatchEntriesByLogin: async (uid, limit, signal) =>
