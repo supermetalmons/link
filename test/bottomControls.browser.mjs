@@ -34,6 +34,8 @@ export const environment = {
   eventModalListeners: new Set(),
   navigationListeners: new Set(),
   transientHandlers: new Set(),
+  wagerEligible: false,
+  homeTransitionGate: null,
 };
 export const pendingGame = (inviteId) => ({
   id: inviteId, inviteId, entityType: 'game', kind: 'auto',
@@ -71,7 +73,7 @@ export const didClickEndMatchButton = () => invoke('end');
 export const didClickConfirmResignButton = () => invoke('resign');
 export const playSameCompletedPuzzleAgain = () => {};
 export const didSelectRematchSeriesMatch = () => {};
-export const didSelectPuzzle = () => {};
+export const didSelectPuzzle = problem => invoke('puzzle', problem.id);
 `;
 const connectionSource = `
 import { environment, pendingGame } from 'bottom-environment';
@@ -99,6 +101,8 @@ export const connection = {
     return () => { subscription.active = false; };
   },
   rematchSeriesEndIsIndicated: () => false,
+  sendVoiceReaction: reaction => environment.calls.push(['reaction', reaction]),
+  sendWagerProposal: async (material, count) => { environment.calls.push(['wager', material, count]); },
 };
 `;
 const appNavigationSource = `
@@ -141,6 +145,7 @@ export const getCurrentTarget = () => environment.route;
 export const isTransitionInProgress = () => false;
 export const transitionToHome = async options => {
   environment.calls.push(['transitionHome', options]);
+  if (environment.homeTransitionGate) await environment.homeTransitionGate.promise;
   environment.route = { mode: 'home', path: '' };
 };
 `;
@@ -154,8 +159,12 @@ export const registerBottomControlsTransientUiHandler = (close, clear) => {
 `;
 const navigationSource = `
 import React from 'react';
-export default function NavigationPicker({ topGames, onSelectGame }) {
-  return React.createElement('div', { 'data-testid': 'navigation-picker' },
+export default function NavigationPicker({ topGames, onSelectGame, onSelectProblem }) {
+  return React.createElement('div', {
+    'data-testid': 'navigation-picker', style: { position: 'fixed', top: 150, right: 10 },
+  },
+    React.createElement('button', null, 'Navigation contents'),
+    React.createElement('button', { onClick: () => onSelectProblem('test-puzzle') }, 'Open test puzzle'),
     topGames.map(item => React.createElement('button', {
       key: item.id, onClick: () => onSelectGame(item, { status: item.status }),
     }, 'Open ' + item.id)));
@@ -205,6 +214,16 @@ window.harness = {
   },
   publishPending(inviteId) {
     run(() => environment.subscriptions.findLast(subscription => subscription.active).update([pendingGame(inviteId)]));
+  },
+  publishNavigation(items) {
+    run(() => environment.subscriptions.findLast(subscription => subscription.active).update(items));
+  },
+  holdHomeTransition() { environment.homeTransitionGate = Promise.withResolvers(); },
+  async releaseHomeTransition() {
+    await settle(async () => {
+      environment.homeTransitionGate.resolve();
+      environment.homeTransitionGate = null;
+    });
   },
   resetMatch() {
     run(() => environment.transientHandlers.forEach(({ close, clear }) => { close(); clear(); }));
@@ -273,7 +292,7 @@ navigation.replaceRoutePath('/event-game-1');
 session.initializeAppSessionManager();
 `;
 
-async function fixture(run, { realNavigation = false } = {}) {
+async function fixture(run, { realNavigation = false, mobile = false } = {}) {
   const modules = new Map([
     ["bottom-environment", environmentSource],
     ["bottom-controller", controllerSource],
@@ -297,7 +316,7 @@ async function fixture(run, { realNavigation = false } = {}) {
   const stubs = new Map([
     [
       "../hooks/useAvailableMaterials",
-      "export const useAvailableMaterials = () => ({ availableMaterials: {}, frozenMaterialsStatus: 'ready', hasConfirmedSnapshot: true });",
+      "export const useAvailableMaterials = () => ({ availableMaterials: { dust: 3, slime: 2 }, frozenMaterialsStatus: 'ready', hasConfirmedSnapshot: true });",
     ],
     [
       "../hooks/useMaterialImages",
@@ -305,7 +324,7 @@ async function fixture(run, { realNavigation = false } = {}) {
     ],
     [
       "../utils/misc",
-      "export const isMobile = false; export const defaultEarlyInputEventName = 'mousedown';",
+      `export const isMobile = ${mobile}; export const defaultEarlyInputEventName = '${mobile ? "touchstart" : "mousedown"}';`,
     ],
     [
       "../utils/SoundPlayer",
@@ -313,11 +332,11 @@ async function fixture(run, { realNavigation = false } = {}) {
     ],
     [
       "../content/sounds",
-      "export const playReaction = () => {}; export const playSounds = () => {}; export const newReactionOfKind = () => ({}); export const newStickerReaction = () => ({});",
+      "export const playReaction = () => {}; export const playSounds = () => {}; export const newReactionOfKind = kind => ({ kind }); export const newStickerReaction = () => ({});",
     ],
     [
       "./controls/boardReactionPort",
-      "export const showVoiceReactionText = () => {}; export const showVideoReaction = () => {}; export const isMetadataSideDisplayedAtOpponentSlot = () => false; export const getPlayerReactionUid = () => null; export const getOpponentReactionUid = () => null;",
+      "import { environment } from 'bottom-environment'; export const showVoiceReactionText = () => {}; export const showVideoReaction = () => {}; export const isMetadataSideDisplayedAtOpponentSlot = () => false; export const getPlayerReactionUid = () => environment.wagerEligible ? 'player' : null; export const getOpponentReactionUid = () => environment.wagerEligible ? 'opponent' : null;",
     ],
     [
       "./controls/useReactionPicker",
@@ -326,28 +345,34 @@ async function fixture(run, { realNavigation = false } = {}) {
     ["./controls/menuPort", "export const closeMenuAndInfoIfAny = () => {};"],
     [
       "./BoardStylePicker",
-      "export default () => null; export const preloadPangchiuBoardPreview = () => {};",
+      "import React from 'react'; export default () => React.createElement('div', { 'data-testid': 'appearance-picker', style: { position: 'fixed', top: 150, left: 10 } }, React.createElement('button', null, 'Appearance contents')); export const preloadPangchiuBoardPreview = () => {};",
     ],
     ["../utils/gameModels", "export const Sound = {};"],
-    ["./MoveHistoryPopup", "export default () => null;"],
+    [
+      "./MoveHistoryPopup",
+      "import React from 'react'; export default ({ ref }) => React.createElement('div', { ref, 'data-testid': 'history-popup', style: { position: 'fixed', top: 200, left: 10 } }, React.createElement('button', null, 'History contents'));",
+    ],
     [
       "./controls/moveHistoryPopupStore",
       "export const subscribeMoveHistoryPopupReload = () => () => {}; export const triggerMoveHistoryPopupSelectionReset = () => {};",
     ],
-    ["../services/rocksMiningService", "export const MATERIALS = [];"],
+    [
+      "../services/rocksMiningService",
+      "export const MATERIALS = ['dust', 'slime'];",
+    ],
     [
       "../game/wagerState",
       "export const subscribeToWagerState = () => () => {}; export const hasConfirmedWagerSnapshot = () => true;",
     ],
     [
       "../utils/playerMetadata",
-      "export const getStashedPlayerProfile = () => undefined;",
+      "import { environment } from 'bottom-environment'; export const getStashedPlayerProfile = () => environment.wagerEligible ? { id: 'opponent-profile' } : undefined;",
     ],
     [
       "../navigation/routeState",
       "import { environment } from 'bottom-environment'; export const getCurrentRouteState = () => environment.route;",
     ],
-    ["../content/problems", "export const problems = [];"],
+    ["../content/problems", "export const problems = [{ id: 'test-puzzle' }];"],
     [
       "../content/emojis",
       "export const emojis = { getEmojiUrl: emojiId => '/__emoji/' + emojiId + '.svg' };",
@@ -442,7 +467,7 @@ export const teardownProfileScope = () => {};
             if (request.url !== "/__bottom") return next();
             response.setHeader("Content-Type", "text/html");
             response.end(
-              '<div id="monsboard"></div><div id="root"></div><script type="module" src="/__bottom-harness.js"></script>',
+              '<div id="monsboard" style="position:absolute;top:0;left:0;width:100px;height:100px"></div><div id="root"></div><script type="module" src="/__bottom-harness.js"></script>',
             );
           });
         },
@@ -486,6 +511,7 @@ export const teardownProfileScope = () => {};
     });
     const context = await browser.newContext({
       viewport: { width: 1200, height: 900 },
+      hasTouch: mobile,
     });
     context.setDefaultTimeout(15000);
     await context.route("**/*", (route) =>
@@ -515,6 +541,24 @@ const click = async (page, name) =>
     window.harness.run(() => element.click()),
   );
 const count = (page, name) => button(page, name).count();
+const popupState = (page) =>
+  page.evaluate(() => ({
+    appearance: !!document.querySelector('[data-testid="appearance-picker"]'),
+    history: !!document.querySelector('[data-testid="history-popup"]'),
+    navigation: window.harness.port.hasNavigationPopupVisible(),
+    reaction: [...document.querySelectorAll("button")].some(
+      (element) => element.textContent === "yo",
+    ),
+    bottom: window.harness.port.hasBottomPopupsVisible(),
+  }));
+const showPopupControls = (page) =>
+  page.evaluate(() =>
+    window.harness.run(() => {
+      window.harness.port.showMoveHistoryButton(true);
+      window.harness.port.showVoiceReactionButton(true);
+      window.harness.port.showResignButton();
+    }),
+  );
 const startAutomatch = async (page) => {
   await page.evaluate(() =>
     window.harness.run(() => {
@@ -587,6 +631,310 @@ const assertEventButtonRetained = async (page) => {
     },
   );
 };
+
+test(
+  "popup transitions preserve coexistence and keep navigation separate from bottom visibility",
+  { timeout: 60000 },
+  async () => {
+    await fixture(async (page) => {
+      await showPopupControls(page);
+      await click(page, "Navigation");
+      assert.deepEqual(await popupState(page), {
+        appearance: false,
+        history: false,
+        navigation: true,
+        reaction: false,
+        bottom: false,
+      });
+      await page.evaluate(() =>
+        window.harness.port.setWagerPanelVisibilityChecker(() => true),
+      );
+      assert.equal((await popupState(page)).bottom, true);
+      await page.evaluate(() => window.harness.port.resetWagerPanelApi());
+      assert.equal((await popupState(page)).bottom, false);
+      await click(page, "Appearance");
+      await click(page, "Move History");
+      await click(page, "Navigation");
+      assert.deepEqual(await popupState(page), {
+        appearance: true,
+        history: true,
+        navigation: true,
+        reaction: false,
+        bottom: true,
+      });
+      await page.evaluate(() =>
+        window.harness.run(() => window.harness.port.toggleReactionPicker()),
+      );
+      await click(page, "Resign");
+      assert.deepEqual(await popupState(page), {
+        appearance: true,
+        history: false,
+        navigation: true,
+        reaction: true,
+        bottom: true,
+      });
+      assert.equal(await count(page, "Resign"), 2);
+      await page.evaluate(() =>
+        window.harness.run(() => window.harness.port.toggleReactionPicker()),
+      );
+      assert.equal(await count(page, "Resign"), 2);
+      await click(page, "Move History");
+      assert.equal(await count(page, "Resign"), 1);
+      assert.deepEqual(await popupState(page), {
+        appearance: true,
+        history: true,
+        navigation: false,
+        reaction: false,
+        bottom: true,
+      });
+      await click(page, "Navigation");
+      await click(page, "Appearance");
+      assert.deepEqual(await popupState(page), {
+        appearance: false,
+        history: true,
+        navigation: true,
+        reaction: false,
+        bottom: true,
+      });
+      await page.evaluate(() => window.harness.resetMatch());
+      assert.deepEqual(await popupState(page), {
+        appearance: false,
+        history: false,
+        navigation: false,
+        reaction: false,
+        bottom: false,
+      });
+    });
+  },
+);
+
+for (const mobile of [false, true]) {
+  test(
+    `${mobile ? "touch" : "mouse"} input excludes each popup's trigger and content while dismissing outside`,
+    { timeout: 60000 },
+    async () => {
+      await fixture(
+        async (page) => {
+          await showPopupControls(page);
+          const activate = (target) =>
+            mobile
+              ? target.tap({ force: true })
+              : target.click({ force: true });
+          for (const [trigger, content, testId] of [
+            ["Appearance", "Appearance contents", "appearance-picker"],
+            ["Move History", "History contents", "history-popup"],
+            ["Navigation", "Navigation contents", "navigation-picker"],
+          ]) {
+            await activate(button(page, trigger));
+            assert.equal(await page.getByTestId(testId).count(), 1);
+            await activate(button(page, content));
+            assert.equal(await page.getByTestId(testId).count(), 1);
+            await activate(button(page, trigger));
+            assert.equal(await page.getByTestId(testId).count(), 0);
+            await activate(button(page, trigger));
+            await activate(page.locator("#monsboard"));
+            assert.equal(await page.getByTestId(testId).count(), 0);
+          }
+          await activate(button(page, "Voice Reaction"));
+          assert.equal(await count(page, "yo"), 1);
+          await activate(button(page, "Voice Reaction"));
+          assert.equal(await count(page, "yo"), 0);
+          await activate(button(page, "Voice Reaction"));
+          await activate(page.locator("#monsboard"));
+          assert.equal(await count(page, "yo"), 0);
+          await activate(button(page, "Voice Reaction"));
+          await page.clock.runFor(500);
+          await activate(button(page, "yo"));
+          assert.equal(await count(page, "yo"), 0);
+          await page.evaluate(() =>
+            window.harness.run(() =>
+              window.harness.port.showTimerButtonProgressing(1, 1, true),
+            ),
+          );
+          await activate(button(page, "Timer"));
+          assert.equal(await count(page, "Start a Timer"), 1);
+          await activate(button(page, "Timer"));
+          assert.equal(await count(page, "Start a Timer"), 0);
+          await activate(button(page, "Timer"));
+          await activate(page.locator("#monsboard"));
+          assert.equal(await count(page, "Start a Timer"), 0);
+          await activate(button(page, "Timer"));
+          await activate(button(page, "Start a Timer"));
+          assert.equal(await count(page, "Start a Timer"), 0);
+          assert.deepEqual(
+            await page.evaluate(() => window.harness.environment.calls),
+            [["reaction", { kind: "yo" }], ["timer"]],
+          );
+        },
+        { mobile },
+      );
+    },
+  );
+}
+
+test(
+  "event navigation survives outside and preserved closes, with ordinary close and expiry still dismissing",
+  { timeout: 60000 },
+  async () => {
+    await fixture(async (page) => {
+      await showPopupControls(page);
+      await click(page, "Appearance");
+      await click(page, "Navigation");
+      await page.evaluate(() =>
+        window.harness.publishNavigation([
+          {
+            id: "event-1",
+            entityType: "event",
+            eventId: "event-1",
+            status: "active",
+            sortBucket: 10,
+            listSortAtMs: 1,
+            participantPreview: [],
+          },
+        ]),
+      );
+      await click(page, "Open event-1");
+      assert.equal(await page.getByTestId("appearance-picker").count(), 0);
+      assert.equal((await popupState(page)).navigation, true);
+      await click(page, "Voice Reaction");
+      await page.evaluate(() =>
+        window.harness.run(() => {
+          window.harness.port.closeNavigationAndAppearancePopupIfAny({
+            preserveNavigationSelection: true,
+          });
+          window.harness.port.setNavigationListButtonVisible(false);
+        }),
+      );
+      await page.locator("#monsboard").click({ force: true });
+      assert.deepEqual(await popupState(page), {
+        appearance: false,
+        history: false,
+        navigation: true,
+        reaction: false,
+        bottom: false,
+      });
+      await page.evaluate(() =>
+        window.harness.run(() =>
+          window.harness.port.closeNavigationAndAppearancePopupIfAny(),
+        ),
+      );
+      assert.equal((await popupState(page)).navigation, false);
+      await click(page, "Navigation");
+      await page.evaluate(() => {
+        window.harness.navigate({
+          mode: "event",
+          eventId: "event-1",
+          path: "event/event-1",
+        });
+        window.harness.dismissEvent();
+        window.harness.run(() =>
+          window.harness.port.closeNavigationAndAppearancePopupIfAny({
+            preserveNavigationSelection: true,
+          }),
+        );
+      });
+      assert.equal((await popupState(page)).navigation, true);
+      await page.clock.runFor(10001);
+      await page.evaluate(() =>
+        window.harness.run(() =>
+          window.harness.port.setNavigationListButtonVisible(false),
+        ),
+      );
+      assert.equal((await popupState(page)).navigation, false);
+    });
+  },
+);
+
+test(
+  "ordinary transient closes cancel pending puzzle selection while preserved closes allow it",
+  { timeout: 60000 },
+  async () => {
+    await fixture(async (page) => {
+      for (const preserveNavigationSelection of [false, true]) {
+        await click(page, "Navigation");
+        await page.evaluate(() => window.harness.holdHomeTransition());
+        await click(page, "Open test puzzle");
+        assert.equal((await popupState(page)).navigation, false);
+        await page.evaluate(
+          (preserveNavigationSelection) =>
+            window.harness.run(() => {
+              window.harness.port.closeNavigationAndAppearancePopupIfAny({
+                preserveNavigationSelection,
+              });
+            }),
+          preserveNavigationSelection,
+        );
+        await page.evaluate(() => window.harness.releaseHomeTransition());
+        assert.equal(
+          await page.evaluate(
+            () =>
+              window.harness.environment.calls.filter(
+                ([name]) => name === "puzzle",
+              ).length,
+          ),
+          preserveNavigationSelection ? 1 : 0,
+        );
+      }
+      assert.deepEqual(
+        await page.evaluate(() => window.harness.environment.calls.at(-1)),
+        ["puzzle", "test-puzzle"],
+      );
+    });
+  },
+);
+
+test(
+  "reaction hiding resets wager selection and submitting captures the selected material and count",
+  { timeout: 60000 },
+  async () => {
+    await fixture(async (page) => {
+      await page.evaluate(() => {
+        window.harness.environment.wagerEligible = true;
+        window.harness.updateConnection({ online: true });
+      });
+      await showPopupControls(page);
+      await click(page, "Voice Reaction");
+      await click(page, "Propose a Wager");
+      await click(page, "3");
+      await click(page, "3");
+      assert.equal(await count(page, "Propose 2"), 1);
+      await page.evaluate(() =>
+        window.harness.run(() =>
+          window.harness.port.showVoiceReactionButton(false),
+        ),
+      );
+      assert.equal(await count(page, "Propose 2"), 0);
+      await page.evaluate(() =>
+        window.harness.run(() =>
+          window.harness.port.showVoiceReactionButton(true),
+        ),
+      );
+      await click(page, "Voice Reaction");
+      assert.equal(await count(page, "yo"), 1);
+      await click(page, "Propose a Wager");
+      assert.equal(await button(page, "Select a Material").isDisabled(), true);
+      await click(page, "2");
+      await click(page, "2");
+      await click(page, "Propose 2");
+      assert.equal(await count(page, "Propose 2"), 0);
+      assert.deepEqual(
+        await page.evaluate(() => window.harness.environment.calls),
+        [["wager", "slime", 2]],
+      );
+      await click(page, "Voice Reaction");
+      await click(page, "yo");
+      assert.equal(await button(page, "Voice Reaction").isDisabled(), true);
+      await click(page, "Move History");
+      await click(page, "Resign");
+      await page.evaluate(() =>
+        window.harness.run(() => window.harness.port.toggleReactionPicker()),
+      );
+      assert.equal(await count(page, "yo"), 0);
+      assert.equal(await count(page, "Resign"), 2);
+      assert.equal(await page.getByTestId("history-popup").count(), 1);
+    });
+  },
+);
 
 test(
   "event button survives real session navigation, queued overlays, and browser history while a game loads",

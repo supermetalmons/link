@@ -155,9 +155,13 @@ import {
 import {
   automatchControlsReducer,
   createAutomatchControlsState,
-  createGameControlsState,
-  gameControlsReducer,
+  type GameControlsAction,
 } from "./controls/bottomControlsState";
+import {
+  bottomControlsUiReducer,
+  createBottomControlsUiState,
+  hasBottomControlsPopups,
+} from "./controls/bottomControlsUiState";
 import { didDismissSomethingWithOutsideTapJustNow } from "./controls/outsideTapState";
 import { observeBottomControlsViewport } from "./controls/bottomControlsViewport";
 import {
@@ -634,16 +638,26 @@ interface BottomControlsProps {
 const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const { authStatus, profileId } = authState;
   const isAuthenticated = authStatus === "authenticated";
-  const [gameControls, dispatchGameControls] = useReducer(
-    gameControlsReducer,
+  const [controlsUi, dispatchControlsUi] = useReducer(
+    bottomControlsUiReducer,
     undefined,
     () =>
-      createGameControlsState({
+      createBottomControlsUiState({
         duration: MATCH_TIMER_DURATION_SECONDS,
         progress: 0,
         requestDate: Date.now(),
       }),
   );
+  const { gameControls, popups } = controlsUi;
+  const dispatchGameControls = useCallback((action: GameControlsAction) => {
+    dispatchControlsUi({ type: "gameControls", action });
+  }, []);
+  const isNavigationPopupVisible = popups.navigation;
+  const isBoardStylePickerVisible = popups.appearance;
+  const isMoveHistoryPopupVisible = popups.history;
+  const isReactionPickerVisible = popups.reaction.mode !== "closed";
+  const isWagerMode = popups.reaction.mode === "wager";
+  const wagerSelection = popups.reaction.selection;
   const [automatchControls, dispatchAutomatchControls] = useReducer(
     automatchControlsReducer,
     undefined,
@@ -685,10 +699,6 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     useState(false);
   const [isBrushButtonDimmed, setIsBrushButtonDimmed] = useState(false);
   const [, setIsNavigationListButtonVisible] = useState(false);
-  const [isNavigationPopupVisible, setIsNavigationPopupVisible] =
-    useState(false);
-  const [isBoardStylePickerVisible, setIsBoardStylePickerVisible] =
-    useState(false);
   const {
     topGames: topNavigationGames,
     pagedGames: pagedNavigationGames,
@@ -731,10 +741,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const [waitingStateText, setWaitingStateText] = useState("");
   const [isVoiceReactionButtonVisible, setIsVoiceReactionButtonVisible] =
     useState(false);
-  const [isReactionPickerVisible, setIsReactionPickerVisible] = useState(false);
   const [isMoveHistoryButtonVisible, setIsMoveHistoryButtonVisible] =
-    useState(false);
-  const [isMoveHistoryPopupVisible, setIsMoveHistoryPopupVisible] =
     useState(false);
   const [
     isRematchSeriesSelectionInFlight,
@@ -759,11 +766,6 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     number | null
   >(null);
 
-  const [isWagerMode, setIsWagerMode] = useState(false);
-  const [wagerSelection, setWagerSelection] = useState<{
-    name: MaterialName | null;
-    count: number;
-  }>({ name: null, count: 0 });
   const materialUrls = useMaterialImages(
     isWagerMode && isReactionPickerVisible,
   );
@@ -925,7 +927,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     if (isStartTimerVisibleRef.current && isTimerButtonDisabledRef.current) {
       dispatchGameControls({ type: "enableTimer" });
     }
-  }, [clearTrackedMatchScopedTimeout]);
+  }, [clearTrackedMatchScopedTimeout, dispatchGameControls]);
 
   const tryRevealCancelAutomatchFromDeadline = useCallback(() => {
     const deadline = cancelAutomatchRevealDeadlineRef.current;
@@ -1012,8 +1014,11 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
           !claimVictoryButtonRef.current?.contains(event.target as Node))
       ) {
         didDismissSomethingWithOutsideTapJustNow();
-        setIsReactionPickerVisible(false);
-        dispatchGameControls({ type: "setConfirmation", confirmation: "none" });
+        dispatchControlsUi({
+          type: "dismissPopups",
+          reaction: true,
+          confirmation: true,
+        });
       }
 
       if (
@@ -1022,7 +1027,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         !moveHistoryButtonRef.current?.contains(event.target as Node)
       ) {
         didDismissSomethingWithOutsideTapJustNow();
-        setIsMoveHistoryPopupVisible(false);
+        dispatchControlsUi({ type: "dismissPopups", history: true });
       }
 
       if (
@@ -1033,7 +1038,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         if (!isEventModalVisible()) {
           didDismissSomethingWithOutsideTapJustNow();
           navigationSelectionEpochRef.current += 1;
-          setIsNavigationPopupVisible(false);
+          dispatchControlsUi({ type: "dismissPopups", navigation: true });
         }
       }
 
@@ -1043,7 +1048,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         !brushButtonRef.current?.contains(event.target as Node)
       ) {
         didDismissSomethingWithOutsideTapJustNow();
-        setIsBoardStylePickerVisible(false);
+        dispatchControlsUi({ type: "dismissPopups", appearance: true });
       }
 
       if (handleWagerPanelOutsideTap && handleWagerPanelOutsideTap(event)) {
@@ -1127,13 +1132,6 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
       window.removeEventListener("resize", updateClaimVictoryConfirmPosition);
     };
   }, [isClaimVictoryConfirmVisible, updateClaimVictoryConfirmPosition]);
-
-  useEffect(() => {
-    if (!isReactionPickerVisible) {
-      setIsWagerMode(false);
-      setWagerSelection({ name: null, count: 0 });
-    }
-  }, [isReactionPickerVisible]);
 
   useEffect(() => {
     const unsubscribe = subscribeToWagerState((state) => {
@@ -1364,14 +1362,10 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
       const shouldSuppressNavigationAutoClose =
         options?.preserveNavigationSelection === true &&
         shouldSuppressNavigationPopupProgrammaticAutoCloseForEventModal();
-      if (!shouldSuppressNavigationAutoClose) {
-        setIsNavigationPopupVisible(false);
-      }
-      setIsBoardStylePickerVisible(false);
-      setIsMoveHistoryPopupVisible(false);
-      setIsReactionPickerVisible(false);
-      dispatchGameControls({ type: "setConfirmation", confirmation: "none" });
-      setIsWagerMode(false);
+      dispatchControlsUi({
+        type: "closeTransient",
+        preserveNavigation: shouldSuppressNavigationAutoClose,
+      });
     },
     [shouldSuppressNavigationPopupProgrammaticAutoCloseForEventModal],
   );
@@ -1433,7 +1427,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
       !visible &&
       !shouldSuppressNavigationPopupProgrammaticAutoCloseForEventModal()
     ) {
-      setIsNavigationPopupVisible(false);
+      dispatchControlsUi({ type: "dismissPopups", navigation: true });
     }
   };
 
@@ -1445,7 +1439,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const showVoiceReactionButtonHandler = (show: boolean) => {
     setIsVoiceReactionButtonVisible(show);
     if (!show) {
-      setIsReactionPickerVisible(false);
+      dispatchControlsUi({ type: "dismissPopups", reaction: true });
     }
   };
 
@@ -1511,15 +1505,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   };
 
   const hasBottomPopupsVisibleHandler = () => {
-    return (
-      isReactionPickerVisible ||
-      isMoveHistoryPopupVisible ||
-      isResignConfirmVisible ||
-      isTimerConfirmVisible ||
-      isClaimVictoryConfirmVisible ||
-      isBoardStylePickerVisible ||
-      isWagerPanelVisible()
-    );
+    return hasBottomControlsPopups(controlsUi) || isWagerPanelVisible();
   };
 
   const enableTimerVictoryClaimHandler = () => {
@@ -1652,21 +1638,19 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         return;
       }
       closeMenuAndInfoIfAny();
-      dispatchGameControls({ type: "setConfirmation", confirmation: "none" });
-      setIsMoveHistoryPopupVisible(false);
     }
-    setIsReactionPickerVisible((prev) => !prev);
+    dispatchControlsUi({
+      type: "toggleReaction",
+      disabled: isVoiceReactionDisabled,
+    });
   };
 
   const toggleMoveHistoryPopup = () => {
     if (!isMoveHistoryPopupVisible) {
       closeMenuAndInfoIfAny();
-      dispatchGameControls({ type: "setConfirmation", confirmation: "none" });
-      setIsReactionPickerVisible(false);
       navigationSelectionEpochRef.current += 1;
-      setIsNavigationPopupVisible(false);
     }
-    setIsMoveHistoryPopupVisible((prev) => !prev);
+    dispatchControlsUi({ type: "toggleHistory" });
   };
 
   const handleRematchSeriesChipClick = useCallback(async (matchId: string) => {
@@ -1723,12 +1707,9 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const handleBrushClick = () => {
     if (!isBoardStylePickerVisible) {
       closeMenuAndInfoIfAny();
-      dispatchGameControls({ type: "setConfirmation", confirmation: "none" });
-      setIsReactionPickerVisible(false);
       navigationSelectionEpochRef.current += 1;
-      setIsNavigationPopupVisible(false);
     }
-    setIsBoardStylePickerVisible(!isBoardStylePickerVisible);
+    dispatchControlsUi({ type: "toggleAppearance" });
   };
 
   const handleResignClick = (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -1806,14 +1787,14 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const handleStickerSelect = useCallback(
     (stickerId: number) => {
       if (!isVoiceReactionButtonVisible) {
-        setIsReactionPickerVisible(false);
+        dispatchControlsUi({ type: "dismissPopups", reaction: true });
         return;
       }
       if (!canSendSticker(stickerId)) {
-        setIsReactionPickerVisible(false);
+        dispatchControlsUi({ type: "dismissPopups", reaction: true });
         return;
       }
-      setIsReactionPickerVisible(false);
+      dispatchControlsUi({ type: "dismissPopups", reaction: true });
       showVideoReaction(
         isMetadataSideDisplayedAtOpponentSlot(false),
         stickerId,
@@ -1849,10 +1830,10 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const handleReactionSelect = useCallback(
     (reaction: string) => {
       if (!isVoiceReactionButtonVisible) {
-        setIsReactionPickerVisible(false);
+        dispatchControlsUi({ type: "dismissPopups", reaction: true });
         return;
       }
-      setIsReactionPickerVisible(false);
+      dispatchControlsUi({ type: "dismissPopups", reaction: true });
       const reactionObj = newReactionOfKind(reaction);
       playReaction(reactionObj);
       showVoiceReactionText(reaction, false);
@@ -1931,7 +1912,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     wagerCount > 0;
 
   const handleWagerModeToggle = useCallback(() => {
-    setIsWagerMode(true);
+    dispatchControlsUi({ type: "enterWager" });
   }, []);
 
   const handleMaterialSelect = useCallback(
@@ -1939,14 +1920,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
       if (frozenMaterialsStatus !== "ready") return;
       const total = materialAmounts[name] ?? 0;
       if (total <= 0) return;
-      setWagerSelection((prev) => {
-        if (prev.name === name) {
-          const nextCount = Math.min(total, prev.count + 1);
-          if (nextCount === prev.count) return prev;
-          return { name, count: nextCount };
-        }
-        return { name, count: 1 };
-      });
+      dispatchControlsUi({ type: "selectWagerMaterial", name, total });
     },
     [materialAmounts, frozenMaterialsStatus],
   );
@@ -1955,7 +1929,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     if (!wagerMaterial || !wagerReady) {
       return;
     }
-    setIsReactionPickerVisible(false);
+    dispatchControlsUi({ type: "dismissPopups", reaction: true });
     const material = wagerMaterial;
     const count = wagerCount;
     connection.sendWagerProposal(material, count).catch(() => {});
@@ -2107,7 +2081,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     } else {
       navigationSelectionEpochRef.current += 1;
     }
-    setIsNavigationPopupVisible(!isNavigationPopupVisible);
+    dispatchControlsUi({ type: "toggleNavigation" });
   };
 
   const handleNavigationGameSelect = (
@@ -2115,7 +2089,10 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     options?: { status?: NavigationGameStatus },
   ) => {
     navigationSelectionEpochRef.current += 1;
-    setIsBoardStylePickerVisible(false);
+    dispatchControlsUi({
+      type: "selectNavigationItem",
+      kind: item.entityType === "event" ? "event" : "game",
+    });
     if (item.entityType === "event") {
       const requestSeq =
         pendingNavigationOpenedEventModalRequestSeqRef.current + 1;
@@ -2132,7 +2109,6 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     }
     pendingNavigationOpenedEventModalRequestedAtMsRef.current = 0;
     pendingNavigationOpenedEventModalRequestSeqRef.current += 1;
-    setIsNavigationPopupVisible(false);
     const inviteId = item.inviteId;
     if (options?.status === "pending") {
       clearPendingDelayedCancelAutomatchIntent();
@@ -2162,8 +2138,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     }
     const selectionEpoch = navigationSelectionEpochRef.current + 1;
     navigationSelectionEpochRef.current = selectionEpoch;
-    setIsNavigationPopupVisible(false);
-    setIsBoardStylePickerVisible(false);
+    dispatchControlsUi({ type: "selectNavigationItem", kind: "problem" });
     dismissPendingAutomatchTransition();
     void (async () => {
       try {
