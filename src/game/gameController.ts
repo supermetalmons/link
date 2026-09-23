@@ -2415,16 +2415,7 @@ function rematchInLoopMode() {
   scheduleWatchAutomove();
 }
 
-function startFreshLocalMatch() {
-  ensureLocalRematchSeriesInitialized();
-  const activeLocalMatchIndex = localActiveRematchMatchId
-    ? localRematchMatchIds.indexOf(localActiveRematchMatchId)
-    : -1;
-  const playerStartsAsBlackInThisMatch =
-    activeLocalMatchIndex >= 0 && activeLocalMatchIndex % 2 === 1;
-  playerSideColor = playerStartsAsBlackInThisMatch
-    ? MonsRules.Color.Black
-    : MonsRules.Color.White;
+function initializeLocalMatch(mode: "local" | "bot") {
   prepareForNewLocalLiveMatch();
   resetBotScoreReactionState();
   isGameOver = false;
@@ -2435,10 +2426,10 @@ function startFreshLocalMatch() {
   flashbackMode = false;
   resignedColor = undefined;
   winnerByTimerColor = undefined;
-  isInviteBotIntoLocalGameUnavailable = false;
+  isInviteBotIntoLocalGameUnavailable = mode === "bot";
   didMakeFirstLocalPlayerMoveOnLocalBoard = false;
   didStartLocalGame = true;
-  isGameWithBot = false;
+  isGameWithBot = mode === "bot";
   whiteProcessedMovesCount = 0;
   blackProcessedMovesCount = 0;
   didSetWhiteProcessedMovesCount = false;
@@ -2460,6 +2451,19 @@ function startFreshLocalMatch() {
   setAutomoveActionEnabled(true);
   showMoveHistoryButton(true);
   showResignButton();
+}
+
+function startFreshLocalMatch() {
+  ensureLocalRematchSeriesInitialized();
+  const activeLocalMatchIndex = localActiveRematchMatchId
+    ? localRematchMatchIds.indexOf(localActiveRematchMatchId)
+    : -1;
+  const playerStartsAsBlackInThisMatch =
+    activeLocalMatchIndex >= 0 && activeLocalMatchIndex % 2 === 1;
+  playerSideColor = playerStartsAsBlackInThisMatch
+    ? MonsRules.Color.Black
+    : MonsRules.Color.White;
+  initializeLocalMatch("local");
   showVoiceReactionButton(false);
   setEndMatchVisible(false);
   setEndMatchConfirmed(false);
@@ -2478,41 +2482,7 @@ function startFreshLocalMatch() {
 function startBotMatch(botColor: MonsRules.Color) {
   const nextSeed = buildRandomGameSeed();
   ensureLocalRematchSeriesInitialized();
-  prepareForNewLocalLiveMatch();
-  resetBotScoreReactionState();
-  isGameOver = false;
-  isReconnect = false;
-  didConnect = false;
-  isWaitingForInviteToGetAccepted = false;
-  isWaitingForRematchResponse = false;
-  flashbackMode = false;
-  resignedColor = undefined;
-  winnerByTimerColor = undefined;
-  isInviteBotIntoLocalGameUnavailable = true;
-  didMakeFirstLocalPlayerMoveOnLocalBoard = false;
-  didStartLocalGame = true;
-  isGameWithBot = true;
-  whiteProcessedMovesCount = 0;
-  blackProcessedMovesCount = 0;
-  didSetWhiteProcessedMovesCount = false;
-  didSetBlackProcessedMovesCount = false;
-  currentGameModelMatchId = null;
-  whiteFlatMovesString = null;
-  blackFlatMovesString = null;
-  currentInputs = [];
-  resetTimerStateForMatch(null);
-  setHomeVisible(true);
-  setIslandButtonDimmed(true);
-  setUndoVisible(true);
-  setBrushAndNavigationButtonDimmed(true);
-  setInviteLinkActionVisible(false);
-  setAutomatchVisible(false);
-  setBotGameOptionVisible(false);
-  setNavigationListButtonVisible(false);
-  setAutomoveActionVisible(true);
-  setAutomoveActionEnabled(true);
-  showMoveHistoryButton(true);
-  showResignButton();
+  initializeLocalMatch("bot");
   Board.setBoardFlipped(botColor === MonsRules.Color.White);
   Board.showOpponentAsBotPlayer();
   Board.resetForNewGame();
