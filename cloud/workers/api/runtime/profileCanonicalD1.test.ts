@@ -7,6 +7,7 @@ import {
 } from "@mons/shared/profiles";
 import {
   buildCanonicalGuardStatements,
+  CANONICAL_PROFILE_INTERNAL_REDIRECT_LIMIT,
   CanonicalProfileConflict,
   CanonicalProfileCorruption,
   commitCanonicalPlan,
@@ -41,6 +42,7 @@ import { createProfileCustomizationRepository } from "../src/profileCustomizatio
 import { observeD1FailureDatabase } from "./d1FailureTestUtils.ts";
 import { profileWriteRow } from "../src/profileCanonical/profiles.ts";
 import { buildCanonicalRatingProjectionMutation } from "../src/profileCanonical/accounting.ts";
+import { readCanonicalProfileIdMap } from "../src/profileCanonical/auth.ts";
 
 const testEnv = env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] };
 
@@ -2036,6 +2038,12 @@ describe("canonical profile D1 store", () => {
         ownership.canonicalProfileIdByProfileId.get(profileId),
       ),
     ).toEqual(profileIds.map(() => profileIds.at(-1)));
+    const idMapRead = observeAggregateDatabase({ mapAll: (rows) => rows });
+    expect([
+      ...(await readCanonicalProfileIdMap(idMapRead.database, profileIds)),
+    ]).toEqual(profileIds.map((profileId) => [profileId, profileIds.at(-1)]));
+    expect(idMapRead.allQueries).toHaveLength(1);
+    expect(idMapRead.batches).toHaveLength(0);
     for (const resolve of [
       resolveCanonicalProfile,
       resolveCanonicalPublicProfile,
@@ -2881,6 +2889,170 @@ describe("canonical profile D1 store", () => {
     },
   );
 
+  describe("canonical profile ID map", () => {
+    it("returns empty input and rejects invalid input without accessing D1", async () => {
+      let accesses = 0;
+      const database = new Proxy({} as D1Database, {
+        get() {
+          accesses += 1;
+          throw new Error("unexpected-database-access");
+        },
+      });
+      await expect(readCanonicalProfileIdMap(database, [])).resolves.toEqual(
+        new Map(),
+      );
+      for (const profileIds of [[""], ["valid", ""], [null], [1]]) {
+        await expect(
+          readCanonicalProfileIdMap(
+            database,
+            profileIds as unknown as string[],
+          ),
+        ).rejects.toThrow("invalid-canonical-profile-ownership-input");
+      }
+      expect(accesses).toBe(0);
+    });
+
+    it("reads unique exact keys with one identity-only query", async () => {
+      const value = profileValue("canonical-id-map-profile");
+      await commitCanonicalPlan(testEnv.PROFILE_DB, {
+        expectations: [{ kind: "profile-absent", profileId: value.profile.id }],
+        mutations: [{ kind: "insert-active-profile", value }],
+      });
+      const keys = [
+        value.profile.id,
+        "missing",
+        ` ${value.profile.id} `,
+        " ",
+        "' OR 1 = 1 --",
+        "é",
+        "e\u0301",
+        "😀",
+      ];
+      const observed = observeAggregateDatabase({ mapAll: (rows) => rows });
+      const result = await readCanonicalProfileIdMap(observed.database, [
+        ...keys,
+        value.profile.id,
+        "missing",
+      ]);
+      expect([...result]).toEqual(
+        keys.map((key) => [key, key === value.profile.id ? key : null]),
+      );
+      expect(observed.allQueries).toHaveLength(1);
+      expect(observed.batches).toHaveLength(0);
+      expect(observed.allBindings).toEqual([
+        [JSON.stringify(keys), CANONICAL_PROFILE_INTERNAL_REDIRECT_LIMIT + 1],
+      ]);
+      expect(observed.allQueries[0]).not.toMatch(
+        /payload_json|legacy_fields_json|profile_login_owners|profile_auth_methods|profile\.\*/,
+      );
+    });
+
+    function chainRows(profileIds = ["id-map-source", "id-map-target"]) {
+      return profileIds.map((profileId, index) => {
+        const target = profileIds[index + 1] ?? null;
+        return {
+          request_index: 0,
+          request_key: profileIds[0],
+          root_profile_id: profileIds[0],
+          owner_revision: null,
+          owner_created_at_ms: null,
+          owner_updated_at_ms: null,
+          chain_profile_id: profileId,
+          depth: index,
+          profile_revision: 1,
+          profile_state: target ? "retiring" : "active",
+          merged_into_profile_id: target,
+          merge_target_profile_id: target,
+          merge_target_merged_at_ms: target ? 2_000 : null,
+          merge_target_op_id: null,
+        };
+      });
+    }
+
+    it.each([
+      ["invalid revision", 1, { profile_revision: 0 }],
+      ["fractional revision", 1, { profile_revision: 1.5 }],
+      ["active redirect", 0, { profile_state: "active" }],
+      ["mismatched redirect", 0, { merged_into_profile_id: "other" }],
+      ["invalid redirect timestamp", 0, { merge_target_merged_at_ms: -1 }],
+      ["invalid redirect operation", 0, { merge_target_op_id: false }],
+      ["retiring terminal", 1, { profile_state: "retiring" }],
+      ["dangling target", 1, { profile_revision: null, profile_state: null }],
+    ] as const)("rejects %s", async (_name, index, patch) => {
+      const observed = observeAggregateDatabase({
+        mapAll: () =>
+          chainRows().map((row, rowIndex) =>
+            rowIndex === index ? { ...row, ...patch } : row,
+          ),
+      });
+      await expect(
+        readCanonicalProfileIdMap(observed.database, ["id-map-source"]),
+      ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+      expect(observed.allQueries).toHaveLength(1);
+    });
+
+    it.each([
+      ["cycle", ["id-map-source", "id-map-middle", "id-map-source"]],
+      [
+        "excessive depth",
+        Array.from(
+          { length: CANONICAL_PROFILE_INTERNAL_REDIRECT_LIMIT + 2 },
+          (_, index) => (index === 0 ? "id-map-source" : `id-map-${index}`),
+        ),
+      ],
+    ])("rejects a %s", async (_name, profileIds) => {
+      const observed = observeAggregateDatabase({
+        mapAll: () => chainRows(profileIds as string[]),
+      });
+      await expect(
+        readCanonicalProfileIdMap(observed.database, ["id-map-source"]),
+      ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+      expect(observed.allQueries).toHaveLength(1);
+    });
+
+    it.each(["public-profile", "login-owner"])(
+      "ignores unrelated %s corruption while full ownership rejects it",
+      async (kind) => {
+        const value = profileValue("canonical-id-map-corruption");
+        const loginUid = "canonical-id-map-login";
+        await commitCanonicalPlan(testEnv.PROFILE_DB, {
+          expectations: [
+            { kind: "profile-absent", profileId: value.profile.id },
+            { kind: "login-owner-absent", loginUid },
+          ],
+          mutations: [
+            { kind: "insert-active-profile", value },
+            {
+              kind: "insert-login-owner",
+              value: {
+                loginUid,
+                profileId: value.profile.id,
+                createdAtMs: 1_000,
+                updatedAtMs: 1_000,
+              },
+            },
+          ],
+        });
+        await testEnv.PROFILE_DB.prepare(
+          kind === "public-profile"
+            ? "UPDATE profile_records SET payload_json = '{}' WHERE profile_id = ?"
+            : "UPDATE profile_login_owners SET revision = 1.5 WHERE profile_id = ?",
+        )
+          .bind(value.profile.id)
+          .run();
+        await expect(
+          readCanonicalProfileIdMap(testEnv.PROFILE_DB, [value.profile.id]),
+        ).resolves.toEqual(new Map([[value.profile.id, value.profile.id]]));
+        await expect(
+          readCanonicalProfileOwnershipSnapshot(testEnv.PROFILE_DB, {
+            loginUids: [],
+            profileIds: [value.profile.id],
+          }),
+        ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+      },
+    );
+  });
+
   it("resolves bulk ownership in one transactional batch", async () => {
     const value = profileValue("canonical-bulk-owner");
     const loginUids = Array.from(
@@ -3034,6 +3206,17 @@ describe("canonical profile D1 store", () => {
       (await resolveCanonicalProfile(testEnv.PROFILE_DB, source.profile.id))
         ?.profileId,
     ).toBe(target.profile.id);
+    await expect(
+      readCanonicalProfileIdMap(testEnv.PROFILE_DB, [
+        source.profile.id,
+        target.profile.id,
+      ]),
+    ).resolves.toEqual(
+      new Map([
+        [source.profile.id, target.profile.id],
+        [target.profile.id, target.profile.id],
+      ]),
+    );
     await expect(
       readCanonicalMergeTarget(testEnv.PROFILE_DB, source.profile.id),
     ).resolves.toEqual({
@@ -3268,6 +3451,9 @@ describe("canonical profile D1 store", () => {
     ).toBe("canonical-chain-32");
     expect(fullObserved.allQueries).toHaveLength(1);
     expect(fullObserved.batches).toHaveLength(0);
+    await expect(
+      readCanonicalProfileIdMap(testEnv.PROFILE_DB, ["canonical-chain-0"]),
+    ).resolves.toEqual(new Map([["canonical-chain-0", "canonical-chain-32"]]));
     const observed = observeAggregateDatabase({ mapAll: (rows) => rows });
     await expect(
       resolveCanonicalPublicProfile(observed.database, "canonical-chain-28", 4),

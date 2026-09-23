@@ -296,7 +296,10 @@ const ratingDiscoveryCases = [
   },
 ] as const;
 
-function observeRatingDiscovery(db: D1Database) {
+function observeRatingDiscovery(
+  db: D1Database,
+  beforeRead?: (query: string) => Promise<void>,
+) {
   const queries: string[] = [];
   const reads: Array<{
     query: string;
@@ -317,6 +320,7 @@ function observeRatingDiscovery(db: D1Database) {
         }
         if (property === "all") {
           return async () => {
+            await beforeRead?.(query);
             const result = await target.all<Record<string, unknown>>();
             reads.push({
               query,
@@ -978,7 +982,7 @@ describe("canonical gameplay repositories", () => {
       }
       expect(
         queries.filter((query) => /^\s*(?:SELECT|WITH)\b/i.test(query)),
-      ).toHaveLength({ wager: 3, rating: 3, challenge: 8 }[kind]);
+      ).toHaveLength({ wager: 3, rating: 3, challenge: 5 }[kind]);
       expect(writes).toHaveLength(2);
       for (const [index, profileId] of [playerId, opponentId].entries()) {
         const write = writes.find(
@@ -1466,6 +1470,104 @@ describe("canonical gameplay repositories", () => {
           Object.isFrozen(snapshot.profileById.get(profileId)?.profile),
         ).toBe(true);
       }
+    },
+  );
+
+  it("uses one narrow ID read for each February replay resolution phase", async () => {
+    const playerProfileId = "d1-feb-narrow-player";
+    const opponentProfileId = "d1-feb-narrow-opponent";
+    const priorOpponentProfileId = "d1-feb-narrow-prior";
+    for (const profileId of [
+      playerProfileId,
+      opponentProfileId,
+      priorOpponentProfileId,
+    ]) {
+      await insertProfile(profileId, `${profileId}-login`);
+    }
+    await projectionRatingRepository().applyFebruaryChallengeReplay(
+      playerProfileId,
+      priorOpponentProfileId,
+    );
+    const observed = observeRatingDiscovery(testEnv.PROFILE_DB);
+
+    await projectionRatingRepository(
+      observed.database,
+    ).applyFebruaryChallengeReplay(playerProfileId, opponentProfileId);
+
+    expect(observed.reads).toHaveLength(2);
+    expect(
+      observed.reads.map(({ bindings }) => JSON.parse(String(bindings[0]))),
+    ).toEqual([[playerProfileId, opponentProfileId], [priorOpponentProfileId]]);
+    for (const read of observed.reads) {
+      expect(read.query).toContain("roots.request_index");
+      expect(read.query).not.toMatch(
+        /payload_json|legacy_fields_json|profile_login_owners/,
+      );
+      expect(read.rowsWritten).toBe(0);
+    }
+    expect(
+      observed.queries.filter((query) => /^\s*(?:SELECT|WITH)\b/i.test(query)),
+    ).toHaveLength(6);
+    for (const [profileId, count] of [
+      [playerProfileId, 2],
+      [opponentProfileId, 1],
+      [priorOpponentProfileId, 1],
+    ] as const) {
+      expect(
+        (await readCanonicalProfile(testEnv.PROFILE_DB, profileId))?.profile
+          .feb2026UniqueOpponentsCount,
+      ).toBe(count);
+    }
+  });
+
+  it.each([1, 2])(
+    "does not change February counters when ID resolution phase %i fails",
+    async (failedPhase) => {
+      const playerProfileId = "d1-feb-id-failure-player";
+      const opponentProfileId = "d1-feb-id-failure-opponent";
+      const priorOpponentProfileId = "d1-feb-id-failure-prior";
+      for (const profileId of [
+        playerProfileId,
+        opponentProfileId,
+        priorOpponentProfileId,
+      ]) {
+        await insertProfile(profileId, null);
+      }
+      await projectionRatingRepository().applyFebruaryChallengeReplay(
+        playerProfileId,
+        priorOpponentProfileId,
+      );
+      const profileIds = [playerProfileId, opponentProfileId];
+      const before = await Promise.all(profileIds.map(readRawProfileRow));
+      const failure = new Error("challenge-id-resolution-unavailable");
+      let phase = 0;
+      const observed = observeRatingDiscovery(
+        testEnv.PROFILE_DB,
+        async (query) => {
+          if (
+            query.includes("roots.request_index") &&
+            ++phase === failedPhase
+          ) {
+            throw failure;
+          }
+        },
+      );
+
+      await expect(
+        projectionRatingRepository(
+          observed.database,
+        ).applyFebruaryChallengeReplay(playerProfileId, opponentProfileId),
+      ).rejects.toBe(failure);
+
+      expect(phase).toBe(failedPhase);
+      expect(await Promise.all(profileIds.map(readRawProfileRow))).toEqual(
+        before,
+      );
+      expect(
+        await testEnv.PROFILE_DB.prepare(
+          "SELECT COUNT(*) AS count FROM profile_february_opponents",
+        ).first("count"),
+      ).toBe(2);
     },
   );
 

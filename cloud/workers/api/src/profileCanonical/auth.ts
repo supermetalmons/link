@@ -711,6 +711,33 @@ function parseCanonicalOwnershipOwners(
   return { aggregateOwnerByUid, loginOwnersByProfileId };
 }
 
+export async function readCanonicalProfileIdMap(
+  db: D1Database,
+  profileIds: readonly string[],
+): Promise<ReadonlyMap<string, string | null>> {
+  const requestKeys = canonicalOwnershipInputs(
+    profileIds,
+    "invalid-canonical-profile-ownership-input",
+  );
+  if (requestKeys.length === 0) return new Map();
+  const { results } = await canonicalOwnershipResolutionStatement(
+    db,
+    requestKeys,
+    "profile",
+  ).all<CanonicalOwnershipResolutionRow>();
+  const resolutions = parseCanonicalOwnershipResolutions(
+    results,
+    requestKeys,
+    "profile",
+  );
+  return new Map(
+    requestKeys.map((profileId, index) => [
+      profileId,
+      resolutions[index]?.profileId ?? null,
+    ]),
+  );
+}
+
 export async function readCanonicalProfileOwnershipSnapshot(
   db: D1Database,
   query: CanonicalProfileOwnershipQuery,

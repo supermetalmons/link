@@ -5,7 +5,6 @@ import {
 } from "@mons/shared/game-sessions";
 import {
   commitCanonicalPlan,
-  readCanonicalProfileOwnershipSnapshot,
   readCanonicalRatingUpdate,
   CanonicalProfileConflict,
   CanonicalProfileCorruption,
@@ -15,6 +14,7 @@ import {
   type CanonicalRatingUpdateSnapshot,
   type CanonicalRatingUpdateValue,
 } from "./profileCanonicalD1.ts";
+import { readCanonicalProfileIdMap } from "./profileCanonical/auth.ts";
 import {
   canonicalRatingProjectionFields,
   buildCanonicalRatingProjectionMutation,
@@ -104,14 +104,8 @@ async function canonicalProfileIds(
   db: D1Database,
   profileIds: readonly string[],
 ): Promise<Array<string | null>> {
-  const snapshot = await readCanonicalProfileOwnershipSnapshot(db, {
-    loginUids: [],
-    profileIds,
-  });
-  return profileIds.map(
-    (profileId) =>
-      snapshot.canonicalProfileIdByProfileId.get(profileId) || null,
-  );
+  const canonicalIds = await readCanonicalProfileIdMap(db, profileIds);
+  return profileIds.map((profileId) => canonicalIds.get(profileId) ?? null);
 }
 
 function ratingProfileFromSnapshot(
