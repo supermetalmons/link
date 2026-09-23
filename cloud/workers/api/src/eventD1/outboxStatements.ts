@@ -26,10 +26,12 @@ import {
 } from "./guards.ts";
 import { parseEventProgressOutbox } from "../eventProgressCodec.ts";
 import type { PreparedEventMutations } from "./mutationPreparation.ts";
+import { requiredMutationSnapshot } from "./mutationSnapshots.ts";
 
 export async function buildOutboxStatements(
   db: EventD1Connection,
   {
+    snapshots,
     progressOutboxSnapshot,
     progressDispatchSnapshots,
     telegramProjectionSnapshot,
@@ -40,6 +42,7 @@ export async function buildOutboxStatements(
     telegramStateUpdates,
   }: Pick<
     PreparedEventMutations,
+    | "snapshots"
     | "progressOutboxSnapshot"
     | "progressDispatchSnapshots"
     | "telegramProjectionSnapshot"
@@ -85,7 +88,9 @@ export async function buildOutboxStatements(
     const stored =
       progressOutboxSnapshot ??
       progressDispatchSnapshots.get(outboxId) ??
-      (await readEventProgressOutboxSnapshot(db, outboxId));
+      (snapshots
+        ? requiredMutationSnapshot(snapshots.progress, outboxId)
+        : await readEventProgressOutboxSnapshot(db, outboxId));
     guards.push(progressOutboxSnapshotGuard(db, stored));
     const previous =
       stored.recordJson !== null
@@ -300,7 +305,9 @@ export async function buildOutboxStatements(
   for (const [eventId, update] of telegramStateUpdates) {
     const current = telegramProjectionSnapshot
       ? telegramProjectionSnapshot.current
-      : await readEventTelegramProjectionState(db, eventId);
+      : snapshots
+        ? requiredMutationSnapshot(snapshots.telegram, eventId)
+        : await readEventTelegramProjectionState(db, eventId);
     const currentRevision = current?.revision || 0;
     const expectedRevision =
       options.expectedTelegramStateRevisions?.[eventId] ?? currentRevision;

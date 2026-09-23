@@ -26,8 +26,15 @@ import {
   readEventProfileGameProjectionOutbox,
 } from "./reads.ts";
 import type { EventMutation } from "../../../../runtime/eventCommands.js";
+import {
+  readEventMutationSnapshots,
+  requiredMutationSnapshot,
+  validateEventMutationKeys,
+  type EventMutationSnapshots,
+} from "./mutationSnapshots.ts";
 
 export type PreparedEventMutations = {
+  snapshots: EventMutationSnapshots | null;
   progressOutboxSnapshot: EventMutationOptions["progressOutboxSnapshot"];
   progressDispatchSnapshots: ReadonlyMap<string, ProgressOutboxSnapshot>;
   telegramProjectionSnapshot: EventMutationOptions["telegramProjectionSnapshot"];
@@ -65,10 +72,13 @@ async function getEventMutationState(
   db: EventD1Connection,
   states: Map<string, EventMutationState>,
   eventId: string,
+  snapshots: EventMutationSnapshots | null,
 ): Promise<EventMutationState> {
   let state = states.get(eventId);
   if (!state) {
-    const stored = await readEventRecord(db, eventId);
+    const stored = snapshots
+      ? requiredMutationSnapshot(snapshots.events, eventId)
+      : await readEventRecord(db, eventId);
     state = {
       current: stored?.event ?? null,
       next: stored ? cloneJson(stored.event) : null,
@@ -87,9 +97,12 @@ async function ensureSelections(
   db: EventD1Connection,
   eventId: string,
   state: EventMutationState,
+  snapshots: EventMutationSnapshots | null,
 ): Promise<Record<string, string>> {
   if (state.selections === null) {
-    state.originalSelections = await readSelections(db, eventId);
+    state.originalSelections = snapshots
+      ? requiredMutationSnapshot(snapshots.selections, eventId)
+      : await readSelections(db, eventId);
     state.selections = { ...state.originalSelections };
   }
   return state.selections;
@@ -183,6 +196,7 @@ export async function prepareEventMutations(
     db,
     snapshot ? new Map() : profilePrizeReadTargets(changes),
   );
+  const snapshots = await readEventMutationSnapshots(db, changes, options);
   const progressUpdates = new Map<string, unknown>();
   const progressDispatchSnapshots = new Map<string, ProgressOutboxSnapshot>();
   const progressDeadUpdates = new Map<string, unknown>();
@@ -194,17 +208,7 @@ export async function prepareEventMutations(
   >();
 
   for (const change of changes) {
-    for (const key of ["eventId", "profileId", "outboxId"] as const)
-      if (key in change && !exactKey(change[key as keyof typeof change]))
-        throw new EventD1Failure("invalid-event-path");
-    if (
-      "roundKey" in change &&
-      change.roundKey !== null &&
-      !exactKey(change.roundKey)
-    )
-      throw new EventD1Failure("invalid-event-path");
-    if ("matchKey" in change && !exactKey(change.matchKey))
-      throw new EventD1Failure("invalid-event-path");
+    validateEventMutationKeys(change);
     const { value } = change;
     switch (change.kind) {
       case "event":
@@ -215,7 +219,12 @@ export async function prepareEventMutations(
       case "event-match-status": {
         const eventId = exactKey(change.eventId);
         if (!eventId) throw new EventD1Failure("invalid-event-path");
-        const state = await getEventMutationState(db, eventStates, eventId);
+        const state = await getEventMutationState(
+          db,
+          eventStates,
+          eventId,
+          snapshots,
+        );
         if (change.kind === "event") {
           if (value === null)
             throw new EventD1Failure("event-deletion-unsupported");
@@ -265,9 +274,19 @@ export async function prepareEventMutations(
       case "prize-selection": {
         const eventId = exactKey(change.eventId);
         if (!eventId) throw new EventD1Failure("invalid-event-path");
-        const state = await getEventMutationState(db, eventStates, eventId);
+        const state = await getEventMutationState(
+          db,
+          eventStates,
+          eventId,
+          snapshots,
+        );
         if (!state.next) throw new EventD1Failure("event-not-found");
-        const selections = await ensureSelections(db, eventId, state);
+        const selections = await ensureSelections(
+          db,
+          eventId,
+          state,
+          snapshots,
+        );
         if (change.kind === "prize-selections") {
           const replacement = value === null ? {} : value;
           if (!isRecord(replacement))
@@ -358,7 +377,9 @@ export async function prepareEventMutations(
         const eventId = exactKey(change.eventId);
         const stored = profileProjectionUpdates.has(eventId)
           ? profileProjectionUpdates.get(eventId)
-          : await readEventProfileGameProjectionOutbox(db, eventId);
+          : snapshots
+            ? requiredMutationSnapshot(snapshots.profileGame, eventId)
+            : await readEventProfileGameProjectionOutbox(db, eventId);
         const next = isRecord(stored) ? cloneJson(stored) : {};
         setNested(
           next,
@@ -398,6 +419,7 @@ export async function prepareEventMutations(
       db,
       eventStates,
       transitionEventId,
+      snapshots,
     );
     if (state.pendingTransitionId !== transitionId) {
       throw new EventD1Failure("event-transition-not-owned");
@@ -405,6 +427,7 @@ export async function prepareEventMutations(
   }
 
   return {
+    snapshots,
     progressOutboxSnapshot,
     progressDispatchSnapshots,
     telegramProjectionSnapshot,

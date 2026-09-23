@@ -35,31 +35,46 @@ export async function readEventRecord(
   db: EventD1Connection,
   eventId: string,
 ): Promise<DecodedEventRow | null> {
+  const row = await prepareEventRecordRead(db, eventId).first<EventRow>();
+  return row ? decodeEventRow(row) : null;
+}
+
+export function prepareEventRecordRead(
+  db: EventD1Connection,
+  eventId: string,
+): D1PreparedStatement {
   const normalizedEventId = exactKey(eventId);
   if (!normalizedEventId) throw new EventD1Failure("invalid-event-id");
-  const row = await db
+  return db
     .prepare(
       `SELECT event_id, status, start_at_ms, updated_at_ms, revision,
               pending_transition_id, record_json
        FROM event_records WHERE event_id = ?`,
     )
-    .bind(normalizedEventId)
-    .first<EventRow>();
-  return row ? decodeEventRow(row) : null;
+    .bind(normalizedEventId);
 }
 
 export async function readSelections(
   db: EventD1Connection,
   eventId: string,
 ): Promise<Record<string, string>> {
-  const rows = await db
+  const rows = await prepareSelectionsRead(db, eventId).all<{
+    prize_id: string;
+    profile_id: string;
+  }>();
+  return selectionsFromRows(eventId, rows.results);
+}
+
+export function prepareSelectionsRead(
+  db: EventD1Connection,
+  eventId: string,
+): D1PreparedStatement {
+  return db
     .prepare(
       `SELECT profile_id, prize_id FROM event_prize_selections
        WHERE event_id = ? ORDER BY profile_id`,
     )
-    .bind(eventId)
-    .all<{ prize_id: string; profile_id: string }>();
-  return selectionsFromRows(eventId, rows.results);
+    .bind(eventId);
 }
 
 export async function readEvent(
@@ -78,7 +93,7 @@ export async function readEventPrizeSelections(
   return readSelections(db, normalizedEventId);
 }
 
-function selectionsFromRows(
+export function selectionsFromRows(
   eventId: string,
   rows: Array<{ prize_id: string; profile_id: string }>,
 ): Record<string, string> {
@@ -529,17 +544,28 @@ export async function readEventProgressOutboxSnapshot(
   outboxId: string,
 ): Promise<ProgressOutboxSnapshot> {
   const normalizedOutboxId = exactKey(outboxId);
-  const row = await db
-    .prepare(
-      `SELECT record_json FROM event_progress_outboxes
-       WHERE outbox_id = ? AND status = 'pending'`,
-    )
-    .bind(normalizedOutboxId)
-    .first<{ record_json: string }>();
+  const row = await prepareEventProgressOutboxRead(
+    db,
+    normalizedOutboxId,
+  ).first<{
+    record_json: string;
+  }>();
   return {
     outboxId: normalizedOutboxId,
     recordJson: row ? row.record_json : null,
   };
+}
+
+export function prepareEventProgressOutboxRead(
+  db: EventD1Connection,
+  outboxId: string,
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `SELECT record_json FROM event_progress_outboxes
+       WHERE outbox_id = ? AND status = 'pending'`,
+    )
+    .bind(exactKey(outboxId));
 }
 
 export async function listDueEventProgressOutboxes(
@@ -590,13 +616,30 @@ async function readProjectionOutbox(
     | "event_telegram_projection_outboxes",
   eventId: string,
 ): Promise<EventOutboxRecord | null> {
-  const row = await db
+  const row = await prepareProjectionOutboxRead(db, table, eventId).first<{
+    record_json: string;
+  }>();
+  return decodeProjectionOutboxRow(row);
+}
+
+export function prepareProjectionOutboxRead(
+  db: EventD1Connection,
+  table:
+    | "event_profile_game_projection_outboxes"
+    | "event_telegram_projection_outboxes",
+  eventId: string,
+): D1PreparedStatement {
+  return db
     .prepare(
       `SELECT record_json FROM ${table}
        WHERE event_id = ? AND status = 'pending'`,
     )
-    .bind(exactKey(eventId))
-    .first<{ record_json: string }>();
+    .bind(exactKey(eventId));
+}
+
+export function decodeProjectionOutboxRow(
+  row: { record_json: string } | null | undefined,
+): EventOutboxRecord | null {
   return row ? (decodeJson(row.record_json) as EventOutboxRecord) : null;
 }
 
@@ -655,13 +698,32 @@ export async function readEventTelegramProjectionState(
   db: EventD1Connection,
   eventId: string,
 ): Promise<TelegramProjectionState | null> {
-  const row = await db
+  const row = await prepareTelegramProjectionStateRead(db, eventId).first<{
+    generation: number;
+    revision: number;
+    state_json: string;
+  }>();
+  return decodeTelegramProjectionStateRow(row);
+}
+
+export function prepareTelegramProjectionStateRead(
+  db: EventD1Connection,
+  eventId: string,
+): D1PreparedStatement {
+  return db
     .prepare(
       `SELECT generation, revision, state_json
        FROM event_telegram_projection_state WHERE event_id = ?`,
     )
-    .bind(exactKey(eventId))
-    .first<{ generation: number; revision: number; state_json: string }>();
+    .bind(exactKey(eventId));
+}
+
+export function decodeTelegramProjectionStateRow(
+  row:
+    | { generation: number; revision: number; state_json: string }
+    | null
+    | undefined,
+): TelegramProjectionState | null {
   if (!row) return null;
   const state = decodeJson(row.state_json);
   if (!isRecord(state)) throw new EventD1Failure();

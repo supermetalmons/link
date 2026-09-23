@@ -1,30 +1,8 @@
 import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
-import {
-  isToggleEventPrizeSelectionRequest,
-  type ToggleEventPrizeSelectionRequest,
-} from "@mons/shared/event-prizes";
-import {
-  isCreateEventRequest,
-  isDisqualifyEventMatchWinnersRequest,
-  isJoinEventRequest,
-  isPostponeEventStartRequest,
-  isRemoveEventParticipantRequest,
-  isSyncEventStateRequest,
-  type CreateEventRequest,
-  type DisqualifyEventMatchWinnersRequest,
-  type JoinEventRequest,
-  type PostponeEventStartRequest,
-  type RemoveEventParticipantRequest,
-  type SyncEventStateRequest,
-} from "@mons/shared/events";
-import { normalizeRecordKey } from "@mons/shared/ids";
 import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
 import { authJsonResponse, getAuthCorsHeaders } from "./authHttp.ts";
 import {
   EVENT_OPERATION_TIMEOUT_MS,
-  joinEvent,
-  removeEventParticipant,
-  toggleEventPrizeSelection,
   type EventParticipationDependencies,
 } from "./eventParticipation.ts";
 import type { WorkerExecutionContext } from "./sessionAuth.ts";
@@ -33,11 +11,7 @@ import { EventWritesDisabled, assertEventWritesAllowed } from "./eventD1.ts";
 import { createEventMutationRepository } from "./eventMutationRepository.ts";
 import { readBoundedJson } from "./http.ts";
 import {
-  createEvent,
-  disqualifyEventMatchWinners,
   EVENT_CONTROL_TIMEOUT_MS,
-  postponeEventStart,
-  syncEventState,
   type EventControlDependencies,
 } from "./eventOperations.ts";
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
@@ -48,16 +22,14 @@ import {
   readOptionalEventSnapshotSeed,
   type EventSnapshotSeedDependencies,
 } from "./eventSnapshotResponse.ts";
+import {
+  eventRoutes,
+  type EventRequestBody,
+  type EventRoute,
+  type PreparedEventRoute,
+} from "./eventRouteDefinitions.ts";
 
-export const EVENT_PATHS = new Set([
-  "/events/create",
-  "/events/matches/winners/disqualify",
-  "/events/participants/join",
-  "/events/participants/remove",
-  "/events/prize-selections/toggle",
-  "/events/start/postpone",
-  "/events/state/sync",
-]);
+export const EVENT_PATHS = new Set(eventRoutes.keys());
 
 export type EventRouteDependencies = EventSnapshotSeedDependencies & {
   assertEventWrites?: () => Promise<void>;
@@ -78,67 +50,28 @@ function toRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-export async function readEventBody(
+async function prepareEventRoute(
   request: Request,
-  pathname: string,
-): Promise<
-  | CreateEventRequest
-  | DisqualifyEventMatchWinnersRequest
-  | JoinEventRequest
-  | PostponeEventStartRequest
-  | RemoveEventParticipantRequest
-  | SyncEventStateRequest
-  | ToggleEventPrizeSelectionRequest
-> {
+  route: EventRoute,
+): Promise<PreparedEventRoute> {
   let body: Record<string, unknown> | null;
   try {
     body = toRecord(await readBoundedJson(request));
   } catch {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
   }
-  if (pathname === "/events/participants/join") {
-    if (!isJoinEventRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return { eventId: normalizeRecordKey(body.eventId) || "" };
-  }
-  if (pathname === "/events/create") {
-    if (!isCreateEventRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return body;
-  }
-  if (pathname === "/events/start/postpone") {
-    if (!isPostponeEventStartRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return body;
-  }
-  if (pathname === "/events/matches/winners/disqualify") {
-    if (!isDisqualifyEventMatchWinnersRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return body;
-  }
-  if (pathname === "/events/state/sync") {
-    if (!isSyncEventStateRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return body;
-  }
-  if (pathname === "/events/prize-selections/toggle") {
-    if (!isToggleEventPrizeSelectionRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return body;
-  }
-  if (!isRemoveEventParticipantRequest(body)) {
+  return route.prepare(body);
+}
+
+export async function readEventBody(
+  request: Request,
+  pathname: string,
+): Promise<EventRequestBody> {
+  const route =
+    eventRoutes.get(pathname) || eventRoutes.get("/events/participants/remove");
+  if (!route)
     throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-  }
-  return {
-    eventId: normalizeRecordKey(body.eventId) || "",
-    participantProfileId: normalizeRecordKey(body.participantProfileId) || "",
-  };
+  return (await prepareEventRoute(request, route)).body;
 }
 
 export async function handleEventRoute(
@@ -194,13 +127,11 @@ async function handleEventRequest(
           : null,
     },
     async ({ pathname, corsHeaders, authenticate }) => {
-      if (!EVENT_PATHS.has(pathname)) {
+      const route = eventRoutes.get(pathname);
+      if (!route) {
         throw new AuthApiFailure(404, "not-found", "not-found");
       }
-      const isParticipationPath =
-        pathname === "/events/participants/join" ||
-        pathname === "/events/participants/remove" ||
-        pathname === "/events/prize-selections/toggle";
+      const isParticipationPath = route.kind === "participation";
       const signal = isParticipationPath
         ? dependencies.participation?.signal ||
           AbortSignal.timeout(EVENT_OPERATION_TIMEOUT_MS)
@@ -213,80 +144,19 @@ async function handleEventRequest(
         await assertEventWritesAllowed(env.EVENT_DB);
       }
       await assertProfileMutationAllowed(env);
-      const body = await readEventBody(request, pathname);
+      const prepared = await prepareEventRoute(request, route);
       const schedule = (work: Promise<void>) => ctx.waitUntil(work);
       const repository = createEventMutationRepository(env, {
         eventRepository: dependencies.repository,
         schedule,
       });
-      const participation = {
-        ...dependencies.participation,
-        signal,
-      };
-      let operation: Promise<unknown>;
-      if (pathname === "/events/participants/join") {
-        if (!isJoinEventRequest(body)) {
-          throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-        }
-        operation = joinEvent(identity, body, repository, participation);
-      } else if (pathname === "/events/participants/remove") {
-        if (!isRemoveEventParticipantRequest(body)) {
-          throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-        }
-        operation = removeEventParticipant(
-          identity,
-          body,
-          repository,
-          participation,
-        );
-      } else if (pathname === "/events/prize-selections/toggle") {
-        if (!isToggleEventPrizeSelectionRequest(body)) {
-          throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-        }
-        operation = toggleEventPrizeSelection(
-          identity,
-          body,
-          repository,
-          participation,
-        );
-      } else if (pathname === "/events/create") {
-        if (!isCreateEventRequest(body)) {
-          throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-        }
-        operation = createEvent(env, identity, body, {
-          ...dependencies.control,
-          repository,
-          signal,
-        });
-      } else if (pathname === "/events/start/postpone") {
-        if (!isPostponeEventStartRequest(body)) {
-          throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-        }
-        operation = postponeEventStart(env, identity, body, {
-          ...dependencies.control,
-          repository,
-          signal,
-        });
-      } else if (pathname === "/events/matches/winners/disqualify") {
-        if (!isDisqualifyEventMatchWinnersRequest(body)) {
-          throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-        }
-        operation = disqualifyEventMatchWinners(env, identity, body, {
-          ...dependencies.control,
-          repository,
-          signal,
-        });
-      } else {
-        if (!isSyncEventStateRequest(body)) {
-          throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-        }
-        operation = syncEventState(env, identity, body, {
-          ...dependencies.control,
-          repository,
-          signal,
-        });
-      }
-      const response = await operation;
+      const response = await prepared.execute({
+        env,
+        identity,
+        repository,
+        participation: { ...dependencies.participation, signal },
+        control: { ...dependencies.control, repository, signal },
+      });
       const value = toRecord(response);
       const params = new URL(request.url).searchParams;
       if (

@@ -303,7 +303,7 @@ describe("event D1 store", () => {
         });
         await withD1Admission(async (admission) => {
           const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
-            async beforeBatch() {
+            async beforeWriteBatch() {
               await testEnv.EVENT_DB.prepare(
                 "UPDATE event_records SET revision = revision + 1 WHERE event_id = ?",
               )
@@ -346,7 +346,8 @@ describe("event D1 store", () => {
           expect(classifyD1Failure(observed.errors[0])).toBe(
             sentinel === "present" ? "event-conflict" : "guard",
           );
-          expect(observed.batches).toHaveLength(1);
+          expect(observed.writeBatches).toHaveLength(1);
+          expect(observed.readBatches).toHaveLength(1);
           expect(observed.sessions).toEqual(
             sentinel === "present" ? [] : ["first-primary"],
           );
@@ -484,7 +485,7 @@ describe("event D1 store", () => {
           const failure = await operation.catch((error: unknown) => error);
           expect(failure).toBeInstanceOf(EventWritesDisabled);
           expect(failure).toHaveProperty("cause", observed.errors[0]);
-          expect(observed.batches).toHaveLength(1);
+          expect(observed.writeBatches).toHaveLength(1);
           expect(observed.sessions).toEqual(["first-primary"]);
           expect(
             await readEventSnapshot(testEnv.EVENT_DB, eventId),
@@ -1493,52 +1494,26 @@ describe("event D1 store", () => {
 
     function observe(
       kind: SnapshotKind,
-      beforeBatch?: (attempt: number) => Promise<void>,
+      beforeWriteBatch?: (attempt: number) => Promise<void>,
       afterRead?: (read: number) => Promise<void>,
     ) {
-      const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
-        beforeBatch,
-      });
       let reads = 0;
       const table =
         kind === "progress"
           ? "event_progress_outboxes"
           : "event_telegram_projection_state";
-      const db: EventD1Connection = {
-        prepare(query) {
-          const statement = observed.database.prepare(query);
+      const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
+        beforeWriteBatch,
+        async afterRead(query) {
           if (!/^\s*SELECT\b/i.test(query) || !query.includes(`FROM ${table}`))
-            return statement;
-          const read = ++reads;
-          if (!afterRead) return statement;
-          const wrap = (current: D1PreparedStatement): D1PreparedStatement =>
-            new Proxy(current, {
-              get(target, property) {
-                if (property === "bind")
-                  return (...values: unknown[]) => wrap(target.bind(...values));
-                if (property === "first")
-                  return async (...args: unknown[]) => {
-                    const result = await Reflect.apply(
-                      target.first,
-                      target,
-                      args,
-                    );
-                    await afterRead(read);
-                    return result;
-                  };
-                const member = Reflect.get(target, property, target);
-                return typeof member === "function"
-                  ? member.bind(target)
-                  : member;
-              },
-            });
-          return wrap(statement);
+            return;
+          reads++;
+          await afterRead?.(reads);
         },
-        batch: (statements) => observed.database.batch(statements),
-      };
+      });
       return {
         ...observed,
-        db,
+        db: observed.database,
         get reads() {
           return reads;
         },
@@ -1566,7 +1541,8 @@ describe("event D1 store", () => {
         ),
       );
       expect(observed.reads).toBe(1);
-      expect(observed.batches).toHaveLength(1);
+      expect(observed.writeBatches).toHaveLength(1);
+      expect(observed.readBatches).toHaveLength(0);
       expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual({
         ...original,
         lastQueuedAtMs: 300,
@@ -1630,7 +1606,7 @@ describe("event D1 store", () => {
           ),
         ).rejects.toBeInstanceOf(EventD1Conflict);
         expect(observed.reads).toBe(1);
-        expect(observed.batches).toHaveLength(1);
+        expect(observed.writeBatches).toHaveLength(1);
         expect(
           await testEnv.EVENT_DB.prepare(
             "SELECT record_json FROM event_progress_outboxes WHERE outbox_id = ? AND status = 'pending'",
@@ -1695,7 +1671,7 @@ describe("event D1 store", () => {
         ),
       );
       expect(observed.reads).toBe(3);
-      expect(observed.batches).toHaveLength(1);
+      expect(observed.writeBatches).toHaveLength(1);
       for (const [plan, timestamp] of [
         [first, 400],
         [second, 300],
@@ -1752,7 +1728,7 @@ describe("event D1 store", () => {
         expect(observed.reads).toBe(
           position === "after" && kind === "replacement" ? 2 : 1,
         );
-        expect(observed.batches).toHaveLength(1);
+        expect(observed.writeBatches).toHaveLength(1);
         expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(
           position === "before"
             ? { ...outbox, lastQueuedAtMs: 300 }
@@ -1837,7 +1813,8 @@ describe("event D1 store", () => {
           transactEventOwnedPath(observed.db, path, () => ({ value: next })),
         ).resolves.toMatchObject({ committed: true, value: next });
         expect(observed.reads).toBe(1);
-        expect(observed.batches).toHaveLength(1);
+        expect(observed.writeBatches).toHaveLength(1);
+        expect(observed.readBatches).toHaveLength(0);
         if (kind === "progress") {
           expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(
             next,
@@ -1889,7 +1866,7 @@ describe("event D1 store", () => {
             : [3, 8],
         );
         expect(observed.reads).toBe(2);
-        expect(observed.batches).toHaveLength(2);
+        expect(observed.writeBatches).toHaveLength(2);
         expect(
           await readEventTelegramProjectionState(testEnv.EVENT_DB, eventId),
         ).toEqual({
@@ -1959,7 +1936,7 @@ describe("event D1 store", () => {
           };
         });
         expect(observed.reads).toBe(2);
-        expect(observed.batches).toHaveLength(2);
+        expect(observed.writeBatches).toHaveLength(2);
         if (kind === "progress") {
           expect(inputs).toEqual(
             race === "insert" ? [null, inserted] : [outbox, null],
@@ -2018,7 +1995,7 @@ describe("event D1 store", () => {
       });
       expect(inputs).toEqual([outbox, raced]);
       expect(observed.reads).toBe(2);
-      expect(observed.batches).toHaveLength(2);
+      expect(observed.writeBatches).toHaveLength(2);
       expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual({
         ...outbox,
         lastQueuedAtMs: 200,
@@ -2053,7 +2030,7 @@ describe("event D1 store", () => {
         return { value };
       });
       expect(observed.reads).toBe(1);
-      expect(observed.batches).toHaveLength(1);
+      expect(observed.writeBatches).toHaveLength(1);
       expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual({
         ...outbox,
         lastQueuedAtMs: 300,
@@ -2083,7 +2060,8 @@ describe("event D1 store", () => {
         });
       });
       expect(observed.reads).toBe(0);
-      expect(observed.batches).toHaveLength(2);
+      expect(observed.writeBatches).toHaveLength(2);
+      expect(observed.readBatches).toHaveLength(0);
       expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toBeNull();
     });
 
@@ -2113,7 +2091,7 @@ describe("event D1 store", () => {
           ),
         ).rejects.toMatchObject({ name: "AbortError" });
         expect(observed.reads).toBe(2);
-        expect(observed.batches).toHaveLength(0);
+        expect(observed.writeBatches).toHaveLength(0);
         expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(
           before,
         );
@@ -2146,7 +2124,7 @@ describe("event D1 store", () => {
           })),
         ).rejects.toBeInstanceOf(EventD1Conflict);
         expect(observed.reads).toBe(12);
-        expect(observed.batches).toHaveLength(12);
+        expect(observed.writeBatches).toHaveLength(12);
         if (kind === "progress") {
           expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual({
             ...outbox,
@@ -2187,7 +2165,7 @@ describe("event D1 store", () => {
         ),
       ).rejects.toBe(reason);
       expect(observed.reads).toBe(1);
-      expect(observed.batches).toHaveLength(0);
+      expect(observed.writeBatches).toHaveLength(0);
       expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual({
         retained: true,
       });
@@ -2212,7 +2190,7 @@ describe("event D1 store", () => {
         ),
       ).rejects.toBe(reason);
       expect(observed.reads).toBe(12);
-      expect(observed.batches).toHaveLength(12);
+      expect(observed.writeBatches).toHaveLength(12);
       expect(observed.errors).toHaveLength(12);
       expect(
         await readEventTelegramProjectionState(testEnv.EVENT_DB, eventId),
@@ -2243,7 +2221,7 @@ describe("event D1 store", () => {
         value: next,
       });
       expect(observed.reads).toBe(1);
-      expect(observed.batches).toHaveLength(1);
+      expect(observed.writeBatches).toHaveLength(1);
       expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(next);
     });
   });
@@ -4197,7 +4175,8 @@ describe("event D1 store", () => {
     await patchEventOwnedPaths(observed.database, {
       [path]: { ...outbox, firstQueuedAtMs: 400, lastQueuedAtMs: 400 },
     });
-    expect(observed.batches).toHaveLength(1);
+    expect(observed.writeBatches).toHaveLength(1);
+    expect(observed.readBatches).toHaveLength(1);
     expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual({
       ...outbox,
       lastQueuedAtMs: 400,
@@ -4245,7 +4224,7 @@ describe("event D1 store", () => {
         evidence: "concurrent-record",
       };
       const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
-        async beforeBatch(attempt) {
+        async beforeWriteBatch(attempt) {
           if (attempt !== 1) return;
           await testEnv.EVENT_DB.prepare(
             "INSERT INTO event_progress_outboxes (outbox_id, event_id, status, run_at_ms, last_queued_at_ms, record_json) VALUES (?, ?, 'pending', NULL, ?, ?) ON CONFLICT (status, outbox_id) DO UPDATE SET record_json = excluded.record_json",
@@ -4255,7 +4234,8 @@ describe("event D1 store", () => {
         },
       });
       await patchEventOwnedPaths(observed.database, { [path]: outbox });
-      expect(observed.batches).toHaveLength(2);
+      expect(observed.writeBatches).toHaveLength(2);
+      expect(observed.readBatches).toHaveLength(2);
       expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(outbox);
       expect(
         await readEventOwnedPath(
@@ -4287,7 +4267,7 @@ describe("event D1 store", () => {
       .run();
     const repaired = { ...outbox, firstQueuedAtMs: 50 };
     const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
-      async beforeBatch(attempt) {
+      async beforeWriteBatch(attempt) {
         if (attempt !== 1) return;
         await testEnv.EVENT_DB.prepare(
           "UPDATE event_progress_outboxes SET record_json = ? WHERE status = 'pending' AND outbox_id = ?",
@@ -4297,7 +4277,8 @@ describe("event D1 store", () => {
       },
     });
     await patchEventOwnedPaths(observed.database, { [path]: outbox });
-    expect(observed.batches).toHaveLength(2);
+    expect(observed.writeBatches).toHaveLength(2);
+    expect(observed.readBatches).toHaveLength(2);
     expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(repaired);
     expect(
       await readEventOwnedPath(
@@ -4325,7 +4306,7 @@ describe("event D1 store", () => {
       });
       const raced = { ...outbox, schemaVersion: 2 };
       const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
-        async beforeBatch() {
+        async beforeWriteBatch() {
           await testEnv.EVENT_DB.prepare(
             "UPDATE event_progress_outboxes SET record_json = ? WHERE status = 'pending' AND outbox_id = ?",
           )
@@ -4347,7 +4328,8 @@ describe("event D1 store", () => {
             : {},
         ),
       ).rejects.toBeInstanceOf(EventD1Conflict);
-      expect(observed.batches).toHaveLength(1);
+      expect(observed.writeBatches).toHaveLength(1);
+      expect(observed.readBatches).toHaveLength(1);
       expect(
         (await readEventSnapshot(testEnv.EVENT_DB, eventId)).event?.status,
       ).toBe("scheduled");
@@ -4376,7 +4358,7 @@ describe("event D1 store", () => {
       [path]: outbox,
     });
     const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
-      async beforeBatch(attempt) {
+      async beforeWriteBatch(attempt) {
         await testEnv.EVENT_DB.prepare(
           "UPDATE event_progress_outboxes SET record_json = ? WHERE status = 'pending' AND outbox_id = ?",
         )
@@ -4390,7 +4372,8 @@ describe("event D1 store", () => {
     await expect(
       patchEventOwnedPaths(observed.database, { [path]: outbox }),
     ).rejects.toBeInstanceOf(EventD1Conflict);
-    expect(observed.batches).toHaveLength(12);
+    expect(observed.writeBatches).toHaveLength(12);
+    expect(observed.readBatches).toHaveLength(12);
     expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual({
       ...outbox,
       schemaVersion: 2,

@@ -13,7 +13,11 @@ import {
   type EventSnapshotSeed,
 } from "@mons/shared/events";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import { handleEventRoute } from "../src/eventRoute.ts";
+import {
+  EVENT_PATHS,
+  handleEventRoute,
+  readEventBody,
+} from "../src/eventRoute.ts";
 import { EVENT_CONTROL_TIMEOUT_MS } from "../src/eventOperations.ts";
 import { EVENT_OPERATION_TIMEOUT_MS } from "../src/eventParticipation.ts";
 import type { EventGameplayRepository } from "../src/eventRepository.ts";
@@ -156,6 +160,108 @@ function createRepository(): EventGameplayRepository &
 }
 
 const ctx = { waitUntil: () => undefined };
+
+const eventRouteCases = [
+  {
+    path: "/events/create",
+    kind: "control",
+    body: { startsInMinutes: 5 },
+    parsed: { startsInMinutes: 5 },
+  },
+  {
+    path: "/events/matches/winners/disqualify",
+    kind: "control",
+    body: { eventId: "event-1", matchKey: "0_0" },
+    parsed: { eventId: "event-1", matchKey: "0_0" },
+  },
+  {
+    path: "/events/participants/join",
+    kind: "participation",
+    body: { eventId: " event-1 " },
+    parsed: { eventId: "event-1" },
+  },
+  {
+    path: "/events/participants/remove",
+    kind: "participation",
+    body: { eventId: " event-1 ", participantProfileId: " target-profile " },
+    parsed: { eventId: "event-1", participantProfileId: "target-profile" },
+  },
+  {
+    path: "/events/prize-selections/toggle",
+    kind: "participation",
+    body: { eventId: LEGACY_CORE_PRIZES_EVENT_ID, prizeId: "1092" },
+    parsed: { eventId: LEGACY_CORE_PRIZES_EVENT_ID, prizeId: "1092" },
+  },
+  {
+    path: "/events/start/postpone",
+    kind: "control",
+    body: { eventId: "event-1", postponeByMinutes: 5 },
+    parsed: { eventId: "event-1", postponeByMinutes: 5 },
+  },
+  {
+    path: "/events/state/sync",
+    kind: "control",
+    body: { eventId: "event-1" },
+    parsed: { eventId: "event-1" },
+  },
+] as const;
+
+test("preserves all event request parsers and their strict body contracts", async () => {
+  assert.deepEqual(
+    [...EVENT_PATHS],
+    eventRouteCases.map(({ path }) => path),
+  );
+  for (const { path, body, parsed } of eventRouteCases) {
+    const request = (value: string) =>
+      new Request(`https://api.mons.link${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: value,
+      });
+    assert.deepEqual(
+      await readEventBody(request(JSON.stringify(body)), path),
+      parsed,
+      path,
+    );
+    for (const invalid of [
+      "invalid-json",
+      "null",
+      "[]",
+      "{}",
+      JSON.stringify({ ...body, extra: true }),
+    ]) {
+      await assert.rejects(
+        readEventBody(request(invalid), path),
+        (error: unknown) =>
+          error instanceof AuthApiFailure &&
+          error.status === 400 &&
+          error.message === "invalid-request",
+        `${path}: ${invalid}`,
+      );
+    }
+  }
+});
+
+test("readEventBody retains the removal parser fallback for unknown paths", async () => {
+  const path = "/events/unknown";
+  const request = (body: unknown) =>
+    new Request(`https://api.mons.link${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  assert.deepEqual(
+    await readEventBody(
+      request({ eventId: " event-1 ", participantProfileId: " profile-1 " }),
+      path,
+    ),
+    { eventId: "event-1", participantProfileId: "profile-1" },
+  );
+  await assert.rejects(
+    readEventBody(request({ eventId: "event-1" }), path),
+    (error: unknown) => error instanceof AuthApiFailure && error.status === 400,
+  );
+});
 
 test("serves authenticated event CORS preflight", async () => {
   const response = await handleEventRoute(
@@ -332,11 +438,7 @@ test("keeps participation and event-control deadlines separate", async () => {
     },
   });
   try {
-    for (const pathname of [
-      "/events/participants/join",
-      "/events/prize-selections/toggle",
-      "/events/create",
-    ]) {
+    for (const { path: pathname } of eventRouteCases) {
       const response = await handleEventRoute(
         new Request(`https://api.mons.link${pathname}`, {
           method: "POST",
@@ -354,16 +456,88 @@ test("keeps participation and event-control deadlines separate", async () => {
       Object.defineProperty(AbortSignal, "timeout", timeoutDescriptor);
     }
   }
-  assert.deepEqual(timeouts, [
-    EVENT_OPERATION_TIMEOUT_MS,
-    EVENT_OPERATION_TIMEOUT_MS,
-    EVENT_CONTROL_TIMEOUT_MS,
-  ]);
+  assert.deepEqual(
+    timeouts,
+    eventRouteCases.map(({ kind }) =>
+      kind === "participation"
+        ? EVENT_OPERATION_TIMEOUT_MS
+        : EVENT_CONTROL_TIMEOUT_MS,
+    ),
+  );
   assert.equal(EVENT_OPERATION_TIMEOUT_MS, 25_000);
   assert.equal(EVENT_CONTROL_TIMEOUT_MS, 30_000);
 });
 
-test("returns strict join and removal responses", async () => {
+test("honors each event route's supplied deadline signal", async () => {
+  const timeoutDescriptor = Object.getOwnPropertyDescriptor(
+    AbortSignal,
+    "timeout",
+  );
+  const timeouts: number[] = [];
+  Object.defineProperty(AbortSignal, "timeout", {
+    configurable: true,
+    value(milliseconds: number) {
+      timeouts.push(milliseconds);
+      return new AbortController().signal;
+    },
+  });
+  try {
+    for (const { path, kind } of eventRouteCases) {
+      const response = await handleEventRoute(
+        new Request(`https://api.mons.link${path}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        }),
+        TELEGRAM_TEST_ENV,
+        ctx,
+        {
+          verifyIdentity: async () => identity,
+          [kind]: { signal: new AbortController().signal },
+        },
+      );
+      assert.equal(response.status, 400, path);
+    }
+  } finally {
+    if (timeoutDescriptor)
+      Object.defineProperty(AbortSignal, "timeout", timeoutDescriptor);
+  }
+  assert.deepEqual(timeouts, []);
+});
+
+test("passes supplied signals through participation and control handlers", async () => {
+  for (const { path, kind } of [
+    { path: "/events/participants/join", kind: "participation" },
+    { path: "/events/state/sync", kind: "control" },
+  ] as const) {
+    const signal = new AbortController().signal;
+    const repository =
+      kind === "control" ? syncRouteFixture().repository : createRepository();
+    const signals: (AbortSignal | undefined)[] = [];
+    repository.readEvent = async (_eventId, receivedSignal) => {
+      signals.push(receivedSignal);
+      throw new AuthApiFailure(409, "aborted", "stop-after-read");
+    };
+    const response = await handleEventRoute(
+      new Request(`https://api.mons.link${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ eventId: "event-1" }),
+      }),
+      TELEGRAM_TEST_ENV,
+      ctx,
+      {
+        repository,
+        verifyIdentity: async () => identity,
+        [kind]: { signal },
+      },
+    );
+    assert.equal(response.status, 409, path);
+    assert.deepEqual(signals, [signal], path);
+  }
+});
+
+test("returns strict join and removal responses without snapshot enrichment", async () => {
   const background: Promise<unknown>[] = [];
   const routeCtx = {
     waitUntil(promise: Promise<unknown>) {
@@ -381,13 +555,21 @@ test("returns strict join and removal responses", async () => {
         updates: decodeEventUpdates({}),
       }),
     },
+    readEventSnapshotSeed: async () => {
+      snapshotReads++;
+      return snapshotSeed();
+    },
   };
+  let snapshotReads = 0;
   const join = await handleEventRoute(
-    new Request("https://api.mons.link/events/participants/join", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ eventId: "event-1" }),
-    }),
+    new Request(
+      "https://api.mons.link/events/participants/join?eventSnapshot=v1",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ eventId: "event-1" }),
+      },
+    ),
     TELEGRAM_TEST_ENV,
     routeCtx,
     dependencies,
@@ -401,14 +583,17 @@ test("returns strict join and removal responses", async () => {
   assert.equal(background.length, 1);
 
   const removal = await handleEventRoute(
-    new Request("https://api.mons.link/events/participants/remove", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        eventId: "event-1",
-        participantProfileId: "target-profile",
-      }),
-    }),
+    new Request(
+      "https://api.mons.link/events/participants/remove?eventSnapshot=v1",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          eventId: "event-1",
+          participantProfileId: "target-profile",
+        }),
+      },
+    ),
     TELEGRAM_TEST_ENV,
     routeCtx,
     {
@@ -441,9 +626,10 @@ test("returns strict join and removal responses", async () => {
   });
   assert.equal(background.length, 2);
   await Promise.all(background);
+  assert.equal(snapshotReads, 0);
 });
 
-test("returns a strict event prize selection response", async () => {
+test("returns a strict event prize selection response without snapshot enrichment", async () => {
   const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
   const repository = createRepository();
   repository.readEvent = async (id) =>
@@ -459,18 +645,26 @@ test("returns a strict event prize selection response", async () => {
     assert.ok(decision && typeof decision === "object" && "value" in decision);
     return { committed: true, value: decision.value };
   };
+  let snapshotReads = 0;
   const response = await handleEventRoute(
-    new Request("https://api.mons.link/events/prize-selections/toggle", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ eventId, prizeId: "1092" }),
-    }),
+    new Request(
+      "https://api.mons.link/events/prize-selections/toggle?eventSnapshot=v1",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ eventId, prizeId: "1092" }),
+      },
+    ),
     TELEGRAM_TEST_ENV,
     ctx,
     {
       verifyIdentity: async () => identity,
       repository,
       participation: { lockManager },
+      readEventSnapshotSeed: async () => {
+        snapshotReads++;
+        return snapshotSeed();
+      },
     },
   );
   assert.equal(response.status, 200);
@@ -479,6 +673,7 @@ test("returns a strict event prize selection response", async () => {
     eventId,
     selectedPrizeId: "1092",
   });
+  assert.equal(snapshotReads, 0);
 });
 
 test("rejects malformed event prize selections after authentication", async () => {
