@@ -227,6 +227,7 @@ export function createAutomatchMutations(
         const current = await read(root, key, signal);
         return { record: current.value, version: current.revision };
       },
+      getValue: (current) => current.record,
       decide(current) {
         const decision = validateTelegramTransactionDecision(
           update(structuredClone(current)),
@@ -239,8 +240,8 @@ export function createAutomatchMutations(
         const snapshot = {
           root,
           key,
-          value: current!.record,
-          revision: current!.version,
+          value: current.record,
+          revision: current.version,
         };
         const value = resolveAutomatchServerValues(next, snapshot.value, nowMs);
         return {

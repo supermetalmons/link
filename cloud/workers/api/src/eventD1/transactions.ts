@@ -29,6 +29,7 @@ import type {
   EventJsonRecord,
 } from "../../../../runtime/eventReads.js";
 import { cloneJson, decodeJson } from "./validation.ts";
+import { runOptimisticTransaction } from "../optimisticTransaction.ts";
 
 async function transactEventValue<T>(
   db: EventD1Connection,
@@ -46,38 +47,33 @@ async function transactEventValue<T>(
     allowStoredProfilePrizeAssignment?: boolean;
   },
 ): Promise<TransactionResult<T>> {
-  for (let attempt = 0; attempt < MAX_EVENT_TRANSACTION_ATTEMPTS; attempt++) {
-    options.signal?.throwIfAborted();
-    const loaded = await load();
-    options.signal?.throwIfAborted();
-    const decision = updater(loaded.value);
-    options.signal?.throwIfAborted();
-    if ("commit" in decision)
-      return {
-        committed: false,
-        decision: decision.decision,
-        value: loaded.value,
-      };
-    try {
-      await commitEventMutationsInternal(
-        db,
-        [loaded.mutation(decision.value)],
-        { ...options, ...loaded.options },
-      );
-      return {
-        committed: true,
-        decision: decision.decision,
-        value: decision.value,
-      };
-    } catch (error) {
-      if (error instanceof EventD1Conflict) {
-        options.signal?.throwIfAborted();
-        continue;
+  return runOptimisticTransaction({
+    maxAttempts: MAX_EVENT_TRANSACTION_ATTEMPTS,
+    signal: options.signal,
+    read: load,
+    getValue: (loaded) => loaded.value,
+    decide(value) {
+      const decision = updater(value);
+      options.signal?.throwIfAborted();
+      return decision;
+    },
+    async write(loaded, value) {
+      try {
+        await commitEventMutationsInternal(db, [loaded.mutation(value)], {
+          ...options,
+          ...loaded.options,
+        });
+        return { applied: true, value };
+      } catch (error) {
+        if (error instanceof EventD1Conflict) {
+          options.signal?.throwIfAborted();
+          return { applied: false, value };
+        }
+        throw error;
       }
-      throw error;
-    }
-  }
-  throw new EventD1Conflict();
+    },
+    conflictError: () => new EventD1Conflict(),
+  });
 }
 
 export function transactEventPrizeSelection(

@@ -177,6 +177,7 @@ async function transactRow(
   return runOptimisticTransaction({
     maxAttempts: MAX_TRANSACTION_ATTEMPTS,
     read: () => readRow(db, eventId, prizeId),
+    getValue: (current) => current?.record ?? null,
     decide: updater,
     async write(current, next) {
       if (next === null) {

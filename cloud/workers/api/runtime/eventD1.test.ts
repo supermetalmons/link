@@ -2169,6 +2169,83 @@ describe("event D1 store", () => {
         }
       },
     );
+
+    it("preserves cancellation when an updater declines the transaction", async () => {
+      const { path } = await seed("state");
+      const observed = observe("state");
+      const controller = new AbortController();
+      const reason = new Error("cancelled-before-decline");
+      await expect(
+        transactEventOwnedPath(
+          observed.db,
+          path,
+          () => {
+            controller.abort(reason);
+            return { commit: false, decision: "declined" };
+          },
+          { signal: controller.signal },
+        ),
+      ).rejects.toBe(reason);
+      expect(observed.reads).toBe(1);
+      expect(observed.batches).toHaveLength(0);
+      expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual({
+        retained: true,
+      });
+    });
+
+    it("preserves cancellation after the final transaction conflict", async () => {
+      const { path } = await seed("state");
+      const controller = new AbortController();
+      const reason = new Error("cancelled-at-final-conflict");
+      const observed = observe("state", async (attempt) => {
+        await patchEventOwnedPaths(testEnv.EVENT_DB, {
+          [`eventTelegramProjectionGenerations/${eventId}`]: attempt + 3,
+        });
+        if (attempt === 12) controller.abort(reason);
+      });
+      await expect(
+        transactEventOwnedPath(
+          observed.db,
+          path,
+          () => ({ value: { discarded: true } }),
+          { signal: controller.signal },
+        ),
+      ).rejects.toBe(reason);
+      expect(observed.reads).toBe(12);
+      expect(observed.batches).toHaveLength(12);
+      expect(observed.errors).toHaveLength(12);
+      expect(
+        await readEventTelegramProjectionState(testEnv.EVENT_DB, eventId),
+      ).toEqual({
+        generation: 15,
+        revision: 13,
+        state: { retained: true },
+      });
+    });
+
+    it("returns a committed transaction when cancellation arrives during its write", async () => {
+      const { path } = await seed("state");
+      const controller = new AbortController();
+      const observed = observe("state", async () => {
+        controller.abort(new Error("cancelled-during-commit"));
+      });
+      const next = { updated: true };
+      await expect(
+        transactEventOwnedPath(
+          observed.db,
+          path,
+          () => ({ value: next, decision: "updated" }),
+          { signal: controller.signal },
+        ),
+      ).resolves.toEqual({
+        committed: true,
+        decision: "updated",
+        value: next,
+      });
+      expect(observed.reads).toBe(1);
+      expect(observed.batches).toHaveLength(1);
+      expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(next);
+    });
   });
 
   it.each(["events", "eventPrizeSelections"])(

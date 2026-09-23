@@ -77,13 +77,16 @@ async function withWriter<T>(
     await releaseWagerReservationAdmission(db, admission);
   }
 }
-function responseLost(database: D1Database): D1Database {
+function responseLost(
+  database: D1Database,
+  failure = new Error("response-lost-after-commit"),
+): D1Database {
   return new Proxy(database, {
     get(target, property) {
       if (property === "batch")
         return async (statements: D1PreparedStatement[]) => {
           await target.batch(statements);
-          throw new Error("response-lost-after-commit");
+          throw failure;
         };
       const value = Reflect.get(target, property, target);
       return typeof value === "function" ? value.bind(target) : value;
@@ -300,6 +303,105 @@ describe("canonical wager state", () => {
       expect((await writer.readWager(id))?.overwritten).toBeUndefined();
     });
   });
+  it.each(["host", "guest"])(
+    "recomputes a conflicted proposal after a %s write and only notifies a confirmed change",
+    async (competingPlayer) => {
+      await withWriter(async (writeGuards) => {
+        const id = key(`retry-${competingPlayer}`);
+        const live = createWagerStateRepository(db, { writeGuards, now });
+        const observed = observeD1FailureDatabase(db, {
+          beforeBatch: async (attempt) => {
+            if (attempt === 1)
+              await live.sendProposal(
+                id,
+                proposal(
+                  competingPlayer,
+                  competingPlayer === "guest" ? "slime" : "dust",
+                ),
+              );
+          },
+        });
+        const notices: boolean[] = [];
+        const writer = createWagerStateRepository(observed.database, {
+          writeGuards,
+          now,
+          notify: async (_id, committed) => {
+            notices.push(committed);
+          },
+        });
+        const result = await writer.sendProposal(id, proposal());
+        const changed = competingPlayer === "guest";
+        expect(result.committed).toBe(changed);
+        expect(result.value).toEqual(await live.readWager(id));
+        expect(observed.sessions).toHaveLength(2);
+        expect(observed.batches).toHaveLength(changed ? 2 : 1);
+        expect(observed.errors.map(classifyD1Failure)).toEqual([
+          "wager-state-conflict",
+        ]);
+        expect(notices).toEqual(changed ? [true] : []);
+      });
+    },
+  );
+  it("stops after 25 wager-state conflicts without notifying or changing state", async () => {
+    await withWriter(async (writeGuards) => {
+      const observed = observeD1FailureDatabase(db);
+      const notices: boolean[] = [];
+      const writer = createWagerStateRepository(observed.database, {
+        writeGuards: () => [
+          ...writeGuards(),
+          db.prepare(
+            "INSERT INTO wager_state_revision_guards (singleton) VALUES (0)",
+          ),
+        ],
+        now,
+        notify: async (_id, committed) => {
+          notices.push(committed);
+        },
+      });
+      const id = key("retry-exhaustion");
+      await expect(writer.sendProposal(id, proposal())).rejects.toThrow(
+        "wager-state-conflict",
+      );
+      expect(observed.sessions).toHaveLength(25);
+      expect(observed.batches).toHaveLength(25);
+      expect(observed.errors.map(classifyD1Failure)).toEqual(
+        Array(25).fill("wager-state-conflict"),
+      );
+      expect(notices).toEqual([]);
+      expect((await createWagerStateD1Store(db).read(id)).revision).toBe(0);
+    });
+  });
+  it("stops cancelled conflict retries before another read or notification", async () => {
+    await withWriter(async (writeGuards) => {
+      const id = key("retry-cancelled");
+      const controller = new AbortController();
+      const reason = new Error("cancelled-after-conflict");
+      const live = createWagerStateRepository(db, { writeGuards, now });
+      const observed = observeD1FailureDatabase(db, {
+        beforeBatch: async () => {
+          await live.sendProposal(id, proposal("guest"));
+          controller.abort(reason);
+        },
+      });
+      const notices: boolean[] = [];
+      const writer = createWagerStateRepository(observed.database, {
+        writeGuards,
+        now,
+        notify: async (_id, committed) => {
+          notices.push(committed);
+        },
+      });
+      await expect(
+        writer.sendProposal(id, proposal(), controller.signal),
+      ).rejects.toBe(reason);
+      expect(observed.sessions).toHaveLength(1);
+      expect(observed.batches).toHaveLength(1);
+      expect(notices).toEqual([]);
+      expect(
+        Object.keys((await live.readWager(id))!.proposals as object),
+      ).toEqual(["guest"]);
+    });
+  });
   it("keeps admission guards in completion and invalidates uncertain commits", async () => {
     await withWriter(async (writeGuards) => {
       const writer = createWagerStateRepository(db, { writeGuards, now });
@@ -363,7 +465,8 @@ describe("canonical wager state", () => {
   it("does not treat a frozen-balance conflict as a wager-state conflict", async () => {
     await withWriter(async (writeGuards) => {
       const observed = observeD1FailureDatabase(db);
-      const store = createWagerStateD1Store(observed.database, {
+      const notices: boolean[] = [];
+      const writer = createWagerStateRepository(observed.database, {
         writeGuards: () => [
           ...writeGuards(),
           db.prepare(
@@ -373,22 +476,23 @@ describe("canonical wager state", () => {
           ),
         ],
         now,
+        notify: async (_id, committed) => {
+          notices.push(committed);
+        },
       });
-      const current = await store.read(key("foreign-conflict"));
       await expect(
-        store.commit([
-          {
-            current,
-            value: { wager: { created: true }, resolutionMarker: null },
-          },
-        ]),
+        writer.sendProposal(key("foreign-conflict"), proposal()),
       ).rejects.toThrow("wager_frozen_revision_guard");
       expect(observed.batches).toHaveLength(1);
       expect(observed.errors).toHaveLength(1);
       expect(classifyD1Failure(observed.errors[0])).toBe(
         "wager-frozen-conflict",
       );
-      expect((await store.read(key("foreign-conflict"))).revision).toBe(0);
+      expect(notices).toEqual([false]);
+      expect(
+        (await createWagerStateD1Store(db).read(key("foreign-conflict")))
+          .revision,
+      ).toBe(0);
     });
   });
   it("fences settlement completion by operation and fingerprint without changing either record", async () => {
@@ -478,6 +582,54 @@ describe("canonical wager state", () => {
         }).sendProposal(key("unreadable"), proposal()),
       ).rejects.toThrow("read-unavailable");
       expect(notices).toEqual([]);
+    });
+  });
+  it("preserves confirmed writes and original errors when cancellation or notification failure follows a commit", async () => {
+    await withWriter(async (writeGuards) => {
+      const controller = new AbortController();
+      const notices: boolean[] = [];
+      const notify = async (_id: string, committed: boolean) => {
+        notices.push(committed);
+        throw new Error("notification-unavailable");
+      };
+      const connection = new Proxy(db, {
+        get(target, property) {
+          if (property === "batch")
+            return async (statements: D1PreparedStatement[]) => {
+              const result = await target.batch(statements);
+              controller.abort(new Error("cancelled-after-commit"));
+              return result;
+            };
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const id = key("notification-failure");
+      const writer = createWagerStateRepository(connection, {
+        writeGuards,
+        now,
+        notify,
+      });
+      await expect(
+        writer.sendProposal(id, proposal(), controller.signal),
+      ).resolves.toMatchObject({ committed: true });
+      const failure = new Error("response-lost-after-commit");
+      const uncertain = createWagerStateRepository(responseLost(db, failure), {
+        writeGuards,
+        now,
+        notify,
+      });
+      await expect(
+        uncertain.removeProposal(id, {
+          proposalUid: "host",
+          operationId: "remove",
+          expectedReservationOperationId: proposal().reservationOperationId,
+        }),
+      ).rejects.toBe(failure);
+      expect(notices).toEqual([true, false]);
+      expect(
+        (await writer.readWager(id))!.proposalRemovalOperations,
+      ).toHaveProperty("remove");
     });
   });
 });

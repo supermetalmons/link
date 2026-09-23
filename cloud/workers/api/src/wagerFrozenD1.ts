@@ -16,6 +16,7 @@ import {
   type WagerFrozenStore,
 } from "./wagerFrozenStore.ts";
 import { classifyD1Failure } from "./d1Failure.ts";
+import { runOptimisticTransaction } from "./optimisticTransaction.ts";
 
 const MAX_TRANSACTION_ATTEMPTS = 25;
 const EMPTY_FROZEN_JSON = JSON.stringify(createEmptyMaterials());
@@ -119,39 +120,33 @@ export function createWagerFrozenD1Store(
       return (await read(playerUid, operationId)).value;
     },
     async transact(playerUid, operationId, update, signal) {
-      for (let attempt = 0; attempt < MAX_TRANSACTION_ATTEMPTS; attempt += 1) {
-        signal?.throwIfAborted();
-        const current = await read(playerUid, operationId);
-        signal?.throwIfAborted();
-        const decision = update(current.value);
-        if ("commit" in decision) {
-          return {
-            committed: false,
-            decision: decision.decision,
-            value: current.value,
-          };
-        }
-        const next = decision.value;
-        assertMaterials(next.frozen);
-        const operation = storedWagerFrozenOperation(next.operation);
-        if (
-          next.operation.status === "active" &&
-          !parseFrozenOperation(operation)
-        ) {
-          throw new Error("wager-operation-unavailable");
-        }
-        const revision = current.revision + 1;
-        const updatedAtMs = now();
-        if (
-          !Number.isSafeInteger(revision) ||
-          !Number.isSafeInteger(updatedAtMs) ||
-          updatedAtMs < 0
-        ) {
-          throw new Error("wager-operation-unavailable");
-        }
-        const guard = db
-          .prepare(
-            `INSERT INTO wager_frozen_balances
+      return runOptimisticTransaction({
+        maxAttempts: MAX_TRANSACTION_ATTEMPTS,
+        signal,
+        read: () => read(playerUid, operationId),
+        getValue: (current) => current.value,
+        decide: update,
+        async write(current, next) {
+          assertMaterials(next.frozen);
+          const operation = storedWagerFrozenOperation(next.operation);
+          if (
+            next.operation.status === "active" &&
+            !parseFrozenOperation(operation)
+          ) {
+            throw new Error("wager-operation-unavailable");
+          }
+          const revision = current.revision + 1;
+          const updatedAtMs = now();
+          if (
+            !Number.isSafeInteger(revision) ||
+            !Number.isSafeInteger(updatedAtMs) ||
+            updatedAtMs < 0
+          ) {
+            throw new Error("wager-operation-unavailable");
+          }
+          const guard = db
+            .prepare(
+              `INSERT INTO wager_frozen_balances
              (player_uid, frozen_json, revision, updated_at_ms)
            SELECT ?, ?, 0, 0
            WHERE ${
@@ -159,67 +154,70 @@ export function createWagerFrozenD1Store(
                ? "EXISTS (SELECT 1 FROM wager_frozen_balances WHERE player_uid = ?)"
                : "NOT EXISTS (SELECT 1 FROM wager_frozen_balances WHERE player_uid = ? AND revision = ?)"
            }`,
-          )
-          .bind(
-            playerUid,
-            EMPTY_FROZEN_JSON,
-            playerUid,
-            ...(current.revision === 0 ? [] : [current.revision]),
-          );
-        const balanceWrite =
-          current.revision === 0
-            ? db
-                .prepare(
-                  `INSERT INTO wager_frozen_balances
+            )
+            .bind(
+              playerUid,
+              EMPTY_FROZEN_JSON,
+              playerUid,
+              ...(current.revision === 0 ? [] : [current.revision]),
+            );
+          const balanceWrite =
+            current.revision === 0
+              ? db
+                  .prepare(
+                    `INSERT INTO wager_frozen_balances
                (player_uid, frozen_json, revision, updated_at_ms)
              VALUES (?, ?, ?, ?)`,
-                )
-                .bind(
-                  playerUid,
-                  JSON.stringify(next.frozen),
-                  revision,
-                  updatedAtMs,
-                )
-            : db
-                .prepare(
-                  `UPDATE wager_frozen_balances
+                  )
+                  .bind(
+                    playerUid,
+                    JSON.stringify(next.frozen),
+                    revision,
+                    updatedAtMs,
+                  )
+              : db
+                  .prepare(
+                    `UPDATE wager_frozen_balances
              SET frozen_json = ?, revision = ?, updated_at_ms = MAX(updated_at_ms, ?)
              WHERE player_uid = ?`,
-                )
-                .bind(
-                  JSON.stringify(next.frozen),
-                  revision,
-                  updatedAtMs,
-                  playerUid,
-                );
-        const operationWrite =
-          operation === null
-            ? db
-                .prepare(
-                  "DELETE FROM wager_frozen_operations WHERE player_uid = ? AND operation_id = ?",
-                )
-                .bind(playerUid, operationId)
-            : db
-                .prepare(
-                  `INSERT INTO wager_frozen_operations (player_uid, operation_id, record_json)
+                  )
+                  .bind(
+                    JSON.stringify(next.frozen),
+                    revision,
+                    updatedAtMs,
+                    playerUid,
+                  );
+          const operationWrite =
+            operation === null
+              ? db
+                  .prepare(
+                    "DELETE FROM wager_frozen_operations WHERE player_uid = ? AND operation_id = ?",
+                  )
+                  .bind(playerUid, operationId)
+              : db
+                  .prepare(
+                    `INSERT INTO wager_frozen_operations (player_uid, operation_id, record_json)
              VALUES (?, ?, ?)
              ON CONFLICT (player_uid, operation_id) DO UPDATE SET record_json = excluded.record_json`,
-                )
-                .bind(playerUid, operationId, JSON.stringify(operation));
-        signal?.throwIfAborted();
-        try {
-          await db.batch([
-            ...writeGuards(),
-            guard,
-            balanceWrite,
-            operationWrite,
-          ]);
-          return { committed: true, decision: decision.decision, value: next };
-        } catch (error) {
-          if (classifyD1Failure(error) !== "wager-frozen-conflict") throw error;
-        }
-      }
-      throw new Error("wager-operation-unavailable");
+                  )
+                  .bind(playerUid, operationId, JSON.stringify(operation));
+          signal?.throwIfAborted();
+          try {
+            await db.batch([
+              ...writeGuards(),
+              guard,
+              balanceWrite,
+              operationWrite,
+            ]);
+            return { applied: true, value: next };
+          } catch (error) {
+            if (classifyD1Failure(error) !== "wager-frozen-conflict")
+              throw error;
+            return { applied: false, value: next };
+          }
+        },
+        conflictError: () => new Error("wager-operation-unavailable"),
+      });
     },
   };
 }

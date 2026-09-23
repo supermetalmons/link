@@ -144,6 +144,7 @@ async function transactRow(
   return runOptimisticTransaction({
     maxAttempts: MAX_D1_TRANSACTION_ATTEMPTS,
     read: () => readRow(db, input.table, input.keyColumn, input.key),
+    getValue: (current) => current?.record ?? null,
     decide(current) {
       const decision = validateTelegramTransactionDecision(
         input.updater(current),

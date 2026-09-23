@@ -277,6 +277,99 @@ describe("D1 wager frozen reservations", () => {
     });
   });
 
+  it("stops after 25 frozen conflicts and refreshes its clock and guards each attempt", async () => {
+    const connection = withBatch((statements) =>
+      db.batch([
+        ...statements,
+        db
+          .prepare(
+            "INSERT INTO wager_frozen_balances (player_uid, frozen_json, revision, updated_at_ms) VALUES ('conflict', ?, 0, 0)",
+          )
+          .bind(JSON.stringify(materials())),
+      ]),
+    );
+    const observed = observeD1FailureDatabase(connection);
+    let guards = 0;
+    let clock = 100;
+    let decisions = 0;
+    const bounded = createWagerFrozenD1Store(observed.database, {
+      writeGuards: () => {
+        guards++;
+        return [];
+      },
+      now: () => clock++,
+    });
+    await expect(
+      bounded.transact("host", "send", (current) => {
+        decisions++;
+        return { value: { ...current, frozen: materials(3) } };
+      }),
+    ).rejects.toThrow("wager-operation-unavailable");
+    expect(observed.batches).toHaveLength(25);
+    expect(observed.sessions).toHaveLength(25);
+    expect(observed.errors.map(classifyD1Failure)).toEqual(
+      Array(25).fill("wager-frozen-conflict"),
+    );
+    expect({ guards, clock, decisions }).toEqual({
+      guards: 25,
+      clock: 125,
+      decisions: 25,
+    });
+    expect(await store().readBalance("host")).toEqual({
+      frozen: materials(),
+      revision: 0,
+    });
+  });
+
+  it("honors cancellation after a decision without writing, but retains a confirmed commit", async () => {
+    const controller = new AbortController();
+    const reason = new Error("cancelled-before-write");
+    const observed = observeD1FailureDatabase(db);
+    const cancelled = createWagerFrozenD1Store(observed.database, {
+      writeGuards: () => [],
+    });
+    await expect(
+      cancelled.transact(
+        "host",
+        "send",
+        (current) => {
+          controller.abort(reason);
+          return { value: { ...current, frozen: materials(3) } };
+        },
+        controller.signal,
+      ),
+    ).rejects.toBe(reason);
+    expect(observed.batches).toHaveLength(0);
+    const committedController = new AbortController();
+    const committed = createWagerFrozenD1Store(
+      withBatch(async (statements) => {
+        const result = await db.batch(statements);
+        committedController.abort(reason);
+        return result;
+      }),
+      { writeGuards: () => [] },
+    );
+    await expect(
+      committed.transact(
+        "host",
+        "send",
+        (current) => ({
+          value: { ...current, frozen: materials(3) },
+          decision: "reserved",
+        }),
+        committedController.signal,
+      ),
+    ).resolves.toEqual({
+      committed: true,
+      decision: "reserved",
+      value: { frozen: materials(3), operation: { status: "absent" } },
+    });
+    expect(await store().readBalance("host")).toEqual({
+      frozen: materials(3),
+      revision: 1,
+    });
+  });
+
   it("preserves no-op accepts and refuses malformed or conflicting active records", async () => {
     const repo = repository();
     await reserve(repo, "send");

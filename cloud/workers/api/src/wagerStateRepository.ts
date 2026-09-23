@@ -3,6 +3,7 @@ import type {
   TransactionResult,
 } from "./repositoryContracts.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
+import { runOptimisticTransaction } from "./optimisticTransaction.ts";
 import {
   createWagerStateD1Store,
   WagerStateD1Failure,
@@ -170,43 +171,41 @@ export function createWagerStateRepository(
   ): Promise<TransactionResult<WagerRecord>> {
     if (!options.writeGuards)
       throw new WagerStateD1Failure("wager-state-read-only");
-    for (let attempt = 0; attempt < 25; attempt++) {
-      signal?.throwIfAborted();
-      const current = await store.read(key, signal);
-      const decision = reduce(structuredClone(current.wager));
-      if ("commit" in decision)
-        return {
-          committed: false,
-          decision: decision.decision,
-          value: current.wager as WagerRecord | null,
-        };
-      const wager = (
-        complete ? decision.value : normalizeJson(decision.value)
-      ) as WagerRecord | null;
-      let committed: boolean;
-      try {
-        committed = await store.commit(
-          [
-            {
-              current,
-              value: {
-                wager,
-                resolutionMarker: complete ? true : current.resolutionMarker,
+    return runOptimisticTransaction({
+      maxAttempts: 25,
+      signal,
+      read: () => store.read(key, signal),
+      getValue: (current) => current.wager as WagerRecord | null,
+      decide: (current) => reduce(structuredClone(current)),
+      async write(current, next) {
+        const wager = (
+          complete ? next : normalizeJson(next)
+        ) as WagerRecord | null;
+        let committed: boolean;
+        try {
+          committed = await store.commit(
+            [
+              {
+                current,
+                value: {
+                  wager,
+                  resolutionMarker: complete ? true : current.resolutionMarker,
+                },
               },
-            },
-          ],
-          signal,
-        );
-      } catch (error) {
-        await notify(key.inviteId, false);
-        throw error;
-      }
-      if (committed) {
-        await notify(key.inviteId, true);
-        return { committed: true, decision: decision.decision, value: wager };
-      }
-    }
-    throw new WagerStateD1Failure("wager-state-conflict");
+            ],
+            signal,
+          );
+        } catch (error) {
+          await notify(key.inviteId, false);
+          throw error;
+        }
+        if (committed) {
+          await notify(key.inviteId, true);
+        }
+        return { applied: committed, value: wager };
+      },
+      conflictError: () => new WagerStateD1Failure("wager-state-conflict"),
+    });
   }
   return {
     ...createWagerStateReader(db),

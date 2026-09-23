@@ -129,3 +129,43 @@ test("a cancelled command cannot read or dispatch a notification", async () => {
   assert.equal(f.accesses(), 0);
   assert.equal(notices, 0);
 });
+
+test("cancellation during a read prevents the decision, write, and notification", async () => {
+  const controller = new AbortController();
+  const reason = new Error("cancelled-during-read");
+  let reads = 0;
+  let notices = 0;
+  const db = new Proxy({} as D1Database, {
+    get(_target, property) {
+      if (property === "withSession")
+        return () => ({
+          prepare: () => ({
+            bind: () => ({
+              async first() {
+                reads++;
+                controller.abort(reason);
+                return null;
+              },
+            }),
+          }),
+        });
+      throw new Error("unexpected-database-access");
+    },
+  });
+  const writer = createWagerStateRepository(db, {
+    writeGuards: () => [],
+    notify: async () => {
+      notices++;
+    },
+  });
+  await assert.rejects(
+    writer.sendProposal(
+      { inviteId: "invite", matchId: "match" },
+      proposal,
+      controller.signal,
+    ),
+    (error) => error === reason,
+  );
+  assert.equal(reads, 1);
+  assert.equal(notices, 0);
+});

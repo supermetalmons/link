@@ -1,28 +1,39 @@
-import type {
-  TransactionDecision,
-  TransactionResult,
-} from "./repositoryContracts.ts";
+type OptimisticDecision<T> =
+  { commit: false; decision?: string } | { value: T; decision?: string };
 
-type VersionedRecord<T> = { record: T; version: number };
+type OptimisticResult<T> = {
+  committed: boolean;
+  decision?: string;
+  value: T;
+};
 
-export async function runOptimisticTransaction<T>(input: {
+export async function runOptimisticTransaction<
+  Snapshot,
+  Value,
+  Proposed,
+>(input: {
   maxAttempts: number;
-  read: () => Promise<VersionedRecord<T> | null>;
-  decide: (current: T | null) => TransactionDecision<unknown>;
+  signal?: AbortSignal;
+  read: () => Promise<Snapshot>;
+  getValue: (snapshot: Snapshot) => Value;
+  decide: (current: Value) => OptimisticDecision<Proposed>;
   write: (
-    current: VersionedRecord<T> | null,
-    value: unknown,
-  ) => Promise<{ applied: boolean; value: T | null }>;
+    current: Snapshot,
+    value: Proposed,
+  ) => Promise<{ applied: boolean; value: Value }>;
   conflictError: () => Error;
-}): Promise<TransactionResult<T>> {
+}): Promise<OptimisticResult<Value>> {
   for (let attempt = 0; attempt < input.maxAttempts; attempt += 1) {
+    input.signal?.throwIfAborted();
     const current = await input.read();
-    const decision = input.decide(current?.record ?? null);
+    input.signal?.throwIfAborted();
+    const value = input.getValue(current);
+    const decision = input.decide(value);
     if ("commit" in decision) {
       return {
         committed: false,
         decision: decision.decision,
-        value: current?.record ?? null,
+        value,
       };
     }
     const written = await input.write(current, decision.value);
