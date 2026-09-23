@@ -2093,12 +2093,13 @@ export function didAttemptAuthentication() {
   }
 }
 
-export async function go(routeStateOverride?: RouteState) {
+function cancelSessionPreload() {
   initialWagersMatchId = null;
   cancelRematchScoresPreload?.();
   cancelRematchScoresPreload = null;
-  const routeState = routeStateOverride ?? getCurrentRouteState();
-  activeRouteState = routeState;
+}
+
+function resetSessionBoardState() {
   clearAllManagedGameTimeouts();
   resetBotScoreReactionState();
   isGameWithBot = false;
@@ -2108,7 +2109,9 @@ export async function go(routeStateOverride?: RouteState) {
   clearRematchHistoryCaches();
   Board.resetPlayersMetadataForSession();
   Board.setBoardFlipped(false);
-  setIslandButtonDimmed(false);
+}
+
+function resetSessionFlags() {
   isOnlineGame = false;
   isGameWithBot = false;
   isWaitingForRematchResponse = false;
@@ -2118,6 +2121,15 @@ export async function go(routeStateOverride?: RouteState) {
   isGameOver = false;
   isReconnect = false;
   didConnect = false;
+}
+
+export async function go(routeStateOverride?: RouteState) {
+  cancelSessionPreload();
+  const routeState = routeStateOverride ?? getCurrentRouteState();
+  activeRouteState = routeState;
+  resetSessionBoardState();
+  setIslandButtonDimmed(false);
+  resetSessionFlags();
   isWaitingForInviteToGetAccepted = false;
   const isAutomatchTransition = pendingAutomatchTransition;
   pendingAutomatchTransition = false;
@@ -2271,9 +2283,7 @@ export async function go(routeStateOverride?: RouteState) {
 }
 
 export function disposeGameSession(nextRouteState?: RouteState) {
-  initialWagersMatchId = null;
-  cancelRematchScoresPreload?.();
-  cancelRematchScoresPreload = null;
+  cancelSessionPreload();
   resetRemoteMoveHistories();
   const preserveAutomatchUi = pendingAutomatchTransition;
   const wasWaitingAnimationRunning =
@@ -2287,15 +2297,7 @@ export function disposeGameSession(nextRouteState?: RouteState) {
     connection.hasPendingInviteCreationFor(nextRouteState.inviteId);
   const preserveWaitingAnimation =
     preserveAutomatchUi || preserveManualInviteAnimation;
-  clearAllManagedGameTimeouts();
-  resetBotScoreReactionState();
-  isGameWithBot = false;
-  nextBoardRenderSession();
-  boardViewMode = "activeLive";
-  clearViewedRematchState();
-  clearRematchHistoryCaches();
-  Board.resetPlayersMetadataForSession();
-  Board.setBoardFlipped(false);
+  resetSessionBoardState();
   setIslandButtonDimmed(preserveAutomatchUi);
   if (unsubscribeFromWagerState) {
     unsubscribeFromWagerState();
@@ -2306,16 +2308,8 @@ export function disposeGameSession(nextRouteState?: RouteState) {
     clearManagedGameTimeout(wagerOutcomeAnimTimer);
     wagerOutcomeAnimTimer = null;
   }
-  isOnlineGame = false;
-  isGameWithBot = false;
-  isWaitingForRematchResponse = false;
-  pendingRematchNavigationToLiveBoard = false;
-  puzzleMode = false;
+  resetSessionFlags();
   selectedProblem = null;
-  didStartLocalGame = false;
-  isGameOver = false;
-  isReconnect = false;
-  didConnect = false;
   isWaitingForInviteToGetAccepted = preserveAutomatchUi;
   resetOnlineReconnectRequestState();
   isInviteBotIntoLocalGameUnavailable = false;
