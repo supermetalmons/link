@@ -255,12 +255,8 @@ describe("D1-only invite source reader", () => {
       expect(await reader(undefined, undefined, executions)(inviteId)).toEqual(
         source,
       );
-      expect(executions.map(({ kind }) => kind)).toEqual([
-        "batch",
-        "single",
-        "single",
-      ]);
-      expect(executions[0].queries).toHaveLength(3);
+      expect(executions.map(({ kind }) => kind)).toEqual(["batch", "single"]);
+      expect(executions[0].queries).toHaveLength(4);
       expect(executions[0].queries[0]).toContain(
         "FROM automatch_runtime_control ",
       );
@@ -268,8 +264,8 @@ describe("D1-only invite source reader", () => {
       expect(executions[0].queries[2]).toContain(
         "FROM game_session_transition_resources ",
       );
-      expect(executions[1].queries[0]).toContain("FROM invite_sources ");
-      expect(executions[2].queries[0]).toContain(
+      expect(executions[0].queries[3]).toContain("FROM invite_sources ");
+      expect(executions[1].queries[0]).toContain(
         "FROM game_session_transition_resources ",
       );
       expect(globalThis.fetch).not.toHaveBeenCalled();
@@ -315,12 +311,10 @@ describe("D1-only invite source reader", () => {
     await db.prepare("DELETE FROM invite_sources").run();
     const executions: ReadExecution[] = [];
     expect(await reader(undefined, undefined, executions)(inviteId)).toBeNull();
-    expect(executions.map(({ kind }) => kind)).toEqual([
-      "batch",
-      "single",
-      "single",
-    ]);
-    expect(executions[2].queries[0]).toContain(
+    expect(executions.map(({ kind }) => kind)).toEqual(["batch", "single"]);
+    expect(executions[0].queries).toHaveLength(4);
+    expect(executions[0].queries[3]).toContain("FROM invite_sources ");
+    expect(executions[1].queries[0]).toContain(
       "FROM game_session_transition_resources ",
     );
   });
@@ -359,40 +353,50 @@ describe("D1-only invite source reader", () => {
         /invite-source|automatch-control/,
       );
       expect(executions.map(({ kind }) => kind)).toEqual(["batch"]);
+      expect(executions[0].queries).toHaveLength(4);
+      expect(executions[0].queries[3]).toContain("FROM invite_sources ");
       expect(globalThis.fetch).not.toHaveBeenCalled();
     },
   );
 
-  it.each([
-    {
-      automatch: { state: "invalid" },
-      invite: { state: "invalid" },
-      error: "automatch-control-unavailable",
-    },
-    {
-      automatch: { metadata_json: "{" },
-      invite: { state: "invalid" },
-      error: "automatch-control-corrupt",
-    },
-    {
-      automatch: { backend: "rtdb" },
-      invite: { state: "invalid" },
-      error: "invite-source-control-unavailable",
-    },
-    {
-      automatch: { backend: "rtdb" },
-      invite: {},
-      error: "invite-source-session-backend-conflict",
-    },
-    {
-      automatch: {},
-      invite: { backend: "rtdb", epoch: 0 },
-      error: "invite-source-not-activated",
-    },
-  ])(
-    "preserves $error precedence over retained transition resources",
-    async ({ automatch, invite, error }) => {
+  it.each(
+    [
+      {
+        automatch: { state: "invalid" },
+        invite: { state: "invalid" },
+        error: "automatch-control-unavailable",
+      },
+      {
+        automatch: { metadata_json: "{" },
+        invite: { state: "invalid" },
+        error: "automatch-control-corrupt",
+      },
+      {
+        automatch: { backend: "rtdb" },
+        invite: { state: "invalid" },
+        error: "invite-source-control-unavailable",
+      },
+      {
+        automatch: { backend: "rtdb" },
+        invite: {},
+        error: "invite-source-session-backend-conflict",
+      },
+      {
+        automatch: {},
+        invite: { backend: "rtdb", epoch: 0 },
+        error: "invite-source-not-activated",
+      },
+    ].flatMap((scenario) =>
+      ["valid", "malformed"].map((sourceState) => ({
+        ...scenario,
+        sourceState,
+      })),
+    ),
+  )(
+    "preserves $error precedence over retained transition resources with a $sourceState source",
+    async ({ automatch, invite, error, sourceState }) => {
       await seedPendingTransition("pending");
+      let sourceReads = 0;
       const executions: ReadExecution[] = [];
       const read = reader(
         async (query, execute) => {
@@ -401,12 +405,18 @@ describe("D1-only invite source reader", () => {
             return { ...(value as object), ...automatch };
           if (query.includes("FROM invite_source_control "))
             return { ...(value as object), ...invite };
+          if (query.includes("FROM invite_sources ")) {
+            sourceReads++;
+            if (sourceState === "malformed")
+              return { ...(value as object), source_json: "{" };
+          }
           return value;
         },
         undefined,
         executions,
       );
       await expect(read(inviteId)).rejects.toThrow(error);
+      expect(sourceReads).toBe(1);
       expect(executions.map(({ kind }) => kind)).toEqual(["batch"]);
     },
   );
@@ -429,6 +439,7 @@ describe("D1-only invite source reader", () => {
     { when: "before", status: "pending" as const },
     { when: "during", status: "pending" as const },
     { when: "before", status: "completed" as const },
+    { when: "during", status: "completed" as const },
   ])(
     "rejects retained $status transition resources $when metadata reads without recovering or writing",
     async ({ when, status }) => {
@@ -450,10 +461,41 @@ describe("D1-only invite source reader", () => {
       await expect(read(inviteId)).rejects.toThrow(
         "game-session-transition-resource-pending",
       );
-      expect(sourceReads).toBe(when === "before" ? 0 : 1);
+      expect(sourceReads).toBe(1);
       expect(executions.map(({ kind }) => kind)).toEqual(
-        when === "before" ? ["batch"] : ["batch", "single", "single"],
+        when === "before" ? ["batch"] : ["batch", "single"],
       );
+      expect(
+        await db
+          .prepare("SELECT status, attempt_count FROM game_session_transitions")
+          .first(),
+      ).toEqual({ status, attempt_count: 0 });
+    },
+  );
+
+  it.each(["pending", "completed"] as const)(
+    "rejects retained %s transition resources before decoding a malformed source",
+    async (status) => {
+      await seedPendingTransition(status);
+      let sourceReads = 0;
+      const executions: ReadExecution[] = [];
+      const read = reader(
+        async (query, execute) => {
+          const value = await execute();
+          if (query.includes("FROM invite_sources ")) {
+            sourceReads++;
+            return { ...(value as object), source_json: "{" };
+          }
+          return value;
+        },
+        undefined,
+        executions,
+      );
+      await expect(read(inviteId)).rejects.toThrow(
+        "game-session-transition-resource-pending",
+      );
+      expect(sourceReads).toBe(1);
+      expect(executions.map(({ kind }) => kind)).toEqual(["batch"]);
       expect(
         await db
           .prepare("SELECT status, attempt_count FROM game_session_transitions")
@@ -482,11 +524,7 @@ describe("D1-only invite source reader", () => {
       await expect(read(inviteId)).rejects.toThrow(
         "game-session-transition-resource-pending",
       );
-      expect(executions.map(({ kind }) => kind)).toEqual([
-        "batch",
-        "single",
-        "single",
-      ]);
+      expect(executions.map(({ kind }) => kind)).toEqual(["batch", "single"]);
       expect(
         await db
           .prepare("SELECT status, attempt_count FROM game_session_transitions")
@@ -542,7 +580,6 @@ describe("D1-only invite source reader", () => {
     );
     expect(executions.map(({ kind }) => kind)).toEqual([
       "batch",
-      "single",
       "single",
       "batch",
     ]);
