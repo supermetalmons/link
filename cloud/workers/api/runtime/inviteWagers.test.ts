@@ -243,7 +243,7 @@ describe("durable invite wagers", () => {
   });
 
   it.each(["wagers", "metadata"] as const)(
-    "coalesces both channel reads and simultaneous admissions with %s first",
+    "coalesces reads and simultaneous admissions within each channel with %s first",
     async (firstChannel) => {
       const { room, inviteId, source } = await fixture();
       const results = await runInDurableObject(room, (instance) =>
@@ -255,7 +255,7 @@ describe("durable invite wagers", () => {
         ]),
       );
       expect(results.every((result) => result.status === "ok")).toBe(true);
-      expect(source.reads).toBe(1);
+      expect(source.reads).toBe(2);
       expect(source.wagerReads).toBe(1);
       const admissionReads = await runInDurableObject(
         room,
@@ -280,7 +280,8 @@ describe("durable invite wagers", () => {
           return source.reads;
         },
       );
-      expect(admissionReads).toBe(2);
+      expect(admissionReads).toBeGreaterThan(2);
+      expect(admissionReads).toBeLessThanOrEqual(4);
       expect(source.wagerReads).toBe(2);
     },
   );
@@ -388,7 +389,7 @@ describe("durable invite wagers", () => {
       release.resolve();
       return Promise.all([older, newer]);
     });
-    expect(source.reads).toBe(4);
+    expect(source.reads).toBe(5);
     expect(source.wagerReads).toBe(4);
     for (const result of results) {
       expect(result).toMatchObject({
@@ -408,7 +409,7 @@ describe("durable invite wagers", () => {
     ).toBeNull();
   });
 
-  it("refreshes both active channels with one alarm read and broadcasts only to the matching channel", async () => {
+  it("refreshes both active channels independently and broadcasts only to the matching channel", async () => {
     const { room, inviteId, source } = await fixture();
     const wager = acceptSocket(await room.fetch(request(inviteId)));
     const metadata = acceptSocket(
@@ -426,7 +427,7 @@ describe("durable invite wagers", () => {
     const before = source.reads;
     const wagerReads = source.wagerReads;
     expect(await runScheduledAlarm(room)).toBe(true);
-    expect(source.reads).toBe(before + 1);
+    expect(source.reads).toBe(before + 2);
     expect(source.wagerReads).toBe(wagerReads + 1);
     expect(JSON.parse(await wager.read()).snapshot).toMatchObject({
       revision: 2,
@@ -607,7 +608,7 @@ describe("durable invite wagers", () => {
     });
     expect(wagers).toEqual({ status: "invalid" });
     expect(await storedWagers(room)).toEqual(stored);
-    expect(source.reads).toBe(2);
+    expect(source.reads).toBe(3);
     expect(source.wagerReads).toBe(2);
     expect(await room.readMetadata(inviteId)).toEqual(metadata);
     expect(source.wagerReads).toBe(2);
@@ -798,7 +799,7 @@ describe("durable invite wagers", () => {
     source.value = { ...invite };
     const before = source.reads;
     expect(await runScheduledAlarm(room)).toBe(true);
-    expect(source.reads).toBe(before + 1);
+    expect(source.reads).toBe(before + 2);
     await wager.read();
     expect(
       await runInDurableObject(room, (_instance, state) =>

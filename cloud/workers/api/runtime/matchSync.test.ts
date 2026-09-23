@@ -12,6 +12,7 @@ import {
   type MatchSyncMessage,
 } from "@mons/shared/match-sync";
 import { INVITE_METADATA_SOCKET_PROTOCOL } from "@mons/shared/invite-metadata";
+import { INVITE_WAGERS_SOCKET_PROTOCOL } from "@mons/shared/invite-wagers";
 import {
   REACTION_HEARTBEAT_REQUEST,
   REACTION_HEARTBEAT_RESPONSE,
@@ -671,6 +672,133 @@ describe("live match snapshots", () => {
     );
     expect(next).not.toBeNull();
   });
+
+  it.each(["reader", "digest"] as const)(
+    "refreshes cached metadata and matches during the same alarm while the wager %s is blocked",
+    async (blockedWork) => {
+      const now = Date.now() + 60_000;
+      const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+      const { room, inviteId, source } = await fixture(false);
+      const channel = await connect(room, inviteId);
+      await channel.snapshot();
+      await runInDurableObject(room, (instance) => {
+        const mutable = instance as unknown as {
+          wagerReader: () => Promise<[]>;
+        };
+        mutable.wagerReader = async () => [];
+      });
+      const inviteChannels = await Promise.all(
+        (["Metadata", "Wagers"] as const).map(async (name) => {
+          const client = accept(
+            await room.fetch(
+              new Request(
+                `https://room.internal/${name.toLowerCase()}/socket`,
+                {
+                  headers: {
+                    Upgrade: "websocket",
+                    "Sec-WebSocket-Protocol":
+                      name === "Metadata"
+                        ? INVITE_METADATA_SOCKET_PROTOCOL
+                        : INVITE_WAGERS_SOCKET_PROTOCOL,
+                    [`X-Mons-${name}-Invite`]: inviteId,
+                    [`X-Mons-${name}-Role`]: "host",
+                    [`X-Mons-${name}-Actor`]: "host-login",
+                    [`X-Mons-${name}-IP`]: "192.0.2.1",
+                    [`X-Mons-${name}-Revision`]: "1",
+                    [`X-Mons-${name}-Protected`]: "0",
+                    [`X-Mons-${name}-Authenticated`]: "1",
+                    ...socketTestSessionHeaders(),
+                  },
+                },
+              ),
+            ),
+          );
+          await client.read();
+          return client;
+        }),
+      );
+      const metadataChannel = inviteChannels[0];
+      clock.mockReturnValue(now + MATCH_SYNC_REPAIR_MS);
+      expect(await room.readMetadata(inviteId)).toMatchObject({
+        status: "ok",
+        snapshot: { guestId: null, revision: 1 },
+      });
+      source.invite.guestId = "guest-login";
+      setMatch(source, `guest-login/${inviteId}`, {
+        ...match,
+        color: "black",
+      });
+      await runInDurableObject(room, async (instance, state) => {
+        let began!: () => void;
+        let release!: () => void;
+        const entered = new Promise<void>((resolve) => (began = resolve));
+        const blocked = new Promise<void>((resolve) => (release = resolve));
+        const metadataSend = vi.spyOn(
+          state.getWebSockets("channel:metadata")[0],
+          "send",
+        );
+        const matchSend = vi.spyOn(
+          state.getWebSockets("channel:matches")[0],
+          "send",
+        );
+        let restoreDigest: (() => void) | undefined;
+        if (blockedWork === "reader") {
+          const mutable = instance as unknown as {
+            wagerReader: () => Promise<[]>;
+          };
+          mutable.wagerReader = async () => {
+            began();
+            await blocked;
+            return [];
+          };
+        } else {
+          const digest = crypto.subtle.digest.bind(crypto.subtle);
+          const digestSpy = vi
+            .spyOn(crypto.subtle, "digest")
+            .mockImplementation(async (...args) => {
+              began();
+              await blocked;
+              return digest(...args);
+            });
+          restoreDigest = () => digestSpy.mockRestore();
+        }
+        let settled = false;
+        const alarm = instance.alarm().finally(() => {
+          settled = true;
+        });
+        try {
+          await Promise.race([
+            entered,
+            alarm.then(() => {
+              throw new Error("alarm-completed-before-wager-work");
+            }),
+          ]);
+          await expect
+            .poll(() => [
+              metadataSend.mock.calls.length,
+              matchSend.mock.calls.length,
+            ])
+            .toEqual([1, 1]);
+          expect(settled).toBe(false);
+        } finally {
+          release();
+          await alarm;
+          metadataSend.mockRestore();
+          matchSend.mockRestore();
+          restoreDigest?.();
+        }
+      });
+      expect(JSON.parse(await metadataChannel.read()).snapshot).toMatchObject({
+        guestId: "guest-login",
+        revision: 2,
+      });
+      expect(await channel.snapshot()).toMatchObject({
+        guestPlayerId: "guest-login",
+        guestMatch: { color: "black" },
+        revision: 2,
+      });
+    },
+  );
 
   it("rechecks access at the repair deadline with only match subscribers", async () => {
     const { room, inviteId, source } = await fixture();

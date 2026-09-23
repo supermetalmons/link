@@ -260,7 +260,7 @@ describe("durable invite metadata", () => {
   });
 
   it.each(["metadata", "wagers"] as const)(
-    "orders an older %s read before a commit refresh in the same invalidation generation",
+    "preserves committed metadata while an older %s read completes in the same invalidation generation",
     async (channel) => {
       vi.spyOn(Date, "now").mockReturnValue(Date.now() + 24 * 60 * 60 * 1_000);
       const { room, inviteId, source } = await fixture();
@@ -278,11 +278,7 @@ describe("durable invite metadata", () => {
             InviteChannelsRoom,
             "readMetadata" | "invalidationGeneration"
           > & {
-            refreshInvite: (
-              id: string,
-              needsWagers?: boolean,
-              metadataOnly?: boolean,
-            ) => Promise<unknown>;
+            readMetadataSnapshot: (id: string) => Promise<unknown>;
           };
           matchSync: { notify: (id: string) => Promise<void> };
           wagerReader: () => Promise<[]>;
@@ -320,14 +316,15 @@ describe("durable invite metadata", () => {
             : instance.readWagers(inviteId);
         await reading.promise;
         const refreshing = deferred();
-        const originalRefresh = mutable.inviteChannels.refreshInvite.bind(
-          mutable.inviteChannels,
-        );
+        const originalRefresh =
+          mutable.inviteChannels.readMetadataSnapshot.bind(
+            mutable.inviteChannels,
+          );
         const refresh = vi
-          .spyOn(mutable.inviteChannels, "refreshInvite")
+          .spyOn(mutable.inviteChannels, "readMetadataSnapshot")
           .mockImplementation((...args) => {
             const pending = originalRefresh(...args);
-            if (args[2]) refreshing.resolve();
+            refreshing.resolve();
             return pending;
           });
         try {
@@ -362,18 +359,19 @@ describe("durable invite metadata", () => {
         status: "ok",
         snapshot: { hostRematches: "1", revision: 2 },
       };
+      const committed = {
+        status: "ok",
+        snapshot: { hostRematches: "1;2", revision: 3 },
+      };
       expect(results.original).toMatchObject(
         channel === "metadata"
           ? original
-          : { status: "ok", metadata: original },
+          : { status: "ok", metadata: committed },
       );
-      expect(results.cached).toMatchObject({
-        status: "ok",
-        snapshot: { hostRematches: "1;2", revision: 3 },
-      });
+      expect(results.cached).toMatchObject(committed);
       expect(results.finalGeneration).toBe(results.generation);
-      expect(results.reads).toBe(2);
-      expect(source.wagerReads).toBe(channel === "wagers" ? 1 : 0);
+      expect(results.reads).toBe(channel === "wagers" ? 3 : 2);
+      expect(source.wagerReads).toBe(channel === "wagers" ? 2 : 0);
       expect(JSON.parse(await client.read()).snapshot).toMatchObject({
         hostRematches: "1",
         revision: 2,

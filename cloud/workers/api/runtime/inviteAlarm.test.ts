@@ -2,12 +2,13 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { afterEach, expect, it } from "vitest";
 import type { InviteReactions } from "../src/inviteReactions.ts";
+import type { InviteAlarmWork } from "../src/inviteAlarmCoordinator.ts";
 
 type Room = DurableObjectStub<InviteReactions>;
 type AlarmComponents = {
   socketSessions: { nextExpiry: () => number | null };
   inviteChannels: {
-    alarm: () => Promise<void>;
+    prepareAlarm: () => InviteAlarmWork | null;
     nextAlarm: () => number | null;
   };
   matchSync: {
@@ -55,9 +56,17 @@ it("refreshes sockets and expiry before awaiting effects, then schedules the ear
       phases.push("expiry");
       return now + 2_000;
     };
-    target.inviteChannels.alarm = async () => {
-      phases.push("invite");
-    };
+    target.inviteChannels.prepareAlarm = () => ({
+      schedule: async () => {
+        phases.push("schedule");
+      },
+      metadata: async () => {
+        phases.push("metadata");
+      },
+      wagers: async () => {
+        phases.push("wagers");
+      },
+    });
     target.inviteChannels.nextAlarm = () => now + 5_000;
     target.matchSync.alarm = async () => {
       phases.push("match");
@@ -77,7 +86,9 @@ it("refreshes sockets and expiry before awaiting effects, then schedules the ear
     try {
       expect(phases).toEqual([
         "expiry",
-        "invite",
+        "schedule",
+        "metadata",
+        "wagers",
         "match",
         "expiry",
         "effects",
@@ -91,7 +102,68 @@ it("refreshes sockets and expiry before awaiting effects, then schedules the ear
   });
 });
 
-for (const failed of ["invite", "match", "effects"] as const) {
+it("finishes metadata before refreshing matches without awaiting blocked wagers", async () => {
+  await runInDurableObject(fixture(), async (instance) => {
+    const target = instance as unknown as AlarmComponents;
+    const metadataStarted = Promise.withResolvers<void>();
+    const releaseMetadata = Promise.withResolvers<void>();
+    const releaseWagers = Promise.withResolvers<void>();
+    const matchStarted = Promise.withResolvers<void>();
+    const phases: string[] = [];
+    target.socketSessions.nextExpiry = () => null;
+    target.inviteChannels.prepareAlarm = () => ({
+      schedule: async () => {},
+      metadata: async () => {
+        phases.push("metadata-start");
+        metadataStarted.resolve();
+        await releaseMetadata.promise;
+        phases.push("metadata-end");
+      },
+      wagers: async () => {
+        phases.push("wagers-start");
+        await releaseWagers.promise;
+        phases.push("wagers-end");
+      },
+    });
+    target.inviteChannels.nextAlarm = () => null;
+    target.matchSync.alarm = async () => {
+      phases.push("match");
+      matchStarted.resolve();
+    };
+    target.matchSync.nextAlarm = () => null;
+    target.matchState.nextEffectAt = () => null;
+    target.matchEffects.dispatch = async () => {
+      phases.push("effects");
+    };
+    const pending = instance.alarm();
+    await metadataStarted.promise;
+    try {
+      expect(phases).toEqual(["metadata-start"]);
+      releaseMetadata.resolve();
+      await matchStarted.promise;
+      expect(phases).toEqual([
+        "metadata-start",
+        "metadata-end",
+        "wagers-start",
+        "match",
+      ]);
+    } finally {
+      releaseMetadata.resolve();
+      releaseWagers.resolve();
+      await pending;
+    }
+    expect(phases.slice(-2)).toEqual(["wagers-end", "effects"]);
+  });
+});
+
+for (const failed of [
+  "prepare",
+  "schedule",
+  "metadata",
+  "wagers",
+  "match",
+  "effects",
+] as const) {
   it(`continues after a ${failed} failure, reschedules and surfaces the original error`, async () => {
     await runInDurableObject(fixture(), async (instance, state) => {
       const target = instance as unknown as AlarmComponents;
@@ -107,7 +179,15 @@ for (const failed of ["invite", "match", "effects"] as const) {
         phases.push("expiry");
         return null;
       };
-      target.inviteChannels.alarm = () => run("invite");
+      target.inviteChannels.prepareAlarm = () => {
+        phases.push("prepare");
+        if (failed === "prepare") throw error;
+        return {
+          schedule: () => run("schedule"),
+          metadata: () => run("metadata"),
+          wagers: () => run("wagers"),
+        };
+      };
       target.inviteChannels.nextAlarm = () => deadline;
       target.matchSync.alarm = () => run("match");
       target.matchSync.nextAlarm = () => deadline + 1_000;
@@ -116,7 +196,8 @@ for (const failed of ["invite", "match", "effects"] as const) {
       await expect(instance.alarm()).rejects.toBe(error);
       expect(phases).toEqual([
         "expiry",
-        "invite",
+        "prepare",
+        ...(failed === "prepare" ? [] : ["schedule", "metadata", "wagers"]),
         "match",
         "expiry",
         "effects",
@@ -133,7 +214,7 @@ it("schedules surviving deadlines when another component cannot read its deadlin
     const error = new Error("invite-deadline-unavailable");
     const deadline = Date.now() + 2_000;
     target.socketSessions.nextExpiry = () => deadline;
-    target.inviteChannels.alarm = async () => {};
+    target.inviteChannels.prepareAlarm = () => null;
     target.inviteChannels.nextAlarm = () => {
       throw error;
     };

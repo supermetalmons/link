@@ -111,7 +111,7 @@ export class InviteReactions
     this.socketSessions = new SocketSessions(ctx);
     this.alarmCoordinator = new InviteAlarmCoordinator(ctx.storage, {
       expireSessions: () => this.socketSessions.nextExpiry(),
-      refreshInviteChannels: () => this.inviteChannels.alarm(),
+      prepareInviteChannels: () => this.inviteChannels.prepareAlarm(),
       refreshMatches: () => this.matchSync.alarm(),
       dispatchEffects: () => this.matchEffects.dispatch(),
       inviteDeadline: () => this.inviteChannels.nextAlarm(),

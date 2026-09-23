@@ -8,7 +8,7 @@ import {
 function idleCallbacks(): InviteAlarmCallbacks {
   return {
     expireSessions: () => null,
-    refreshInviteChannels: async () => {},
+    prepareInviteChannels: () => null,
     refreshMatches: async () => {},
     dispatchEffects: async () => {},
     inviteDeadline: () => null,
@@ -104,8 +104,9 @@ test("an idle run neither schedules an alarm nor reads callbacks during construc
     expirations++;
     return null;
   };
-  callbacks.refreshInviteChannels = async () => {
+  callbacks.prepareInviteChannels = () => {
     refreshes++;
+    return null;
   };
   callbacks.refreshMatches = async () => {
     refreshes++;
@@ -126,4 +127,48 @@ test("an idle run neither schedules an alarm nor reads callbacks during construc
   await coordinator.run();
   assert.equal(expirations, 3);
   assert.equal(refreshes, 3);
+});
+
+test("settles both refreshes before effects and reports failures in lane order", async () => {
+  const matchStarted = Promise.withResolvers<void>();
+  const releaseWagers = Promise.withResolvers<void>();
+  const wagerError = new Error("wagers-failed");
+  const matchError = new Error("match-failed");
+  let effects = 0;
+  const callbacks = idleCallbacks();
+  callbacks.prepareInviteChannels = () => ({
+    schedule: async () => {},
+    metadata: async () => {},
+    wagers: async () => {
+      await releaseWagers.promise;
+      throw wagerError;
+    },
+  });
+  callbacks.refreshMatches = () => {
+    matchStarted.resolve();
+    throw matchError;
+  };
+  callbacks.dispatchEffects = async () => {
+    effects++;
+  };
+  const coordinator = new InviteAlarmCoordinator(
+    {
+      transaction: async () => {
+        assert.fail("idle coordinator scheduled an alarm");
+      },
+    },
+    callbacks,
+  );
+  const failed = assert.rejects(
+    coordinator.run(),
+    (error) => error === wagerError,
+  );
+  await matchStarted.promise;
+  try {
+    assert.equal(effects, 0);
+  } finally {
+    releaseWagers.resolve();
+    await failed;
+  }
+  assert.equal(effects, 1);
 });
