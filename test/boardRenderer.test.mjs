@@ -28,11 +28,23 @@ registerHooks({
 const {
   bindBoardUiHandlers,
   createEmptyPlayerInfoOverlayState,
+  getBoardPlayerInfoOverlayState,
   playerInfoOverlayStatesEqual,
   resetBoardUiHandlers,
   setBoardPlayerInfoOverlayState,
+  setTopBoardOverlayVisible,
+  showRaibowAura,
+  unbindBoardUiHandlers,
+  updateAuraForAvatarElement,
   updateBoardComponentForBoardStyleChange,
+  updateWagerPlayerUids,
 } = await import("../src/game/boardUiPort.ts");
+const {
+  bindBoardVideoReactionHandler,
+  resetBoardVideoReactionHandler,
+  showVideoReaction,
+  unbindBoardVideoReactionHandler,
+} = await import("../src/ui/controls/boardReactionPort.ts");
 const { bindBoardEffectsRuntime, getBoardEffectsRuntime } =
   await import("../src/game/boardEffectsPort.ts");
 const {
@@ -59,24 +71,153 @@ const {
 const { getLifecycleCounters } =
   await import("../src/lifecycle/lifecycleDiagnostics.ts");
 
-test("board UI port is inert before binding and forwards exact state", () => {
+const recordingBoardUiHandlers = (events) =>
+  Object.fromEntries(
+    [
+      "updateBoardComponentForBoardStyleChange",
+      "setTopBoardOverlayVisible",
+      "showRaibowAura",
+      "updateAuraForAvatarElement",
+      "updateWagerPlayerUids",
+      "setBoardPlayerInfoOverlayState",
+    ].map((name) => [name, (...args) => events.push([name, ...args])]),
+  );
+
+test.afterEach(() => {
   resetBoardUiHandlers();
-  assert.doesNotThrow(() => updateBoardComponentForBoardStyleChange());
+  setBoardPlayerInfoOverlayState(createEmptyPlayerInfoOverlayState());
+  resetBoardVideoReactionHandler();
+});
+
+test("board UI port forwards exact arguments only while bound", () => {
+  resetBoardUiHandlers();
   const empty = createEmptyPlayerInfoOverlayState();
-  const events = [];
-  bindBoardUiHandlers({
-    updateBoardComponentForBoardStyleChange: () => events.push("style"),
-    setTopBoardOverlayVisible: () => {},
-    showRaibowAura: () => {},
-    updateAuraForAvatarElement: () => {},
-    updateWagerPlayerUids: () => {},
-    setBoardPlayerInfoOverlayState: (state) => events.push(state),
-  });
-
-  updateBoardComponentForBoardStyleChange();
   setBoardPlayerInfoOverlayState(empty);
+  const events = [];
+  const handlers = recordingBoardUiHandlers(events);
+  const svgElement = { id: "overlay" };
+  const ok = () => {};
+  const cancel = () => {};
+  const sendCommands = () => {
+    updateBoardComponentForBoardStyleChange();
+    setTopBoardOverlayVisible(true, svgElement, true, ok, cancel);
+    showRaibowAura(true, "aura.webp", false);
+    updateAuraForAvatarElement(true, svgElement);
+    updateWagerPlayerUids("player-1", "player-2");
+    setBoardPlayerInfoOverlayState(empty);
+  };
 
-  assert.deepEqual(events, ["style", empty]);
+  assert.doesNotThrow(sendCommands);
+  assert.deepEqual(events, []);
+  assert.equal(bindBoardUiHandlers(handlers), handlers);
+  assert.deepEqual(events, []);
+
+  sendCommands();
+  assert.deepEqual(events, [
+    ["updateBoardComponentForBoardStyleChange"],
+    ["setTopBoardOverlayVisible", true, svgElement, true, ok, cancel],
+    ["showRaibowAura", true, "aura.webp", false],
+    ["updateAuraForAvatarElement", true, svgElement],
+    ["updateWagerPlayerUids", "player-1", "player-2"],
+    ["setBoardPlayerInfoOverlayState", empty],
+  ]);
+
+  unbindBoardUiHandlers(handlers);
+  events.length = 0;
+  assert.doesNotThrow(sendCommands);
+  assert.deepEqual(events, []);
+});
+
+test("board UI port preserves cached player info without dispatching on bind", () => {
+  const state = createEmptyPlayerInfoOverlayState();
+  state.player.nameText = "Player";
+  state.player.visible = true;
+  setBoardPlayerInfoOverlayState(state);
+  assert.equal(getBoardPlayerInfoOverlayState(), state);
+
+  const firstEvents = [];
+  const first = bindBoardUiHandlers(recordingBoardUiHandlers(firstEvents));
+  assert.deepEqual(firstEvents, []);
+  assert.equal(getBoardPlayerInfoOverlayState(), state);
+
+  const updated = { ...state, wagerLayoutRevision: 1 };
+  setBoardPlayerInfoOverlayState(updated);
+  assert.equal(getBoardPlayerInfoOverlayState(), updated);
+  assert.deepEqual(firstEvents.at(-1), [
+    "setBoardPlayerInfoOverlayState",
+    updated,
+  ]);
+  unbindBoardUiHandlers(first);
+  assert.equal(getBoardPlayerInfoOverlayState(), updated);
+
+  const whileUnmounted = { ...updated, topControlSlot: "player" };
+  setBoardPlayerInfoOverlayState(whileUnmounted);
+  assert.equal(firstEvents.length, 1);
+  const secondEvents = [];
+  bindBoardUiHandlers(recordingBoardUiHandlers(secondEvents));
+  assert.deepEqual(secondEvents, []);
+  assert.equal(getBoardPlayerInfoOverlayState(), whileUnmounted);
+
+  resetBoardUiHandlers();
+  assert.equal(getBoardPlayerInfoOverlayState(), whileUnmounted);
+  updateBoardComponentForBoardStyleChange();
+  assert.deepEqual(secondEvents, []);
+  const thirdEvents = [];
+  bindBoardUiHandlers(recordingBoardUiHandlers(thirdEvents));
+  assert.deepEqual(thirdEvents, []);
+  assert.equal(getBoardPlayerInfoOverlayState(), whileUnmounted);
+});
+
+test("an older board UI binding cannot unbind its replacement", () => {
+  const firstEvents = [];
+  const secondEvents = [];
+  const first = bindBoardUiHandlers(recordingBoardUiHandlers(firstEvents));
+  const second = bindBoardUiHandlers(recordingBoardUiHandlers(secondEvents));
+  firstEvents.length = 0;
+  secondEvents.length = 0;
+
+  unbindBoardUiHandlers(first);
+  updateWagerPlayerUids("current-player", "current-opponent");
+  assert.deepEqual(firstEvents, []);
+  assert.deepEqual(secondEvents, [
+    ["updateWagerPlayerUids", "current-player", "current-opponent"],
+  ]);
+
+  unbindBoardUiHandlers(second);
+  updateWagerPlayerUids("ignored", "ignored");
+  assert.equal(secondEvents.length, 1);
+});
+
+test("video reaction bindings forward exact arguments and unbind by identity", () => {
+  resetBoardVideoReactionHandler();
+  assert.doesNotThrow(() => showVideoReaction(true, 17));
+  const firstEvents = [];
+  const secondEvents = [];
+  const firstHandler = (...args) => firstEvents.push(args);
+  const secondHandler = (...args) => secondEvents.push(args);
+  const first = bindBoardVideoReactionHandler(firstHandler);
+  assert.equal(first, firstHandler);
+  showVideoReaction(false, 20);
+  assert.deepEqual(firstEvents, [[false, 20]]);
+
+  const second = bindBoardVideoReactionHandler(secondHandler);
+  assert.equal(second, secondHandler);
+  unbindBoardVideoReactionHandler(first);
+  showVideoReaction(true, 374);
+  assert.deepEqual(firstEvents, [[false, 20]]);
+  assert.deepEqual(secondEvents, [[true, 374]]);
+
+  unbindBoardVideoReactionHandler(second);
+  assert.doesNotThrow(() => showVideoReaction(false, 429));
+  assert.deepEqual(secondEvents, [[true, 374]]);
+  bindBoardVideoReactionHandler(secondHandler);
+  resetBoardVideoReactionHandler();
+  showVideoReaction(true, 465);
+  assert.deepEqual(secondEvents, [[true, 374]]);
+});
+
+test("board player info comparison checks state values", () => {
+  const empty = createEmptyPlayerInfoOverlayState();
   assert.equal(
     playerInfoOverlayStatesEqual(empty, createEmptyPlayerInfoOverlayState()),
     true,

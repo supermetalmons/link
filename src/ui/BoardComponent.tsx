@@ -42,15 +42,15 @@ import {
 } from "../game/board";
 import {
   bindBoardVideoReactionHandler,
-  resetBoardVideoReactionHandler,
-  showVideoReaction,
+  unbindBoardVideoReactionHandler,
 } from "./controls/boardReactionPort";
 import { getImageResource } from "../resources/imageResources";
 import { registerBoardTransientUiHandler } from "./uiSession";
 import {
   bindBoardUiHandlers,
-  createEmptyPlayerInfoOverlayState,
+  getBoardPlayerInfoOverlayState,
   playerInfoOverlayStatesEqual,
+  unbindBoardUiHandlers,
 } from "../game/boardUiPort";
 import type {
   BoardInviteBotButtonLayout,
@@ -76,6 +76,16 @@ export type {
   BoardPlayerInfoSlotState,
   BoardTimerColor,
 } from "../game/boardUiPort";
+
+export {
+  updateBoardComponentForBoardStyleChange,
+  setTopBoardOverlayVisible,
+  showRaibowAura,
+  updateAuraForAvatarElement,
+  updateWagerPlayerUids,
+  setBoardPlayerInfoOverlayState,
+} from "../game/boardUiPort";
+export { showVideoReaction } from "./controls/boardReactionPort";
 
 const PANGCHIU_BOARD_BACKGROUND_URL =
   "https://cdn.lil.org/mons/boards/backgrounds/pangchiu.jpg";
@@ -131,99 +141,12 @@ const CircularButton = styled.button`
   }
 `;
 
-const listeners: Array<() => void> = [];
-
-const subscribeToBoardStyleChanges = (listener: () => void) => {
-  listeners.push(listener);
-  return () => {
-    const index = listeners.indexOf(listener);
-    if (index > -1) {
-      listeners.splice(index, 1);
-    }
-  };
-};
-
-export const updateBoardComponentForBoardStyleChange = () => {
-  listeners.forEach((listener) => listener());
-};
-
-let latestBoardPlayerInfoOverlayState = createEmptyPlayerInfoOverlayState();
-let setTopBoardOverlayVisibleImpl: (
-  blurry: boolean,
-  svgElement: SVGElement | null,
-  withConfirmAndCancelButtons: boolean,
-  ok?: () => void,
-  cancel?: () => void,
-) => void = () => {};
-let showRaibowAuraImpl: (
-  visible: boolean,
-  url: string,
-  opponent: boolean,
-) => void = () => {};
-let updateAuraForAvatarElementImpl: (
-  opponent: boolean,
-  avatarElement: SVGElement,
-) => void = () => {};
-let updateWagerPlayerUidsImpl: (
-  playerUid: string,
-  opponentUid: string,
-) => void = () => {};
 type BotStrengthControlOverlayState = {
   visible: boolean;
   mode: BotAutomoveMode;
   x: number;
   y: number;
   size: number;
-};
-let setBoardPlayerInfoOverlayStateImpl: (
-  state: BoardPlayerInfoOverlayState,
-) => void = () => {};
-
-export const setTopBoardOverlayVisible = (
-  blurry: boolean,
-  svgElement: SVGElement | null,
-  withConfirmAndCancelButtons: boolean,
-  ok?: () => void,
-  cancel?: () => void,
-) => {
-  setTopBoardOverlayVisibleImpl(
-    blurry,
-    svgElement,
-    withConfirmAndCancelButtons,
-    ok,
-    cancel,
-  );
-};
-
-export { showVideoReaction };
-
-export const showRaibowAura = (
-  visible: boolean,
-  url: string,
-  opponent: boolean,
-) => {
-  showRaibowAuraImpl(visible, url, opponent);
-};
-
-export const updateAuraForAvatarElement = (
-  opponent: boolean,
-  avatarElement: SVGElement,
-) => {
-  updateAuraForAvatarElementImpl(opponent, avatarElement);
-};
-
-export const updateWagerPlayerUids = (
-  playerUid: string,
-  opponentUid: string,
-) => {
-  updateWagerPlayerUidsImpl(playerUid, opponentUid);
-};
-
-export const setBoardPlayerInfoOverlayState = (
-  state: BoardPlayerInfoOverlayState,
-) => {
-  latestBoardPlayerInfoOverlayState = state;
-  setBoardPlayerInfoOverlayStateImpl(state);
 };
 
 const VIDEO_CONTAINER_HEIGHT_GRID = "12.5%";
@@ -1211,9 +1134,7 @@ const BoardComponent: React.FC = () => {
   const [currentColorSet, setCurrentColorSet] =
     useState<ColorSet>(getCurrentColorSet());
   const [playerInfoOverlayState, setPlayerInfoOverlayState] =
-    useState<BoardPlayerInfoOverlayState>(
-      () => latestBoardPlayerInfoOverlayState,
-    );
+    useState<BoardPlayerInfoOverlayState>(getBoardPlayerInfoOverlayState);
   const [endOfGameIconHrefs, setEndOfGameIconHrefs] =
     useState<EndOfGameIconHrefs>(getEndOfGameIconHrefs);
   const [prefersDarkMode, setPrefersDarkMode] = useState(
@@ -1292,7 +1213,7 @@ const BoardComponent: React.FC = () => {
   const [playerInfoTextLayoutVersion, setPlayerInfoTextLayoutVersion] =
     useState(0);
 
-  setBoardPlayerInfoOverlayStateImpl = (
+  const setBoardPlayerInfoOverlayStateHandler = (
     nextState: BoardPlayerInfoOverlayState,
   ) => {
     setPlayerInfoOverlayState((prevState) =>
@@ -1302,7 +1223,7 @@ const BoardComponent: React.FC = () => {
     );
   };
 
-  updateWagerPlayerUidsImpl = (
+  const updateWagerPlayerUidsHandler = (
     nextPlayerUid: string,
     nextOpponentUid: string,
   ) => {
@@ -1314,7 +1235,7 @@ const BoardComponent: React.FC = () => {
     );
   };
 
-  updateAuraForAvatarElementImpl = (
+  const updateAuraForAvatarElementHandler = (
     opponent: boolean,
     avatarElement: SVGElement,
   ) => {
@@ -1425,13 +1346,13 @@ const BoardComponent: React.FC = () => {
     clearPlayerVideoNow();
   }, [clearOpponentVideoNow, clearPlayerVideoNow]);
 
-  bindBoardVideoReactionHandler((opponent: boolean, stickerId: number) => {
+  const showVideoReactionHandler = (opponent: boolean, stickerId: number) => {
     if (opponent) {
       showOpponentVideoReaction(stickerId);
     } else {
       showPlayerVideoReaction(stickerId);
     }
-  });
+  };
 
   const syncVideoReactionsAfterPageResume = useCallback(() => {
     if (document.visibilityState === "hidden") {
@@ -1460,7 +1381,7 @@ const BoardComponent: React.FC = () => {
     };
   }, [syncVideoReactionsAfterPageResume]);
 
-  setTopBoardOverlayVisibleImpl = (
+  const setTopBoardOverlayVisibleHandler = (
     blurry: boolean,
     svgElement: SVGElement | null,
     withConfirmAndCancelButtons: boolean,
@@ -1476,7 +1397,11 @@ const BoardComponent: React.FC = () => {
     });
   };
 
-  showRaibowAuraImpl = (visible: boolean, url: string, opponent: boolean) => {
+  const showRaibowAuraHandler = (
+    visible: boolean,
+    url: string,
+    opponent: boolean,
+  ) => {
     const targets = opponent ? opponentAuraRefs : playerAuraRefs;
     const container = opponent
       ? opponentAuraContainerRef.current
@@ -1502,28 +1427,46 @@ const BoardComponent: React.FC = () => {
     };
   }, []);
 
-  useEffect(() => {
-    const updateColorSetAndGrid = () => {
-      setCurrentColorSet(getCurrentColorSet());
-      const newIsGridVisible = !isCustomPictureBoardEnabled();
-      setIsGridVisible(newIsGridVisible);
-      setIsPangchiuBoardLayout(isPangchiuBoard());
-      if (!newIsGridVisible) {
-        setShouldIncludePictureBoardImage(true);
-      }
-    };
-
-    const unsubscribeBoardStyle = subscribeToBoardStyleChanges(
-      updateColorSetAndGrid,
-    );
-    const unsubscribeBoardColorSet = subscribeToBoardColorSetChanges(
-      updateColorSetAndGrid,
-    );
-    return () => {
-      unsubscribeBoardStyle();
-      unsubscribeBoardColorSet();
-    };
+  const updateColorSetAndGrid = useCallback(() => {
+    setCurrentColorSet(getCurrentColorSet());
+    const newIsGridVisible = !isCustomPictureBoardEnabled();
+    setIsGridVisible(newIsGridVisible);
+    setIsPangchiuBoardLayout(isPangchiuBoard());
+    if (!newIsGridVisible) {
+      setShouldIncludePictureBoardImage(true);
+    }
   }, []);
+
+  useLayoutEffect(() => {
+    const boundHandlers = bindBoardUiHandlers({
+      updateBoardComponentForBoardStyleChange: updateColorSetAndGrid,
+      setTopBoardOverlayVisible: setTopBoardOverlayVisibleHandler,
+      showRaibowAura: showRaibowAuraHandler,
+      updateAuraForAvatarElement: updateAuraForAvatarElementHandler,
+      updateWagerPlayerUids: updateWagerPlayerUidsHandler,
+      setBoardPlayerInfoOverlayState: setBoardPlayerInfoOverlayStateHandler,
+    });
+    const boundVideoHandler = bindBoardVideoReactionHandler(
+      showVideoReactionHandler,
+    );
+    const latestPlayerInfoOverlayState = getBoardPlayerInfoOverlayState();
+    if (
+      !playerInfoOverlayStatesEqual(
+        playerInfoOverlayState,
+        latestPlayerInfoOverlayState,
+      )
+    ) {
+      setBoardPlayerInfoOverlayStateHandler(latestPlayerInfoOverlayState);
+    }
+    return () => {
+      unbindBoardUiHandlers(boundHandlers);
+      unbindBoardVideoReactionHandler(boundVideoHandler);
+    };
+  });
+
+  useEffect(() => {
+    return subscribeToBoardColorSetChanges(updateColorSetAndGrid);
+  }, [updateColorSetAndGrid]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
@@ -1779,12 +1722,6 @@ const BoardComponent: React.FC = () => {
   useEffect(() => {
     return () => {
       clearPendingBoardTransitionState();
-      setTopBoardOverlayVisibleImpl = () => {};
-      resetBoardVideoReactionHandler();
-      showRaibowAuraImpl = () => {};
-      updateAuraForAvatarElementImpl = () => {};
-      updateWagerPlayerUidsImpl = () => {};
-      setBoardPlayerInfoOverlayStateImpl = () => {};
       applyInviteBotButtonLayout(null);
     };
   }, [clearPendingBoardTransitionState]);
@@ -2603,14 +2540,5 @@ const BoardComponent: React.FC = () => {
     </>
   );
 };
-
-bindBoardUiHandlers({
-  updateBoardComponentForBoardStyleChange,
-  setTopBoardOverlayVisible,
-  showRaibowAura,
-  updateAuraForAvatarElement,
-  updateWagerPlayerUids,
-  setBoardPlayerInfoOverlayState,
-});
 
 export default BoardComponent;

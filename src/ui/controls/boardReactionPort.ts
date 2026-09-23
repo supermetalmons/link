@@ -5,11 +5,13 @@ export type BoardReactionMetadataApi = {
   getOpponentUid(): string;
 };
 
-let metadataApi: BoardReactionMetadataApi | null = null;
-let showVideoReactionHandler: (
+export type BoardVideoReactionHandler = (
   opponent: boolean,
   stickerId: number,
-) => void = () => {};
+) => void;
+
+let metadataApi: BoardReactionMetadataApi | null = null;
+let showVideoReactionHandler: BoardVideoReactionHandler | null = null;
 
 export const bindBoardReactionMetadataApi = (
   nextApi: BoardReactionMetadataApi,
@@ -18,13 +20,22 @@ export const bindBoardReactionMetadataApi = (
 };
 
 export const bindBoardVideoReactionHandler = (
-  handler: (opponent: boolean, stickerId: number) => void,
-): void => {
+  handler: BoardVideoReactionHandler,
+): BoardVideoReactionHandler => {
   showVideoReactionHandler = handler;
+  return handler;
+};
+
+export const unbindBoardVideoReactionHandler = (
+  handler: BoardVideoReactionHandler,
+): void => {
+  if (showVideoReactionHandler === handler) {
+    showVideoReactionHandler = null;
+  }
 };
 
 export const resetBoardVideoReactionHandler = (): void => {
-  showVideoReactionHandler = () => {};
+  showVideoReactionHandler = null;
 };
 
 export const showVoiceReactionText = (
@@ -44,4 +55,4 @@ export const getOpponentReactionUid = (): string =>
   metadataApi?.getOpponentUid() ?? "";
 
 export const showVideoReaction = (opponent: boolean, stickerId: number): void =>
-  showVideoReactionHandler(opponent, stickerId);
+  showVideoReactionHandler?.(opponent, stickerId);

@@ -26,7 +26,6 @@ export const environment = {
   }[],
   outside: null as Function | null,
   visible: () => false,
-  video: null as Function | null,
   style: "grid",
   mobile: new URLSearchParams(location.search).has("mobile"),
   state: null as any,
@@ -137,13 +136,20 @@ export const getImageResource = () => ({
 export const attachRainbowAura = (container: HTMLElement) => {
   const background = document.createElement("div");
   const inner = document.createElement("div");
+  background.dataset.fixtureAura = "true";
   background.append(inner);
   container.append(background);
   return { background, inner };
 };
-export const hideRainbowAura = () => {};
-export const setRainbowAuraMask = () => {};
-export const showRainbowAura = () => {};
+export const hideRainbowAura = (background: HTMLElement) => {
+  background.dataset.visible = "false";
+};
+export const setRainbowAuraMask = (inner: HTMLElement, url: string) => {
+  inner.dataset.mask = url;
+};
+export const showRainbowAura = (background: HTMLElement) => {
+  background.dataset.visible = "true";
+};
 export const registerBoardTransientUiHandler = (callback: Function) => {
   environment.transient = callback;
   return () => {
@@ -156,11 +162,3 @@ export const setWagerPanelOutsideTapHandler = (callback: Function | null) => {
 export const setWagerPanelVisibilityChecker = (callback: () => boolean) => {
   environment.visible = callback;
 };
-export const bindBoardVideoReactionHandler = (callback: Function) => {
-  environment.video = callback;
-};
-export const resetBoardVideoReactionHandler = () => {
-  environment.video = null;
-};
-export const showVideoReaction = (side: boolean, id: number) =>
-  environment.video?.(side, id);

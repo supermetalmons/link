@@ -102,14 +102,27 @@ export type BoardUiHandlers = {
 };
 
 let handlers: BoardUiHandlers | null = null;
+let playerInfoOverlayState = createEmptyPlayerInfoOverlayState();
 
-export const bindBoardUiHandlers = (nextHandlers: BoardUiHandlers): void => {
+export const bindBoardUiHandlers = (
+  nextHandlers: BoardUiHandlers,
+): BoardUiHandlers => {
   handlers = nextHandlers;
+  return nextHandlers;
+};
+
+export const unbindBoardUiHandlers = (boundHandlers: BoardUiHandlers): void => {
+  if (handlers === boundHandlers) {
+    handlers = null;
+  }
 };
 
 export const resetBoardUiHandlers = (): void => {
   handlers = null;
 };
+
+export const getBoardPlayerInfoOverlayState = (): BoardPlayerInfoOverlayState =>
+  playerInfoOverlayState;
 
 export const updateBoardComponentForBoardStyleChange = (): void => {
   handlers?.updateBoardComponentForBoardStyleChange();
@@ -156,5 +169,6 @@ export const updateWagerPlayerUids = (
 export const setBoardPlayerInfoOverlayState = (
   state: BoardPlayerInfoOverlayState,
 ): void => {
+  playerInfoOverlayState = state;
   handlers?.setBoardPlayerInfoOverlayState(state);
 };

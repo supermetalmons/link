@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
 import BoardComponent, * as boardUi from "../../src/ui/BoardComponent";
 import { createEmptyPlayerInfoOverlayState } from "../../src/game/boardUiPort";
+import { showVideoReaction } from "../../src/ui/controls/boardReactionPort";
 import {
   createWagerPile,
   syncWagerPileIcons,
@@ -116,7 +117,7 @@ const harness = {
     opponentSideMetadata.uid = opponentUid;
     run(() => boardUi.updateWagerPlayerUids(playerUid, opponentUid));
   },
-  mount() {
+  mount({ seedNames = true } = {}) {
     root = createRoot(document.getElementById("root")!);
     run(() =>
       root.render(
@@ -125,7 +126,7 @@ const harness = {
         </React.StrictMode>,
       ),
     );
-    names();
+    if (seedNames) names();
   },
   state(state: any) {
     e.state = state;
@@ -163,6 +164,43 @@ const harness = {
   style(value: string) {
     e.style = value;
     run(() => e.styleSubscribers.forEach((callback) => callback()));
+  },
+  styleViaBoardPort(value: string) {
+    e.style = value;
+    run(() => boardUi.updateBoardComponentForBoardStyleChange());
+  },
+  overlay(label: string | null) {
+    const element = label
+      ? document.createElementNS("http://www.w3.org/2000/svg", "rect")
+      : null;
+    element?.setAttribute("data-fixture-overlay", label!);
+    run(() =>
+      boardUi.setTopBoardOverlayVisible(
+        false,
+        element,
+        !!label,
+        () => e.calls.push(`confirm:${label}`),
+        () => e.calls.push(`cancel:${label}`),
+      ),
+    );
+  },
+  aura(opponent: boolean, visible: boolean) {
+    const avatar = document.createElementNS(
+      "http://www.w3.org/2000/svg",
+      "rect",
+    );
+    avatar.setAttribute("x", "20");
+    avatar.setAttribute("y", "30");
+    avatar.setAttribute("width", "40");
+    avatar.setAttribute("height", "50");
+    document.getElementById("avatarLayer")!.append(avatar);
+    const { left, top, width, height } = avatar.getBoundingClientRect();
+    run(() => {
+      boardUi.updateAuraForAvatarElement(opponent, avatar);
+      boardUi.showRaibowAura(visible, `mask:${opponent}`, opponent);
+    });
+    avatar.remove();
+    return { left, top, width, height };
   },
   emit(options: any = {}) {
     renderState = {
@@ -212,8 +250,8 @@ const harness = {
   },
   videos() {
     run(() => {
-      e.video?.(false, 1);
-      e.video?.(true, 2);
+      showVideoReaction(false, 1);
+      showVideoReaction(true, 2);
     });
   },
   dispose() {
@@ -231,7 +269,6 @@ const harness = {
       outside: !!e.outside,
       visible: e.visible(),
       transient: !!e.transient,
-      video: !!e.video,
     };
   },
 };

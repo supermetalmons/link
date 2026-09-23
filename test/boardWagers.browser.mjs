@@ -31,7 +31,6 @@ const stubbedModules = new Set(
     "ui/rainbowAura",
     "ui/uiSession",
     "ui/controls/bottomControlsPort",
-    "ui/controls/boardReactionPort",
   ].map((name) => path.join(repository, "src", name)),
 );
 
@@ -622,7 +621,6 @@ async function scenarios(browser, origin, mode, snapshots) {
           outside: false,
           visible: false,
           transient: false,
-          video: false,
         });
         await invoke(page, "mount");
         await page.clock.runFor(80);
@@ -640,6 +638,133 @@ async function scenarios(browser, origin, mode, snapshots) {
     }
   }
 }
+
+test(
+  "board commands survive StrictMode and remount while preserving only cached player info",
+  { timeout: 60_000 },
+  async () => {
+    await fixture(null, async ({ browser, origin }) => {
+      const { context, page, errors } = await openPage(
+        browser,
+        origin,
+        false,
+        false,
+      );
+      try {
+        await invoke(page, "dispose");
+        await invoke(page, "names", true);
+        await invoke(page, "overlay", "unmounted");
+        await invoke(page, "videos");
+        assert.equal(
+          await page.locator("video, [data-fixture-overlay]").count(),
+          0,
+        );
+        assert.equal(
+          await page.evaluate(() => window.pendingBoardUiWork().timeouts),
+          0,
+        );
+
+        const initial = await page.evaluate(() => {
+          const h = window.harness;
+          h.mount({ seedNames: false });
+          h.videos();
+          return {
+            videos: document.querySelectorAll("video").length,
+            overlay: document.querySelectorAll("[data-fixture-overlay]").length,
+          };
+        });
+        assert.deepEqual(initial, { videos: 2, overlay: 0 });
+        assert.equal(
+          await page
+            .getByText("player_a_very_long_player_name", { exact: true })
+            .count(),
+          1,
+        );
+        await invoke(page, "reset");
+
+        await invoke(page, "overlay", "old");
+        await invoke(page, "overlay", "latest");
+        assert.equal(
+          await page.locator('[data-fixture-overlay="latest"]').count(),
+          1,
+        );
+        await page.locator("button").last().dispatchEvent("click");
+        await page.locator("button").first().dispatchEvent("click");
+        assert.deepEqual(await page.evaluate(() => window.harness.e.calls), [
+          "confirm:latest",
+          "cancel:latest",
+        ]);
+        await invoke(page, "overlay", null);
+
+        await invoke(page, "styleViaBoardPort", "pangchiu");
+        assert.equal(await page.locator(".board-svg.grid-hidden").count(), 2);
+        await invoke(page, "styleViaBoardPort", "grid");
+        assert.equal(await page.locator(".board-svg.grid-visible").count(), 2);
+        for (const opponent of [true, false]) {
+          const expected = await invoke(page, "aura", opponent, true);
+          const aura = page
+            .locator("[data-fixture-aura]")
+            .nth(opponent ? 0 : 1);
+          const actual = await aura.evaluate((element) => {
+            const wrapper = element.parentElement.parentElement;
+            return {
+              visible: element.dataset.visible,
+              mask: element.firstElementChild.dataset.mask,
+              left: parseFloat(wrapper.style.left),
+              top: parseFloat(wrapper.style.top),
+              width: parseFloat(wrapper.style.width),
+              height: parseFloat(wrapper.style.height),
+            };
+          });
+          assert.equal(actual.visible, "true");
+          assert.equal(actual.mask, `mask:${opponent}`);
+          for (const key of ["left", "top", "width", "height"])
+            assert.ok(Math.abs(actual[key] - expected[key]) < 0.01, key);
+          await invoke(page, "aura", opponent, false);
+          assert.equal(await aura.getAttribute("data-visible"), "false");
+        }
+
+        await invoke(page, "bridge", "next-player", "next-opponent");
+        await invoke(page, "state", {
+          proposals: {
+            "next-player": { material: "obsidian", count: 4 },
+            "next-opponent": { material: "obsidian", count: 8 },
+          },
+        });
+        await invoke(page, "emit");
+        await interact(page, pile(page, "player"), false);
+        assert.equal(
+          await page
+            .getByRole("button", { name: "Cancel Proposal", exact: true })
+            .count(),
+          1,
+        );
+        await invoke(page, "clearPiles");
+        await invoke(page, "dispose");
+        await invoke(page, "videos");
+        assert.equal(
+          await page.evaluate(() => window.pendingBoardUiWork().timeouts),
+          0,
+        );
+        await invoke(page, "mount", { seedNames: false });
+        assert.equal(
+          await page
+            .getByText("player_a_very_long_player_name", { exact: true })
+            .count(),
+          1,
+        );
+        await invoke(page, "names");
+        assert.equal(await page.getByText("Moss", { exact: true }).count(), 1);
+        await invoke(page, "videos");
+        assert.equal(await page.locator("video").count(), 2);
+        await invoke(page, "dispose");
+        assert.deepEqual(errors, []);
+      } finally {
+        await context.close();
+      }
+    });
+  },
+);
 
 test(
   "wager actions follow confirmation readiness even when the proposal object is unchanged",
