@@ -66,24 +66,10 @@ import {
   MiningMaterialName,
 } from "../connection/connectionModels";
 import { registerMainMenuTransientUiHandler } from "./uiSession";
-import {
-  createProfileEvent,
-  type EventCreateDateTimePayload,
-} from "./profileSurfaceDataPort";
-import {
-  getEventModalState,
-  openEventModal,
-  openEventModalPendingCreate,
-  setEventModalPendingCreateError,
-} from "./eventModalController";
-import {
-  EVENT_SCHEDULE_TIMEZONE_OPTIONS,
-  MAX_STARTS_IN_MINUTES,
-  MIN_STARTS_IN_MINUTES,
-  isMonsLinkAdmin,
-  type EventScheduleTimezone,
-  type EventTelegramAnnouncements,
-} from "@mons/shared/events";
+import { isMonsLinkAdmin } from "@mons/shared/events";
+import { EventCreateForm } from "./event/EventCreateForm";
+import { ToggleRow } from "./event/EventCreateForm.styles";
+import { useEventCreateForm } from "./event/useEventCreateForm";
 import type { AuthState } from "../connection/authModels";
 import { InventoryModal } from "./InventoryModal";
 import { getImageResource } from "../resources/imageResources";
@@ -97,14 +83,6 @@ const LEADERBOARD_TYPES: LeaderboardType[] = [
   "mp",
 ];
 type LeaderboardSpecialType = keyof typeof LEADERBOARD_TYPE_ICON_URLS;
-
-type EventScheduleMode = "minutes" | "datetime";
-
-const EVENT_TELEGRAM_ANNOUNCEMENT_OPTIONS = [
-  { key: "invite", label: "Invite when created" },
-  { key: "matches", label: "Event start and match updates" },
-  { key: "results", label: "Final results" },
-] as const;
 
 const TOP_RIGHT_CONTROL_IDS = {
   info: "top-right-info-button",
@@ -127,30 +105,6 @@ const FOCUS_CLAIMING_TARGET_SELECTOR =
   "[contenteditable]:not([contenteditable='false'])";
 
 type TopRightPopoverName = keyof typeof TOP_RIGHT_POPOVER_IDS | null;
-
-const pad2 = (value: number): string => String(value).padStart(2, "0");
-
-const formatLocalDateInputValue = (date: Date): string =>
-  `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
-
-const formatLocalTimeInputValue = (date: Date): string =>
-  `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
-
-const DEFAULT_EVENT_SCHEDULE_LEAD_MINUTES = 30;
-
-const getDefaultScheduledDateTimeInput = (): { date: string; time: string } => {
-  const minimumStartMs =
-    Date.now() + DEFAULT_EVENT_SCHEDULE_LEAD_MINUTES * 60 * 1000;
-  const rounded = new Date(minimumStartMs);
-  rounded.setMinutes(0, 0, 0);
-  if (rounded.getTime() < minimumStartMs) {
-    rounded.setHours(rounded.getHours() + 1);
-  }
-  return {
-    date: formatLocalDateInputValue(rounded),
-    time: formatLocalTimeInputValue(rounded),
-  };
-};
 
 const getSpecialLeaderboardTypeImageUrl = (type: LeaderboardSpecialType) =>
   getImageResource(LEADERBOARD_TYPE_ICON_URLS[type]).load();
@@ -611,150 +565,6 @@ const BuildInfo = styled.div`
 
   @media (prefers-color-scheme: dark) {
     color: var(--buildInfoTextColorDark);
-  }
-`;
-
-const ToggleRow = styled.label`
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  align-self: center;
-  font-size: 14px;
-  color: var(--color-gray-33);
-
-  @media (prefers-color-scheme: dark) {
-    color: var(--color-gray-f5);
-  }
-`;
-
-const TelegramAnnouncements = styled.fieldset`
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: none;
-  color: var(--color-gray-33);
-
-  legend {
-    padding: 0;
-    margin-bottom: 8px;
-    font-size: 14px;
-    font-weight: 600;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    color: var(--color-gray-f5);
-  }
-`;
-
-const TelegramAnnouncementToggle = styled(ToggleRow)`
-  align-self: stretch;
-  line-height: 1.35;
-  cursor: pointer;
-
-  input {
-    flex-shrink: 0;
-    margin: 0;
-  }
-`;
-
-const TelegramAnnouncementsHint = styled.p`
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.4;
-`;
-
-const ScheduleModeToggle = styled.div`
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-`;
-
-const ScheduleModeButton = styled.button<{ $active: boolean }>`
-  height: 34px;
-  border: none;
-  border-radius: 999px;
-  padding: 0 10px;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  color: ${(props) => (props.$active ? "white" : "var(--color-gray-33)")};
-  background: ${(props) =>
-    props.$active ? "var(--color-blue-primary)" : "rgba(111, 126, 141, 0.2)"};
-
-  @media (prefers-color-scheme: dark) {
-    color: ${(props) => (props.$active ? "white" : "var(--color-gray-f5)")};
-    background: ${(props) =>
-      props.$active
-        ? "var(--color-blue-primary-dark)"
-        : "rgba(255, 255, 255, 0.12)"};
-  }
-`;
-
-const ExperimentalInput = styled.input`
-  width: 100%;
-  box-sizing: border-box;
-  border: none;
-  border-radius: 12px;
-  padding: 10px 12px;
-  font-size: 14px;
-  background: rgba(111, 126, 141, 0.12);
-  color: var(--color-gray-25);
-
-  @media (prefers-color-scheme: dark) {
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--color-gray-f5);
-  }
-`;
-
-const ExperimentalSelect = styled.select`
-  width: 100%;
-  box-sizing: border-box;
-  border: none;
-  border-radius: 12px;
-  padding: 10px 12px;
-  font-size: 14px;
-  background: rgba(111, 126, 141, 0.12);
-  color: var(--color-gray-25);
-
-  @media (prefers-color-scheme: dark) {
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--color-gray-f5);
-  }
-`;
-
-const ExperimentalActionButton = styled.button`
-  height: 40px;
-  border: none;
-  border-radius: 999px;
-  padding: 0 14px;
-  margin-bottom: 24px;
-  font-size: 14px;
-  font-weight: 700;
-  cursor: pointer;
-  background: var(--color-blue-primary);
-  color: white;
-
-  &:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    background: var(--color-blue-primary-dark);
-  }
-`;
-
-const ExperimentalInlineError = styled.div`
-  font-size: 12px;
-  line-height: 1.35;
-  color: var(--dangerButtonBackground);
-  text-align: center;
-
-  @media (prefers-color-scheme: dark) {
-    color: var(--dangerButtonBackgroundDark);
   }
 `;
 
@@ -1384,29 +1194,11 @@ const MainMenu: React.FC = () => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [clickCount, setClickCount] = useState(0);
   const [showExperimental, setShowExperimental] = useState(false);
-  const [eventStartsInMinutes, setEventStartsInMinutes] = useState("5");
-  const initialScheduledDateTimeRef = useRef(
-    getDefaultScheduledDateTimeInput(),
-  );
-  const [eventScheduleMode, setEventScheduleMode] =
-    useState<EventScheduleMode>("minutes");
-  const [eventScheduledDate, setEventScheduledDate] = useState(
-    () => initialScheduledDateTimeRef.current.date,
-  );
-  const [eventScheduledTime, setEventScheduledTime] = useState(
-    () => initialScheduledDateTimeRef.current.time,
-  );
-  const [eventScheduledTimezone, setEventScheduledTimezone] =
-    useState<EventScheduleTimezone>("local");
-  const [isSundayMons, setIsSundayMons] = useState(false);
-  const [eventTelegramAnnouncements, setEventTelegramAnnouncements] =
-    useState<EventTelegramAnnouncements>({
-      invite: false,
-      matches: false,
-      results: false,
-    });
-  const [isCreatingEvent, setIsCreatingEvent] = useState(false);
-  const [eventCreateError, setEventCreateError] = useState("");
+  const handleEventCreateStarted = useCallback(() => {
+    setIsMenuOpen(false);
+    setShowExperimental(false);
+  }, []);
+  const eventCreateForm = useEventCreateForm(handleEventCreateStarted);
 
   const [areAnimatedMonsEnabled, setAreAnimatedMonsEnabled] = useState<boolean>(
     storage.getIsExperimentingWithSprites(false),
@@ -1543,19 +1335,8 @@ const MainMenu: React.FC = () => {
   };
 
   const showExperimentalFeaturesSelection = () => {
-    const defaults = getDefaultScheduledDateTimeInput();
     setShowExperimental(true);
-    setEventScheduleMode("minutes");
-    setEventScheduledDate(defaults.date);
-    setEventScheduledTime(defaults.time);
-    setEventScheduledTimezone("local");
-    setIsSundayMons(false);
-    setEventTelegramAnnouncements({
-      invite: false,
-      matches: false,
-      results: false,
-    });
-    setEventCreateError("");
+    eventCreateForm.resetForOpen();
   };
 
   const handleBooleanToggle =
@@ -1575,83 +1356,6 @@ const MainMenu: React.FC = () => {
       setAnimatedMonsEnabled(checked, false);
     },
   );
-
-  const handleCreateEvent = useCallback(() => {
-    let createRequest: number | EventCreateDateTimePayload;
-    if (eventScheduleMode === "minutes") {
-      const parsedStartsInMinutes = Math.floor(Number(eventStartsInMinutes));
-      if (
-        !Number.isFinite(parsedStartsInMinutes) ||
-        parsedStartsInMinutes < 1
-      ) {
-        setEventCreateError("Enter at least 1 minute.");
-        return;
-      }
-      createRequest = parsedStartsInMinutes;
-    } else {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(eventScheduledDate)) {
-        setEventCreateError("Enter a valid date.");
-        return;
-      }
-      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(eventScheduledTime)) {
-        setEventCreateError("Enter a valid time.");
-        return;
-      }
-      const localTimezoneIana =
-        Intl.DateTimeFormat().resolvedOptions().timeZone;
-      if (eventScheduledTimezone === "local" && !localTimezoneIana) {
-        setEventCreateError("Could not detect local timezone.");
-        return;
-      }
-      createRequest = {
-        scheduledDate: eventScheduledDate,
-        scheduledTime: eventScheduledTime,
-        scheduledTimezone: eventScheduledTimezone,
-        ...(eventScheduledTimezone === "local" ? { localTimezoneIana } : {}),
-      };
-    }
-    setEventCreateError("");
-    setIsCreatingEvent(true);
-    setIsMenuOpen(false);
-    setShowExperimental(false);
-    openEventModalPendingCreate();
-    void createProfileEvent(createRequest, {
-      isSundayMons,
-      telegramAnnouncements: eventTelegramAnnouncements,
-    })
-      .then((result) => {
-        if (!result.ok || !result.eventId) {
-          setEventModalPendingCreateError("Failed to create event.");
-          return;
-        }
-        const modalState = getEventModalState();
-        if (!modalState.isOpen || !modalState.isPendingCreate) {
-          return;
-        }
-        openEventModal(result.eventId);
-      })
-      .catch((error) => {
-        const message =
-          error &&
-          typeof error === "object" &&
-          "message" in error &&
-          typeof (error as { message?: unknown }).message === "string"
-            ? (error as { message: string }).message
-            : "Failed to create event.";
-        setEventModalPendingCreateError(message);
-      })
-      .finally(() => {
-        setIsCreatingEvent(false);
-      });
-  }, [
-    eventScheduleMode,
-    eventStartsInMinutes,
-    eventScheduledDate,
-    eventScheduledTime,
-    eventScheduledTimezone,
-    isSundayMons,
-    eventTelegramAnnouncements,
-  ]);
 
   const closeMainMenuPopupsHandler = useCallback(() => {
     setIsMenuOpen(false);
@@ -1940,131 +1644,10 @@ const MainMenu: React.FC = () => {
                 </LinksContainer>
                 {showExperimental && (
                   <ExperimentalMenu>
-                    {canCreatePilotEvents && (
-                      <>
-                        <ScheduleModeToggle>
-                          <ScheduleModeButton
-                            type="button"
-                            $active={eventScheduleMode === "minutes"}
-                            onClick={() => {
-                              setEventScheduleMode("minutes");
-                              setEventCreateError("");
-                            }}
-                          >
-                            In minutes
-                          </ScheduleModeButton>
-                          <ScheduleModeButton
-                            type="button"
-                            $active={eventScheduleMode === "datetime"}
-                            onClick={() => {
-                              setEventScheduleMode("datetime");
-                              setEventCreateError("");
-                            }}
-                          >
-                            Date & time
-                          </ScheduleModeButton>
-                        </ScheduleModeToggle>
-                        {eventScheduleMode === "minutes" ? (
-                          <ExperimentalInput
-                            type="number"
-                            min={MIN_STARTS_IN_MINUTES}
-                            max={MAX_STARTS_IN_MINUTES}
-                            step="1"
-                            value={eventStartsInMinutes}
-                            onChange={(event) => {
-                              setEventStartsInMinutes(event.target.value);
-                              setEventCreateError("");
-                            }}
-                            placeholder="minutes from now"
-                          />
-                        ) : (
-                          <>
-                            <ExperimentalInput
-                              type="date"
-                              value={eventScheduledDate}
-                              onChange={(event) => {
-                                setEventScheduledDate(event.target.value);
-                                setEventCreateError("");
-                              }}
-                            />
-                            <ExperimentalInput
-                              type="time"
-                              step="60"
-                              value={eventScheduledTime}
-                              onChange={(event) => {
-                                setEventScheduledTime(event.target.value);
-                                setEventCreateError("");
-                              }}
-                            />
-                            <ExperimentalSelect
-                              value={eventScheduledTimezone}
-                              onChange={(event) => {
-                                setEventScheduledTimezone(
-                                  event.target.value as EventScheduleTimezone,
-                                );
-                                setEventCreateError("");
-                              }}
-                            >
-                              {EVENT_SCHEDULE_TIMEZONE_OPTIONS.map((option) => (
-                                <option key={option.value} value={option.value}>
-                                  {option.label}
-                                </option>
-                              ))}
-                            </ExperimentalSelect>
-                          </>
-                        )}
-                        <ToggleRow>
-                          <input
-                            type="checkbox"
-                            checked={isSundayMons}
-                            onChange={(event) =>
-                              setIsSundayMons(event.target.checked)
-                            }
-                          />
-                          Sunday Mons
-                        </ToggleRow>
-                        <TelegramAnnouncements aria-describedby="event-telegram-announcements-hint">
-                          <legend>Telegram announcements</legend>
-                          {EVENT_TELEGRAM_ANNOUNCEMENT_OPTIONS.map(
-                            ({ key, label }) => (
-                              <TelegramAnnouncementToggle key={key}>
-                                <input
-                                  type="checkbox"
-                                  checked={eventTelegramAnnouncements[key]}
-                                  onChange={(event) => {
-                                    const checked = event.target.checked;
-                                    setEventTelegramAnnouncements(
-                                      (current) => ({
-                                        ...current,
-                                        [key]: checked,
-                                      }),
-                                    );
-                                  }}
-                                />
-                                {label}
-                              </TelegramAnnouncementToggle>
-                            ),
-                          )}
-                          <TelegramAnnouncementsHint id="event-telegram-announcements-hint">
-                            Once an invite is sent, it updates as people join.
-                          </TelegramAnnouncementsHint>
-                        </TelegramAnnouncements>
-                        <ExperimentalActionButton
-                          type="button"
-                          onClick={handleCreateEvent}
-                          disabled={isCreatingEvent}
-                        >
-                          {isCreatingEvent
-                            ? "Creating Event..."
-                            : "Create Event"}
-                        </ExperimentalActionButton>
-                      </>
-                    )}
-                    {eventCreateError !== "" && (
-                      <ExperimentalInlineError>
-                        {eventCreateError}
-                      </ExperimentalInlineError>
-                    )}
+                    <EventCreateForm
+                      form={eventCreateForm}
+                      canCreateEvents={canCreatePilotEvents}
+                    />
                     <ToggleRow>
                       <input
                         type="checkbox"

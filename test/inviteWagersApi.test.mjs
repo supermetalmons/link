@@ -1,13 +1,28 @@
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
 import test from "node:test";
 import { INVITE_WAGERS_MAX_MESSAGE_BYTES } from "@mons/shared/invite-wagers";
-import {
+
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (
+      context.parentURL?.endsWith(".ts") &&
+      (specifier.startsWith("./") || specifier.startsWith("../")) &&
+      !/\.[^/]+$/.test(specifier)
+    ) {
+      return nextResolve(`${specifier}.ts`, context);
+    }
+    return nextResolve(specifier, context);
+  },
+});
+
+const {
   createInviteWagersSocketProtocols,
   getInviteWagersSocketUrl,
   InviteWagersApiError,
   INVITE_WAGERS_REQUEST_TIMEOUT_MS,
   readInviteWagersViaApi,
-} from "../src/services/inviteWagersApi.ts";
+} = await import("../src/services/inviteWagersApi.ts");
 
 const originalFetch = globalThis.fetch;
 const value = (snapshot = {}) => ({
@@ -256,4 +271,74 @@ test("rejects auth-user replacement and cancels late response bodies", async () 
   );
   await assert.rejects(pending, /authentication-changed/);
   assert.equal(canceled, true);
+});
+
+test("public 401 reads stop after one request and cancel unread error bodies", async () => {
+  let calls = 0;
+  let canceled = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return new Response(
+      new ReadableStream({
+        cancel() {
+          canceled++;
+          return new Promise(() => {});
+        },
+      }),
+      { status: 401, headers: { "Retry-After": "2" } },
+    );
+  };
+  await assert.rejects(readInviteWagersViaApi("invite"), (error) => {
+    assert.ok(error instanceof InviteWagersApiError);
+    assert.equal(error.code, "http-401");
+    assert.equal(error.status, 401);
+    assert.equal(error.retryAfterMs, 2_000);
+    return true;
+  });
+  assert.equal(calls, 1);
+  assert.equal(canceled, 1);
+});
+
+test("already-aborted reads do not start token lookup or fetch", async () => {
+  let tokens = 0;
+  let fetches = 0;
+  globalThis.fetch = async () => {
+    fetches++;
+    return response();
+  };
+  await assert.rejects(
+    readInviteWagersViaApi(
+      "invite",
+      async () => {
+        tokens++;
+        return "token";
+      },
+      { signal: AbortSignal.abort() },
+    ),
+    { name: "InviteWagersApiError", code: "aborted" },
+  );
+  assert.equal(tokens, 0);
+  assert.equal(fetches, 0);
+});
+
+test("preserves raw token and network failures without retrying", async () => {
+  for (const stage of ["token", "fetch"]) {
+    const failure = new TypeError(`${stage} unavailable`);
+    let tokens = 0;
+    let fetches = 0;
+    globalThis.fetch = async () => {
+      fetches++;
+      throw failure;
+    };
+    await assert.rejects(
+      readInviteWagersViaApi("invite", async () => {
+        tokens++;
+        if (stage === "token") throw failure;
+        return "token";
+      }),
+      (error) => error === failure,
+    );
+    assert.equal(tokens, 1);
+    assert.equal(fetches, stage === "fetch" ? 1 : 0);
+  }
 });

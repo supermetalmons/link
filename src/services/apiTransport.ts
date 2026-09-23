@@ -23,6 +23,16 @@ type AuthenticatedJsonRequest<T> = {
   errors: ApiErrorPolicy;
 };
 
+type SnapshotJsonRead<T> = {
+  url: string;
+  tokenProvider?: AuthTokenProvider;
+  signal?: AbortSignal;
+  timeoutMs: number;
+  maxResponseBytes: number;
+  validate: (value: unknown) => value is T;
+  createError: (code: string, status?: number, retryAfterMs?: number) => Error;
+};
+
 function cancelBody(response: Response): void {
   void response.body?.cancel().catch(() => undefined);
 }
@@ -94,6 +104,100 @@ function responseError(
       ? body.message.trim()
       : errors.unavailableMessage;
   return errors.createError(code, message, body.details);
+}
+
+function retryAfterMs(response: Response): number | undefined {
+  const value = response.headers.get("Retry-After");
+  if (!value) return undefined;
+  const seconds = Number(value);
+  const delay = Number.isFinite(seconds)
+    ? seconds * 1_000
+    : Date.parse(value) - Date.now();
+  return Number.isFinite(delay) && delay >= 0 ? delay : undefined;
+}
+
+export async function readSnapshotJson<T>({
+  url,
+  tokenProvider,
+  signal,
+  timeoutMs,
+  maxResponseBytes,
+  validate,
+  createError,
+}: SnapshotJsonRead<T>): Promise<T> {
+  if (signal?.aborted) throw createError("aborted");
+  const controller = new AbortController();
+  const deadline = Date.now() + timeoutMs;
+  let rejectCancellation: (error: Error) => void = () => undefined;
+  const cancellation = new Promise<never>((_resolve, reject) => {
+    rejectCancellation = reject;
+  });
+  const cancel = (code: string) => {
+    rejectCancellation(createError(code));
+    controller.abort();
+  };
+  const onAbort = () => cancel("aborted");
+  const timer = setTimeout(() => cancel("timeout"), timeoutMs);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  const assertCurrent = () => {
+    if (controller.signal.aborted) throw createError("aborted");
+    if (Date.now() >= deadline) {
+      controller.abort();
+      throw createError("timeout");
+    }
+    tokenProvider?.assertCurrentUser?.();
+  };
+  const run = async (): Promise<T> => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      assertCurrent();
+      const token = tokenProvider ? await tokenProvider(attempt === 1) : null;
+      assertCurrent();
+      const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        cache: "no-store",
+        redirect: "error",
+        signal: controller.signal,
+      });
+      try {
+        assertCurrent();
+      } catch (error) {
+        cancelBody(response);
+        throw error;
+      }
+      if (response.status === 401 && tokenProvider && attempt === 0) {
+        cancelBody(response);
+        continue;
+      }
+      if (!response.ok) {
+        cancelBody(response);
+        throw createError(
+          `http-${response.status}`,
+          response.status,
+          retryAfterMs(response),
+        );
+      }
+      const payload = await readBoundedJson(
+        response,
+        maxResponseBytes,
+        controller.signal,
+        () => createError("invalid-response"),
+      );
+      assertCurrent();
+      if (!validate(payload)) throw createError("invalid-response");
+      return payload;
+    }
+    throw createError("unauthenticated", 401);
+  };
+  try {
+    return await Promise.race([run(), cancellation]);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
 }
 
 export async function authenticatedJsonRequest<T>({
