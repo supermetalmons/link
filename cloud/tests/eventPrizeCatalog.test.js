@@ -268,6 +268,9 @@ test("maps the compressed event to the supplied prizes in fallback order", () =>
     "1241",
     "443",
     "1274",
+    "66",
+    "220",
+    "131",
   ]);
   for (const prize of config.prizes) {
     assert.equal(bs58.default.decode(prize.assetAddress).length, 32);

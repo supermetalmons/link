@@ -12,6 +12,7 @@ const RARE_WEITSMANS_PRIZES_EVENT_ID = "RpPjMNyrJJa";
 const PLANET_PEPPA_PRIZES_EVENT_ID = "z3oj52Iiime";
 const SHELVES_PRIZES_EVENT_ID = "Q7uRdLXyVKF";
 const VEHICLE_WAMMIN_PRIZES_EVENT_ID = "wjFa2d03Ciu";
+const SWAG_PACK_PRIZES_EVENT_ID = "d9RtIQY8ONs";
 const CORE_PRIZE_COLLECTION_ADDRESS =
   "2xF7dq3maFLud8FQUYAyLiWucdF7RePyzHJs7NkurkoD";
 const COMPRESSED_PRIZE_COLLECTION_ADDRESS =
@@ -26,6 +27,8 @@ const SHELVES_COLLECTION_ADDRESS =
   "BsnjB6xDv2HNenoZiNFDE1uMZVj86ciXwYAX75nUTDSt";
 const VEHICLE_WAMMIN_COLLECTION_ADDRESS =
   "BBkMWyu4RRrNSdjGDV27FGgZZ58o7jfvQY1MrD2iTfs6";
+const SWAG_PACK_COLLECTION_ADDRESS =
+  "C22esis7kQMbX9JGWsMaKvsh1X5GeBmHPju28jiKDyAP";
 const SCARECROW_PRIZE_IMAGE_SIZE = Object.freeze({
   imageWidth: 420,
   imageHeight: 525,
@@ -53,6 +56,10 @@ const SHELVES_IMAGE_SIZE = Object.freeze({
 const VEHICLE_WAMMIN_IMAGE_SIZE = Object.freeze({
   imageWidth: 1000,
   imageHeight: 1000,
+});
+const SWAG_PACK_IMAGE_SIZE = Object.freeze({
+  imageWidth: 1320,
+  imageHeight: 1320,
 });
 
 const createPrize = ({
@@ -342,6 +349,39 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
       }),
     ]),
   }),
+  [SWAG_PACK_PRIZES_EVENT_ID]: Object.freeze({
+    eventId: SWAG_PACK_PRIZES_EVENT_ID,
+    collectionName: "swag pack",
+    prizes: Object.freeze([
+      createPrize({
+        ...SWAG_PACK_IMAGE_SIZE,
+        id: "66",
+        imageUrl: "https://cdn.lil.org/player/swag_pack/mid/66.webp",
+        assetAddress: "BBjweNsXkEc19Mb6xELJD4VhvpBG2gxsjnpGNgi2HZcG",
+        collectionAddress: SWAG_PACK_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...SWAG_PACK_IMAGE_SIZE,
+        id: "220",
+        imageUrl: "https://cdn.lil.org/player/swag_pack/mid/220.webp",
+        assetAddress: "5LTnDmNTnvbM5PNfbCgTJJa3WNmr6v4WCuXPNiKMjKkG",
+        collectionAddress: SWAG_PACK_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...SWAG_PACK_IMAGE_SIZE,
+        id: "131",
+        imageUrl: "https://cdn.lil.org/player/swag_pack/mid/131.webp",
+        assetAddress: "3mQLZM2xW3sDXW7h15eZfWLwt4TYaKi4eVkzfQMZtcRK",
+        collectionAddress: SWAG_PACK_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+    ]),
+  }),
 });
 
 const EVENT_PRIZE_IDS = Object.freeze(
@@ -544,6 +584,7 @@ module.exports = {
   PLANET_PEPPA_PRIZES_EVENT_ID,
   RARE_WEITSMANS_PRIZES_EVENT_ID,
   SHELVES_PRIZES_EVENT_ID,
+  SWAG_PACK_PRIZES_EVENT_ID,
   VEHICLE_WAMMIN_PRIZES_EVENT_ID,
   getEventPrizeConfig,
   getEventPrizeDefinition,

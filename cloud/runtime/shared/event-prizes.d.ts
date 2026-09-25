@@ -6,6 +6,7 @@ export const RARE_WEITSMANS_PRIZES_EVENT_ID: "RpPjMNyrJJa";
 export const PLANET_PEPPA_PRIZES_EVENT_ID: "z3oj52Iiime";
 export const SHELVES_PRIZES_EVENT_ID: "Q7uRdLXyVKF";
 export const VEHICLE_WAMMIN_PRIZES_EVENT_ID: "wjFa2d03Ciu";
+export const SWAG_PACK_PRIZES_EVENT_ID: "d9RtIQY8ONs";
 export const EVENT_PRIZE_REVEAL_WINDOW_MS: 3_600_000;
 
 export type EventPrizeEventId =
@@ -16,7 +17,8 @@ export type EventPrizeEventId =
   | typeof RARE_WEITSMANS_PRIZES_EVENT_ID
   | typeof PLANET_PEPPA_PRIZES_EVENT_ID
   | typeof SHELVES_PRIZES_EVENT_ID
-  | typeof VEHICLE_WAMMIN_PRIZES_EVENT_ID;
+  | typeof VEHICLE_WAMMIN_PRIZES_EVENT_ID
+  | typeof SWAG_PACK_PRIZES_EVENT_ID;
 export type EventPrizeId =
   | "1092"
   | "1111"
@@ -41,7 +43,9 @@ export type EventPrizeId =
   | "1213"
   | "1241"
   | "443"
-  | "1274";
+  | "1274"
+  | "66"
+  | "131";
 export type EventPrizeStandard = "core" | "compressed";
 
 export type EventPrizeDefinition = Readonly<{
