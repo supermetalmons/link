@@ -192,77 +192,172 @@ export const PrizeImage = styled.img<{ $concealed?: boolean }>`
     `}
 `;
 
-const mysteryPrizeFloat = keyframes`
-  0%, 100% {
-    opacity: 0.76;
-    transform: translate(-50%, -50%) translateY(2px) rotate(-7deg);
+const prizeStarShape = css`
+  background: #fff5a3;
+  clip-path: polygon(
+    50% 0%,
+    61% 35%,
+    98% 35%,
+    68% 56%,
+    79% 91%,
+    50% 70%,
+    21% 91%,
+    32% 56%,
+    2% 35%,
+    39% 35%
+  );
+  filter: drop-shadow(0 0 2px rgba(255, 226, 52, 1))
+    drop-shadow(0 0 7px rgba(255, 180, 0, 0.9));
+  transform: rotate(var(--sparkle-rotation, 0deg))
+    scaleX(var(--sparkle-scale-x, 1)) scaleY(var(--sparkle-scale-y, 1));
+`;
+
+const mysteryPrizeDrift = keyframes`
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) translateY(8px) rotate(-6deg) scale(0.65);
+  }
+
+  25% {
+    opacity: 0.65;
   }
 
   50% {
     opacity: 1;
-    transform: translate(-50%, -50%) translateY(-2px) rotate(6deg);
+  }
+
+  75% {
+    opacity: 0.55;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) translate(var(--sparkle-drift-x, 5px), -8px)
+      rotate(8deg) scale(0.85);
   }
 `;
 
-export const MysteryPrizeMarks = styled.span`
+const mysteryPrizeGlint = keyframes`
+  0%, 28% {
+    opacity: 0;
+    transform: translate(-50%, -50%) translateY(6px) rotate(-8deg) scale(0.45);
+  }
+
+  46% {
+    opacity: 1;
+    transform: translate(-50%, -50%) rotate(2deg) scale(1.1);
+  }
+
+  68%, 100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) translate(-4px, -7px) rotate(12deg) scale(0.6);
+  }
+`;
+
+export const MysteryPrizeSparkles = styled.span<{ $index: number }>`
+  --prize-sparkle-phase: ${(p) => `${p.$index * -1.37}s`};
   position: absolute;
   z-index: 1;
   inset: 0;
   pointer-events: none;
-  color: #4f356f;
-  text-shadow:
-    0 1px 2px rgba(255, 255, 255, 0.95),
-    0 0 7px rgba(255, 255, 255, 0.8);
 
   > span {
     position: absolute;
-    font-family: inherit;
-    font-size: clamp(16px, 2.6vh, 22px);
-    font-weight: 800;
-    line-height: 1;
-    animation: ${mysteryPrizeFloat} 4s ease-in-out infinite;
+    display: block;
+    width: clamp(3px, 0.7vh, 5px);
+    aspect-ratio: 1;
+    opacity: 0;
+    animation: ${mysteryPrizeDrift} 5.4s ease-in-out infinite;
+    animation-delay: calc(var(--prize-sparkle-phase) - 0.6s);
+
+    &::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      ${prizeStarShape}
+    }
   }
 
   > span:nth-child(1) {
-    left: 19%;
-    top: 24%;
-    animation-delay: -0.6s;
+    --sparkle-rotation: -14deg;
+    --sparkle-scale-x: 1.12;
+    --sparkle-scale-y: 0.88;
+    left: 17%;
+    top: 42%;
   }
 
   > span:nth-child(2) {
-    left: 78%;
-    top: 30%;
-    font-size: clamp(15px, 2.3vh, 19px);
+    --sparkle-rotation: 24deg;
+    --sparkle-scale-x: 0.78;
+    --sparkle-scale-y: 1.28;
+    --sparkle-drift-x: -5px;
+    left: 75%;
+    top: 33%;
     animation-duration: 4.6s;
-    animation-delay: -2.3s;
+    animation-delay: calc(var(--prize-sparkle-phase) - 2.3s);
   }
 
   > span:nth-child(3) {
-    left: 26%;
-    top: 74%;
-    font-size: clamp(14px, 2.1vh, 18px);
-    animation-duration: 3.8s;
-    animation-delay: -1.7s;
+    --sparkle-rotation: -28deg;
+    --sparkle-scale-x: 1.32;
+    --sparkle-scale-y: 0.7;
+    left: 30%;
+    top: 76%;
+    width: clamp(3.5px, 0.8vh, 6px);
+    animation-duration: 6.2s;
+    animation-delay: calc(var(--prize-sparkle-phase) - 3.7s);
   }
 
   > span:nth-child(4) {
-    left: 77%;
-    top: 73%;
+    --sparkle-rotation: 9deg;
+    --sparkle-scale-x: 0.86;
+    --sparkle-scale-y: 1.2;
+    --sparkle-drift-x: -6px;
+    left: 65%;
+    top: 77%;
     animation-duration: 4.3s;
-    animation-delay: -3.1s;
+    animation-delay: calc(var(--prize-sparkle-phase) - 1.7s);
   }
 
-  @media (prefers-color-scheme: dark) {
-    color: #eadcff;
-    text-shadow:
-      0 1px 2px rgba(24, 12, 42, 0.95),
-      0 0 7px rgba(82, 45, 128, 0.85);
+  > span:nth-child(5) {
+    --sparkle-rotation: -18deg;
+    --sparkle-scale-x: 1.18;
+    --sparkle-scale-y: 0.82;
+    left: 43%;
+    top: 27%;
+    width: clamp(5px, 1.2vh, 9px);
+    animation-duration: 6.7s;
+    animation-delay: calc(var(--prize-sparkle-phase) - 4.6s);
+  }
+
+  > span:nth-child(6) {
+    --sparkle-rotation: 31deg;
+    --sparkle-scale-x: 0.9;
+    --sparkle-scale-y: 1.16;
+    --sparkle-drift-x: -4px;
+    left: 79%;
+    top: 62%;
+    width: clamp(5.5px, 1.35vh, 10px);
+    animation-duration: 5.8s;
+    animation-delay: calc(var(--prize-sparkle-phase) - 0.9s);
+  }
+
+  > span:nth-child(7) {
+    --sparkle-rotation: -12deg;
+    --sparkle-scale-x: 1.08;
+    --sparkle-scale-y: 0.92;
+    left: 45%;
+    top: 54%;
+    width: clamp(8px, 1.9vh, 14px);
+    animation-name: ${mysteryPrizeGlint};
+    animation-duration: 7s;
+    animation-delay: calc(var(--prize-sparkle-phase) - 3.2s);
   }
 
   @media (prefers-reduced-motion: reduce) {
-    > span {
+    > span:nth-child(n) {
       animation: none;
-      opacity: 0.9;
+      opacity: 0.75;
       transform: translate(-50%, -50%);
     }
   }
@@ -658,23 +753,7 @@ export const EndedAwardSparkles = styled.span<{ $place: WinnerPodiumPlace }>`
       content: "";
       position: absolute;
       inset: 0;
-      background: #fff5a3;
-      clip-path: polygon(
-        50% 0%,
-        61% 35%,
-        98% 35%,
-        68% 56%,
-        79% 91%,
-        50% 70%,
-        21% 91%,
-        32% 56%,
-        2% 35%,
-        39% 35%
-      );
-      filter: drop-shadow(0 0 2px rgba(255, 226, 52, 1))
-        drop-shadow(0 0 7px rgba(255, 180, 0, 0.9));
-      transform: rotate(var(--sparkle-rotation, 0deg))
-        scaleX(var(--sparkle-scale-x, 1)) scaleY(var(--sparkle-scale-y, 1));
+      ${prizeStarShape}
     }
   }
 

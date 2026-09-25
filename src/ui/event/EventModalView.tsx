@@ -130,7 +130,7 @@ import {
   EndedAwardSparkles,
   EndedAwardsRow,
   MatchAvatarSlot,
-  MysteryPrizeMarks,
+  MysteryPrizeSparkles,
   Overlay,
   OverlayStatus,
   ParticipantPill,
@@ -2261,7 +2261,7 @@ const EventModal: React.FC = () => {
                 aria-label="Event prizes"
                 aria-busy={isUpdatingPrizeSelection ? "true" : undefined}
               >
-                {displayedEventPrizes.map(({ prize, assignment }) => {
+                {displayedEventPrizes.map(({ prize, assignment }, index) => {
                   const selectedParticipants = participants.filter(
                     (participant) =>
                       eventPrizeSelections[participant.profileId] === prize.id,
@@ -2322,12 +2322,18 @@ const EventModal: React.FC = () => {
                           onLoad={() => markPrizeImageLoaded(prize.id)}
                         />
                         {areEventPrizesConcealed && (
-                          <MysteryPrizeMarks aria-hidden="true">
-                            <span>?</span>
-                            <span>?</span>
-                            <span>?</span>
-                            <span>?</span>
-                          </MysteryPrizeMarks>
+                          <MysteryPrizeSparkles
+                            $index={index}
+                            aria-hidden="true"
+                          >
+                            <span />
+                            <span />
+                            <span />
+                            <span />
+                            <span />
+                            <span />
+                            <span />
+                          </MysteryPrizeSparkles>
                         )}
                       </PrizeChoiceButton>
                       {!areEventPrizesConcealed &&
