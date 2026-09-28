@@ -127,7 +127,7 @@ export function createEventTelegramProjectionRepository(
 ): EventGameplayRepository {
   return {
     ...repository,
-    async commitEventPlan(updates, signal) {
+    async commitEventPlan(updates, signal, options) {
       const prepared = prepareEventTelegramProjection(
         env,
         updates,
@@ -139,6 +139,7 @@ export function createEventTelegramProjectionRepository(
         [prepared],
         signal,
         dependencies.schedule,
+        options,
       );
     },
   };

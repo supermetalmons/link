@@ -47,6 +47,7 @@ function repository(
   overrides: Partial<ProfileRepository> = {},
 ): ProfileRepository {
   return {
+    resolveProfileId: async () => profile.id,
     getProfileById: async () => profile,
     getProfileByLoginId: async () => profile,
     readLeaderboard: async () => [profile],
@@ -142,6 +143,104 @@ test("accepts login UID character limits and profile ID byte limits", () => {
   assert.equal(validLookupId("login", "é".repeat(129)), false);
   assert.equal(validLookupId("profile", "é".repeat(750)), true);
   assert.equal(validLookupId("profile", "é".repeat(751)), false);
+});
+
+test("canonical ID reads require authentication and a valid profile ID", async () => {
+  const unauthenticatedRequest = request("/profiles/canonical-id", {
+    profileId: "profile-1",
+  });
+  const unauthorized = await handleProfileRoute(
+    unauthenticatedRequest,
+    TELEGRAM_TEST_ENV,
+    ctx,
+    {
+      verifyIdentity: async () => {
+        throw new AuthApiFailure(
+          401,
+          "unauthenticated",
+          "authentication-required",
+        );
+      },
+    },
+  );
+  assert.equal(unauthorized.status, 401);
+  assert.equal(unauthenticatedRequest.bodyUsed, false);
+  const dependencies = {
+    repository: repository({
+      resolveProfileId: async () =>
+        assert.fail("Invalid IDs must not reach D1."),
+    }),
+    verifyIdentity: async () => identity,
+  };
+  for (const body of [
+    {},
+    { profileId: "" },
+    { profileId: "   " },
+    { profileId: "path/segment" },
+    { profileId: "." },
+    { profileId: ".." },
+    { profileId: "bad\u0000id" },
+    { profileId: "é".repeat(751) },
+    { profileId: 1 },
+    { profileId: "profile-1", extra: true },
+  ]) {
+    const response = await handleProfileRoute(
+      request("/profiles/canonical-id", body),
+      TELEGRAM_TEST_ENV,
+      ctx,
+      dependencies,
+    );
+    assert.equal(response.status, 400);
+  }
+});
+
+test("routes canonical ID reads while frozen and preserves missing versus failed resolution", async () => {
+  for (const resolved of ["canonical-profile", null]) {
+    const calls: string[] = [];
+    const response = await handleRequest(
+      request("/profiles/canonical-id", { profileId: " retired-profile " }),
+      withProfileControl(TELEGRAM_TEST_ENV, "frozen"),
+      {
+        profile: {
+          repository: repository({
+            resolveProfileId: async (profileId) => {
+              calls.push(profileId);
+              return resolved;
+            },
+          }),
+          verifyIdentity: async () => identity,
+        },
+      },
+      ctx,
+    );
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("Cache-Control"), "no-store");
+    assert.deepEqual(await responseJson(response), {
+      ok: true,
+      profileId: resolved,
+    });
+    assert.deepEqual(calls, ["retired-profile"]);
+  }
+  const failed = await handleProfileRoute(
+    request("/profiles/canonical-id", { profileId: "retired-profile" }),
+    TELEGRAM_TEST_ENV,
+    ctx,
+    {
+      repository: repository({
+        resolveProfileId: async () => {
+          throw new Error("canonical-profile-corruption");
+        },
+      }),
+      verifyIdentity: async () => identity,
+      logFailure: () => {},
+    },
+  );
+  assert.equal(failed.status, 503);
+  assert.deepEqual(await responseJson(failed), {
+    ok: false,
+    error: "unavailable",
+    message: "profile-service-unavailable",
+  });
 });
 
 test("authenticates before parsing and strictly validates request bodies", async () => {

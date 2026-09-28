@@ -31,6 +31,7 @@ const {
   endRematchViaApi,
   ensureMatchViaApi,
   joinEventViaApi,
+  leaveEventViaApi,
   joinInviteViaApi,
   readEventSnapshotViaApi,
   removeEventParticipantViaApi,
@@ -118,6 +119,8 @@ const {
   isEventSnapshotResponse,
   isJoinEventRequest,
   isJoinEventResponse,
+  isLeaveEventRequest,
+  isLeaveEventResponse,
   isRemoveEventParticipantRequest,
   isRemoveEventParticipantResponse,
   isPostponeEventStartRequest,
@@ -2531,6 +2534,46 @@ test("bounds a busy rating retry to one 60-second deadline", async () => {
   assert.deepEqual(delays, [20_000]);
 });
 
+test("leaves events with an authenticated self-only request and matching response", async () => {
+  const calls = [];
+  const response = {
+    ok: true,
+    eventId: "event-1",
+    removedProfileId: "profile-1",
+  };
+  globalThis.fetch = async (input, init) => {
+    calls.push({ input, init });
+    return jsonResponse(response);
+  };
+  assert.deepEqual(
+    await leaveEventViaApi({ eventId: "event-1" }, async () => "session-token"),
+    response,
+  );
+  assert.equal(
+    calls[0].input,
+    "https://api.mons.link/events/participants/leave",
+  );
+  assert.equal(calls[0].init.method, "POST");
+  assert.equal(
+    new Headers(calls[0].init.headers).get("Authorization"),
+    "Bearer session-token",
+  );
+  assert.deepEqual(JSON.parse(calls[0].init.body), { eventId: "event-1" });
+
+  for (const invalidResponse of [
+    { ...response, eventId: "different-event" },
+    { ...response, removedProfileId: "" },
+    { ok: true, eventId: "event-1" },
+  ]) {
+    globalThis.fetch = async () => jsonResponse(invalidResponse);
+    await assert.rejects(
+      leaveEventViaApi({ eventId: "event-1" }, async () => "session-token"),
+      (error) =>
+        error instanceof GameplayApiError && error.code === "unavailable",
+    );
+  }
+});
+
 test("sends exact authenticated gameplay mutations and validates contracts", async () => {
   const calls = [];
   const responses = [
@@ -2932,6 +2975,31 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
   );
   assert.equal(isJoinEventRequest({ eventId: "event-1" }), true);
   assert.equal(isJoinEventRequest({ eventId: "event-1", extra: true }), false);
+  assert.equal(isLeaveEventRequest({ eventId: "event-1" }), true);
+  for (const request of [
+    {},
+    { eventId: "" },
+    { eventId: "bad/event" },
+    { eventId: "event-1", participantProfileId: "profile-2" },
+    { eventId: "event-1", extra: true },
+  ]) {
+    assert.equal(isLeaveEventRequest(request), false);
+  }
+  const leaveResponse = {
+    ok: true,
+    eventId: "event-1",
+    removedProfileId: "profile-1",
+  };
+  assert.equal(isLeaveEventResponse(leaveResponse), true);
+  for (const response of [
+    { ...leaveResponse, ok: false },
+    { ...leaveResponse, eventId: "bad/event" },
+    { ...leaveResponse, removedProfileId: "" },
+    { ...leaveResponse, removedProfileId: "bad/profile" },
+    { ok: true, eventId: "event-1" },
+  ]) {
+    assert.equal(isLeaveEventResponse(response), false);
+  }
   assert.equal(
     isRemoveEventParticipantRequest({
       eventId: "event-1",

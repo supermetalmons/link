@@ -150,6 +150,10 @@ function isJoinEventRequest(value) {
   return isExactRecord(value, ["eventId"]) && isSafeRecordKey(value.eventId);
 }
 
+function isLeaveEventRequest(value) {
+  return isJoinEventRequest(value);
+}
+
 function isRemoveEventParticipantRequest(value) {
   return (
     isExactRecord(value, ["eventId", "participantProfileId"]) &&
@@ -211,6 +215,10 @@ function isRemoveEventParticipantResponse(value) {
     isSafeRecordKey(value.eventId) &&
     isSafeRecordKey(value.removedProfileId)
   );
+}
+
+function isLeaveEventResponse(value) {
+  return isRemoveEventParticipantResponse(value);
 }
 
 function hasExactOptionalKeys(value, requiredKeys, optionalKeys) {
@@ -491,6 +499,8 @@ module.exports = {
   isEventSnapshotResponse,
   isJoinEventRequest,
   isJoinEventResponse,
+  isLeaveEventRequest,
+  isLeaveEventResponse,
   isMonsLinkAdmin,
   isRemoveEventParticipantRequest,
   isRemoveEventParticipantResponse,

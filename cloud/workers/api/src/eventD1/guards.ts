@@ -5,6 +5,7 @@ import {
   EventD1Failure,
   EventD1Conflict,
   EventWritesDisabled,
+  EventNotUpcoming,
   type EventMutationState,
   type ProgressOutboxSnapshot,
 } from "./types.ts";
@@ -77,10 +78,32 @@ export function eventLeaseGuard(
   );
 }
 
+export function upcomingEventGuard(
+  db: EventD1Connection,
+  eventId: string,
+): D1PreparedStatement {
+  return guardStatement(
+    db,
+    `NOT EXISTS (
+       SELECT 1 FROM event_records
+       WHERE event_id = ? AND status = 'scheduled'
+         AND start_at_ms > CAST(
+           (julianday('now') - 2440587.5) * 86400000 AS INTEGER
+         )
+     )`,
+    [exactKey(eventId)],
+    "invariant",
+  );
+}
+
 export async function rethrowEventBatchFailure(
   db: EventD1Connection,
   error: unknown,
-  options: { admission: EventWriteAdmission; eventLease?: EventLeaseGuard },
+  options: {
+    admission: EventWriteAdmission;
+    eventLease?: EventLeaseGuard;
+    upcomingEventId?: string;
+  },
 ): Promise<never> {
   const failure = classifyD1Failure(error);
   if (failure === "event-conflict") {
@@ -91,6 +114,7 @@ export async function rethrowEventBatchFailure(
       storage_mode: string;
       admission_valid: number;
       lease_valid: number;
+      upcoming_valid: number;
     } | null;
     try {
       const primary = db.withSession?.("first-primary") || db;
@@ -112,7 +136,14 @@ export async function rethrowEventBatchFailure(
                  AND expires_at_ms > CAST(
                    (julianday('now') - 2440587.5) * 86400000 AS INTEGER
                  )
-             )) AS lease_valid
+             )) AS lease_valid,
+             (? IS NULL OR EXISTS (
+               SELECT 1 FROM event_records
+               WHERE event_id = ? AND status = 'scheduled'
+                 AND start_at_ms > CAST(
+                   (julianday('now') - 2440587.5) * 86400000 AS INTEGER
+                 )
+             )) AS upcoming_valid
            FROM event_runtime_control AS control WHERE singleton = 1`,
         )
         .bind(
@@ -122,6 +153,8 @@ export async function rethrowEventBatchFailure(
           options.eventLease?.eventId ?? null,
           options.eventLease?.lockId ?? null,
           options.eventLease?.ownerUid ?? null,
+          options.upcomingEventId ?? null,
+          options.upcomingEventId ?? null,
         )
         .first<typeof control>();
     } catch {
@@ -138,6 +171,9 @@ export async function rethrowEventBatchFailure(
       }
       if (control.lease_valid === 0) {
         throw new EventD1Failure("event-lease-lost", { cause: error });
+      }
+      if (control.upcoming_valid === 0) {
+        throw new EventNotUpcoming({ cause: error });
       }
     }
   }

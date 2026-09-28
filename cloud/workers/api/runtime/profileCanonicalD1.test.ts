@@ -43,6 +43,7 @@ import { observeD1FailureDatabase } from "./d1FailureTestUtils.ts";
 import { profileWriteRow } from "../src/profileCanonical/profiles.ts";
 import { buildCanonicalRatingProjectionMutation } from "../src/profileCanonical/accounting.ts";
 import { readCanonicalProfileIdMap } from "../src/profileCanonical/auth.ts";
+import { createProfileRepository } from "../src/profileRepository.ts";
 
 const testEnv = env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] };
 
@@ -3007,7 +3008,13 @@ describe("canonical profile D1 store", () => {
       await expect(
         readCanonicalProfileIdMap(observed.database, ["id-map-source"]),
       ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
-      expect(observed.allQueries).toHaveLength(1);
+      const repository = createProfileRepository(testEnv, {
+        profileDb: observed.database,
+      });
+      await expect(
+        repository.resolveProfileId("id-map-source"),
+      ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+      expect(observed.allQueries).toHaveLength(2);
     });
 
     it.each(["public-profile", "login-owner"])(
@@ -3454,6 +3461,18 @@ describe("canonical profile D1 store", () => {
     await expect(
       readCanonicalProfileIdMap(testEnv.PROFILE_DB, ["canonical-chain-0"]),
     ).resolves.toEqual(new Map([["canonical-chain-0", "canonical-chain-32"]]));
+    const profileRepository = createProfileRepository(testEnv);
+    for (const profileId of ["canonical-chain-27", "canonical-chain-0"]) {
+      await expect(profileRepository.resolveProfileId(profileId)).resolves.toBe(
+        "canonical-chain-32",
+      );
+      await expect(
+        profileRepository.getProfileById(profileId),
+      ).resolves.toBeNull();
+    }
+    await expect(
+      profileRepository.resolveProfileId("canonical-id-missing"),
+    ).resolves.toBeNull();
     const observed = observeAggregateDatabase({ mapAll: (rows) => rows });
     await expect(
       resolveCanonicalPublicProfile(observed.database, "canonical-chain-28", 4),

@@ -87,6 +87,7 @@ import {
   getProfileByIdViaApi,
   getProfileByLoginIdViaApi,
   readLeaderboardViaApi,
+  resolveProfileIdViaApi,
   updateProfileCustomizationViaApi,
 } from "../services/profileApi";
 import {
@@ -101,6 +102,7 @@ import {
   endRematchViaApi,
   ensureMatchViaApi,
   joinEventViaApi,
+  leaveEventViaApi,
   joinInviteViaApi,
   removeEventParticipantViaApi,
   removeNavigationGameViaApi,
@@ -166,6 +168,7 @@ import {
   type EventCreateDateTimePayload,
   type EventSnapshotResponse,
   type EventSnapshotSeed,
+  type LeaveEventResponse,
   type EventScheduleTimezone as SharedEventScheduleTimezone,
 } from "@mons/shared/events";
 import {
@@ -395,6 +398,7 @@ class Connection {
   private auth = sessionAuth;
   private eventPollingRegistry: EventPollingRegistry;
   private eventAuthUser = this.auth.currentUser;
+  private readonly eventMutationTails = new Map<string, Promise<unknown>>();
 
   private inviteMetadataState: InviteMetadataState | null = null;
   private inviteMetadataViewer: InviteMetadataViewer | null = null;
@@ -1447,6 +1451,19 @@ class Connection {
     }
     await this.ensureAuthenticated();
     return getProfileByIdViaApi(normalizedProfileId, this.getAuthApiToken);
+  }
+
+  public async resolveProfileId(profileId: string): Promise<string | null> {
+    const normalizedProfileId = profileId.trim();
+    if (!normalizedProfileId) return null;
+    await this.ensureAuthenticated();
+    const tokenProvider = this.getUserBoundAuthTokenProvider();
+    const canonicalId = await resolveProfileIdViaApi(
+      normalizedProfileId,
+      tokenProvider,
+    );
+    tokenProvider.assertCurrentUser();
+    return canonicalId;
   }
 
   private async getPlayerProfileWithRetry(
@@ -2741,15 +2758,32 @@ class Connection {
     }
   }
 
+  private serializeEventMutation<T>(
+    eventId: string,
+    mutate: () => Promise<T>,
+  ): Promise<T> {
+    const key = eventId.trim();
+    const previous = this.eventMutationTails.get(key) ?? Promise.resolve();
+    const result = previous.catch(() => undefined).then(mutate);
+    this.eventMutationTails.set(key, result);
+    return result.finally(() => {
+      if (this.eventMutationTails.get(key) === result) {
+        this.eventMutationTails.delete(key);
+      }
+    });
+  }
+
   public async joinEvent(
     eventId: string,
   ): Promise<{ ok: boolean; eventId?: string }> {
     try {
       await this.ensureAuthenticated();
-      const data = await joinEventViaApi(
-        { eventId },
-        this.getUserBoundAuthTokenProvider(),
-      );
+      const tokenProvider = this.getUserBoundAuthTokenProvider();
+      const data = await this.serializeEventMutation(eventId, () => {
+        tokenProvider.assertCurrentUser();
+        return joinEventViaApi({ eventId }, tokenProvider);
+      });
+      tokenProvider.assertCurrentUser();
       this.eventPollingRegistry.invalidateEvent(data.eventId);
       this.notifyNavigationGamesChanged();
       return {
@@ -2758,6 +2792,32 @@ class Connection {
       };
     } catch (error) {
       console.error("Error joining event:", error);
+      throw error;
+    }
+  }
+
+  public async leaveEvent(eventId: string): Promise<LeaveEventResponse> {
+    try {
+      await this.ensureAuthenticated();
+      this.synchronizeEventAuthOwner();
+      const generation = this.eventPollingRegistry.getGeneration();
+      const tokenProvider = this.getUserBoundAuthTokenProvider();
+      try {
+        const data = await this.serializeEventMutation(eventId, () => {
+          tokenProvider.assertCurrentUser();
+          return leaveEventViaApi({ eventId }, tokenProvider);
+        });
+        tokenProvider.assertCurrentUser();
+        return data;
+      } finally {
+        this.synchronizeEventAuthOwner();
+        if (generation === this.eventPollingRegistry.getGeneration()) {
+          this.eventPollingRegistry.invalidateEvent(eventId);
+          this.notifyNavigationGamesChanged();
+        }
+      }
+    } catch (error) {
+      console.error("Error leaving event:", error);
       throw error;
     }
   }
@@ -3221,10 +3281,14 @@ class Connection {
     try {
       await this.ensureAuthenticated();
       const tokenProvider = this.getUserBoundAuthTokenProvider();
-      const response = await toggleEventPrizeSelectionViaApi(
-        request,
-        tokenProvider,
+      const response = await this.serializeEventMutation(
+        normalizedEventId,
+        () => {
+          tokenProvider.assertCurrentUser();
+          return toggleEventPrizeSelectionViaApi(request, tokenProvider);
+        },
       );
+      tokenProvider.assertCurrentUser();
       this.eventPollingRegistry.invalidateEvent(response.eventId);
       return response.selectedPrizeId;
     } catch (error) {

@@ -106,7 +106,11 @@ function createRepository(): EventGameplayRepository &
       const loginOwnerByUid = new Map(
         query.loginUids.map((uid) => [
           uid,
-          uid === identity.uid ? { profileId, revision: 1 } : null,
+          uid === identity.uid
+            ? { profileId, revision: 1 }
+            : uid === "target-login"
+              ? { profileId: "target-profile", revision: 1 }
+              : null,
         ]),
       );
       const canonicalIds = new Set([
@@ -119,7 +123,11 @@ function createRepository(): EventGameplayRepository &
         loginUidsByProfileId: new Map(
           [...canonicalIds].map((candidateProfileId) => [
             candidateProfileId,
-            candidateProfileId === profileId ? [identity.uid] : [],
+            candidateProfileId === profileId
+              ? [identity.uid]
+              : candidateProfileId === "target-profile"
+                ? ["target-login"]
+                : [],
           ]),
         ),
         profileById: new Map(
@@ -176,6 +184,12 @@ const eventRouteCases = [
   },
   {
     path: "/events/participants/join",
+    kind: "participation",
+    body: { eventId: " event-1 " },
+    parsed: { eventId: "event-1" },
+  },
+  {
+    path: "/events/participants/leave",
     kind: "participation",
     body: { eventId: " event-1 " },
     parsed: { eventId: "event-1" },
@@ -319,6 +333,7 @@ test("freezes every authenticated event mutation before parsing", async () => {
     "/events/create",
     "/events/matches/winners/disqualify",
     "/events/participants/join",
+    "/events/participants/leave",
     "/events/participants/remove",
     "/events/prize-selections/toggle",
     "/events/start/postpone",
@@ -508,6 +523,7 @@ test("honors each event route's supplied deadline signal", async () => {
 test("passes supplied signals through participation and control handlers", async () => {
   for (const { path, kind } of [
     { path: "/events/participants/join", kind: "participation" },
+    { path: "/events/participants/leave", kind: "participation" },
     { path: "/events/state/sync", kind: "control" },
   ] as const) {
     const signal = new AbortController().signal;
@@ -537,7 +553,7 @@ test("passes supplied signals through participation and control handlers", async
   }
 });
 
-test("returns strict join and removal responses without snapshot enrichment", async () => {
+test("returns strict join, leave, and removal responses without snapshot enrichment", async () => {
   const background: Promise<unknown>[] = [];
   const routeCtx = {
     waitUntil(promise: Promise<unknown>) {
@@ -625,6 +641,47 @@ test("returns strict join and removal responses without snapshot enrichment", as
     removedProfileId: "target-profile",
   });
   assert.equal(background.length, 2);
+  const leave = await handleEventRoute(
+    new Request(
+      "https://api.mons.link/events/participants/leave?eventSnapshot=v1",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ eventId: "event-1" }),
+      },
+    ),
+    TELEGRAM_TEST_ENV,
+    routeCtx,
+    {
+      ...dependencies,
+      verifyIdentity: async () => ({ uid: "target-login" }),
+      repository: {
+        ...createRepository(),
+        readEvent: async () => ({
+          eventId: "event-1",
+          status: "scheduled",
+          startAtMs: 10_000,
+          createdByLoginUid: identity.uid,
+          createdByProfileId: profileId,
+          participants: {
+            [profileId]: participant,
+            "target-profile": {
+              ...participant,
+              profileId: "target-profile",
+              loginUid: "target-login",
+            },
+          },
+        }),
+      },
+    },
+  );
+  assert.equal(leave.status, 200);
+  assert.deepEqual(await leave.json(), {
+    ok: true,
+    eventId: "event-1",
+    removedProfileId: "target-profile",
+  });
+  assert.equal(background.length, 3);
   await Promise.all(background);
   assert.equal(snapshotReads, 0);
 });

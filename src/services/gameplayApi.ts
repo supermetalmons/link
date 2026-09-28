@@ -98,6 +98,7 @@ import {
   isDisqualifyEventMatchWinnersResponse,
   isEventSnapshotSeed,
   isJoinEventResponse,
+  isLeaveEventResponse,
   isPostponeEventStartResponse,
   isRemoveEventParticipantResponse,
   isSyncEventStateResponse,
@@ -108,6 +109,8 @@ import {
   type EventSnapshotSeed,
   type JoinEventRequest,
   type JoinEventResponse,
+  type LeaveEventRequest,
+  type LeaveEventResponse,
   type PostponeEventStartRequest,
   type PostponeEventStartResponse,
   type RemoveEventParticipantRequest,
@@ -679,6 +682,19 @@ export function joinEventViaApi(
     request,
     tokenProvider,
     isJoinEventResponse,
+  );
+}
+
+export function leaveEventViaApi(
+  request: LeaveEventRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<LeaveEventResponse> {
+  return gameplayMutation(
+    "/events/participants/leave",
+    request,
+    tokenProvider,
+    (value): value is LeaveEventResponse =>
+      isLeaveEventResponse(value) && value.eventId === request.eventId,
   );
 }
 

@@ -5,6 +5,7 @@ import type {
 
 export type EventPrizeSelectionCoordinator = {
   dispose: () => void;
+  isPending: () => boolean;
   receiveAuthoritative: (selections: EventPrizeSelections) => void;
   toggle: (prizeId: EventPrizeId) => void;
 };
@@ -160,6 +161,8 @@ export const createEventPrizeSelectionCoordinator = ({
     dispose: () => {
       isDisposed = true;
     },
+    isPending: () =>
+      !isDisposed && (isMutationInFlight || desiredPrizeId !== undefined),
     receiveAuthoritative: (selections) => {
       if (isDisposed) {
         return;

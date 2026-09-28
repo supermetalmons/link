@@ -154,6 +154,19 @@ const isProfileLookupResponse = (value) =>
   value.ok === true &&
   (value.profile === null || isPlayerProfile(value.profile));
 
+const isResolveProfileIdRequest = (value) =>
+  isRecord(value) &&
+  hasExactKeys(value, ["profileId"]) &&
+  typeof value.profileId === "string" &&
+  value.profileId.trim() !== "";
+
+const isResolveProfileIdResponse = (value) =>
+  isRecord(value) &&
+  hasExactKeys(value, ["ok", "profileId"]) &&
+  value.ok === true &&
+  (value.profileId === null ||
+    (typeof value.profileId === "string" && value.profileId.trim() !== ""));
+
 const isLeaderboardReadType = (value) =>
   typeof value === "string" && LEADERBOARD_READ_TYPES.includes(value);
 
@@ -285,5 +298,7 @@ module.exports = {
   isProfileCustomizationUpdateResponse,
   isProfileLookupRequest,
   isProfileLookupResponse,
+  isResolveProfileIdRequest,
+  isResolveProfileIdResponse,
   cropAddress,
 };

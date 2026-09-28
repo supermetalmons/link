@@ -3,6 +3,7 @@ import type {
   EventCommitPlan,
 } from "../../../runtime/eventCommands.js";
 import type { EventGameplayRepository } from "./eventRepository.ts";
+import type { EventCommitOptions } from "./eventStoreContracts.ts";
 
 export type EventMutationReads = Pick<
   EventGameplayRepository,
@@ -41,6 +42,7 @@ export async function commitPreparedEventMutation(
   preparations: readonly (PreparedEventMutation | null)[],
   signal?: AbortSignal,
   schedule?: (work: Promise<void>) => void,
+  options?: EventCommitOptions,
 ): Promise<void> {
   const prepared = preparations.filter(
     (value): value is PreparedEventMutation => value !== null,
@@ -50,6 +52,7 @@ export async function commitPreparedEventMutation(
       ? updates
       : [...updates, ...prepared.flatMap(({ commands }) => commands)],
     signal,
+    options,
   );
   if (prepared.length === 0) return;
   const dispatches = prepared.toReversed();

@@ -2,9 +2,11 @@ import {
   isLeaderboardReadRequest,
   isProfileCustomizationUpdateRequest,
   isProfileLookupRequest,
+  isResolveProfileIdRequest,
   type LeaderboardReadResponse,
   type ProfileCustomizationUpdateResponse,
   type ProfileLookupResponse,
+  type ResolveProfileIdResponse,
 } from "@mons/shared/profiles";
 import { AuthApiFailure } from "./authErrors.ts";
 import { authJsonResponse } from "./authHttp.ts";
@@ -39,6 +41,7 @@ export const PROFILE_PATHS = new Set([
   "/leaderboards/read",
   "/profiles/custom",
   "/profiles/lookup",
+  "/profiles/canonical-id",
   "/profiles/username",
 ]);
 
@@ -200,6 +203,21 @@ export async function handleProfileRoute(
 
       const repository =
         dependencies.repository || createProfileRepository(env);
+
+      if (pathname === "/profiles/canonical-id") {
+        if (!isResolveProfileIdRequest(body)) {
+          throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+        }
+        const profileId = body.profileId.trim();
+        if (!validLookupId("profile", profileId)) {
+          throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+        }
+        const response: ResolveProfileIdResponse = {
+          ok: true,
+          profileId: await repository.resolveProfileId(profileId),
+        };
+        return authJsonResponse(response, 200, corsHeaders);
+      }
 
       if (pathname === "/profiles/lookup") {
         if (!isProfileLookupRequest(body)) {

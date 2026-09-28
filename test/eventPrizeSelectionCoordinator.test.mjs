@@ -148,6 +148,27 @@ test("serializes a rapid move to the latest selected prize", async () => {
   assert.deepEqual(harness.pendingStates, [true, false]);
 });
 
+test("exposes pending work synchronously until the queued selection settles", async () => {
+  const harness = createHarness();
+  harness.coordinator.receiveAuthoritative({});
+  assert.equal(harness.coordinator.isPending(), false);
+
+  harness.coordinator.toggle("1092");
+  assert.equal(harness.coordinator.isPending(), true);
+  harness.coordinator.toggle("1111");
+  harness.coordinator.receiveAuthoritative({});
+  assert.equal(harness.coordinator.isPending(), true);
+
+  harness.mutations[0].resolve("1092");
+  await flushPromises();
+  assert.equal(harness.coordinator.isPending(), true);
+  assert.equal(harness.mutations[1].prizeId, "1111");
+
+  harness.mutations[1].resolve("1111");
+  await flushPromises();
+  assert.equal(harness.coordinator.isPending(), false);
+});
+
 test("rolls back a failed mutation to the newest authoritative state", async () => {
   const harness = createHarness();
   const failure = new Error("unavailable");
@@ -174,6 +195,7 @@ test("rolls back a failed mutation to the newest authoritative state", async () 
   });
   assert.deepEqual(harness.pendingStates, [true, false]);
   assert.deepEqual(harness.errors, [failure]);
+  assert.equal(harness.coordinator.isPending(), false);
 });
 
 test("ignores mutation completions and snapshots after disposal", async () => {
@@ -184,6 +206,7 @@ test("ignores mutation completions and snapshots after disposal", async () => {
   const pendingCount = harness.pendingStates.length;
 
   harness.coordinator.dispose();
+  assert.equal(harness.coordinator.isPending(), false);
   harness.mutations[0].resolve("1092");
   await flushPromises();
   harness.coordinator.receiveAuthoritative({ local: "1111" });

@@ -18,6 +18,7 @@ test("event D1 preserves its exact public facade and implementation identities",
     EventD1Conflict: types.EventD1Conflict,
     EventD1Failure: types.EventD1Failure,
     EventWritesDisabled: types.EventWritesDisabled,
+    EventNotUpcoming: types.EventNotUpcoming,
     listDueEventProfileGameProjectionOutboxes:
       reads.listDueEventProfileGameProjectionOutboxes,
     listDueEventProgressOutboxes: reads.listDueEventProgressOutboxes,

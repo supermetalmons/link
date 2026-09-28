@@ -6,12 +6,14 @@ import {
   isCreateEventRequest,
   isDisqualifyEventMatchWinnersRequest,
   isJoinEventRequest,
+  isLeaveEventRequest,
   isPostponeEventStartRequest,
   isRemoveEventParticipantRequest,
   isSyncEventStateRequest,
   type CreateEventRequest,
   type DisqualifyEventMatchWinnersRequest,
   type JoinEventRequest,
+  type LeaveEventRequest,
   type PostponeEventStartRequest,
   type RemoveEventParticipantRequest,
   type SyncEventStateRequest,
@@ -27,6 +29,7 @@ import {
 } from "./eventOperations.ts";
 import {
   joinEvent,
+  leaveEvent,
   removeEventParticipant,
   toggleEventPrizeSelection,
   type EventParticipationDependencies,
@@ -38,6 +41,7 @@ export type EventRequestBody =
   | CreateEventRequest
   | DisqualifyEventMatchWinnersRequest
   | JoinEventRequest
+  | LeaveEventRequest
   | PostponeEventStartRequest
   | RemoveEventParticipantRequest
   | SyncEventStateRequest
@@ -115,6 +119,16 @@ export const eventRoutes: ReadonlyMap<string, EventRoute> = new Map(
       },
       handle: (body, { identity, repository, participation }) =>
         joinEvent(identity, body, repository, participation),
+    }),
+    defineEventRoute({
+      path: "/events/participants/leave",
+      kind: "participation",
+      parse(body) {
+        const value = validateBody(body, isLeaveEventRequest);
+        return { eventId: normalizeRecordKey(value.eventId) || "" };
+      },
+      handle: (body, { identity, repository, participation }) =>
+        leaveEvent(identity, body, repository, participation),
     }),
     defineEventRoute({
       path: "/events/participants/remove",

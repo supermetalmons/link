@@ -162,6 +162,12 @@ export type JoinEventResponse = {
   eventId: string;
   participant: EventParticipantSnapshot;
 };
+export type LeaveEventRequest = { eventId: string };
+export type LeaveEventResponse = {
+  ok: true;
+  eventId: string;
+  removedProfileId: string;
+};
 export type RemoveEventParticipantRequest = {
   eventId: string;
   participantProfileId: string;
@@ -177,6 +183,10 @@ export function isEventParticipantSnapshot(
 ): value is EventParticipantSnapshot;
 export function isJoinEventRequest(value: unknown): value is JoinEventRequest;
 export function isJoinEventResponse(value: unknown): value is JoinEventResponse;
+export function isLeaveEventRequest(value: unknown): value is LeaveEventRequest;
+export function isLeaveEventResponse(
+  value: unknown,
+): value is LeaveEventResponse;
 export function isRemoveEventParticipantRequest(
   value: unknown,
 ): value is RemoveEventParticipantRequest;

@@ -8,6 +8,7 @@ import React, {
 } from "react";
 import { FaLink, FaShareAlt } from "react-icons/fa";
 import { connection } from "../../connection/connection";
+import { useEventProfileIds } from "./useEventProfileIds";
 import {
   EventMatch,
   EventParticipant,
@@ -54,6 +55,7 @@ import {
   PENDING_JOIN_POLL_INTERVAL_MS,
   PENDING_JOIN_POLL_TIMEOUT_MS,
   type BracketMatchAction,
+  canLeaveEvent,
   canSelectEventPrize as isEventPrizeSelectionAvailable,
   formatAbsoluteStart,
   formatRelativeStart,
@@ -383,6 +385,8 @@ const EventModal: React.FC = () => {
     DEV_STUB_DEFAULT_PLAYERS,
   );
   const [isLoading, setIsLoading] = useState(false);
+  const [isLeaving, setIsLeaving] = useState(false);
+  const activeLeaveRequestRef = useRef<object | null>(null);
   const [isEventFresh, setIsEventFresh] = useState(false);
   const loadTimingRef = useRef<{
     eventId: string;
@@ -455,6 +459,16 @@ const EventModal: React.FC = () => {
     nowMs,
   );
   const currentProfileId = storage.getProfileId("");
+  const currentLoginUid = storage.getLoginId("");
+  const { profileIds: eventProfileIds, pending: isResolvingEventProfileIds } =
+    useEventProfileIds(
+      !devStubRecord && eventRecord?.status === "scheduled"
+        ? eventRecord
+        : null,
+      currentProfileId,
+      currentLoginUid,
+      modalState,
+    );
   const markPrizeImageLoaded = useCallback((prizeId: EventPrizeId) => {
     setLoadedPrizeImageIds((current) => {
       if (current.has(prizeId)) {
@@ -584,6 +598,8 @@ const EventModal: React.FC = () => {
   useEffect(() => {
     const unsubscribe = subscribeToEventModalState((nextState) => {
       if (participantLookupModalStateRef.current !== nextState) {
+        activeLeaveRequestRef.current = null;
+        setIsLeaving(false);
         participantLookupModalStateRef.current = nextState;
         invalidateParticipantLookups();
       }
@@ -591,6 +607,7 @@ const EventModal: React.FC = () => {
     });
     return () => {
       unsubscribe();
+      activeLeaveRequestRef.current = null;
       invalidateParticipantLookups();
     };
   }, [invalidateParticipantLookups]);
@@ -1041,7 +1058,11 @@ const EventModal: React.FC = () => {
         setPendingJoinRequestedAtMs(0);
         return;
       }
-      if (storage.getProfileId("") === "") {
+      if (
+        storage.getProfileId("") === "" ||
+        activeLeaveRequestRef.current ||
+        prizeSelectionCoordinatorRef.current?.isPending()
+      ) {
         return;
       }
       const eventId = pendingJoinEventId;
@@ -1203,8 +1224,14 @@ const EventModal: React.FC = () => {
     ];
   }, [displayedEventRecord?.status, eventPrizeAssignments, eventPrizes]);
   const eventUiState = useMemo(
-    () => getCurrentUiState(displayedEventRecord, currentProfileId),
-    [currentProfileId, displayedEventRecord],
+    () =>
+      getCurrentUiState(
+        displayedEventRecord,
+        currentProfileId,
+        currentLoginUid,
+        eventProfileIds,
+      ),
+    [currentLoginUid, currentProfileId, displayedEventRecord, eventProfileIds],
   );
   const watchableMatch = useMemo(
     () =>
@@ -1222,6 +1249,9 @@ const EventModal: React.FC = () => {
       if (
         devStubRecord ||
         !eventPrizeConfig ||
+        !isEventFresh ||
+        isLoading ||
+        activeLeaveRequestRef.current ||
         !isEventPrizeSelectionAvailable(
           eventRecord,
           currentProfileId,
@@ -1232,7 +1262,14 @@ const EventModal: React.FC = () => {
       }
       prizeSelectionCoordinatorRef.current?.toggle(prizeId);
     },
-    [currentProfileId, devStubRecord, eventRecord, eventPrizeConfig],
+    [
+      currentProfileId,
+      devStubRecord,
+      eventRecord,
+      eventPrizeConfig,
+      isEventFresh,
+      isLoading,
+    ],
   );
 
   useEffect(() => {
@@ -1460,6 +1497,12 @@ const EventModal: React.FC = () => {
     !!displayedEventRecord &&
     displayedEventRecord.status === "scheduled" &&
     nowMs < displayedEventRecord.startAtMs;
+  const isParticipationPending =
+    isLoading ||
+    isLeaving ||
+    isUpdatingPrizeSelection ||
+    !isEventFresh ||
+    isResolvingEventProfileIds;
 
   const shouldKeepVisibleForOutsideDismiss = useCallback(() => {
     const hasShinyCardElement =
@@ -1710,7 +1753,11 @@ const EventModal: React.FC = () => {
   }, [copyEventLinkToClipboard, modalState.eventId]);
 
   const handleJoinClick = useCallback(() => {
-    if (!modalState.eventId) {
+    if (
+      !modalState.eventId ||
+      activeLeaveRequestRef.current ||
+      prizeSelectionCoordinatorRef.current?.isPending()
+    ) {
       return;
     }
     if (storage.getProfileId("") === "") {
@@ -1729,6 +1776,65 @@ const EventModal: React.FC = () => {
         setIsLoading(false);
       });
   }, [modalState.eventId]);
+
+  const handleLeaveClick = useCallback(async () => {
+    const profileId = storage.getProfileId("");
+    const loginUid = storage.getLoginId("");
+    if (
+      !modalState.eventId ||
+      !modalState.isOpen ||
+      getEventModalState() !== modalState ||
+      eventRecord?.eventId !== modalState.eventId ||
+      devStubRecord ||
+      !isEventFresh ||
+      isResolvingEventProfileIds ||
+      isLoading ||
+      activeLeaveRequestRef.current ||
+      prizeSelectionCoordinatorRef.current?.isPending() ||
+      !canLeaveEvent(
+        eventRecord,
+        profileId,
+        Date.now(),
+        loginUid,
+        eventProfileIds,
+      )
+    ) {
+      return;
+    }
+    const request = {};
+    activeLeaveRequestRef.current = request;
+    setIsLeaving(true);
+    try {
+      await connection.leaveEvent(modalState.eventId);
+    } catch (error) {
+      if (
+        activeLeaveRequestRef.current !== request ||
+        getEventModalState() !== modalState ||
+        storage.getProfileId("") !== profileId ||
+        storage.getLoginId("") !== loginUid ||
+        (error instanceof Error && error.message === "authentication-changed")
+      ) {
+        return;
+      }
+      const message = error instanceof Error ? error.message.trim() : "";
+      window.alert(message || "Failed to leave event. Please try again.");
+    } finally {
+      if (activeLeaveRequestRef.current === request) {
+        activeLeaveRequestRef.current = null;
+        if (getEventModalState() === modalState) {
+          setIsLeaving(false);
+        }
+      }
+    }
+  }, [
+    devStubRecord,
+    eventRecord,
+    eventProfileIds,
+    isEventFresh,
+    isLoading,
+    isResolvingEventProfileIds,
+    modalState,
+  ]);
 
   const openMatch = useCallback(async (inviteId: string) => {
     if (!inviteId) {
@@ -2136,6 +2242,9 @@ const EventModal: React.FC = () => {
   const canSelectEventPrize = !!(
     showEventPrizes &&
     !devStubRecord &&
+    !isLoading &&
+    !isLeaving &&
+    isEventFresh &&
     isEventPrizeSelectionAvailable(eventRecord, currentProfileId, nowMs)
   );
   const topBarTitleText = devStubRecord
@@ -2787,12 +2896,30 @@ const EventModal: React.FC = () => {
               <BottomPillButton
                 type="button"
                 onClick={handleJoinClick}
-                disabled={isLoading}
-                $isViewOnly={isLoading}
+                disabled={isParticipationPending}
+                $isViewOnly={isParticipationPending}
               >
                 Join
               </BottomPillButton>
             )}
+
+            {!devStubRecord &&
+              canLeaveEvent(
+                eventRecord,
+                currentProfileId,
+                nowMs,
+                currentLoginUid,
+                eventProfileIds,
+              ) && (
+                <BottomPillButton
+                  type="button"
+                  onClick={() => void handleLeaveClick()}
+                  disabled={isParticipationPending}
+                  $isViewOnly={isParticipationPending}
+                >
+                  Leave
+                </BottomPillButton>
+              )}
 
             {eventUiState.playableMatch && (
               <BottomPillButton

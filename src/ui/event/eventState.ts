@@ -177,7 +177,12 @@ export const getParticipantCount = (event: EventRecord | null): number => {
   return Object.keys(event.participants).length;
 };
 
-export const isLocalEventCreator = (event: EventRecord | null): boolean => {
+export type EventProfileIds = Readonly<Record<string, string>>;
+
+export const isLocalEventCreator = (
+  event: EventRecord | null,
+  profileIds: EventProfileIds = {},
+): boolean => {
   if (!event) {
     return false;
   }
@@ -192,9 +197,69 @@ export const isLocalEventCreator = (event: EventRecord | null): boolean => {
       localLoginUid === creatorLoginUid) ||
     (localProfileId !== "" &&
       creatorProfileId !== "" &&
-      localProfileId === creatorProfileId)
+      (localProfileId === creatorProfileId ||
+        localProfileId === profileIds[creatorProfileId]))
   );
 };
+
+export const getEventParticipant = (
+  event: EventRecord | null,
+  profileId: string,
+  loginUid: string,
+  profileIds: EventProfileIds = {},
+): EventParticipant | null => {
+  if (!event) {
+    return null;
+  }
+  const normalizedProfileId = profileId.trim();
+  if (normalizedProfileId && event.participants[normalizedProfileId]) {
+    return event.participants[normalizedProfileId];
+  }
+  const normalizedLoginUid = loginUid.trim();
+  return (
+    Object.values(event.participants).find(
+      (participant) =>
+        (normalizedLoginUid !== "" &&
+          participant.loginUid?.trim() === normalizedLoginUid) ||
+        (normalizedProfileId !== "" &&
+          profileIds[participant.profileId] === normalizedProfileId),
+    ) ?? null
+  );
+};
+
+export const getEventProfileIdsToResolve = (
+  event: EventRecord,
+  profileId: string,
+  loginUid: string,
+): string[] => {
+  const participant = getEventParticipant(event, profileId, loginUid);
+  const ids = new Set([
+    event.createdByProfileId,
+    ...(participant
+      ? []
+      : Object.values(event.participants).map((value) => value.profileId)),
+  ]);
+  ids.delete("");
+  ids.delete(profileId);
+  return [...ids];
+};
+
+export const canLeaveEvent = (
+  event: EventRecord | null,
+  profileId: string,
+  nowMs: number,
+  loginUid = storage.getLoginId(""),
+  profileIds: EventProfileIds = {},
+): boolean =>
+  !!(
+    event &&
+    profileId &&
+    getEventParticipant(event, profileId, loginUid, profileIds) &&
+    event.status === "scheduled" &&
+    Number.isFinite(event.startAtMs) &&
+    nowMs < event.startAtMs &&
+    !isLocalEventCreator(event, profileIds)
+  );
 
 export const isLocalEventParticipant = (event: EventRecord | null): boolean => {
   if (!event) {
@@ -205,17 +270,7 @@ export const isLocalEventParticipant = (event: EventRecord | null): boolean => {
   }
   const localLoginUid = storage.getLoginId("").trim();
   const localProfileId = storage.getProfileId("").trim();
-  if (localProfileId && event.participants[localProfileId]) {
-    return true;
-  }
-  return Object.values(event.participants).some((participant) => {
-    const participantLoginUid = participant.loginUid?.trim() ?? "";
-    return (
-      localLoginUid !== "" &&
-      participantLoginUid !== "" &&
-      localLoginUid === participantLoginUid
-    );
-  });
+  return !!getEventParticipant(event, localProfileId, localLoginUid);
 };
 
 export const getSortedParticipants = (
@@ -736,6 +791,8 @@ export const getAwaitedPendingInviteMatchForParticipant = (
 export const getCurrentUiState = (
   event: EventRecord | null,
   profileId: string,
+  loginUid = "",
+  profileIds: EventProfileIds = {},
 ): EventUiState => {
   if (!event || !profileId) {
     return {
@@ -746,7 +803,12 @@ export const getCurrentUiState = (
     };
   }
 
-  const participant = event.participants[profileId];
+  const participant = getEventParticipant(
+    event,
+    profileId,
+    loginUid,
+    profileIds,
+  );
   if (!participant) {
     return {
       isJoined: false,
@@ -756,11 +818,12 @@ export const getCurrentUiState = (
     };
   }
 
+  const participantProfileId = participant.profileId;
   const thirdPlaceMatch = getThirdPlaceMatch(event);
   const thirdPlacePlayableMatch =
     thirdPlaceMatch &&
     isActionablePendingInviteEventMatch(thirdPlaceMatch) &&
-    isProfileParticipatingInMatch(thirdPlaceMatch, profileId)
+    isProfileParticipatingInMatch(thirdPlaceMatch, participantProfileId)
       ? thirdPlaceMatch
       : null;
 
@@ -783,8 +846,8 @@ export const getCurrentUiState = (
       getSortedMatches(round).find(
         (match) =>
           isActionablePendingInviteEventMatch(match) &&
-          (match.hostProfileId === profileId ||
-            match.guestProfileId === profileId),
+          (match.hostProfileId === participantProfileId ||
+            match.guestProfileId === participantProfileId),
       ) ?? null;
     if (candidate) {
       playableMatch = candidate;

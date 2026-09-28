@@ -4,6 +4,7 @@ import { isEventMutation } from "../../../runtime/eventCommands.js";
 import type { EventCommand } from "../../../runtime/eventCommands.js";
 import type { EventLeaseKey } from "../../../runtime/eventLeases.js";
 import type {
+  EventCommitOptions,
   EventProgressOutboxWriter,
   EventStore,
 } from "./eventStoreContracts.ts";
@@ -344,16 +345,22 @@ async function commitD1EventPlan(
   raw: MatchStatePort,
   prepareMatchPresentations: PrepareMatchPresentations,
   signal?: AbortSignal,
+  options?: EventCommitOptions,
 ): Promise<EventTransitionIntent | undefined> {
   const canonical = plan.filter(isEventMutation);
   const effects = plan.filter((command) => !isEventMutation(command));
+  if (options?.upcomingEventId !== undefined && effects.length > 0) {
+    throw new eventD1.EventD1Failure(
+      "event-upcoming-guard-effects-unsupported",
+    );
+  }
   if (
     canonical.length === 0 &&
     effects.some((command) => command.kind === "match-creation")
   )
     throw new Error("event-match-creation-requires-transition");
   if (!effects.length) {
-    await commitEventMutations(db, canonical, { admission });
+    await commitEventMutations(db, canonical, { admission, ...options });
     return;
   }
   const eventIds = [
@@ -582,10 +589,7 @@ function leaseStorageKey(key: EventLeaseKey): string {
 }
 function createEventStore(
   db: D1Database,
-  commit: (
-    changes: readonly EventCommand[],
-    signal?: AbortSignal,
-  ) => Promise<void>,
+  commit: EventStore["commitEventPlan"],
 ): EventStore {
   const admit = <T>(work: (admission: EventWriteAdmission) => Promise<T>) =>
     withEventWriteAdmission(db, "event-path-transaction", work);
@@ -725,7 +729,7 @@ export function createEventStateRepository(
 ): EventStateRepository {
   return {
     ...base,
-    ...createEventStore(env.EVENT_DB, async (plan, signal) => {
+    ...createEventStore(env.EVENT_DB, async (plan, signal, commitOptions) => {
       const committed = await withEventWriteAdmission(
         env.EVENT_DB,
         "event-root-patch",
@@ -738,6 +742,7 @@ export function createEventStateRepository(
             raw,
             prepareMatchPresentations,
             signal,
+            commitOptions,
           ),
       );
       await dispatchCommittedNotifications(env, committed, options.schedule);

@@ -8,9 +8,12 @@ import test from "node:test";
 import type { EventSnapshot } from "../../../runtime/eventReads.js";
 import type { EventLockManager } from "../../../runtime/events/lockManagerCore.js";
 import { AuthApiFailure } from "../src/authErrors.ts";
+import { EventNotUpcoming } from "../src/eventD1.ts";
+import type { EventCommitOptions } from "../src/eventStoreContracts.ts";
 import { LEGACY_CORE_PRIZES_EVENT_ID } from "@mons/shared/event-prizes";
 import {
   joinEvent,
+  leaveEvent,
   removeEventParticipant,
   toggleEventPrizeSelection,
   type EventParticipationRepository,
@@ -1281,6 +1284,485 @@ test("threads one operation signal through event reads and commit calls", async 
     seen.every((receivedSignal) => receivedSignal === signal),
     true,
   );
+});
+
+test("leaves an upcoming prize event and can rejoin with a fresh entry", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  const pathValues: Record<string, unknown> = {
+    [`eventPrizeSelections/${eventId}`]: { "target-profile": "1092" },
+  };
+  const { patches, repository } = createRepository({
+    event: scheduledEvent({
+      eventId,
+      participants: {
+        [profileId]: creatorParticipant(1),
+        "target-profile": participant("target-profile", "target-login", 2),
+      },
+    }),
+    profilesByUid: {
+      "target-login": { ...creatorProfile, profileId: "target-profile" },
+    },
+    pathValues,
+  });
+  const patch = repository.patchStateRoot;
+  repository.patchStateRoot = async (updates, signal) => {
+    await patch(updates, signal);
+    Object.assign(pathValues, updates);
+  };
+  let locked = false;
+  let ownershipReads = 0;
+  const readOwnership = repository.readProfileOwnershipSnapshot;
+  repository.readProfileOwnershipSnapshot = async (query) => {
+    assert.equal(locked, true);
+    ownershipReads++;
+    return readOwnership(query);
+  };
+  const lock = createLockManager({ onAcquire: () => (locked = true) });
+  const staleClaimIdentity = {
+    uid: "target-login",
+    profileId: "forged-profile",
+  };
+  assert.deepEqual(
+    await leaveEvent(staleClaimIdentity, { eventId }, repository, {
+      lockManager: lock.manager,
+      now: () => 100,
+    }),
+    { ok: true, eventId, removedProfileId: "target-profile" },
+  );
+  assert.deepEqual(patches, [
+    {
+      [`events/${eventId}/participants/target-profile`]: null,
+      [`eventPrizeSelections/${eventId}/target-profile`]: null,
+      [`events/${eventId}/updatedAtMs`]: 100,
+    },
+  ]);
+  assert.equal(ownershipReads, 1);
+  assert.equal(lock.stopped(), 1);
+  assert.equal(lock.released(), 1);
+  const leftSnapshot = await repository.readEventSnapshot(eventId);
+  assert.equal(leftSnapshot.event?.status, "scheduled");
+  assert.deepEqual(Object.keys(leftSnapshot.event?.participants || {}), [
+    profileId,
+  ]);
+  assert.deepEqual(leftSnapshot.prizeSelections, {});
+  await expectFailure(
+    leaveEvent({ uid: "target-login" }, { eventId }, repository, {
+      lockManager: lock.manager,
+      now: () => 101,
+    }),
+    409,
+    "You are not participating in this event.",
+  );
+  assert.equal(patches.length, 1);
+  const joined = await joinEvent(
+    { uid: "target-login" },
+    { eventId },
+    repository,
+    { lockManager: lock.manager, now: () => 200 },
+  );
+  assert.equal(joined.participant.profileId, "target-profile");
+  assert.equal(joined.participant.joinedAtMs, 200);
+  assert.deepEqual(
+    (await repository.readEventSnapshot(eventId)).prizeSelections,
+    {},
+  );
+});
+
+test("leaves through an alternate login using the stored participant key", async () => {
+  const canonicalProfile = { ...creatorProfile, profileId: "canonical-target" };
+  const { patches, repository } = createRepository({
+    event: scheduledEvent({
+      participants: {
+        [profileId]: creatorParticipant(1),
+        "retired-target": participant("retired-target", "original-login", 2),
+      },
+    }),
+    profilesByUid: {
+      "original-login": canonicalProfile,
+      "alternate-login": canonicalProfile,
+    },
+    canonicalProfileIds: { "retired-target": "canonical-target" },
+  });
+  const result = await leaveEvent(
+    { uid: "alternate-login" },
+    { eventId: "event-1" },
+    repository,
+    { lockManager: createLockManager().manager, now: () => 100 },
+  );
+  assert.equal(result.removedProfileId, "retired-target");
+  assert.equal(patches[0]["events/event-1/participants/retired-target"], null);
+  assert.equal(patches[0]["eventPrizeSelections/event-1/retired-target"], null);
+  assert.equal(
+    Object.hasOwn(patches[0], "events/event-1/participants/canonical-target"),
+    false,
+  );
+});
+
+test("keeps the creator enrolled for direct, alternate, and merged identities", async () => {
+  const canonicalProfile = {
+    ...creatorProfile,
+    profileId: "canonical-creator",
+  };
+  for (const uid of [identity.uid, "alternate-login", "stored-login"]) {
+    const { patches, repository } = createRepository({
+      event: scheduledEvent({
+        createdByProfileId: "retired-creator",
+        participants: {
+          "canonical-creator": participant(
+            "canonical-creator",
+            "stored-login",
+            1,
+          ),
+        },
+      }),
+      profile: canonicalProfile,
+      profilesByUid: {
+        "alternate-login": canonicalProfile,
+        "stored-login": canonicalProfile,
+      },
+      canonicalProfileIds: { "retired-creator": "canonical-creator" },
+    });
+    await expectFailure(
+      leaveEvent({ uid }, { eventId: "event-1" }, repository, {
+        lockManager: createLockManager().manager,
+        now: () => 100,
+      }),
+      409,
+      "Event creator cannot leave.",
+    );
+    assert.deepEqual(patches, []);
+  }
+});
+
+test("rejects leaving events that are not upcoming or have an invalid deadline", async () => {
+  for (const overrides of [
+    { status: "active" },
+    { status: "ended" },
+    { status: "dismissed" },
+    { startAtMs: null },
+    { startAtMs: NaN },
+  ]) {
+    const { patches, repository } = createRepository({
+      event: scheduledEvent({
+        participants: {
+          [profileId]: creatorParticipant(1),
+          "target-profile": participant("target-profile", "target-login", 2),
+        },
+        ...overrides,
+      }),
+    });
+    await expectFailure(
+      leaveEvent({ uid: "target-login" }, { eventId: "event-1" }, repository, {
+        lockManager: createLockManager().manager,
+        now: () => 100,
+      }),
+      409,
+      "status" in overrides
+        ? "This event can no longer be left."
+        : "This event cannot be updated right now.",
+    );
+    assert.deepEqual(patches, []);
+  }
+});
+
+test("retains the original roster at the leave deadline and when crossing it", async () => {
+  for (const firstNow of [100, 99]) {
+    const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+    const event = scheduledEvent({
+      eventId,
+      startAtMs: 100,
+      participants: {
+        [profileId]: creatorParticipant(1),
+        "target-profile": participant("target-profile", "target-login", 2),
+      },
+    });
+    const { patches, repository } = createRepository({
+      event,
+      pathValues: {
+        [`eventPrizeSelections/${eventId}`]: { "target-profile": "1092" },
+      },
+    });
+    const times = [firstNow, 100];
+    let dueCalls = 0;
+    await expectFailure(
+      leaveEvent({ uid: "target-login" }, { eventId }, repository, {
+        lockManager: createLockManager().manager,
+        now: () => times.shift() || 100,
+        buildDueUpdates: async (input) => {
+          dueCalls++;
+          assert.deepEqual(input.event.participants, event.participants);
+          assert.deepEqual(input.prizeSelections, { "target-profile": "1092" });
+          assert.ok(input.ownershipSnapshot);
+          return {
+            didChange: true,
+            updates: decodeEventUpdates({
+              [`events/${eventId}/status`]: "active",
+              [`events/${eventId}/updatedAtMs`]: 100,
+            }),
+          };
+        },
+      }),
+      409,
+      "This event can no longer be left.",
+    );
+    assert.equal(dueCalls, 1);
+    assert.deepEqual(patches, [
+      {
+        [`events/${eventId}/status`]: "active",
+        [`events/${eventId}/updatedAtMs`]: 100,
+      },
+    ]);
+  }
+});
+
+test("does not leave after losing the event lock or when ownership is unavailable", async () => {
+  for (const failOwnership of [false, true]) {
+    const { patches, repository } = createRepository({
+      event: scheduledEvent({
+        participants: {
+          [profileId]: creatorParticipant(1),
+          "target-profile": participant("target-profile", "target-login", 2),
+        },
+      }),
+    });
+    if (failOwnership) {
+      repository.readProfileOwnershipSnapshot = async () => {
+        throw new Error("ownership-offline");
+      };
+    }
+    const lock = createLockManager({ owned: failOwnership });
+    await expectFailure(
+      leaveEvent({ uid: "target-login" }, { eventId: "event-1" }, repository, {
+        lockManager: lock.manager,
+        now: () => 100,
+      }),
+      503,
+      failOwnership
+        ? "profile-ownership-unavailable"
+        : "Event is busy. Please try leaving again.",
+    );
+    assert.deepEqual(patches, []);
+    assert.equal(lock.stopped(), 1);
+    assert.equal(lock.released(), 1);
+  }
+});
+
+test("fails closed for ambiguous participant ownership when leaving", async () => {
+  const canonicalProfile = { ...creatorProfile, profileId: "canonical-target" };
+  const { patches, repository } = createRepository({
+    event: scheduledEvent({
+      participants: {
+        [profileId]: creatorParticipant(1),
+        "retired-target": participant("retired-target", "original-login", 2),
+        "canonical-target": participant("canonical-target", "second-login", 3),
+      },
+    }),
+    profilesByUid: {
+      "alternate-login": canonicalProfile,
+      "original-login": canonicalProfile,
+      "second-login": canonicalProfile,
+    },
+    canonicalProfileIds: { "retired-target": "canonical-target" },
+  });
+  for (const uid of ["alternate-login", "original-login", "second-login"]) {
+    await expectFailure(
+      leaveEvent({ uid }, { eventId: "event-1" }, repository, {
+        lockManager: createLockManager().manager,
+        now: () => 100,
+      }),
+      503,
+      "profile-ownership-unavailable",
+    );
+  }
+  assert.deepEqual(patches, []);
+});
+
+test("reconciles an ambiguous committed leave", async () => {
+  const { repository } = createRepository({
+    event: scheduledEvent({
+      participants: {
+        [profileId]: creatorParticipant(1),
+        "target-profile": participant("target-profile", "target-login", 2),
+      },
+    }),
+    pathValues: {
+      "events/event-1/participants/target-profile": null,
+      "eventPrizeSelections/event-1/target-profile": null,
+      "events/event-1/updatedAtMs": 100,
+    },
+    patchError: new Error("ambiguous-leave"),
+  });
+  assert.deepEqual(
+    await leaveEvent(
+      { uid: "target-login" },
+      { eventId: "event-1" },
+      repository,
+      { lockManager: createLockManager().manager, now: () => 100 },
+    ),
+    { ok: true, eventId: "event-1", removedProfileId: "target-profile" },
+  );
+});
+
+test("guards only self-leave commits at the storage deadline", async () => {
+  for (const isLeaving of [true, false]) {
+    const { repository } = createRepository({
+      event: scheduledEvent({
+        participants: {
+          [profileId]: creatorParticipant(1),
+          "target-profile": participant("target-profile", "target-login", 2),
+        },
+      }),
+    });
+    const signal = new AbortController().signal;
+    const commitOptions: Array<EventCommitOptions | undefined> = [];
+    const commit = repository.commitEventPlan;
+    repository.commitEventPlan = async (plan, receivedSignal, options) => {
+      assert.equal(receivedSignal, signal);
+      commitOptions.push(options);
+      return commit(plan, receivedSignal, options);
+    };
+    const dependencies = {
+      lockManager: createLockManager().manager,
+      now: () => 100,
+      signal,
+    };
+    if (isLeaving) {
+      await leaveEvent(
+        { uid: "target-login" },
+        { eventId: "event-1" },
+        repository,
+        dependencies,
+      );
+    } else {
+      await removeEventParticipant(
+        identity,
+        { eventId: "event-1", participantProfileId: "target-profile" },
+        repository,
+        dependencies,
+      );
+    }
+    assert.deepEqual(commitOptions, [
+      isLeaving ? { upcomingEventId: "event-1" } : undefined,
+    ]);
+  }
+});
+
+test("storage deadline rejection starts the unchanged roster without reconciling a leave", async () => {
+  const event = scheduledEvent({
+    startAtMs: 100,
+    participants: {
+      [profileId]: creatorParticipant(1),
+      "target-profile": participant("target-profile", "target-login", 2),
+    },
+  });
+  const { patches, repository } = createRepository({ event });
+  const commit = repository.commitEventPlan;
+  const commitOptions: Array<EventCommitOptions | undefined> = [];
+  repository.commitEventPlan = async (plan, signal, options) => {
+    commitOptions.push(options);
+    if (options?.upcomingEventId) throw new EventNotUpcoming();
+    return commit(plan, signal, options);
+  };
+  let reconciliationReads = 0;
+  repository.readEventSnapshot = async () => {
+    reconciliationReads++;
+    return {
+      eventId: "event-1",
+      event: { updatedAtMs: 99, participants: {} },
+      prizeSelections: {},
+      revision: 1,
+    };
+  };
+  let dueCalls = 0;
+  await expectFailure(
+    leaveEvent({ uid: "target-login" }, { eventId: "event-1" }, repository, {
+      lockManager: createLockManager().manager,
+      now: () => 99,
+      buildDueUpdates: async (input) => {
+        dueCalls++;
+        assert.equal(input.nowMs, 100);
+        assert.deepEqual(input.event.participants, event.participants);
+        return {
+          didChange: true,
+          updates: decodeEventUpdates({
+            "events/event-1/status": "active",
+            "events/event-1/updatedAtMs": 100,
+          }),
+        };
+      },
+    }),
+    409,
+    "This event can no longer be left.",
+  );
+  assert.equal(dueCalls, 1);
+  assert.equal(reconciliationReads, 0);
+  assert.deepEqual(commitOptions, [{ upcomingEventId: "event-1" }, undefined]);
+  assert.deepEqual(patches, [
+    {
+      "events/event-1/status": "active",
+      "events/event-1/updatedAtMs": 100,
+    },
+  ]);
+});
+
+test("storage guard rejection honors an already started or newly postponed snapshot", async () => {
+  for (const latest of [{ status: "active" }, { startAtMs: 1_000 }]) {
+    const event = scheduledEvent({
+      startAtMs: 100,
+      participants: {
+        [profileId]: creatorParticipant(1),
+        "target-profile": participant("target-profile", "target-login", 2),
+      },
+    });
+    const { patches, repository } = createRepository({ event });
+    let eventReads = 0;
+    repository.readEvent = async () => {
+      eventReads++;
+      return structuredClone(eventReads < 3 ? event : { ...event, ...latest });
+    };
+    repository.commitEventPlan = async () => {
+      throw new EventNotUpcoming();
+    };
+    await expectFailure(
+      leaveEvent({ uid: "target-login" }, { eventId: "event-1" }, repository, {
+        lockManager: createLockManager().manager,
+        now: () => 99,
+        buildDueUpdates: async () => {
+          assert.fail("must not transition the latest event snapshot");
+        },
+      }),
+      409,
+      "This event can no longer be left.",
+    );
+    assert.equal(eventReads, 3);
+    assert.deepEqual(patches, []);
+  }
+});
+
+test("does not leave when the stored login has lost ownership of its participant", async () => {
+  for (const currentProfile of [
+    null,
+    { ...creatorProfile, profileId: "unrelated-profile" },
+  ]) {
+    const { patches, repository } = createRepository({
+      event: scheduledEvent({
+        participants: {
+          [profileId]: creatorParticipant(1),
+          "target-profile": participant("target-profile", "target-login", 2),
+        },
+      }),
+      profilesByUid: { "target-login": currentProfile },
+    });
+    await expectFailure(
+      leaveEvent({ uid: "target-login" }, { eventId: "event-1" }, repository, {
+        lockManager: createLockManager().manager,
+        now: () => 100,
+      }),
+      503,
+      "profile-ownership-unavailable",
+    );
+    assert.deepEqual(patches, []);
+  }
 });
 
 test("removes a non-creator participant and its prize selection", async () => {

@@ -22,6 +22,7 @@ const {
   ProfileApiError,
   PROFILE_API_MAX_RESPONSE_BYTES,
   readLeaderboardViaApi,
+  resolveProfileIdViaApi,
   updateProfileCustomizationViaApi,
 } = await import("../src/services/profileApi.ts");
 const { AuthApiError } = await import("../src/services/authApi.ts");
@@ -34,6 +35,8 @@ const {
   isProfileCustomizationUpdateResponse,
   isProfileLookupRequest,
   isProfileLookupResponse,
+  isResolveProfileIdRequest,
+  isResolveProfileIdResponse,
   normalizeProfileEmojiId,
   PROFILE_STICKER_CATALOG,
 } = await import("@mons/shared/profiles");
@@ -171,6 +174,111 @@ test("shared profile contracts validate exact requests and responses", () => {
         stickers.map(({ name }) => name),
       ]),
     ),
+  );
+});
+
+test("canonical profile ID contracts distinguish missing ownership from malformed data", () => {
+  assert.equal(
+    isResolveProfileIdRequest({ profileId: "retired-profile" }),
+    true,
+  );
+  for (const request of [
+    {},
+    { profileId: "" },
+    { profileId: null },
+    { profileId: "   " },
+    { profileId: "retired-profile", extra: true },
+    { kind: "profile", id: "retired-profile" },
+  ]) {
+    assert.equal(isResolveProfileIdRequest(request), false);
+  }
+  assert.equal(
+    isResolveProfileIdResponse({ ok: true, profileId: "canonical-profile" }),
+    true,
+  );
+  assert.equal(isResolveProfileIdResponse({ ok: true, profileId: null }), true);
+  for (const response of [
+    { ok: false, profileId: "canonical-profile" },
+    { ok: true },
+    { ok: true, profileId: "" },
+    { ok: true, profileId: "   " },
+    { ok: true, profileId: 7 },
+    { ok: true, profileId: "canonical-profile", extra: true },
+    { ok: true, profile: null },
+  ]) {
+    assert.equal(isResolveProfileIdResponse(response), false);
+  }
+});
+
+test("resolves canonical profile IDs with an authenticated request and preserves null", async () => {
+  const calls = [];
+  const ids = ["canonical-profile", null];
+  globalThis.fetch = async (input, init) => {
+    calls.push({ input: String(input), init });
+    return jsonResponse({ ok: true, profileId: ids.shift() });
+  };
+  const tokenProvider = async () => "session-token";
+  assert.equal(
+    await resolveProfileIdViaApi("retired-profile", tokenProvider),
+    "canonical-profile",
+  );
+  assert.equal(
+    await resolveProfileIdViaApi("missing-profile", tokenProvider),
+    null,
+  );
+  assert.deepEqual(
+    calls.map(({ input, init }) => [input, JSON.parse(init.body)]),
+    [
+      [
+        "https://api.mons.link/profiles/canonical-id",
+        { profileId: "retired-profile" },
+      ],
+      [
+        "https://api.mons.link/profiles/canonical-id",
+        { profileId: "missing-profile" },
+      ],
+    ],
+  );
+  for (const { init } of calls) {
+    assert.equal(init.method, "POST");
+    assert.equal(init.cache, "no-store");
+    assert.equal(
+      new Headers(init.headers).get("Authorization"),
+      "Bearer session-token",
+    );
+  }
+});
+
+test("canonical profile ID resolution rejects malformed responses and unavailable ownership", async () => {
+  for (const body of [
+    { ok: true },
+    { ok: true, profileId: "" },
+    { ok: true, profileId: "   " },
+    { ok: true, profile: null },
+    { ok: true, profileId: "canonical-profile", extra: true },
+  ]) {
+    globalThis.fetch = async () => jsonResponse(body);
+    await assert.rejects(
+      resolveProfileIdViaApi("retired-profile", async () => "token"),
+      (error) =>
+        error instanceof ProfileApiError && error.code === "unavailable",
+    );
+  }
+  globalThis.fetch = async () =>
+    jsonResponse(
+      {
+        ok: false,
+        error: "unavailable",
+        message: "profile-ownership-unavailable",
+      },
+      503,
+    );
+  await assert.rejects(
+    resolveProfileIdViaApi("retired-profile", async () => "token"),
+    (error) =>
+      error instanceof ProfileApiError &&
+      error.code === "unavailable" &&
+      error.message === "profile-ownership-unavailable",
   );
 });
 

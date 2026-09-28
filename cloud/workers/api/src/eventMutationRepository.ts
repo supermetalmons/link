@@ -28,7 +28,7 @@ export function createEventMutationRepository(
     });
   return {
     ...eventRepository,
-    async commitEventPlan(updates, signal) {
+    async commitEventPlan(updates, signal, commitOptions) {
       const reads = createEventMutationReads(eventRepository, signal);
       const profile = await prepareEventProfileGameProjection(
         env,
@@ -47,6 +47,7 @@ export function createEventMutationRepository(
         [profile, telegram, announcements],
         signal,
         options.schedule,
+        commitOptions,
       );
     },
   };

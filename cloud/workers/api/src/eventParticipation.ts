@@ -4,7 +4,7 @@ import {
   mergeEventPlans,
 } from "../../../runtime/eventCommands.js";
 import type { EventCommitPlan } from "../../../runtime/eventCommands.js";
-import type { EventStore } from "./eventStoreContracts.ts";
+import type { EventCommitOptions, EventStore } from "./eventStoreContracts.ts";
 import { createGameVariantHelpers } from "@mons/shared/game-variants";
 import {
   isEventPrizeEvent,
@@ -19,6 +19,8 @@ import {
   type EventParticipantSnapshot,
   type JoinEventRequest,
   type JoinEventResponse,
+  type LeaveEventRequest,
+  type LeaveEventResponse,
   type RemoveEventParticipantRequest,
   type RemoveEventParticipantResponse,
 } from "@mons/shared/events";
@@ -41,6 +43,7 @@ import {
 } from "../../../runtime/events/ownership.js";
 import { getDisplayNameFromAddress } from "../../../runtime/telegramDisplay.js";
 import { AuthApiFailure } from "./authErrors.ts";
+import { EventNotUpcoming } from "./eventD1.ts";
 import type {
   GameplayProfile,
   GameplayRepository,
@@ -289,10 +292,16 @@ async function patchWithReconciliation(
   repository: EventParticipationRepository,
   operationSignal: AbortSignal,
   checks: readonly ReconciliationCheck[],
+  options?: EventCommitOptions,
 ): Promise<void> {
   try {
-    await repository.commitEventPlan(mergeEventPlans(updates), operationSignal);
+    await repository.commitEventPlan(
+      mergeEventPlans(updates),
+      operationSignal,
+      options,
+    );
   } catch (error) {
+    if (error instanceof EventNotUpcoming) throw error;
     const signal = AbortSignal.timeout(EVENT_RECONCILIATION_TIMEOUT_MS);
     const snapshot = await repository
       .readEventSnapshot(eventId, signal)
@@ -411,17 +420,26 @@ async function persistRemoval(
   updates: EventCommitPlan,
   repository: EventParticipationRepository,
   signal: AbortSignal,
+  options?: EventCommitOptions,
 ): Promise<void> {
   const expectedUpdatedAtMs = requireTimestamp(
     getEventField(updates, eventId, "updatedAtMs"),
   );
-  await patchWithReconciliation(eventId, updates, repository, signal, [
-    ({ event }) =>
-      (toRecord(event?.participants)?.[participantProfileId] ?? null) === null,
-    ({ prizeSelections }) =>
-      (prizeSelections[participantProfileId] ?? null) === null,
-    ({ event }) => (event?.updatedAtMs ?? null) === expectedUpdatedAtMs,
-  ]);
+  await patchWithReconciliation(
+    eventId,
+    updates,
+    repository,
+    signal,
+    [
+      ({ event }) =>
+        (toRecord(event?.participants)?.[participantProfileId] ?? null) ===
+        null,
+      ({ prizeSelections }) =>
+        (prizeSelections[participantProfileId] ?? null) === null,
+      ({ event }) => (event?.updatedAtMs ?? null) === expectedUpdatedAtMs,
+    ],
+    options,
+  );
 }
 
 function createDueUpdatesBuilder(
@@ -724,10 +742,48 @@ export async function removeEventParticipant(
   repository: EventParticipationRepository,
   dependencies: EventParticipationDependencies = {},
 ): Promise<RemoveEventParticipantResponse> {
+  return removeEventParticipation(
+    identity,
+    request.eventId,
+    request.participantProfileId,
+    repository,
+    dependencies,
+  );
+}
+
+export async function leaveEvent(
+  identity: RequestIdentity,
+  request: LeaveEventRequest,
+  repository: EventParticipationRepository,
+  dependencies: EventParticipationDependencies = {},
+): Promise<LeaveEventResponse> {
+  return removeEventParticipation(
+    identity,
+    request.eventId,
+    null,
+    repository,
+    dependencies,
+  );
+}
+
+async function removeEventParticipation(
+  identity: RequestIdentity,
+  eventIdInput: string,
+  participantProfileIdInput: string | null,
+  repository: EventParticipationRepository,
+  dependencies: EventParticipationDependencies,
+): Promise<RemoveEventParticipantResponse> {
   const signal =
     dependencies.signal || AbortSignal.timeout(EVENT_OPERATION_TIMEOUT_MS);
-  const eventId = request.eventId.trim();
-  const participantProfileId = request.participantProfileId.trim();
+  const eventId = eventIdInput.trim();
+  const isLeaving = participantProfileIdInput === null;
+  let participantProfileId = participantProfileIdInput?.trim() || "";
+  const busyMessage = isLeaving
+    ? "Event is busy. Please try leaving again."
+    : "Event is busy. Please try removing again.";
+  const closedMessage = isLeaving
+    ? "This event can no longer be left."
+    : "This event can no longer remove participants.";
   const now = dependencies.now || Date.now;
   const buildDueUpdates =
     dependencies.buildDueUpdates ||
@@ -739,29 +795,27 @@ export async function removeEventParticipant(
     eventId,
     identity,
     lockManager,
-    "Event is busy. Please try removing again.",
+    busyMessage,
   );
   const stopHeartbeat = lockManager.startEventLockHeartbeat(lockHandle);
   try {
-    const { event, prizeSelections: eventPrizeSelections } =
-      await readParticipationSnapshot(eventId, repository, signal);
+    const { event, prizeSelections } = await readParticipationSnapshot(
+      eventId,
+      repository,
+      signal,
+    );
     const creatorLoginUid = normalizeString(event.createdByLoginUid);
     const creatorProfileId = normalizeString(event.createdByProfileId);
     const participants = toRecord(event.participants) || {};
-    const targetParticipant = toRecord(participants[participantProfileId]);
-    const targetLoginUid = normalizeString(targetParticipant?.loginUid);
-    const targetProfileId =
-      normalizeString(targetParticipant?.profileId) || participantProfileId;
     const directCreator = identity.uid === creatorLoginUid;
     let ownershipSnapshot: EventOwnershipSnapshot | null = null;
-    let prizeSelections: unknown;
     if (!directCreator) {
-      prizeSelections = eventPrizeSelections;
       ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
         loginUids: [identity.uid],
         profileIds: getPrizeSelectionProfileIds(prizeSelections),
       });
       if (
+        !isLeaving &&
         !applyOwnershipPolicy(() =>
           requesterOwnsProfileReference({
             requesterUid: identity.uid,
@@ -778,11 +832,54 @@ export async function removeEventParticipant(
         );
       }
     }
+    if (isLeaving) {
+      participantProfileId =
+        applyOwnershipPolicy(() =>
+          resolveParticipantParticipation(
+            event,
+            identity.uid,
+            ownershipSnapshot,
+          ),
+        ).profileId || "";
+    }
+    const targetParticipant = toRecord(participants[participantProfileId]);
+    const targetLoginUid = normalizeString(targetParticipant?.loginUid);
+    const targetProfileId =
+      normalizeString(targetParticipant?.profileId) || participantProfileId;
+    if (isLeaving && targetParticipant && ownershipSnapshot) {
+      const snapshot = ownershipSnapshot;
+      const ownedParticipantIds = applyOwnershipPolicy(() => {
+        const ownerProfileId = getLoginProfileId(snapshot, identity.uid);
+        if (!ownerProfileId) return [];
+        return Object.entries(participants).flatMap(([key, value]) => {
+          const candidate = toRecord(value);
+          if (!candidate) return [];
+          const candidateProfileId =
+            normalizeString(candidate.profileId) || key;
+          return getCanonicalProfileId(snapshot, candidateProfileId) ===
+            ownerProfileId
+            ? [key]
+            : [];
+        });
+      });
+      if (
+        ownedParticipantIds.length !== 1 ||
+        ownedParticipantIds[0] !== participantProfileId
+      ) {
+        throw new AuthApiFailure(
+          503,
+          "unavailable",
+          "profile-ownership-unavailable",
+        );
+      }
+    }
     if (event.status !== "scheduled") {
       throw new AuthApiFailure(
         409,
         "failed-precondition",
-        "Only scheduled events can remove participants.",
+        isLeaving
+          ? closedMessage
+          : "Only scheduled events can remove participants.",
       );
     }
     const nowMs = now();
@@ -801,7 +898,6 @@ export async function removeEventParticipant(
       dueNowMs: number,
     ): Promise<boolean> => {
       if (dueNowMs < startAtMs) return false;
-      prizeSelections = eventPrizeSelections;
       if (!ownershipSnapshot && participantCount(event) >= 2) {
         ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
           loginUids: [identity.uid],
@@ -822,22 +918,27 @@ export async function removeEventParticipant(
         lockManager,
         lockHandle,
         signal,
-        "Event is busy. Please try removing again.",
+        busyMessage,
       );
       return true;
     };
     if (await persistDueTransitionIfNeeded(nowMs)) {
+      throw new AuthApiFailure(409, "failed-precondition", closedMessage);
+    }
+    if (isLeaving && directCreator) {
       throw new AuthApiFailure(
         409,
         "failed-precondition",
-        "This event can no longer remove participants.",
+        "Event creator cannot leave.",
       );
     }
     if (!targetParticipant) {
       throw new AuthApiFailure(
         409,
         "failed-precondition",
-        "Selected participant was not found.",
+        isLeaving
+          ? "You are not participating in this event."
+          : "Selected participant was not found.",
       );
     }
     let targetIsCreator =
@@ -869,43 +970,82 @@ export async function removeEventParticipant(
       throw new AuthApiFailure(
         409,
         "failed-precondition",
-        "Event creator cannot be removed.",
+        isLeaving
+          ? "Event creator cannot leave."
+          : "Event creator cannot be removed.",
       );
     }
-    await requireOwnedLock(
-      lockManager,
-      lockHandle,
-      "Event is busy. Please try removing again.",
-    );
+    await requireOwnedLock(lockManager, lockHandle, busyMessage);
     const commitNowMs = now();
     if (await persistDueTransitionIfNeeded(commitNowMs)) {
-      throw new AuthApiFailure(
-        409,
-        "failed-precondition",
-        "This event can no longer remove participants.",
-      );
+      throw new AuthApiFailure(409, "failed-precondition", closedMessage);
     }
-    await persistRemoval(
-      eventId,
-      participantProfileId,
-      [
-        {
-          kind: "event-participant",
-          eventId: eventId,
-          profileId: participantProfileId,
-          value: null,
-        },
-        {
-          kind: "prize-selection",
-          eventId: eventId,
-          profileId: participantProfileId,
-          value: null,
-        },
-        eventField(eventId, "updatedAtMs", commitNowMs),
-      ],
-      repository,
-      signal,
-    );
+    try {
+      await persistRemoval(
+        eventId,
+        participantProfileId,
+        [
+          {
+            kind: "event-participant",
+            eventId: eventId,
+            profileId: participantProfileId,
+            value: null,
+          },
+          {
+            kind: "prize-selection",
+            eventId: eventId,
+            profileId: participantProfileId,
+            value: null,
+          },
+          eventField(eventId, "updatedAtMs", commitNowMs),
+        ],
+        repository,
+        signal,
+        isLeaving ? { upcomingEventId: eventId } : undefined,
+      );
+    } catch (error) {
+      if (!isLeaving || !(error instanceof EventNotUpcoming)) throw error;
+      const latest = await readParticipationSnapshot(
+        eventId,
+        repository,
+        signal,
+      );
+      if (latest.event.status === "scheduled") {
+        const latestStartAtMs = requireTimestamp(latest.event.startAtMs);
+        const dueNowMs =
+          latestStartAtMs === startAtMs
+            ? Math.max(now(), latestStartAtMs)
+            : now();
+        if (dueNowMs >= latestStartAtMs) {
+          const latestOwnership =
+            participantCount(latest.event) >= 2
+              ? await loadOwnershipSnapshot(latest.event, repository, {
+                  loginUids: [identity.uid],
+                  profileIds: getPrizeSelectionProfileIds(
+                    latest.prizeSelections,
+                  ),
+                })
+              : null;
+          const dueTransition = await buildDueUpdates({
+            eventId,
+            event: latest.event,
+            nowMs: dueNowMs,
+            ownershipSnapshot: latestOwnership,
+            prizeSelections: latest.prizeSelections,
+          });
+          await persistDueTransition(
+            eventId,
+            dueTransition,
+            repository,
+            lockManager,
+            lockHandle,
+            signal,
+            busyMessage,
+          );
+        }
+      }
+      throw new AuthApiFailure(409, "failed-precondition", closedMessage);
+    }
     return { ok: true, eventId, removedProfileId: participantProfileId };
   } finally {
     stopHeartbeat();

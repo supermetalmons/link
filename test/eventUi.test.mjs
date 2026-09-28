@@ -22,11 +22,18 @@ const {
   EVENT_AUTO_RECOVERY_DELAY_MS,
   EVENT_AUTO_RECOVERY_MAX_ATTEMPTS_PER_REASON,
   EVENT_AUTO_RECOVERY_MIN_GAP_MS,
+  canLeaveEvent,
+  getCurrentUiState,
+  getEventParticipant,
+  getEventProfileIdsToResolve,
   canSelectEventPrize,
   getDisplayedMatchSides,
   getEventAutoRecoveryReason,
   getEventNowRefreshDelayMs,
 } = await import("../src/ui/event/eventState.ts");
+const { storage } = await import("../src/utils/storage.ts");
+const { getProfileByIdViaApi, resolveProfileIdViaApi } =
+  await import("../src/services/profileApi.ts");
 const { getEndedEventWinnerPodiumEntries } =
   await import("../src/ui/event/eventPresentation.ts");
 const modalController = await import("../src/ui/eventModalController.ts");
@@ -255,6 +262,273 @@ test("refreshes just after the strict prize reveal boundary", () => {
   assert.equal(getEventNowRefreshDelayMs("scheduled", NaN, nowMs), 30_000);
   assert.equal(getEventNowRefreshDelayMs("ended", nowMs, nowMs), 30_000);
   assert.equal(getEventNowRefreshDelayMs(null, null, nowMs), 30_000);
+});
+
+test("allows enrolled noncreators to leave only before the scheduled start", (t) => {
+  let profileId = "p2";
+  let loginUid = "p2-login";
+  t.mock.method(storage, "getProfileId", () => profileId);
+  t.mock.method(storage, "getLoginId", () => loginUid);
+  const event = eventRecord({
+    startAtMs: 1000,
+    participants: { p1: participant("p1", 1), p2: participant("p2", 2) },
+  });
+  assert.equal(canLeaveEvent(event, profileId, 999), true);
+  assert.equal(canLeaveEvent(event, profileId, 1000), false);
+  assert.equal(canLeaveEvent(event, profileId, 1001), false);
+  assert.equal(canLeaveEvent(null, profileId, 999), false);
+  assert.equal(canLeaveEvent(event, "", 999), false);
+  assert.equal(canLeaveEvent(event, "p3", 999, "p3-login"), false);
+  for (const startAtMs of [NaN, Infinity, -Infinity]) {
+    assert.equal(canLeaveEvent({ ...event, startAtMs }, profileId, 999), false);
+  }
+  for (const status of ["active", "ended", "dismissed"]) {
+    assert.equal(canLeaveEvent({ ...event, status }, profileId, 999), false);
+  }
+  profileId = "p1";
+  assert.equal(canLeaveEvent(event, profileId, 999), false);
+  profileId = "p2";
+  loginUid = "p1-login";
+  assert.equal(canLeaveEvent(event, profileId, 999), false);
+});
+
+test("merged-profile membership shows Leave without Join using the stored login", (t) => {
+  t.mock.method(storage, "getProfileId", () => "new-profile");
+  t.mock.method(storage, "getLoginId", () => "linked-login");
+  const storedParticipant = {
+    ...participant("old-profile", 2),
+    loginUid: "linked-login",
+  };
+  const event = eventRecord({
+    startAtMs: 1000,
+    participants: { "old-profile": storedParticipant },
+  });
+  assert.equal(
+    getEventParticipant(event, "new-profile", "linked-login"),
+    storedParticipant,
+  );
+  const uiState = getCurrentUiState(event, "new-profile", "linked-login");
+  const showJoin =
+    !uiState.isJoined && event.status === "scheduled" && 999 < event.startAtMs;
+  const showLeave = canLeaveEvent(event, "new-profile", 999, "linked-login");
+  assert.equal(showLeave, true);
+  assert.equal(showJoin, false);
+  assert.equal(showJoin && showLeave, false);
+  assert.equal(
+    getEventParticipant(event, "new-profile", "different-login"),
+    null,
+  );
+  assert.equal(getEventParticipant(event, "", ""), null);
+  const leftEvent = { ...event, participants: {} };
+  assert.equal(
+    getCurrentUiState(leftEvent, "new-profile", "linked-login").isJoined,
+    false,
+  );
+  assert.equal(
+    canLeaveEvent(leftEvent, "new-profile", 999, "linked-login"),
+    false,
+  );
+});
+
+test("canonical membership shows Leave without Join through another linked login", (t) => {
+  t.mock.method(storage, "getProfileId", () => "canonical-profile");
+  t.mock.method(storage, "getLoginId", () => "alternate-login");
+  const storedParticipant = {
+    ...participant("retired-profile", 2),
+    loginUid: "original-login",
+  };
+  const event = eventRecord({
+    startAtMs: 1000,
+    participants: { "retired-profile": storedParticipant },
+  });
+  const profileIds = { "retired-profile": "canonical-profile", p1: "p1" };
+  const uiState = getCurrentUiState(
+    event,
+    "canonical-profile",
+    "alternate-login",
+    profileIds,
+  );
+  assert.equal(
+    getEventParticipant(
+      event,
+      "canonical-profile",
+      "alternate-login",
+      profileIds,
+    ),
+    storedParticipant,
+  );
+  assert.equal(uiState.isJoined, true);
+  assert.equal(
+    canLeaveEvent(
+      event,
+      "canonical-profile",
+      999,
+      "alternate-login",
+      profileIds,
+    ),
+    true,
+  );
+  assert.equal(
+    canLeaveEvent(
+      event,
+      "canonical-profile",
+      1000,
+      "alternate-login",
+      profileIds,
+    ),
+    false,
+  );
+
+  const leftEvent = { ...event, participants: {} };
+  assert.equal(
+    getCurrentUiState(
+      leftEvent,
+      "canonical-profile",
+      "alternate-login",
+      profileIds,
+    ).isJoined,
+    false,
+  );
+  assert.equal(
+    canLeaveEvent(
+      leftEvent,
+      "canonical-profile",
+      999,
+      "alternate-login",
+      profileIds,
+    ),
+    false,
+  );
+  const rejoinedEvent = {
+    ...event,
+    participants: { "canonical-profile": participant("canonical-profile", 3) },
+  };
+  assert.equal(
+    canLeaveEvent(
+      rejoinedEvent,
+      "canonical-profile",
+      999,
+      "alternate-login",
+      profileIds,
+    ),
+    true,
+  );
+});
+
+test("canonical ownership shows Leave without Join when public profile lookup is null", async (t) => {
+  const profileId = "canonical-profile";
+  const loginUid = "alternate-login";
+  t.mock.method(storage, "getProfileId", () => profileId);
+  t.mock.method(storage, "getLoginId", () => loginUid);
+  const calls = [];
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    const body = JSON.parse(init.body);
+    calls.push({ path, body });
+    const response =
+      path === "/profiles/lookup"
+        ? { ok: true, profile: null }
+        : {
+            ok: true,
+            profileId:
+              body.profileId === "retired-profile" ? profileId : body.profileId,
+          };
+    assert.ok(path === "/profiles/lookup" || path === "/profiles/canonical-id");
+    return new Response(JSON.stringify(response), {
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+  const event = eventRecord({
+    startAtMs: 1000,
+    participants: {
+      "retired-profile": {
+        ...participant("retired-profile", 2),
+        loginUid: "original-login",
+      },
+    },
+  });
+  const tokenProvider = async () => "session-token";
+  assert.equal(
+    await getProfileByIdViaApi("retired-profile", tokenProvider),
+    null,
+  );
+  const profileIds = Object.fromEntries(
+    await Promise.all(
+      getEventProfileIdsToResolve(event, profileId, loginUid).map(
+        async (id) => [
+          id,
+          (await resolveProfileIdViaApi(id, tokenProvider)) ?? "",
+        ],
+      ),
+    ),
+  );
+  const uiState = getCurrentUiState(event, profileId, loginUid, profileIds);
+  const showJoin =
+    !uiState.isJoined && event.status === "scheduled" && 999 < event.startAtMs;
+  assert.equal(
+    canLeaveEvent(event, profileId, 999, loginUid, profileIds),
+    true,
+  );
+  assert.equal(showJoin, false);
+  assert.deepEqual(calls, [
+    {
+      path: "/profiles/lookup",
+      body: { kind: "profile", id: "retired-profile" },
+    },
+    { path: "/profiles/canonical-id", body: { profileId: "p1" } },
+    { path: "/profiles/canonical-id", body: { profileId: "retired-profile" } },
+  ]);
+});
+
+test("canonical creators cannot leave through another linked login", (t) => {
+  t.mock.method(storage, "getProfileId", () => "canonical-profile");
+  t.mock.method(storage, "getLoginId", () => "alternate-login");
+  const profileIds = { "retired-profile": "canonical-profile" };
+  for (const participantId of ["retired-profile", "canonical-profile"]) {
+    const event = eventRecord({
+      startAtMs: 1000,
+      createdByProfileId: "retired-profile",
+      createdByLoginUid: "original-login",
+      participants: { [participantId]: participant(participantId, 1) },
+    });
+    assert.equal(
+      getCurrentUiState(
+        event,
+        "canonical-profile",
+        "alternate-login",
+        profileIds,
+      ).isJoined,
+      true,
+    );
+    assert.equal(
+      canLeaveEvent(
+        event,
+        "canonical-profile",
+        999,
+        "alternate-login",
+        profileIds,
+      ),
+      false,
+    );
+  }
+});
+
+test("profile resolution skips unrelated participants when membership is direct", () => {
+  const event = eventRecord({
+    participants: { p1: participant("p1", 1), p2: participant("p2", 2) },
+  });
+  assert.deepEqual(getEventProfileIdsToResolve(event, "p2", "other-login"), [
+    "p1",
+  ]);
+  assert.deepEqual(
+    getEventProfileIdsToResolve(event, "merged-p2", "p2-login"),
+    ["p1"],
+  );
+  assert.deepEqual(getEventProfileIdsToResolve(event, "p1", "p1-login"), []);
+  assert.deepEqual(
+    getEventProfileIdsToResolve(event, "merged-p2", "other-login"),
+    ["p1", "p2"],
+  );
 });
 
 test("allows prize selection only during the reveal window for unlocked participants", () => {

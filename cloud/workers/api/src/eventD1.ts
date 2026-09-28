@@ -17,6 +17,7 @@ export {
   EventD1Failure,
   EventD1Conflict,
   EventWritesDisabled,
+  EventNotUpcoming,
   type EventLeaseRecord,
   type EventSyncThrottleRecord,
 } from "./eventD1/types.ts";

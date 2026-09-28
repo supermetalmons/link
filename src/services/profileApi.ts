@@ -2,12 +2,14 @@ import {
   isLeaderboardReadResponse,
   isProfileCustomizationUpdateResponse,
   isProfileLookupResponse,
+  isResolveProfileIdResponse,
   type CompletePlayerProfile,
   type LeaderboardReadRequest,
   type LeaderboardReadResponse,
   type LeaderboardReadType,
   type ProfileLookupRequest,
   type ProfileLookupResponse,
+  type ResolveProfileIdRequest,
   type ProfileCustomizationUpdateRequest,
   type ProfileCustomizationUpdateResponse,
 } from "@mons/shared/profiles";
@@ -51,6 +53,7 @@ async function profileRequest<T>(
   path: string,
   body:
     | ProfileLookupRequest
+    | ResolveProfileIdRequest
     | LeaderboardReadRequest
     | ProfileCustomizationUpdateRequest
     | UsernameEditRequest,
@@ -106,6 +109,19 @@ export async function getProfileByIdViaApi(
   return (
     await lookupProfile({ kind: "profile", id: profileId }, tokenProvider)
   ).profile;
+}
+
+export async function resolveProfileIdViaApi(
+  profileId: string,
+  tokenProvider: AuthTokenProvider,
+): Promise<string | null> {
+  const response = await profileRequest(
+    "/profiles/canonical-id",
+    { profileId },
+    tokenProvider,
+    isResolveProfileIdResponse,
+  );
+  return response.profileId;
 }
 
 export async function readLeaderboardViaApi(

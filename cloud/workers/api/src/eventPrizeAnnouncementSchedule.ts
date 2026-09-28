@@ -244,7 +244,7 @@ export function createEventAnnouncementScheduleRepository(
 ): EventGameplayRepository {
   return {
     ...repository,
-    async commitEventPlan(updates, signal) {
+    async commitEventPlan(updates, signal, options) {
       const prepared = await prepareEventAnnouncementSchedule(
         env,
         updates,
@@ -257,6 +257,7 @@ export function createEventAnnouncementScheduleRepository(
         [prepared],
         signal,
         dependencies.schedule,
+        options,
       );
     },
   };

@@ -164,7 +164,7 @@ export function createEventProfileGameProjectionRepository(
 ): EventGameplayRepository {
   return {
     ...repository,
-    async commitEventPlan(updates, signal) {
+    async commitEventPlan(updates, signal, options) {
       const prepared = await prepareEventProfileGameProjection(
         env,
         updates,
@@ -177,6 +177,7 @@ export function createEventProfileGameProjectionRepository(
         [prepared],
         signal,
         dependencies.schedule,
+        options,
       );
     },
   };

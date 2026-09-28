@@ -7,6 +7,9 @@ export type ProfileLookupRequest = {
   id: string;
 };
 
+export type ResolveProfileIdRequest = { profileId: string };
+export type ResolveProfileIdResponse = { ok: true; profileId: string | null };
+
 export type LeaderboardReadType = "rating" | "mp" | MiningMaterialName;
 
 export interface PlayerProfile {
@@ -105,6 +108,12 @@ export function isProfileLookupRequest(
 export function isProfileLookupResponse(
   value: unknown,
 ): value is ProfileLookupResponse;
+export function isResolveProfileIdRequest(
+  value: unknown,
+): value is ResolveProfileIdRequest;
+export function isResolveProfileIdResponse(
+  value: unknown,
+): value is ResolveProfileIdResponse;
 export function isLeaderboardReadType(
   value: unknown,
 ): value is LeaderboardReadType;

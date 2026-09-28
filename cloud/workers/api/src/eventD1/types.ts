@@ -83,6 +83,12 @@ export class EventWritesDisabled extends EventD1Failure {
   }
 }
 
+export class EventNotUpcoming extends EventD1Failure {
+  constructor(options?: ErrorOptions) {
+    super("event-not-upcoming", options);
+  }
+}
+
 export type EventRow = {
   event_id: string;
   pending_transition_id: string | null;
@@ -156,6 +162,7 @@ export type TelegramProjectionSnapshot = {
 
 export type EventMutationOptions = {
   admission: EventWriteAdmission;
+  upcomingEventId?: string;
   allowStoredProfilePrizeAssignment?: boolean;
   eventLease?: EventLeaseGuard;
   eventSnapshot?: StoredEventSnapshot;

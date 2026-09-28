@@ -10,6 +10,7 @@ import type { EventMutation } from "../../../../runtime/eventCommands.js";
 import {
   eventWriteAdmissionGuard,
   eventLeaseGuard,
+  upcomingEventGuard,
   rethrowEventBatchFailure,
 } from "./guards.ts";
 import { safeInteger } from "./validation.ts";
@@ -29,6 +30,9 @@ export async function commitEventMutationsInternal(
   const guards = [eventWriteAdmissionGuard(db, options.admission)];
   if (options.eventLease) {
     guards.push(eventLeaseGuard(db, options.eventLease));
+  }
+  if (options.upcomingEventId !== undefined) {
+    guards.push(upcomingEventGuard(db, options.upcomingEventId));
   }
 
   const events = buildEventStatements(db, prepared.eventStates, options, nowMs);
@@ -82,6 +86,7 @@ export async function commitEventMutations(
     !options.expectedProfilePrizeRevisions &&
     !options.expectedTelegramStateRevisions &&
     !options.eventLease &&
+    options.upcomingEventId === undefined &&
     !options.transition;
   const attempts = canRetry ? MAX_EVENT_TRANSACTION_ATTEMPTS : 1;
   for (let attempt = 0; attempt < attempts; attempt++) {

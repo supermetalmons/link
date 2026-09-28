@@ -8,8 +8,10 @@ import {
   readCanonicalPublicProfileByLogin,
   resolveCanonicalPublicProfile,
 } from "./profileCanonicalD1.ts";
+import { readCanonicalProfileIdMap } from "./profileCanonical/auth.ts";
 
 export type ProfileRepository = {
+  resolveProfileId: (profileId: string) => Promise<string | null>;
   getProfileById: (profileId: string) => Promise<CompletePlayerProfile | null>;
   getProfileByLoginId: (
     loginId: string,
@@ -29,6 +31,12 @@ export function createProfileRepository(
   if (dependencies.canonical) return dependencies.canonical;
   const db = dependencies.profileDb || env.PROFILE_DB;
   return {
+    async resolveProfileId(profileId) {
+      return (
+        (await readCanonicalProfileIdMap(db, [profileId])).get(profileId) ??
+        null
+      );
+    },
     async getProfileById(profileId) {
       return (
         (

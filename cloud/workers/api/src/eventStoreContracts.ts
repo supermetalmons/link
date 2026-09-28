@@ -17,6 +17,9 @@ export type EventLockGuard = {
   lockId: string;
   ownerUid: string;
 };
+export type EventCommitOptions = {
+  upcomingEventId?: string;
+};
 export type EventRecordTransaction = (
   id: string,
   updater: (
@@ -35,6 +38,7 @@ export type EventStore = EventReads &
     commitEventPlan(
       plan: readonly EventCommitPlan[number][],
       signal?: AbortSignal,
+      options?: EventCommitOptions,
     ): Promise<void>;
     transactEventSyncThrottle(
       eventId: string,
