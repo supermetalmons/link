@@ -13,6 +13,7 @@ const PLANET_PEPPA_PRIZES_EVENT_ID = "z3oj52Iiime";
 const SHELVES_PRIZES_EVENT_ID = "Q7uRdLXyVKF";
 const VEHICLE_WAMMIN_PRIZES_EVENT_ID = "wjFa2d03Ciu";
 const SWAG_PACK_PRIZES_EVENT_ID = "d9RtIQY8ONs";
+const REVERIE_BANNERS_PRIZES_EVENT_ID = "PCTotuzfUPu";
 const CORE_PRIZE_COLLECTION_ADDRESS =
   "2xF7dq3maFLud8FQUYAyLiWucdF7RePyzHJs7NkurkoD";
 const COMPRESSED_PRIZE_COLLECTION_ADDRESS =
@@ -29,6 +30,8 @@ const VEHICLE_WAMMIN_COLLECTION_ADDRESS =
   "BBkMWyu4RRrNSdjGDV27FGgZZ58o7jfvQY1MrD2iTfs6";
 const SWAG_PACK_COLLECTION_ADDRESS =
   "C22esis7kQMbX9JGWsMaKvsh1X5GeBmHPju28jiKDyAP";
+const REVERIE_BANNERS_COLLECTION_ADDRESS =
+  "E8k3YeCQeJ3oWT25Jc7EPg6wGtN2vDfHa1SzNqVY765L";
 const SCARECROW_PRIZE_IMAGE_SIZE = Object.freeze({
   imageWidth: 420,
   imageHeight: 525,
@@ -60,6 +63,10 @@ const VEHICLE_WAMMIN_IMAGE_SIZE = Object.freeze({
 const SWAG_PACK_IMAGE_SIZE = Object.freeze({
   imageWidth: 1320,
   imageHeight: 1320,
+});
+const REVERIE_BANNERS_IMAGE_SIZE = Object.freeze({
+  imageWidth: 1500,
+  imageHeight: 500,
 });
 
 const createPrize = ({
@@ -382,6 +389,39 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
       }),
     ]),
   }),
+  [REVERIE_BANNERS_PRIZES_EVENT_ID]: Object.freeze({
+    eventId: REVERIE_BANNERS_PRIZES_EVENT_ID,
+    collectionName: "Rêverie Banners",
+    prizes: Object.freeze([
+      createPrize({
+        ...REVERIE_BANNERS_IMAGE_SIZE,
+        id: "316",
+        imageUrl: "https://cdn.lil.org/player/reverie_banners/316.png",
+        assetAddress: "3vBzfiy28mvLT1pwnBEJJD5v2ZCWbkMtkqBwsDskEy8q",
+        collectionAddress: REVERIE_BANNERS_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...REVERIE_BANNERS_IMAGE_SIZE,
+        id: "317",
+        imageUrl: "https://cdn.lil.org/player/reverie_banners/317.png",
+        assetAddress: "435PQwumaGJWAvZGzCnNnQVpVWRHLbnKR6XgXz79TWjg",
+        collectionAddress: REVERIE_BANNERS_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...REVERIE_BANNERS_IMAGE_SIZE,
+        id: "318",
+        imageUrl: "https://cdn.lil.org/player/reverie_banners/318.png",
+        assetAddress: "EVAuqJhEsDRXF4gzUweD5FiPeCvqpsNHbNrGY25LekaK",
+        collectionAddress: REVERIE_BANNERS_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+    ]),
+  }),
 });
 
 const EVENT_PRIZE_IDS = Object.freeze(
@@ -583,6 +623,7 @@ module.exports = {
   LEGACY_CORE_PRIZES_EVENT_ID,
   PLANET_PEPPA_PRIZES_EVENT_ID,
   RARE_WEITSMANS_PRIZES_EVENT_ID,
+  REVERIE_BANNERS_PRIZES_EVENT_ID,
   SHELVES_PRIZES_EVENT_ID,
   SWAG_PACK_PRIZES_EVENT_ID,
   VEHICLE_WAMMIN_PRIZES_EVENT_ID,
