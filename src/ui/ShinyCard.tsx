@@ -82,11 +82,38 @@ let defaultSubtitleIndex = 0;
 let cardIndex = defaultCardBgIndex;
 let asciimojiIndex = defaultSubtitleIndex;
 
-let demonIndex = 0;
-let angelIndex = 0;
-let drainerIndex = 0;
-let spiritIndex = 0;
-let mysticIndex = 0;
+const CARD_MONS: Record<
+  MonType,
+  { index: number; left: string; regularCount: number }
+> = {
+  [MonType.DEMON]: {
+    index: 0,
+    left: "32.13%",
+    regularCount: demonTypes.length,
+  },
+  [MonType.ANGEL]: {
+    index: 1,
+    left: "44.35%",
+    regularCount: angelTypes.length,
+  },
+  [MonType.DRAINER]: {
+    index: 2,
+    left: "56.85%",
+    regularCount: drainerTypes.length - 1,
+  },
+  [MonType.SPIRIT]: {
+    index: 3,
+    left: "69.2%",
+    regularCount: spiritTypes.length,
+  },
+  [MonType.MYSTIC]: {
+    index: 4,
+    left: "81.5%",
+    regularCount: mysticTypes.length,
+  },
+};
+
+let displayedMonsIndexes: ReturnType<typeof getMonsIndexes> = [0, 0, 0, 0, 0];
 let currentlySelectedStickers: Record<string, string>;
 
 const undoHistory = new ProfileScopedUndoHistory();
@@ -103,11 +130,7 @@ let ownEmojiAuraBackground: HTMLDivElement | null;
 let ownBgImg: HTMLImageElement | null;
 let ownSubtitleElement: HTMLElement | null;
 let nameElement: HTMLElement | null;
-let ownDemonImg: HTMLImageElement | null;
-let ownDrainerImg: HTMLImageElement | null;
-let ownAngelImg: HTMLImageElement | null;
-let ownSpiritImg: HTMLImageElement | null;
-let ownMysticImg: HTMLImageElement | null;
+let ownMonImages: Partial<Record<MonType, HTMLImageElement>> = {};
 let ownCardContentsLayer: HTMLDivElement | null;
 let ownCounterElement: HTMLElement | null;
 let editingPanel: HTMLDivElement | null = null;
@@ -176,7 +199,8 @@ export const getActiveInventoryItemSelection =
 
     if (
       royalAguapwoshiDrainerIndex >= 0 &&
-      getMonsIndexes(false, null)[2] === royalAguapwoshiDrainerIndex
+      getMonsIndexes(false, null)[CARD_MONS[MonType.DRAINER].index] ===
+        royalAguapwoshiDrainerIndex
     ) {
       specialIds.add(0);
     }
@@ -202,10 +226,6 @@ export const getActiveInventoryItemSelection =
 
 const getNextRegularCardBackgroundId = (currentBgId: number): number => {
   return getNextRegularId(currentBgId, totalCardBgsCount);
-};
-
-const getNextRegularDrainerId = (currentDrainerId: number): number => {
-  return getNextRegularId(currentDrainerId, drainerTypes.length - 1);
 };
 
 const getUndoUpdateSource = (contentType: string, oldId: any): UpdateSource => {
@@ -1330,7 +1350,7 @@ const addImageToCard = (
   topPosition: string,
   imageData: string,
   alpha: number,
-  monType: string = "",
+  monType: MonType | "" = "",
   handlePointerLeave: any,
   isOtherPlayer: boolean,
 ): HTMLElement => {
@@ -1423,23 +1443,7 @@ const addImageToCard = (
       imageContainer.addEventListener("mouseleave", updateMonScale);
       imageContainer.addEventListener("mousemove", updateMonScale);
 
-      switch (monType) {
-        case "demon":
-          ownDemonImg = img;
-          break;
-        case "angel":
-          ownAngelImg = img;
-          break;
-        case "drainer":
-          ownDrainerImg = img;
-          break;
-        case "spirit":
-          ownSpiritImg = img;
-          break;
-        case "mystic":
-          ownMysticImg = img;
-          break;
-      }
+      ownMonImages[monType] = img;
     }
 
     imageContainer.appendChild(img);
@@ -1632,11 +1636,7 @@ export const hideShinyCard = () => {
   ownBgImg = null;
   ownSubtitleElement = null;
   nameElement = null;
-  ownDemonImg = null;
-  ownDrainerImg = null;
-  ownAngelImg = null;
-  ownSpiritImg = null;
-  ownMysticImg = null;
+  ownMonImages = {};
   ownCardContentsLayer = null;
   ownCounterElement = null;
   currentlySelectedStickers = {};
@@ -1665,7 +1665,6 @@ async function showMons(
   isOtherPlayer: boolean,
   profile: PlayerProfile | null,
 ) {
-  const alpha = 1;
   const getSpriteByKey = (await import(`../assets/monsSprites`)).getSpriteByKey;
   if (
     !cardContentsLayer.isConnected ||
@@ -1673,112 +1672,30 @@ async function showMons(
   ) {
     return;
   }
-  const nextMonsIndexes = getMonsIndexes(isOtherPlayer, profile);
-  [demonIndex, angelIndex, drainerIndex, spiritIndex, mysticIndex] =
-    nextMonsIndexes;
-  const y = "74.37%";
-  addImageToCard(
-    cardContentsLayer,
-    "32.13%",
-    y,
-    getSpriteByKey(getMonId(MonType.DEMON, demonIndex)),
-    alpha,
-    "demon",
-    handlePointerLeave,
-    isOtherPlayer,
-  );
-  addImageToCard(
-    cardContentsLayer,
-    "44.35%",
-    y,
-    getSpriteByKey(getMonId(MonType.ANGEL, angelIndex)),
-    alpha,
-    "angel",
-    handlePointerLeave,
-    isOtherPlayer,
-  );
-  addImageToCard(
-    cardContentsLayer,
-    "32.13%",
-    y,
-    getSpriteByKey(getMonId(MonType.DEMON, demonIndex)),
-    alpha,
-    "demon",
-    handlePointerLeave,
-    isOtherPlayer,
-  );
-  addImageToCard(
-    cardContentsLayer,
-    "44.35%",
-    y,
-    getSpriteByKey(getMonId(MonType.ANGEL, angelIndex)),
-    alpha,
-    "angel",
-    handlePointerLeave,
-    isOtherPlayer,
-  );
-  addImageToCard(
-    cardContentsLayer,
-    "56.85%",
-    y,
-    getSpriteByKey(getMonId(MonType.DRAINER, drainerIndex)),
-    alpha,
-    "drainer",
-    handlePointerLeave,
-    isOtherPlayer,
-  );
-  addImageToCard(
-    cardContentsLayer,
-    "69.2%",
-    y,
-    getSpriteByKey(getMonId(MonType.SPIRIT, spiritIndex)),
-    alpha,
-    "spirit",
-    handlePointerLeave,
-    isOtherPlayer,
-  );
-  addImageToCard(
-    cardContentsLayer,
-    "81.5%",
-    y,
-    getSpriteByKey(getMonId(MonType.MYSTIC, mysticIndex)),
-    alpha,
-    "mystic",
-    handlePointerLeave,
-    isOtherPlayer,
-  );
+  displayedMonsIndexes = getMonsIndexes(isOtherPlayer, profile);
+  for (const monType of Object.values(MonType)) {
+    const { index, left } = CARD_MONS[monType];
+    addImageToCard(
+      cardContentsLayer,
+      left,
+      "74.37%",
+      getSpriteByKey(getMonId(monType, displayedMonsIndexes[index])),
+      1,
+      monType,
+      handlePointerLeave,
+      isOtherPlayer,
+    );
+  }
 }
 
-async function didClickMonImage(monType: string) {
-  switch (monType) {
-    case "demon":
-      updateContent(monType, (demonIndex + 1) % demonTypes.length, demonIndex);
-      break;
-    case "angel":
-      updateContent(monType, (angelIndex + 1) % angelTypes.length, angelIndex);
-      break;
-    case "drainer":
-      updateContent(
-        monType,
-        getNextRegularDrainerId(drainerIndex),
-        drainerIndex,
-      );
-      break;
-    case "spirit":
-      updateContent(
-        monType,
-        (spiritIndex + 1) % spiritTypes.length,
-        spiritIndex,
-      );
-      break;
-    case "mystic":
-      updateContent(
-        monType,
-        (mysticIndex + 1) % mysticTypes.length,
-        mysticIndex,
-      );
-      break;
-  }
+function didClickMonImage(monType: MonType) {
+  const { index, regularCount } = CARD_MONS[monType];
+  const currentIndex = displayedMonsIndexes[index];
+  void updateContent(
+    monType,
+    getNextRegularId(currentIndex, regularCount),
+    currentIndex,
+  );
   void notifyShinyCardMonsChange();
 }
 
@@ -1860,11 +1777,11 @@ async function updateContent(
       }
       break;
     }
-    case "demon":
-    case "angel":
-    case "drainer":
-    case "spirit":
-    case "mystic": {
+    case MonType.DEMON:
+    case MonType.ANGEL:
+    case MonType.DRAINER:
+    case MonType.SPIRIT:
+    case MonType.MYSTIC: {
       if (
         contentType === "drainer" &&
         source !== "inventory" &&
@@ -1873,46 +1790,18 @@ async function updateContent(
         return;
       }
       const ownMonsIndexes = getMonsIndexes(false, null);
-      let img: HTMLImageElement | null = null;
-      let monType: MonType | null = null;
-      switch (contentType) {
-        case "demon":
-          ownMonsIndexes[0] = newId;
-          img = ownDemonImg;
-          monType = MonType.DEMON;
-          break;
-        case "angel":
-          ownMonsIndexes[1] = newId;
-          img = ownAngelImg;
-          monType = MonType.ANGEL;
-          break;
-        case "drainer":
-          ownMonsIndexes[2] = newId;
-          img = ownDrainerImg;
-          monType = MonType.DRAINER;
-          break;
-        case "spirit":
-          ownMonsIndexes[3] = newId;
-          img = ownSpiritImg;
-          monType = MonType.SPIRIT;
-          break;
-        case "mystic":
-          ownMonsIndexes[4] = newId;
-          img = ownMysticImg;
-          monType = MonType.MYSTIC;
-          break;
-      }
+      ownMonsIndexes[CARD_MONS[contentType].index] = newId;
+      const img = ownMonImages[contentType];
       const monsIndexesString = ownMonsIndexes.join(",");
       storage.setProfileMons(monsIndexesString);
       updateShinyCardProfileMons(monsIndexesString);
       if (isShowingOwnShinyCard()) {
-        [demonIndex, angelIndex, drainerIndex, spiritIndex, mysticIndex] =
-          ownMonsIndexes;
-        if (img?.isConnected && monType !== null) {
+        displayedMonsIndexes = ownMonsIndexes;
+        if (img?.isConnected) {
           const getSpriteByKey = (await import(`../assets/monsSprites`))
             .getSpriteByKey;
           img.src = `data:image/webp;base64,${getSpriteByKey(
-            getMonId(monType, newId),
+            getMonId(contentType, newId),
           )}`;
         }
       }
@@ -1984,7 +1873,9 @@ export function setOwnershipVerifiedSpecialItem(id: number) {
       if (royalAguapwoshiDrainerIndex < 0) {
         break;
       }
-      const ownDrainerIndex = getMonsIndexes(false, null)[2];
+      const ownDrainerIndex = getMonsIndexes(false, null)[
+        CARD_MONS[MonType.DRAINER].index
+      ];
       updateContent(
         "drainer",
         royalAguapwoshiDrainerIndex,

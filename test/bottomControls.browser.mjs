@@ -480,11 +480,16 @@ export const teardownProfileScope = () => {};
               return "\0bottom-lifecycle";
             if (id === "../game/mainGameLoadState") return "\0bottom-main-load";
           }
+          const isAutomatchHook = importer?.endsWith(
+            "/useAutomatchControls.ts",
+          );
+          const replacementId =
+            isAutomatchHook && id.startsWith("../../") ? id.slice(3) : id;
           if (
-            importer?.endsWith("/BottomControls.tsx") &&
-            replacements.has(id)
+            (importer?.endsWith("/BottomControls.tsx") || isAutomatchHook) &&
+            replacements.has(replacementId)
           ) {
-            return "\0" + replacements.get(id);
+            return "\0" + replacements.get(replacementId);
           }
           if (
             importer?.endsWith("/outsideTapState.ts") &&
@@ -1370,6 +1375,47 @@ test(
       assert.deepEqual(
         await page.evaluate(() => window.harness.environment.calls),
         [["connect", "existing"]],
+      );
+    });
+  },
+);
+
+test(
+  "fresh automatch preserves its Cancel deadline through the match reset before entering its invite",
+  { timeout: 60000 },
+  async () => {
+    await fixture(async (page) => {
+      await startAutomatch(page);
+      await page.clock.runFor(3000);
+      await page.evaluate(() =>
+        window.harness.respondAutomatch(
+          0,
+          { ok: true, mode: "pending", inviteId: "fresh-after-reset" },
+          false,
+        ),
+      );
+      await page.evaluate(() => window.harness.resetMatch());
+      assert.equal(
+        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        0,
+      );
+      await page.evaluate(() =>
+        window.harness.run(() => {
+          window.harness.environment.route = {
+            mode: "invite",
+            inviteId: "fresh-after-reset",
+            path: "fresh-after-reset",
+          };
+          window.harness.port.setAutomatchWaitingState(true);
+        }),
+      );
+      await page.clock.runFor(6999);
+      assert.equal(await count(page, "Cancel"), 0);
+      await page.clock.runFor(1);
+      assert.equal(await button(page, "Cancel").isDisabled(), false);
+      assert.equal(
+        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        0,
       );
     });
   },

@@ -43,7 +43,6 @@ import {
   didClickHomeButton,
   didClickInviteActionButtonBeforeThereIsInviteReady,
   didClickAutomoveButton,
-  didClickAutomatchButton,
   didClickStartBotGameButton,
   didClickEndMatchButton,
   didClickConfirmResignButton,
@@ -77,6 +76,7 @@ import {
 } from "./controls/boardReactionPort";
 import NavigationPicker from "./NavigationPicker";
 import { useNavigationGames } from "./controls/useNavigationGames";
+import { useAutomatchControls } from "./controls/useAutomatchControls";
 import {
   STICKER_IMAGE_BASE_URL,
   useReactionPicker,
@@ -152,11 +152,7 @@ import {
   type PrimaryAction,
   type CloseNavigationAndAppearancePopupOptions,
 } from "./controls/bottomControlsPort";
-import {
-  automatchControlsReducer,
-  createAutomatchControlsState,
-  type GameControlsAction,
-} from "./controls/bottomControlsState";
+import type { GameControlsAction } from "./controls/bottomControlsState";
 import {
   bottomControlsUiReducer,
   createBottomControlsUiState,
@@ -165,9 +161,6 @@ import {
 import { didDismissSomethingWithOutsideTapJustNow } from "./controls/outsideTapState";
 import { observeBottomControlsViewport } from "./controls/bottomControlsViewport";
 import {
-  CANCEL_AUTOMATCH_REVEAL_DELAY_MS,
-  NAVIGATION_PENDING_CANCEL_INTENT_TTL_MS,
-  getCancelAutomatchRevealDeadlineMs,
   getTimerEnableDelayMs,
   hasControlDeadlineElapsed,
 } from "./controls/controlTiming";
@@ -215,94 +208,6 @@ export {
 const EVENT_MODAL_NAV_AUTOCLOSE_SUPPRESS_MS = 10000;
 const rematchSeriesDigitsFontFamily =
   'ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, "Liberation Mono", "Courier New", monospace';
-let pendingImmediateCancelAutomatchInviteId: string | null = null;
-let pendingImmediateCancelAutomatchIntentExpiresAtMs = 0;
-let pendingDelayedCancelAutomatchInviteId: string | null = null;
-let pendingDelayedCancelAutomatchIntentExpiresAtMs = 0;
-let pendingDelayedCancelAutomatchRevealAtMs = 0;
-let pendingFreshAutomatchCancelRevealAtMs = 0;
-
-const clearPendingImmediateCancelAutomatchIntent = () => {
-  pendingImmediateCancelAutomatchInviteId = null;
-  pendingImmediateCancelAutomatchIntentExpiresAtMs = 0;
-};
-
-const requestPendingImmediateCancelAutomatchIntent = (inviteId: string) => {
-  if (!inviteId) {
-    clearPendingImmediateCancelAutomatchIntent();
-    return;
-  }
-  pendingImmediateCancelAutomatchInviteId = inviteId;
-  pendingImmediateCancelAutomatchIntentExpiresAtMs =
-    Date.now() + NAVIGATION_PENDING_CANCEL_INTENT_TTL_MS;
-};
-
-const consumePendingImmediateCancelAutomatchIntent = (): boolean => {
-  const pendingInviteId = pendingImmediateCancelAutomatchInviteId;
-  if (!pendingInviteId) {
-    return false;
-  }
-  if (pendingImmediateCancelAutomatchIntentExpiresAtMs < Date.now()) {
-    clearPendingImmediateCancelAutomatchIntent();
-    return false;
-  }
-  const routeState = getCurrentRouteState();
-  const currentInviteId =
-    routeState.mode === "invite" && routeState.inviteId
-      ? routeState.inviteId
-      : "";
-  if (currentInviteId === pendingInviteId) {
-    clearPendingImmediateCancelAutomatchIntent();
-    return true;
-  }
-  return false;
-};
-
-const clearPendingDelayedCancelAutomatchIntent = () => {
-  pendingDelayedCancelAutomatchInviteId = null;
-  pendingDelayedCancelAutomatchIntentExpiresAtMs = 0;
-  pendingDelayedCancelAutomatchRevealAtMs = 0;
-};
-
-const requestPendingDelayedCancelAutomatchIntent = (
-  inviteId: string,
-  revealAtMs: number,
-) => {
-  if (!inviteId) {
-    clearPendingDelayedCancelAutomatchIntent();
-    return;
-  }
-  pendingDelayedCancelAutomatchInviteId = inviteId;
-  pendingDelayedCancelAutomatchIntentExpiresAtMs =
-    Date.now() + NAVIGATION_PENDING_CANCEL_INTENT_TTL_MS;
-  pendingDelayedCancelAutomatchRevealAtMs =
-    revealAtMs > 0
-      ? Math.floor(revealAtMs)
-      : Date.now() + CANCEL_AUTOMATCH_REVEAL_DELAY_MS;
-};
-
-const consumePendingDelayedCancelAutomatchIntent = (): number | null => {
-  const pendingInviteId = pendingDelayedCancelAutomatchInviteId;
-  if (!pendingInviteId) {
-    return null;
-  }
-  if (pendingDelayedCancelAutomatchIntentExpiresAtMs < Date.now()) {
-    clearPendingDelayedCancelAutomatchIntent();
-    return null;
-  }
-  const routeState = getCurrentRouteState();
-  const currentInviteId =
-    routeState.mode === "invite" && routeState.inviteId
-      ? routeState.inviteId
-      : "";
-  if (currentInviteId === pendingInviteId) {
-    const revealAtMs = pendingDelayedCancelAutomatchRevealAtMs;
-    clearPendingDelayedCancelAutomatchIntent();
-    return revealAtMs > 0 ? revealAtMs : null;
-  }
-  return null;
-};
-
 const RematchSeriesInlineControl = styled.div`
   flex: 1 1 0;
   min-width: 0;
@@ -658,11 +563,6 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const isReactionPickerVisible = popups.reaction.mode !== "closed";
   const isWagerMode = popups.reaction.mode === "wager";
   const wagerSelection = popups.reaction.selection;
-  const [automatchControls, dispatchAutomatchControls] = useReducer(
-    automatchControlsReducer,
-    undefined,
-    createAutomatchControlsState,
-  );
   const isUndoButtonVisible = gameControls.undo.visible;
   const isUndoDisabled = !gameControls.undo.enabled;
   const isAutomoveButtonVisible = gameControls.automove.visible;
@@ -677,12 +577,6 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const isResignConfirmVisible = gameControls.confirmation === "resign";
   const isTimerConfirmVisible = gameControls.confirmation === "timer";
   const isClaimVictoryConfirmVisible = gameControls.confirmation === "claim";
-  const isAutomatchButtonVisible = automatchControls.visible;
-  const isAutomatchButtonEnabled = automatchControls.enabled;
-  const isAutomatchWaiting = automatchControls.waiting;
-  const isCancelAutomatchVisible = automatchControls.cancelVisible;
-  const isCancelAutomatchDisabled = automatchControls.cancelDisabled;
-  const cancelAutomatchRevealVersion = automatchControls.revealRevision;
   const [isEndMatchButtonVisible, setIsEndMatchButtonVisible] = useState(false);
   const [isEndMatchConfirmed, setIsEndMatchConfirmed] = useState(false);
   const [isInviteLinkButtonVisible, setIsInviteLinkButtonVisible] =
@@ -718,6 +612,25 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     isOpen: isNavigationPopupVisible,
     client: connection,
   });
+  const {
+    state: automatchControls,
+    beginAutomatchFlow,
+    cancelAutomatch,
+    setWaiting: setAutomatchWaitingStateHandler,
+    setEnabled: setAutomatchEnabledHandler,
+    setVisible: setAutomatchVisibleHandler,
+    selectNavigationGame: selectAutomatchNavigationGame,
+    clearMatchScope: clearAutomatchMatchScope,
+  } = useAutomatchControls({
+    profileId,
+    createProfileRequestGuard,
+    setOptimisticPendingAutomatch,
+  });
+  const isAutomatchButtonVisible = automatchControls.visible;
+  const isAutomatchButtonEnabled = automatchControls.enabled;
+  const isAutomatchWaiting = automatchControls.waiting;
+  const isCancelAutomatchVisible = automatchControls.cancelVisible;
+  const isCancelAutomatchDisabled = automatchControls.cancelDisabled;
   const [liveEventCloudAvatars, setLiveEventCloudAvatars] = useState<
     EventNavigationPreviewParticipant[]
   >([]);
@@ -801,14 +714,6 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const hourglassEnableDeadlineRef = useRef<number | null>(null);
   const isTimerButtonDisabledRef = useRef(true);
   const isStartTimerVisibleRef = useRef(false);
-  const cancelAutomatchRevealTimeoutRef = useRef<number | null>(null);
-  const cancelAutomatchRevealDeadlineRef = useRef<number | null>(null);
-  const pendingCancelAutomatchRevealAtMsRef = useRef<number | null>(null);
-  const forceImmediateCancelAutomatchRevealRef = useRef(false);
-  const automatchCancelRevealModeRef = useRef<
-    "unset" | "immediate" | "delayed"
-  >("unset");
-  const automatchCancelRevealModeDeadlineRef = useRef<number | null>(null);
   const matchScopedTimeoutIdsRef = useRef<Set<number>>(new Set());
   const navigationPopupRef = useRef<HTMLDivElement>(null);
   const navigationButtonRef = useRef<HTMLButtonElement>(null);
@@ -892,19 +797,14 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     matchScopedTimeoutIdsRef.current.clear();
     hourglassEnableTimeoutRef.current = null;
     hourglassEnableDeadlineRef.current = null;
-    cancelAutomatchRevealTimeoutRef.current = null;
-    cancelAutomatchRevealDeadlineRef.current = null;
-    pendingCancelAutomatchRevealAtMsRef.current = null;
-    forceImmediateCancelAutomatchRevealRef.current = false;
-    automatchCancelRevealModeRef.current = "unset";
-    automatchCancelRevealModeDeadlineRef.current = null;
+    clearAutomatchMatchScope();
     if (endMatchGracePeriodTimeoutRef.current !== null) {
       clearTimeout(endMatchGracePeriodTimeoutRef.current);
       endMatchGracePeriodTimeoutRef.current = null;
     }
     setIsEndMatchTemporarilyDisabled(false);
     setIsVoiceReactionDisabled(false);
-  }, []);
+  }, [clearAutomatchMatchScope]);
 
   useEffect(() => {
     isTimerButtonDisabledRef.current = isTimerButtonDisabled;
@@ -929,25 +829,6 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     }
   }, [clearTrackedMatchScopedTimeout, dispatchGameControls]);
 
-  const tryRevealCancelAutomatchFromDeadline = useCallback(() => {
-    const deadline = cancelAutomatchRevealDeadlineRef.current;
-    if (!hasControlDeadlineElapsed(deadline, Date.now())) {
-      return;
-    }
-    if (cancelAutomatchRevealTimeoutRef.current !== null) {
-      clearTrackedMatchScopedTimeout(cancelAutomatchRevealTimeoutRef.current);
-      cancelAutomatchRevealTimeoutRef.current = null;
-    }
-    cancelAutomatchRevealDeadlineRef.current = null;
-    if (isAutomatchWaiting && isAutomatchButtonVisible) {
-      dispatchAutomatchControls({ type: "revealCancel" });
-    }
-  }, [
-    isAutomatchWaiting,
-    clearTrackedMatchScopedTimeout,
-    isAutomatchButtonVisible,
-  ]);
-
   useEffect(() => {
     const handleTimerDeadlineCheck = () => {
       if (document.visibilityState === "hidden") {
@@ -968,33 +849,6 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
       window.removeEventListener("pageshow", handleTimerDeadlineCheck);
     };
   }, [tryEnableTimerButtonFromDeadline]);
-
-  useEffect(() => {
-    const handleCancelAutomatchDeadlineCheck = () => {
-      if (document.visibilityState === "hidden") {
-        return;
-      }
-      tryRevealCancelAutomatchFromDeadline();
-    };
-    handleCancelAutomatchDeadlineCheck();
-    document.addEventListener(
-      "visibilitychange",
-      handleCancelAutomatchDeadlineCheck,
-    );
-    window.addEventListener("focus", handleCancelAutomatchDeadlineCheck);
-    window.addEventListener("pageshow", handleCancelAutomatchDeadlineCheck);
-    return () => {
-      document.removeEventListener(
-        "visibilitychange",
-        handleCancelAutomatchDeadlineCheck,
-      );
-      window.removeEventListener("focus", handleCancelAutomatchDeadlineCheck);
-      window.removeEventListener(
-        "pageshow",
-        handleCancelAutomatchDeadlineCheck,
-      );
-    };
-  }, [tryRevealCancelAutomatchFromDeadline]);
 
   useEffect(() => {
     const handleClickOutside = (event: TouchEvent | MouseEvent) => {
@@ -1193,85 +1047,10 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   useEffect(() => {
     navigationSelectionEpochRef.current += 1;
     eventCloudSubscriptionEventIdRef.current = null;
-    dispatchAutomatchControls({ type: "finishCancellation" });
     setLiveEventCloudAvatars([]);
   }, [profileId]);
 
-  useEffect(() => {
-    return () => {
-      clearAllMatchScopedTimeouts();
-      hourglassEnableTimeoutRef.current = null;
-      hourglassEnableDeadlineRef.current = null;
-      cancelAutomatchRevealTimeoutRef.current = null;
-      cancelAutomatchRevealDeadlineRef.current = null;
-      pendingCancelAutomatchRevealAtMsRef.current = null;
-      forceImmediateCancelAutomatchRevealRef.current = false;
-      automatchCancelRevealModeRef.current = "unset";
-      automatchCancelRevealModeDeadlineRef.current = null;
-      clearPendingImmediateCancelAutomatchIntent();
-      clearPendingDelayedCancelAutomatchIntent();
-      pendingFreshAutomatchCancelRevealAtMs = 0;
-    };
-  }, [clearAllMatchScopedTimeouts]);
-
-  useEffect(() => {
-    if (cancelAutomatchRevealTimeoutRef.current !== null) {
-      clearTrackedMatchScopedTimeout(cancelAutomatchRevealTimeoutRef.current);
-      cancelAutomatchRevealTimeoutRef.current = null;
-    }
-    cancelAutomatchRevealDeadlineRef.current = null;
-    if (isAutomatchWaiting && isAutomatchButtonVisible) {
-      dispatchAutomatchControls({ type: "finishCancellation" });
-      if (forceImmediateCancelAutomatchRevealRef.current) {
-        forceImmediateCancelAutomatchRevealRef.current = false;
-        pendingCancelAutomatchRevealAtMsRef.current = null;
-        dispatchAutomatchControls({ type: "revealCancel" });
-      } else {
-        const now = Date.now();
-        const pendingRevealAtMs = pendingCancelAutomatchRevealAtMsRef.current;
-        pendingCancelAutomatchRevealAtMsRef.current = null;
-        const deadline = getCancelAutomatchRevealDeadlineMs(
-          pendingRevealAtMs,
-          now,
-        );
-        if (deadline <= now) {
-          dispatchAutomatchControls({ type: "revealCancel" });
-        } else {
-          dispatchAutomatchControls({ type: "hideCancel" });
-          cancelAutomatchRevealDeadlineRef.current = deadline;
-          cancelAutomatchRevealTimeoutRef.current = setMatchScopedTimeout(
-            () => {
-              cancelAutomatchRevealTimeoutRef.current = null;
-              cancelAutomatchRevealDeadlineRef.current = null;
-              dispatchAutomatchControls({ type: "revealCancel" });
-            },
-            deadline - now,
-          );
-          tryRevealCancelAutomatchFromDeadline();
-        }
-      }
-    } else {
-      forceImmediateCancelAutomatchRevealRef.current = false;
-      pendingCancelAutomatchRevealAtMsRef.current = null;
-      automatchCancelRevealModeRef.current = "unset";
-      automatchCancelRevealModeDeadlineRef.current = null;
-      dispatchAutomatchControls({ type: "resetCancel" });
-    }
-    return () => {
-      if (cancelAutomatchRevealTimeoutRef.current !== null) {
-        clearTrackedMatchScopedTimeout(cancelAutomatchRevealTimeoutRef.current);
-        cancelAutomatchRevealTimeoutRef.current = null;
-      }
-      cancelAutomatchRevealDeadlineRef.current = null;
-    };
-  }, [
-    isAutomatchWaiting,
-    cancelAutomatchRevealVersion,
-    clearTrackedMatchScopedTimeout,
-    isAutomatchButtonVisible,
-    setMatchScopedTimeout,
-    tryRevealCancelAutomatchFromDeadline,
-  ]);
+  useEffect(() => clearAllMatchScopedTimeouts, [clearAllMatchScopedTimeouts]);
 
   useEffect(() => {
     return subscribeMoveHistoryPopupReload(() => {
@@ -1535,69 +1314,6 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
       setDidCreateInvite(false);
       setInviteCopiedTmpState(false);
     }
-  };
-
-  const setAutomatchWaitingStateHandler = (waiting: boolean) => {
-    if (waiting) {
-      let revealMode = automatchCancelRevealModeRef.current;
-      let revealDeadline = automatchCancelRevealModeDeadlineRef.current;
-
-      if (revealMode === "unset") {
-        const shouldRevealImmediatelyFromNavigation =
-          consumePendingImmediateCancelAutomatchIntent();
-        const delayedRevealAtMs = consumePendingDelayedCancelAutomatchIntent();
-        const now = Date.now();
-        const shouldDelayReveal =
-          !shouldRevealImmediatelyFromNavigation &&
-          delayedRevealAtMs !== null &&
-          delayedRevealAtMs > now;
-        revealMode = shouldDelayReveal ? "delayed" : "immediate";
-        revealDeadline = shouldDelayReveal ? delayedRevealAtMs : null;
-        automatchCancelRevealModeRef.current = revealMode;
-        automatchCancelRevealModeDeadlineRef.current = revealDeadline;
-      }
-
-      if (
-        revealMode === "delayed" &&
-        (revealDeadline === null || revealDeadline <= Date.now())
-      ) {
-        revealMode = "immediate";
-        revealDeadline = null;
-        automatchCancelRevealModeRef.current = revealMode;
-        automatchCancelRevealModeDeadlineRef.current = null;
-      }
-
-      const shouldDelayReveal =
-        revealMode === "delayed" && revealDeadline !== null;
-      forceImmediateCancelAutomatchRevealRef.current = !shouldDelayReveal;
-      pendingCancelAutomatchRevealAtMsRef.current = shouldDelayReveal
-        ? revealDeadline
-        : null;
-      dispatchAutomatchControls({ type: "enterWaiting" });
-      return;
-    }
-    if (cancelAutomatchRevealTimeoutRef.current !== null) {
-      clearTrackedMatchScopedTimeout(cancelAutomatchRevealTimeoutRef.current);
-      cancelAutomatchRevealTimeoutRef.current = null;
-    }
-    clearPendingImmediateCancelAutomatchIntent();
-    clearPendingDelayedCancelAutomatchIntent();
-    pendingFreshAutomatchCancelRevealAtMs = 0;
-    cancelAutomatchRevealDeadlineRef.current = null;
-    pendingCancelAutomatchRevealAtMsRef.current = null;
-    forceImmediateCancelAutomatchRevealRef.current = false;
-    automatchCancelRevealModeRef.current = "unset";
-    automatchCancelRevealModeDeadlineRef.current = null;
-    setOptimisticPendingAutomatch(null);
-    dispatchAutomatchControls({ type: "leaveWaiting" });
-  };
-
-  const setAutomatchEnabledHandler = (enabled: boolean) => {
-    dispatchAutomatchControls({ type: "setEnabled", enabled });
-  };
-
-  const setAutomatchVisibleHandler = (visible: boolean) => {
-    dispatchAutomatchControls({ type: "setVisible", visible });
   };
 
   const setHomeVisibleHandler = (visible: boolean) => {
@@ -1985,82 +1701,16 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     didClickStartBotGameButton();
   };
 
-  const beginAutomatchFlow = useCallback(
-    (options?: { skipSoundInit?: boolean }) => {
-      const isAutomatchRequestCurrent = createProfileRequestGuard();
-      clearPendingImmediateCancelAutomatchIntent();
-      clearPendingDelayedCancelAutomatchIntent();
-      pendingFreshAutomatchCancelRevealAtMs =
-        Date.now() + CANCEL_AUTOMATCH_REVEAL_DELAY_MS;
-      pendingCancelAutomatchRevealAtMsRef.current =
-        pendingFreshAutomatchCancelRevealAtMs;
-      forceImmediateCancelAutomatchRevealRef.current = false;
-      automatchCancelRevealModeRef.current = "unset";
-      automatchCancelRevealModeDeadlineRef.current = null;
-      if (!options?.skipSoundInit) {
-        soundPlayer.initializeOnUserInteraction(false);
-      }
-      didClickAutomatchButton((response) => {
-        if (!isAutomatchRequestCurrent()) {
-          return;
-        }
-        const inviteId = response.ok ? response.inviteId : "";
-        const mode = response.ok ? response.mode : "";
-        if (mode === "pending" && inviteId) {
-          requestPendingDelayedCancelAutomatchIntent(
-            inviteId,
-            pendingFreshAutomatchCancelRevealAtMs,
-          );
-          const item =
-            connection.createOptimisticPendingAutomatchItem(inviteId);
-          if (item) {
-            setOptimisticPendingAutomatch(item);
-          }
-        } else if (mode === "matched") {
-          clearPendingDelayedCancelAutomatchIntent();
-          setOptimisticPendingAutomatch(null);
-        } else {
-          clearPendingDelayedCancelAutomatchIntent();
-          setOptimisticPendingAutomatch(null);
-          dismissPendingAutomatchTransition();
-        }
-        pendingFreshAutomatchCancelRevealAtMs = 0;
-      });
-      dispatchAutomatchControls({ type: "beginRequest" });
-    },
-    [createProfileRequestGuard, setOptimisticPendingAutomatch],
-  );
-
   const handleAutomatchClick = (event: React.MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
     beginAutomatchFlow();
   };
 
-  const handleCancelAutomatchClick = async (
+  const handleCancelAutomatchClick = (
     event: React.MouseEvent<HTMLButtonElement>,
   ) => {
     event.stopPropagation();
-    if (isCancelAutomatchDisabled) return;
-    const isCancelRequestCurrent = createProfileRequestGuard();
-    dispatchAutomatchControls({ type: "requestCancellation" });
-    try {
-      const result = await connection.cancelAutomatch();
-      if (!isCancelRequestCurrent()) {
-        return;
-      }
-      if (result && result.ok) {
-        setOptimisticPendingAutomatch(null);
-        dismissPendingAutomatchTransition();
-        await transitionToHome({ forceMatchScopeReset: true });
-      } else {
-        dispatchAutomatchControls({ type: "finishCancellation" });
-      }
-    } catch (_) {
-      if (!isCancelRequestCurrent()) {
-        return;
-      }
-      dispatchAutomatchControls({ type: "finishCancellation" });
-    }
+    void cancelAutomatch();
   };
 
   const getPrimaryActionButtonText = () => {
@@ -2110,24 +1760,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     pendingNavigationOpenedEventModalRequestedAtMsRef.current = 0;
     pendingNavigationOpenedEventModalRequestSeqRef.current += 1;
     const inviteId = item.inviteId;
-    if (options?.status === "pending") {
-      clearPendingDelayedCancelAutomatchIntent();
-      pendingFreshAutomatchCancelRevealAtMs = 0;
-      requestPendingImmediateCancelAutomatchIntent(inviteId);
-      pendingCancelAutomatchRevealAtMsRef.current = null;
-      forceImmediateCancelAutomatchRevealRef.current = true;
-      automatchCancelRevealModeRef.current = "immediate";
-      automatchCancelRevealModeDeadlineRef.current = null;
-      dispatchAutomatchControls({ type: "selectPending" });
-    } else {
-      clearPendingImmediateCancelAutomatchIntent();
-      clearPendingDelayedCancelAutomatchIntent();
-      pendingFreshAutomatchCancelRevealAtMs = 0;
-      pendingCancelAutomatchRevealAtMsRef.current = null;
-      forceImmediateCancelAutomatchRevealRef.current = false;
-      automatchCancelRevealModeRef.current = "unset";
-      automatchCancelRevealModeDeadlineRef.current = null;
-    }
+    selectAutomatchNavigationGame(inviteId, options?.status === "pending");
     connection.connectToInvite(inviteId);
   };
 

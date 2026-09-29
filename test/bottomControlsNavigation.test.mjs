@@ -267,62 +267,29 @@ test("navigation toolbar delegates its data and preserves picker wiring", () => 
   assert.match(source, /getEventParticipantPreview\(effectiveInviteEventId\)/);
 });
 
-test("toolbar automatch actions retain profile guards and cancel behavior", () => {
+test("toolbar delegates automatch state, deadlines, and requests to its feature hook", () => {
   const source = readFileSync(
     new URL("../src/ui/BottomControls.tsx", import.meta.url),
     "utf8",
   );
-  const extract = (start, end) => {
-    const startIndex = source.indexOf(start);
-    const endIndex = source.indexOf(end, startIndex);
-    assert.ok(startIndex > 0, start);
-    assert.ok(endIndex > startIndex, end);
-    return source.slice(startIndex, endIndex);
-  };
-  const beginSource = extract(
-    "const beginAutomatchFlow = useCallback",
-    "const handleAutomatchClick",
+  assert.match(source, /useAutomatchControls\(/);
+  assert.match(source, /onClick=\{handleAutomatchClick\}/);
+  assert.match(source, /onClick=\{handleCancelAutomatchClick\}/);
+  assert.doesNotMatch(
+    source,
+    /dispatchAutomatchControls|automatchControlsReducer/,
   );
-  const cancelSource = extract(
-    "const handleCancelAutomatchClick = async",
-    "const getPrimaryActionButtonText",
+  assert.doesNotMatch(
+    source,
+    /connection\.cancelAutomatch|didClickAutomatchButton/,
   );
-  const waitingSource = extract(
-    "const setAutomatchWaitingStateHandler = (waiting: boolean) =>",
-    "const setAutomatchEnabledHandler",
+  assert.doesNotMatch(
+    source,
+    /pendingImmediateCancelAutomatch|pendingDelayedCancelAutomatch/,
   );
-  assert.match(
-    beginSource,
-    /const isAutomatchRequestCurrent = createProfileRequestGuard\(\)/,
-  );
-  assert.match(beginSource, /if \(!isAutomatchRequestCurrent\(\)\) \{/);
-  assert.match(
-    beginSource,
-    /requestPendingDelayedCancelAutomatchIntent\([\s\S]*?setOptimisticPendingAutomatch\(item\)/,
-  );
-  assert.match(
-    beginSource,
-    /else if \(mode === "matched"\) \{\s*clearPendingDelayedCancelAutomatchIntent\(\);\s*setOptimisticPendingAutomatch\(null\);/,
-  );
-  assert.match(
-    beginSource,
-    /else \{\s*clearPendingDelayedCancelAutomatchIntent\(\);\s*setOptimisticPendingAutomatch\(null\);\s*dismissPendingAutomatchTransition\(\);/,
-  );
-  assert.match(
-    cancelSource,
-    /const isCancelRequestCurrent = createProfileRequestGuard\(\)/,
-  );
-  assert.equal(
-    cancelSource.match(/if \(!isCancelRequestCurrent\(\)\) \{/g)?.length,
-    2,
-  );
-  assert.match(
-    cancelSource,
-    /if \(result && result\.ok\) \{\s*setOptimisticPendingAutomatch\(null\);\s*dismissPendingAutomatchTransition\(\);\s*await transitionToHome/,
-  );
-  assert.match(
-    waitingSource,
-    /if \(waiting\) \{[\s\S]*?return;\s*\}[\s\S]*?setOptimisticPendingAutomatch\(null\)/,
+  assert.doesNotMatch(
+    source,
+    /cancelAutomatchRevealTimeoutRef|cancelAutomatchRevealDeadlineRef/,
   );
 });
 
