@@ -11,9 +11,6 @@ import {
   createEventMutationReads,
 } from "../src/eventMutationCommit.ts";
 import { createEventMutationRepository } from "../src/eventMutationRepository.ts";
-import { createEventAnnouncementScheduleRepository } from "../src/eventPrizeAnnouncementSchedule.ts";
-import { createEventProfileGameProjectionRepository } from "../src/eventProfileGameProjectionProducer.ts";
-import { createEventTelegramProjectionRepository } from "../src/eventTelegramProjectionProducer.ts";
 import type { EventGameplayRepository } from "../src/eventRepository.ts";
 import { eventReadFixture } from "./eventReadFixture.ts";
 import { attachEventTestPorts } from "./eventTestPorts.ts";
@@ -62,8 +59,8 @@ function fixture(
         ? options.readEvent(eventId, signal)
         : structuredClone(EVENT);
     },
-    async commitEventPlan(updates, signal) {
-      await options.beforeCommit?.(updates, signal);
+    async commitEventPlan(updates, signal, commitOptions) {
+      await options.beforeCommit?.(updates, signal, commitOptions);
       commits.push(structuredClone([...updates]));
     },
   };
@@ -165,7 +162,7 @@ test("the coordinator commits all outboxes before dispatch and shares only each 
   );
 });
 
-test("coordinated commands preserve adapter serialization, ID order and clock placement", async (t) => {
+test("coordinated commands preserve exact serialization, ID order and clock placement", async (t) => {
   let time = NOW_MS;
   let id = 0;
   t.mock.method(Date, "now", () => ++time);
@@ -178,53 +175,72 @@ test("coordinated commands preserve adapter serialization, ID order and clock pl
   await createEventMutationRepository(coordinated.env, {
     eventRepository: coordinated.repository,
   }).commitEventPlan(UPDATES);
-  time = NOW_MS;
-  id = 0;
-  const adapted = fixture();
-  const announcement = createEventAnnouncementScheduleRepository(
-    adapted.env,
-    adapted.repository,
-  );
-  const telegram = createEventTelegramProjectionRepository(
-    adapted.env,
-    announcement,
-  );
-  const profile = createEventProfileGameProjectionRepository(
-    adapted.env,
-    telegram,
-  );
-  await profile.commitEventPlan(UPDATES);
   assert.equal(coordinated.commits.length, 1);
-  assert.equal(adapted.commits.length, 1);
-  assert.deepEqual(coordinated.commits, adapted.commits);
   const encoded = encodeEventUpdates(coordinated.commits[0]);
-  assert.equal(
-    encoded[`profileGameProjectionOutbox/event/${EVENT_ID}/requestId`],
-    "00000000-0000-4000-8000-000000000001",
-  );
-  assert.equal(
-    encoded[`profileGameProjectionOutbox/event/${EVENT_ID}/lastQueuedAtMs`],
-    NOW_MS + 1,
-  );
-  assert.deepEqual(encoded[`telegramProjectionOutbox/event/${EVENT_ID}`], {
-    schemaVersion: 1,
-    status: "pending",
-    requestId: "00000000-0000-4000-8000-000000000002",
-    firstQueuedAtMs: NOW_MS + 2,
-    updatedAtMs: NOW_MS + 2,
-  });
-  assert.deepEqual(
-    coordinated.commits[0].flatMap((command) =>
-      command.kind === "progress-outbox"
-        ? [command.value?.firstQueuedAtMs]
-        : [],
-    ),
-    [NOW_MS + 3, NOW_MS + 3],
-  );
-  assert.equal(
-    JSON.stringify(encoded),
-    JSON.stringify(encodeEventUpdates(adapted.commits[0])),
-  );
+  const expected = {
+    [`events/${EVENT_ID}/status`]: "scheduled",
+    [`profileGameProjectionOutbox/event/${EVENT_ID}/schemaVersion`]: 1,
+    [`profileGameProjectionOutbox/event/${EVENT_ID}/status`]: "pending",
+    [`profileGameProjectionOutbox/event/${EVENT_ID}/requestId`]:
+      "00000000-0000-4000-8000-000000000001",
+    [`profileGameProjectionOutbox/event/${EVENT_ID}/lastQueuedAtMs`]:
+      NOW_MS + 1,
+    [`profileGameProjectionOutbox/event/${EVENT_ID}/reason`]: null,
+    [`profileGameProjectionOutbox/event/${EVENT_ID}/deadAtMs`]: null,
+    [`profileGameProjectionOutbox/event/${EVENT_ID}/cleanupOwnerProfileIds/previous-owner`]: true,
+    [`telegramProjectionOutbox/event/${EVENT_ID}`]: {
+      schemaVersion: 1,
+      status: "pending",
+      requestId: "00000000-0000-4000-8000-000000000002",
+      firstQueuedAtMs: NOW_MS + 2,
+      updatedAtMs: NOW_MS + 2,
+    },
+    [`eventTelegramProjectionGenerations/${EVENT_ID}`]: {
+      ".sv": { increment: 1 },
+    },
+    "eventProgressOutbox/ep_67737a96acccfc1a890b7fbd6695cbc66af23eb9acd2cb4528abbfcfc9f0e227":
+      {
+        schemaVersion: 1,
+        eventId: EVENT_ID,
+        sourceKey: `prizes:${EVENT_ID}:30000000`,
+        reason: "event-prize-announcement",
+        runAtMs: 26_400_000,
+        firstQueuedAtMs: NOW_MS + 3,
+        lastQueuedAtMs: NOW_MS + 3,
+      },
+    "eventProgressOutbox/ep_e145147ed02fcd4752fed1c63ed4caafa3616e778823ae71b453f1eb34cba11f":
+      {
+        schemaVersion: 1,
+        eventId: EVENT_ID,
+        sourceKey: `reminder:${EVENT_ID}:30000000`,
+        reason: "sunday-mons-reminder",
+        runAtMs: 15_600_000,
+        firstQueuedAtMs: NOW_MS + 3,
+        lastQueuedAtMs: NOW_MS + 3,
+      },
+  };
+  assert.equal(JSON.stringify(encoded), JSON.stringify(expected));
+});
+
+test("the coordinator forwards the signal and commit options with and without preparation", async (t) => {
+  t.mock.method(Date, "now", () => NOW_MS);
+  const signal = new AbortController().signal;
+  const commitOptions = { upcomingEventId: EVENT_ID };
+  const unrelated: EventCommitPlan = [
+    { kind: "progress-outbox", outboxId: "outbox-1", value: null },
+  ];
+  for (const updates of [UPDATES, unrelated]) {
+    const memory = fixture({
+      beforeCommit: async (_updates, receivedSignal, receivedOptions) => {
+        assert.equal(receivedSignal, signal);
+        assert.equal(receivedOptions, commitOptions);
+      },
+    });
+    await createEventMutationRepository(memory.env, {
+      eventRepository: memory.repository,
+    }).commitEventPlan(updates, signal, commitOptions);
+    assert.equal(memory.commits.length, 1);
+  }
 });
 
 test("unrelated mutations pass through without event reads or scheduled work", async () => {

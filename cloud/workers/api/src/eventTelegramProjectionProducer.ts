@@ -4,12 +4,8 @@ import type {
 } from "../../../runtime/eventCommands.js";
 import { STATE_FAILURE_MESSAGES } from "./stateCompatibility.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
-import type { EventGameplayRepository } from "./eventRepository.ts";
 import type { EventTelegramProjectionTask } from "./telegramProjectionTasks.ts";
-import {
-  commitPreparedEventMutation,
-  type PreparedEventMutation,
-} from "./eventMutationCommit.ts";
+import type { PreparedEventMutation } from "./eventMutationCommit.ts";
 
 export const EVENT_TELEGRAM_PROJECTION_OUTBOX_ROOT =
   "telegramProjectionOutbox/event";
@@ -22,7 +18,6 @@ type ProducerDependencies = {
   enqueue?: (task: EventTelegramProjectionTask) => Promise<unknown>;
   logger?: Pick<Console, "error">;
   now?: () => number;
-  schedule?: (work: Promise<void>) => void;
 };
 
 function eventIdsFromUpdates(updates: readonly EventCommand[]): string[] {
@@ -116,31 +111,6 @@ export function prepareEventTelegramProjection(
           );
         }
       }
-    },
-  };
-}
-
-export function createEventTelegramProjectionRepository(
-  env: Env,
-  repository: EventGameplayRepository,
-  dependencies: ProducerDependencies = {},
-): EventGameplayRepository {
-  return {
-    ...repository,
-    async commitEventPlan(updates, signal, options) {
-      const prepared = prepareEventTelegramProjection(
-        env,
-        updates,
-        dependencies,
-      );
-      await commitPreparedEventMutation(
-        repository,
-        updates,
-        [prepared],
-        signal,
-        dependencies.schedule,
-        options,
-      );
     },
   };
 }

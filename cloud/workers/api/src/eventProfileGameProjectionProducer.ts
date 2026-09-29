@@ -4,12 +4,9 @@ import type {
 } from "../../../runtime/eventCommands.js";
 import { getOwnerProfileIds } from "../../../runtime/events/eventProjectionModel.js";
 import { isSafeRecordKey } from "./recordKeys.ts";
-import type { EventGameplayRepository } from "./eventRepository.ts";
-import {
-  commitPreparedEventMutation,
-  createEventMutationReads,
-  type EventMutationReads,
-  type PreparedEventMutation,
+import type {
+  EventMutationReads,
+  PreparedEventMutation,
 } from "./eventMutationCommit.ts";
 import type { EventProfileGameProjectionTask } from "./profileGameProjectionTasks.ts";
 
@@ -28,7 +25,6 @@ type ProducerDependencies = {
   enqueue?: (task: EventProfileGameProjectionTask) => Promise<unknown>;
   logger?: Pick<Console, "error">;
   now?: () => number;
-  schedule?: (work: Promise<void>) => void;
 };
 
 function toRecord(value: unknown): Record<string, unknown> | null {
@@ -153,32 +149,6 @@ export async function prepareEventProfileGameProjection(
           );
         }
       }
-    },
-  };
-}
-
-export function createEventProfileGameProjectionRepository(
-  env: Env,
-  repository: EventGameplayRepository,
-  dependencies: ProducerDependencies = {},
-): EventGameplayRepository {
-  return {
-    ...repository,
-    async commitEventPlan(updates, signal, options) {
-      const prepared = await prepareEventProfileGameProjection(
-        env,
-        updates,
-        createEventMutationReads(repository, signal),
-        dependencies,
-      );
-      await commitPreparedEventMutation(
-        repository,
-        updates,
-        [prepared],
-        signal,
-        dependencies.schedule,
-        options,
-      );
     },
   };
 }

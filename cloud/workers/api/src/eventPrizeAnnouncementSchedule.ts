@@ -16,11 +16,9 @@ import { ensureEventProgressWorkflow } from "./eventProgressDispatch.ts";
 import type { EventGameplayRepository } from "./eventRepository.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import type { EventProgressWorkExecutor } from "./eventProgressExecution.ts";
-import {
-  commitPreparedEventMutation,
-  createEventMutationReads,
-  type EventMutationReads,
-  type PreparedEventMutation,
+import type {
+  EventMutationReads,
+  PreparedEventMutation,
 } from "./eventMutationCommit.ts";
 
 export const EVENT_PRIZE_ANNOUNCEMENT_REASON =
@@ -38,7 +36,6 @@ type ScheduleDependencies = {
   enqueue?: (plan: EventProgressPlan) => Promise<void>;
   logger?: Pick<Console, "error">;
   now?: () => number;
-  schedule?: (work: Promise<void>) => void;
 };
 
 function toRecord(value: unknown): Record<string, unknown> | null {
@@ -236,32 +233,3 @@ export async function prepareEventAnnouncementSchedule(
     },
   };
 }
-
-export function createEventAnnouncementScheduleRepository(
-  env: Env,
-  repository: EventGameplayRepository,
-  dependencies: ScheduleDependencies = {},
-): EventGameplayRepository {
-  return {
-    ...repository,
-    async commitEventPlan(updates, signal, options) {
-      const prepared = await prepareEventAnnouncementSchedule(
-        env,
-        updates,
-        createEventMutationReads(repository, signal),
-        dependencies,
-      );
-      await commitPreparedEventMutation(
-        repository,
-        updates,
-        [prepared],
-        signal,
-        dependencies.schedule,
-        options,
-      );
-    },
-  };
-}
-
-export const createEventPrizeAnnouncementScheduleRepository =
-  createEventAnnouncementScheduleRepository;

@@ -1,77 +1,83 @@
-import {
-  getEventTelegramProjectionGenerationPath,
-  getEventTelegramProjectionOutboxPath,
-} from "./legacyEventProjectionFixture.ts";
-import {
-  attachEventTestPorts,
-  type EventTestSource,
-} from "./eventTestPorts.ts";
-import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createEventTelegramProjectionRepository } from "../src/eventTelegramProjectionProducer.ts";
-import type { EventGameplayRepository } from "../src/eventRepository.ts";
-import { eventReadFixture } from "./eventReadFixture.ts";
+import { prepareEventTelegramProjection } from "../src/eventTelegramProjectionProducer.ts";
+import type { EventTelegramProjectionTask } from "../src/telegramProjectionTasks.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
-function repository(
-  patch: NonNullable<EventTestSource["patchStateRoot"]>,
-): EventGameplayRepository {
-  return attachEventTestPorts<EventGameplayRepository & EventTestSource>({
-    ...eventReadFixture(async () => null),
-    readInviteMetadata: async () => {
-      throw new Error("unexpected-invite-metadata-read");
-    },
-    applyWagerTransferOnce: async () => "applied",
-    deleteNavigationGame: async () => "deleted",
-    readProfileOwnershipSnapshot: async () => {
-      throw new Error("unexpected-profile-ownership-read");
-    },
-    getMiningMaterials: async () => ({
-      dust: 0,
-      gum: 0,
-      ice: 0,
-      metal: 0,
-      slime: 0,
-    }),
-    getMiningSnapshot: async () => null,
-    getNavigationGame: async () => null,
-    getStatePath: async () => null,
-    patchStateRoot: patch,
-    transactStatePath: async () => ({ committed: false, value: null }),
-  });
-}
-
-test("event writes persist exact outboxes before enqueueing", async () => {
-  const patches: Record<string, unknown>[] = [];
-  const enqueued: Array<Record<string, string>> = [];
-  let patchCompleted = false;
+test("event preparation emits exact outboxes and generations for sorted unique events", async () => {
+  const enqueued: EventTelegramProjectionTask[] = [];
   let requestIndex = 0;
-  const wrapped = createEventTelegramProjectionRepository(
+  const prepared = prepareEventTelegramProjection(
     TELEGRAM_TEST_ENV,
-    repository(async (updates) => {
-      patches.push(updates);
-      patchCompleted = true;
-    }),
+    [
+      {
+        kind: "event-field",
+        eventId: "event-b",
+        field: "status",
+        value: "active",
+      },
+      {
+        kind: "event-field",
+        eventId: "event-a",
+        field: "updatedAtMs",
+        value: 123,
+      },
+      {
+        kind: "event-field",
+        eventId: "event-b",
+        field: "updatedAtMs",
+        value: 123,
+      },
+      { kind: "invite", inviteId: "invite-1", value: { status: "active" } },
+    ],
     {
       createRequestId: () => `request-${++requestIndex}`,
       enqueue: async (task) => {
-        assert.equal(patchCompleted, true);
         enqueued.push(task);
       },
       now: () => 123,
     },
   );
 
-  await wrapped.commitEventPlan(
-    decodeEventUpdates({
-      "events/event-b/status": "active",
-      "events/event-a/updatedAtMs": 123,
-      "events/event-b/updatedAtMs": 123,
-      "invites/invite-1": { status: "active" },
-    }),
-  );
-
+  assert.ok(prepared);
+  assert.deepEqual(prepared.commands, [
+    {
+      kind: "telegram-outbox",
+      eventId: "event-a",
+      value: {
+        schemaVersion: 1,
+        status: "pending",
+        requestId: "request-1",
+        firstQueuedAtMs: 123,
+        updatedAtMs: 123,
+      },
+    },
+    {
+      kind: "telegram-generation",
+      eventId: "event-a",
+      value: 1,
+      increment: true,
+    },
+    {
+      kind: "telegram-outbox",
+      eventId: "event-b",
+      value: {
+        schemaVersion: 1,
+        status: "pending",
+        requestId: "request-2",
+        firstQueuedAtMs: 123,
+        updatedAtMs: 123,
+      },
+    },
+    {
+      kind: "telegram-generation",
+      eventId: "event-b",
+      value: 1,
+      increment: true,
+    },
+  ]);
+  assert.deepEqual(enqueued, []);
+  await prepared.dispatch();
   assert.deepEqual(enqueued, [
     {
       kind: "event-telegram-projection",
@@ -84,92 +90,69 @@ test("event writes persist exact outboxes before enqueueing", async () => {
       requestId: "request-2",
     },
   ]);
-  assert.deepEqual(
-    patches[0][getEventTelegramProjectionOutboxPath("event-a")],
-    {
-      schemaVersion: 1,
-      status: "pending",
-      requestId: "request-1",
-      firstQueuedAtMs: 123,
-      updatedAtMs: 123,
-    },
-  );
-  assert.deepEqual(
-    patches[0][getEventTelegramProjectionGenerationPath("event-a")],
-    { ".sv": { increment: 1 } },
-  );
 });
 
-test("non-event writes pass through without projection work", async () => {
-  const patches: Record<string, unknown>[] = [];
-  let enqueues = 0;
-  const wrapped = createEventTelegramProjectionRepository(
+test("non-event commands prepare no telegram projection work", () => {
+  const prepared = prepareEventTelegramProjection(
     TELEGRAM_TEST_ENV,
-    repository(async (updates) => {
-      patches.push(updates);
-    }),
+    [{ kind: "invite", inviteId: "invite-1", value: { status: "active" } }],
     {
-      enqueue: async () => {
-        enqueues++;
-      },
+      createRequestId: () => assert.fail("unexpected request id"),
+      now: () => assert.fail("unexpected clock read"),
+      enqueue: async () => assert.fail("unexpected enqueue"),
     },
   );
-  const updates = { "invites/invite-1": { status: "active" } };
-  await wrapped.commitEventPlan(decodeEventUpdates(updates));
-  assert.deepEqual(patches, [updates]);
-  assert.equal(enqueues, 0);
+  assert.equal(prepared, null);
 });
 
-test("enqueue failure leaves the committed marker recoverable", async () => {
-  let persisted: Record<string, unknown> = {};
+test("dispatch logs enqueue failure without altering recovery commands or skipping other events", async () => {
+  const enqueued: EventTelegramProjectionTask[] = [];
   const logs: string[] = [];
-  const wrapped = createEventTelegramProjectionRepository(
+  let requestIndex = 0;
+  const prepared = prepareEventTelegramProjection(
     TELEGRAM_TEST_ENV,
-    repository(async (updates) => {
-      persisted = updates;
-    }),
-    {
-      createRequestId: () => "request-1",
-      enqueue: async () => {
-        throw new Error("queue-unavailable");
+    [
+      {
+        kind: "event-field",
+        eventId: "event-a",
+        field: "status",
+        value: "active",
       },
-      logger: { error: (message) => logs.push(message) },
+      {
+        kind: "event-field",
+        eventId: "event-b",
+        field: "status",
+        value: "active",
+      },
+    ],
+    {
+      createRequestId: () => `request-${++requestIndex}`,
+      enqueue: async (task) => {
+        enqueued.push(task);
+        if (task.eventId === "event-a") throw new Error("queue-unavailable");
+      },
+      logger: { error: (message) => logs.push(String(message)) },
       now: () => 456,
     },
   );
-  await wrapped.commitEventPlan(
-    decodeEventUpdates({ "events/event-1/status": "active" }),
-  );
-  assert.deepEqual(persisted[getEventTelegramProjectionOutboxPath("event-1")], {
-    schemaVersion: 1,
-    status: "pending",
-    requestId: "request-1",
-    firstQueuedAtMs: 456,
-    updatedAtMs: 456,
-  });
-  assert.equal(logs.length, 1);
-});
-
-test("scheduled dispatch does not hold the committed mutation open", async () => {
-  let finishEnqueue: (() => void) | undefined;
-  const enqueueBlocked = new Promise<void>((resolve) => {
-    finishEnqueue = resolve;
-  });
-  const scheduled: Promise<void>[] = [];
-  const wrapped = createEventTelegramProjectionRepository(
-    TELEGRAM_TEST_ENV,
-    repository(async () => undefined),
+  assert.ok(prepared);
+  const commands = structuredClone(prepared.commands);
+  await prepared.dispatch();
+  assert.deepEqual(enqueued, [
     {
-      createRequestId: () => "request-1",
-      enqueue: () => enqueueBlocked,
-      now: () => 789,
-      schedule: (work) => scheduled.push(work),
+      kind: "event-telegram-projection",
+      eventId: "event-a",
+      requestId: "request-1",
     },
+    {
+      kind: "event-telegram-projection",
+      eventId: "event-b",
+      requestId: "request-2",
+    },
+  ]);
+  assert.deepEqual(prepared.commands, commands);
+  assert.deepEqual(
+    logs.map((message) => JSON.parse(message)),
+    [{ event: "event_telegram_projection_enqueue_failed", eventId: "event-a" }],
   );
-  await wrapped.commitEventPlan(
-    decodeEventUpdates({ "events/event-1/status": "active" }),
-  );
-  assert.equal(scheduled.length, 1);
-  finishEnqueue?.();
-  await scheduled[0];
 });

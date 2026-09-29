@@ -5,11 +5,13 @@ import {
 import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { EventCommand } from "../../../runtime/eventCommands.js";
+import { commitPreparedEventMutation } from "../src/eventMutationCommit.ts";
 import {
   buildEventPrizeAnnouncementPlan,
   buildSundayMonsReminderPlan,
-  createEventPrizeAnnouncementScheduleRepository,
   EVENT_PRIZE_ANNOUNCEMENT_REASON,
+  prepareEventAnnouncementSchedule,
   scheduleEventAnnouncements,
   scheduleEventPrizeAnnouncement,
 } from "../src/eventPrizeAnnouncementSchedule.ts";
@@ -105,16 +107,22 @@ function memoryRepository(
   return { get, patches, reads, repository };
 }
 
-function wrapper(
+type AnnouncementMutationDependencies = NonNullable<
+  Parameters<typeof prepareEventAnnouncementSchedule>[3]
+>;
+
+async function commitAnnouncementMutation(
   memory: ReturnType<typeof memoryRepository>,
-  enqueue: (plan: EventProgressPlan) => Promise<void>,
-  now: () => number = () => NOW_MS,
-) {
-  return createEventPrizeAnnouncementScheduleRepository(
+  updates: readonly EventCommand[],
+  dependencies: AnnouncementMutationDependencies,
+): Promise<void> {
+  const prepared = await prepareEventAnnouncementSchedule(
     TELEGRAM_TEST_ENV,
+    updates,
     memory.repository,
-    { enqueue, now },
+    { now: () => NOW_MS, ...dependencies },
   );
+  await commitPreparedEventMutation(memory.repository, updates, [prepared]);
 }
 
 test("event creation commits both announcement markers atomically before dispatch", async () => {
@@ -137,19 +145,23 @@ test("event creation commits both announcement markers atomically before dispatc
       plan.outbox,
     ]),
   );
-  const wrapped = wrapper(memory, async (plan) => {
-    assert.deepEqual(memory.get(EVENT_PATH), event);
-    for (const [path, value] of Object.entries(markers)) {
-      assert.deepEqual(memory.get(path), value);
-    }
-    enqueued.push(plan);
-  });
+  const dependencies: AnnouncementMutationDependencies = {
+    enqueue: async (plan) => {
+      assert.deepEqual(memory.get(EVENT_PATH), event);
+      for (const [path, value] of Object.entries(markers)) {
+        assert.deepEqual(memory.get(path), value);
+      }
+      enqueued.push(plan);
+    },
+  };
 
-  const pending = wrapped.commitEventPlan(
+  const pending = commitAnnouncementMutation(
+    memory,
     decodeEventUpdates({
       [EVENT_PATH]: event,
       "invites/unrelated": { status: "active" },
     }),
+    dependencies,
   );
   await commitStarted.promise;
   assert.equal(enqueued.length, 0);
@@ -180,15 +192,19 @@ test("failed event persistence cannot dispatch or leave a schedule without the e
     throw new Error("persistence-unavailable");
   });
   const enqueued: EventProgressPlan[] = [];
-  const wrapped = wrapper(memory, async (plan) => {
-    enqueued.push(plan);
-  });
+  const dependencies: AnnouncementMutationDependencies = {
+    enqueue: async (plan) => {
+      enqueued.push(plan);
+    },
+  };
 
   await assert.rejects(
-    wrapped.commitEventPlan(
+    commitAnnouncementMutation(
+      memory,
       decodeEventUpdates({
         [EVENT_PATH]: scheduledEvent({ startAtMs: 30_000_000 }),
       }),
+      dependencies,
     ),
     /persistence-unavailable/,
   );
@@ -202,17 +218,13 @@ test("failed event persistence cannot dispatch or leave a schedule without the e
 test("dispatch failure leaves the committed marker available for sweep recovery", async () => {
   const memory = memoryRepository();
   const logs: string[] = [];
-  const wrapped = createEventPrizeAnnouncementScheduleRepository(
-    TELEGRAM_TEST_ENV,
-    memory.repository,
-    {
-      enqueue: async () => {
-        throw new Error("workflow-unavailable");
-      },
-      logger: { error: (value: string) => logs.push(value) },
-      now: () => NOW_MS,
+  const dependencies: AnnouncementMutationDependencies = {
+    enqueue: async () => {
+      throw new Error("workflow-unavailable");
     },
-  );
+    logger: { error: (value: string) => logs.push(value) },
+    now: () => NOW_MS,
+  };
   const event = scheduledEvent();
   const expected = await buildEventPrizeAnnouncementPlan(
     EVENT_ID,
@@ -221,7 +233,11 @@ test("dispatch failure leaves the committed marker available for sweep recovery"
   );
   assert.ok(expected);
 
-  await wrapped.commitEventPlan(decodeEventUpdates({ [EVENT_PATH]: event }));
+  await commitAnnouncementMutation(
+    memory,
+    decodeEventUpdates({ [EVENT_PATH]: event }),
+    dependencies,
+  );
 
   assert.deepEqual(memory.get(EVENT_PATH), event);
   assert.deepEqual(
@@ -244,20 +260,23 @@ test("repeat scheduling preserves first queue time and the workflow identity", a
   let nowMs = NOW_MS;
   const memory = memoryRepository();
   const enqueued: EventProgressPlan[] = [];
-  const wrapped = wrapper(
-    memory,
-    async (plan) => {
+  const dependencies: AnnouncementMutationDependencies = {
+    enqueue: async (plan) => {
       enqueued.push(plan);
     },
-    () => nowMs,
-  );
+    now: () => nowMs,
+  };
 
-  await wrapped.commitEventPlan(
+  await commitAnnouncementMutation(
+    memory,
     decodeEventUpdates({ [EVENT_PATH]: scheduledEvent() }),
+    dependencies,
   );
   nowMs += 5_000;
-  await wrapped.commitEventPlan(
+  await commitAnnouncementMutation(
+    memory,
     decodeEventUpdates({ [`${EVENT_PATH}/startAtMs`]: START_AT_MS }),
+    dependencies,
   );
 
   assert.equal(enqueued.length, 2);
@@ -271,20 +290,25 @@ test("both notification kinds preserve their first scheduling proof on repeat wr
   const event = scheduledEvent({ startAtMs: 30_000_000 });
   const memory = memoryRepository();
   const enqueued: EventProgressPlan[] = [];
-  const wrapped = wrapper(
-    memory,
-    async (plan) => {
+  const dependencies: AnnouncementMutationDependencies = {
+    enqueue: async (plan) => {
       enqueued.push(plan);
     },
-    () => nowMs,
-  );
+    now: () => nowMs,
+  };
 
-  await wrapped.commitEventPlan(decodeEventUpdates({ [EVENT_PATH]: event }));
+  await commitAnnouncementMutation(
+    memory,
+    decodeEventUpdates({ [EVENT_PATH]: event }),
+    dependencies,
+  );
   nowMs += 60_000;
-  await wrapped.commitEventPlan(
+  await commitAnnouncementMutation(
+    memory,
     decodeEventUpdates({
       [`${EVENT_PATH}/startAtMs`]: event.startAtMs,
     }),
+    dependencies,
   );
 
   assert.equal(enqueued.length, 4);
@@ -321,13 +345,17 @@ test("rediscovery preserves a persisted three-hour reminder without creating a f
     });
     const dispatched: Array<{ id?: string; params?: unknown }> = [];
     if (mode === "event-write") {
-      const wrapped = wrapper(memory, async (plan) => {
-        dispatched.push({ id: plan.workflowId, params: plan.params });
-      });
-      await wrapped.commitEventPlan(
+      const dependencies: AnnouncementMutationDependencies = {
+        enqueue: async (plan) => {
+          dispatched.push({ id: plan.workflowId, params: plan.params });
+        },
+      };
+      await commitAnnouncementMutation(
+        memory,
         decodeEventUpdates({
           [`${EVENT_PATH}/startAtMs`]: event.startAtMs,
         }),
+        dependencies,
       );
     } else {
       const env: Env = {
@@ -381,22 +409,22 @@ test("failure dispatching either kind leaves both markers and dispatches the oth
     const attempted: string[] = [];
     const dispatched: string[] = [];
     const logs: unknown[] = [];
-    const wrapped = createEventPrizeAnnouncementScheduleRepository(
-      TELEGRAM_TEST_ENV,
-      memory.repository,
-      {
-        now: () => NOW_MS,
-        logger: { error: (value: unknown) => logs.push(value) },
-        enqueue: async (plan) => {
-          attempted.push(plan.workflowId);
-          if (plan.workflowId === failing.workflowId)
-            throw new Error("dispatch-unavailable");
-          dispatched.push(plan.workflowId);
-        },
+    const dependencies: AnnouncementMutationDependencies = {
+      now: () => NOW_MS,
+      logger: { error: (value: unknown) => logs.push(value) },
+      enqueue: async (plan) => {
+        attempted.push(plan.workflowId);
+        if (plan.workflowId === failing.workflowId)
+          throw new Error("dispatch-unavailable");
+        dispatched.push(plan.workflowId);
       },
-    );
+    };
 
-    await wrapped.commitEventPlan(decodeEventUpdates({ [EVENT_PATH]: event }));
+    await commitAnnouncementMutation(
+      memory,
+      decodeEventUpdates({ [EVENT_PATH]: event }),
+      dependencies,
+    );
 
     assert.deepEqual(
       new Set(attempted),
@@ -424,9 +452,11 @@ test("a Sunday Mons event without prizes schedules only its four-hour reminder",
   });
   const memory = memoryRepository();
   const enqueued: EventProgressPlan[] = [];
-  const wrapped = wrapper(memory, async (plan) => {
-    enqueued.push(plan);
-  });
+  const dependencies: AnnouncementMutationDependencies = {
+    enqueue: async (plan) => {
+      enqueued.push(plan);
+    },
+  };
   const reminder = await buildSundayMonsReminderPlan(eventId, event, NOW_MS);
   assert.ok(reminder);
   assert.equal(
@@ -434,8 +464,10 @@ test("a Sunday Mons event without prizes schedules only its four-hour reminder",
     null,
   );
 
-  await wrapped.commitEventPlan(
+  await commitAnnouncementMutation(
+    memory,
     decodeEventUpdates({ [`events/${eventId}`]: event }),
+    dependencies,
   );
 
   assert.deepEqual(enqueued, [reminder]);
@@ -507,15 +539,18 @@ test("missing the four-hour discovery cutoff still permits the independent prize
   assert.ok(prize);
   const memory = memoryRepository();
   const enqueued: EventProgressPlan[] = [];
-  const wrapped = wrapper(
-    memory,
-    async (plan) => {
+  const dependencies: AnnouncementMutationDependencies = {
+    enqueue: async (plan) => {
       enqueued.push(plan);
     },
-    () => targetMs + 1,
-  );
+    now: () => targetMs + 1,
+  };
 
-  await wrapped.commitEventPlan(decodeEventUpdates({ [EVENT_PATH]: event }));
+  await commitAnnouncementMutation(
+    memory,
+    decodeEventUpdates({ [EVENT_PATH]: event }),
+    dependencies,
+  );
 
   assert.deepEqual(enqueued, [prize]);
   assert.equal(memory.get(`eventProgressOutbox/${onTime.outboxId}`), null);
@@ -533,16 +568,20 @@ test("partial changes evaluate the event after all scheduling fields are applied
     },
   });
   const enqueued: EventProgressPlan[] = [];
-  const wrapped = wrapper(memory, async (plan) => {
-    enqueued.push(plan);
-  });
+  const dependencies: AnnouncementMutationDependencies = {
+    enqueue: async (plan) => {
+      enqueued.push(plan);
+    },
+  };
 
-  await wrapped.commitEventPlan(
+  await commitAnnouncementMutation(
+    memory,
     decodeEventUpdates({
       [`${EVENT_PATH}/status`]: "scheduled",
       [`${EVENT_PATH}/isSundayMons`]: true,
       [`${EVENT_PATH}/startAtMs`]: START_AT_MS,
     }),
+    dependencies,
   );
 
   assert.equal(enqueued.length, 1);
@@ -571,12 +610,18 @@ test("only scheduled strict Sunday Mons events with catalog prizes create marker
   for (const { eventId, event } of cases) {
     const memory = memoryRepository();
     const enqueued: EventProgressPlan[] = [];
-    const wrapped = wrapper(memory, async (plan) => {
-      enqueued.push(plan);
-    });
+    const dependencies: AnnouncementMutationDependencies = {
+      enqueue: async (plan) => {
+        enqueued.push(plan);
+      },
+    };
     const updates = { [`events/${eventId}`]: event };
 
-    await wrapped.commitEventPlan(decodeEventUpdates(updates));
+    await commitAnnouncementMutation(
+      memory,
+      decodeEventUpdates(updates),
+      dependencies,
+    );
 
     assert.deepEqual(enqueued, [], JSON.stringify({ eventId, event }));
     assert.deepEqual(memory.patches, [updates]);
@@ -618,16 +663,19 @@ test("first discovery at the target is accepted but a millisecond late is skippe
   );
   const memory = memoryRepository();
   const enqueued: EventProgressPlan[] = [];
-  const wrapped = wrapper(
-    memory,
-    async (plan) => {
+  const dependencies: AnnouncementMutationDependencies = {
+    enqueue: async (plan) => {
       enqueued.push(plan);
     },
-    () => TARGET_MS + 1,
-  );
+    now: () => TARGET_MS + 1,
+  };
   const updates = { [EVENT_PATH]: scheduledEvent() };
 
-  await wrapped.commitEventPlan(decodeEventUpdates(updates));
+  await commitAnnouncementMutation(
+    memory,
+    decodeEventUpdates(updates),
+    dependencies,
+  );
 
   assert.deepEqual(memory.patches, [updates]);
   assert.deepEqual(enqueued, []);
@@ -636,17 +684,23 @@ test("first discovery at the target is accepted but a millisecond late is skippe
 test("postponement creates a distinct schedule without overwriting the earlier marker", async () => {
   const memory = memoryRepository();
   const enqueued: EventProgressPlan[] = [];
-  const wrapped = wrapper(memory, async (plan) => {
-    enqueued.push(plan);
-  });
+  const dependencies: AnnouncementMutationDependencies = {
+    enqueue: async (plan) => {
+      enqueued.push(plan);
+    },
+  };
 
-  await wrapped.commitEventPlan(
+  await commitAnnouncementMutation(
+    memory,
     decodeEventUpdates({ [EVENT_PATH]: scheduledEvent() }),
+    dependencies,
   );
-  await wrapped.commitEventPlan(
+  await commitAnnouncementMutation(
+    memory,
     decodeEventUpdates({
       [`${EVENT_PATH}/startAtMs`]: START_AT_MS + 7_200_000,
     }),
+    dependencies,
   );
 
   const prizes = enqueued.filter(
@@ -679,16 +733,22 @@ test("gameplay updates and existing progress markers pass through unchanged", as
     eventProgressOutbox: { [existing.outboxId]: existing.outbox },
   });
   const enqueued: EventProgressPlan[] = [];
-  const wrapped = wrapper(memory, async (plan) => {
-    enqueued.push(plan);
-  });
+  const dependencies: AnnouncementMutationDependencies = {
+    enqueue: async (plan) => {
+      enqueued.push(plan);
+    },
+  };
   const updates = {
     [`${EVENT_PATH}/rounds/0/matches/match-1/status`]: "complete",
     [`${EVENT_PATH}/updatedAtMs`]: NOW_MS,
     [`eventProgressOutbox/${existing.outboxId}/lastQueuedAtMs`]: NOW_MS + 1,
   };
 
-  await wrapped.commitEventPlan(decodeEventUpdates(updates));
+  await commitAnnouncementMutation(
+    memory,
+    decodeEventUpdates(updates),
+    dependencies,
+  );
 
   assert.deepEqual(memory.patches, [updates]);
   assert.deepEqual(memory.reads, []);
