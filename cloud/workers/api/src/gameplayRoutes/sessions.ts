@@ -13,17 +13,47 @@ import {
   ensureParticipantMatch,
   joinInvite,
   proposeRematch,
+  type GameSessionMutationDependencies,
 } from "../gameSessionMutations.ts";
 import { enforceGameSessionMutationRateLimit } from "../gameSessionMutationRunner.ts";
 import { resolveInviteRole } from "../inviteAccess.ts";
 import { defineGameplayRoute, validateBody } from "./definition.ts";
-import { createGameplayRuntime } from "./runtime.ts";
+import { requireActiveDurableMatchState } from "../matchStateAuthority.ts";
+import {
+  createGameplayMutationLocks,
+  createGameplayProjectionDispatch,
+  gameplayMutationGuard,
+  type GameplayRequestContext,
+} from "./runtime.ts";
+
+function createSessionRuntime(context: GameplayRequestContext) {
+  const { dependencies } = context;
+  const dispatch = createGameplayProjectionDispatch(context);
+  const gameSessionDependencies: GameSessionMutationDependencies = {
+    ...dependencies.gameSession,
+    assertMutationAllowed: gameplayMutationGuard(context),
+    enqueueProfileGameProjection:
+      dependencies.gameSession?.enqueueProfileGameProjection ||
+      dispatch.defaultEnqueueProfileGameProjection,
+    mutationLocks: createGameplayMutationLocks(context),
+  };
+  return {
+    ...context,
+    gameSessionDependencies,
+    defaultEnqueueTelegramProjection: dispatch.defaultEnqueueTelegramProjection,
+  };
+}
+
+async function createEnsureMatchRuntime(context: GameplayRequestContext) {
+  await requireActiveDurableMatchState(context.env.PROFILE_GAMES_DB);
+  return createSessionRuntime(context);
+}
 
 export const sessionRoutes = [
   defineGameplayRoute({
     path: "/invites/create",
     readOnly: false,
-    runtime: createGameplayRuntime,
+    runtime: createSessionRuntime,
     parse: (body) => validateBody(body, isCreateInviteRequest),
     handle: async (body, runtime) => {
       await enforceGameSessionMutationRateLimit(
@@ -41,7 +71,7 @@ export const sessionRoutes = [
   defineGameplayRoute({
     path: "/invites/join",
     readOnly: false,
-    runtime: createGameplayRuntime,
+    runtime: createSessionRuntime,
     parse: (body) => validateBody(body, isJoinInviteRequest),
     handle: async (body, runtime) => {
       await enforceGameSessionMutationRateLimit(
@@ -67,7 +97,7 @@ export const sessionRoutes = [
   defineGameplayRoute({
     path: "/invites/role/read",
     readOnly: true,
-    runtime: createGameplayRuntime,
+    runtime: (context) => context,
     parse: (body) => validateBody(body, isResolveInviteRoleRequest),
     handle: (body, runtime) =>
       resolveInviteRole(runtime.identity, body, runtime.repository),
@@ -75,7 +105,7 @@ export const sessionRoutes = [
   defineGameplayRoute({
     path: "/matches/ensure",
     readOnly: false,
-    runtime: createGameplayRuntime,
+    runtime: createEnsureMatchRuntime,
     parse: (body) => validateBody(body, isEnsureMatchRequest),
     handle: async (body, runtime) => {
       await enforceGameSessionMutationRateLimit(
@@ -93,7 +123,7 @@ export const sessionRoutes = [
   defineGameplayRoute({
     path: "/rematches/propose",
     readOnly: false,
-    runtime: createGameplayRuntime,
+    runtime: createSessionRuntime,
     parse: (body) => validateBody(body, isProposeRematchRequest),
     handle: async (body, runtime) => {
       await enforceGameSessionMutationRateLimit(
@@ -111,7 +141,7 @@ export const sessionRoutes = [
   defineGameplayRoute({
     path: "/rematches/end",
     readOnly: false,
-    runtime: createGameplayRuntime,
+    runtime: createSessionRuntime,
     parse: (body) => validateBody(body, isEndRematchRequest),
     handle: async (body, runtime) => {
       await enforceGameSessionMutationRateLimit(

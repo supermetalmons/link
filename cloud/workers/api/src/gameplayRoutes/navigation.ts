@@ -19,7 +19,6 @@ import {
   toRecord,
   validateBody,
 } from "./definition.ts";
-import { createGameplayRuntime } from "./runtime.ts";
 
 export async function resolveProfileId(
   identity: RequestIdentity,
@@ -105,7 +104,7 @@ export const navigationRoutes = [
   defineGameplayRoute({
     path: "/navigation/games/read",
     readOnly: true,
-    runtime: createGameplayRuntime,
+    runtime: (context) => context,
     parse: (body) => validateBody(body, isReadNavigationGamesRequest),
     async handle(body, { identity, repository, dependencies, env }) {
       const profileId = await resolveProfileId(identity, repository);
@@ -122,7 +121,7 @@ export const navigationRoutes = [
   defineGameplayRoute({
     path: "/navigation/games/remove",
     readOnly: false,
-    runtime: createGameplayRuntime,
+    runtime: (context) => context,
     parse(body) {
       const value = validateBody(body, isRemoveNavigationGameRequest);
       const inviteId = value.inviteId.trim();

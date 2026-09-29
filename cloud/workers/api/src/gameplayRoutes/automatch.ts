@@ -24,7 +24,29 @@ import {
   invalidRequest,
   validateBody,
 } from "./definition.ts";
-import { createGameplayRuntime } from "./runtime.ts";
+import {
+  createGameplayMutationLocks,
+  createGameplayProjectionDispatch,
+  gameplayMutationGuard,
+  type GameplayRequestContext,
+} from "./runtime.ts";
+
+function createAutomatchRuntime(context: GameplayRequestContext) {
+  const { dependencies } = context;
+  const dispatch = createGameplayProjectionDispatch(context);
+  const automatchDependencies: AutomatchDependencies = {
+    ...dependencies.automatch,
+    assertMutationAllowed: gameplayMutationGuard(context),
+    enqueueProfileGameProjection:
+      dependencies.automatch?.enqueueProfileGameProjection ||
+      dispatch.defaultEnqueueProfileGameProjection,
+    enqueueTelegramProjection:
+      dependencies.automatch?.enqueueTelegramProjection ||
+      dispatch.defaultEnqueueTelegramProjection,
+    mutationLocks: createGameplayMutationLocks(context),
+  };
+  return { ...context, automatchDependencies };
+}
 
 export function readAutomatchOperationId(request: Request): string {
   const values = new URL(request.url).searchParams.getAll("operationId");
@@ -128,7 +150,7 @@ export const automatchRoutes = [
   defineGameplayRoute({
     path: "/automatch/cancel",
     readOnly: false,
-    runtime: createGameplayRuntime,
+    runtime: createAutomatchRuntime,
     parse(body) {
       if (Object.keys(body).length !== 0) throw invalidRequest();
       return body;
@@ -139,7 +161,7 @@ export const automatchRoutes = [
   defineGameplayRoute({
     path: "/automatch/start",
     readOnly: false,
-    runtime: createGameplayRuntime,
+    runtime: createAutomatchRuntime,
     parse: (body) => validateBody(body, isStartAutomatchRequest),
     async handle(
       body,

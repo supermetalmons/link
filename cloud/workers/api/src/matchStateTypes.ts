@@ -116,6 +116,7 @@ export type MatchStateEventEffectsRequest = MatchStateAuthority & {
 
 export type MatchStateOperations = {
   readRecord(input: MatchStateRecordRequest): MatchStateRecord | null;
+  readRecords(input: MatchStateRecordsRequest): Array<MatchStateRecord | null>;
   readPair(input: MatchStatePairRequest): MatchStatePair;
   createRecords(input: MatchStateCreateRequest): MatchStateCreateResult;
   move(input: MatchStateMoveRequest): SubmitMoveResponse;

@@ -1,5 +1,6 @@
 import * as eventD1 from "./eventD1.ts";
 import { normalizeRecordKey } from "@mons/shared/ids";
+import { sha256Hex } from "./canonicalJson.ts";
 import { isEventMutation } from "../../../runtime/eventCommands.js";
 import type { EventCommand } from "../../../runtime/eventCommands.js";
 import type { EventLeaseKey } from "../../../runtime/eventLeases.js";
@@ -139,24 +140,15 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function bytesToHex(value: ArrayBuffer): string {
-  return Array.from(new Uint8Array(value), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
-}
-
 async function transitionId(
   eventId: string,
   revision: number,
   stateEffects: Record<string, unknown>,
 ): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(
-      `${eventId}\n${revision}\n${canonicalJson(stateEffects)}`,
-    ),
+  const digest = await sha256Hex(
+    `${eventId}\n${revision}\n${canonicalJson(stateEffects)}`,
   );
-  return `et_${bytesToHex(digest)}`;
+  return `et_${digest}`;
 }
 
 function sameTransitionIntent(

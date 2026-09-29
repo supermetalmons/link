@@ -7,7 +7,7 @@ import {
   GameSessionMutationLockFailure,
   MatchTimerStartStoreFailure,
 } from "./gameplayCoordinationD1.ts";
-import { createEventGameplayRepository } from "./eventRepository.ts";
+import { createGameplayRepository } from "./gameplayRepository.ts";
 import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
 import { MatchStateD1Failure } from "./matchStateD1.ts";
 import { enforceWagerOutcomeRateLimit } from "./wagerOutcome.ts";
@@ -185,7 +185,7 @@ async function handleGameplayRequest(
       }
       const identity = await measureAutomatchPhase("auth", authenticate);
       const repository =
-        dependencies.repository || createEventGameplayRepository(env);
+        dependencies.repository || createGameplayRepository(env);
       const isWagerMutation =
         pathname.startsWith("/wagers/") && pathname !== WAGER_FROZEN_READ_PATH;
       const reservations =

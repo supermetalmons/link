@@ -1,7 +1,7 @@
 import type { AutomatchDependencies } from "../automatch.ts";
 import type { GameSessionMutationDependencies } from "../gameSessionMutations.ts";
 import {
-  createGameplayCoordinationStores,
+  createGameSessionMutationLockStore,
   type GameplayCoordinationStores,
 } from "../gameplayCoordinationD1.ts";
 import type { GameplayRepository } from "../gameplayRepository.ts";
@@ -20,11 +20,6 @@ import type { readProfileGamesPage } from "../profileGamesD1.ts";
 import type { RequestIdentity } from "../requestIdentity.ts";
 import type { WorkerExecutionContext } from "../sessionAuth.ts";
 import { assertProfileMutationAllowed } from "../profileCanonicalActivation.ts";
-import { canonicalMatchOperations } from "../matchStateClient.ts";
-import {
-  ensureEventProgressWorkflow,
-  type EventProgressPlan,
-} from "../eventProgress.ts";
 import type { TelegramProjectionTask } from "../telegramProjectionTasks.ts";
 import type { ProfileGameProjectionTask } from "../profileGameProjectionTasks.ts";
 
@@ -71,35 +66,32 @@ export type GameplayRequestContext = {
   admittedMatchEpoch?: number;
 };
 
-export type GameplayRuntime = Awaited<ReturnType<typeof createGameplayRuntime>>;
-
-export async function createGameplayRuntime(context: GameplayRequestContext) {
-  const { env, ctx, dependencies, pathname, repository } = context;
-  const baseCoordination =
-    dependencies.coordination ||
-    createGameplayCoordinationStores(env.PROFILE_GAMES_DB);
-  const coordination = {
-    ...baseCoordination,
-    mutationLocks: repository.automatchPersistence.decorateLocks(
-      baseCoordination.mutationLocks,
-    ),
-  };
-  const assertMutationAllowed =
+export function gameplayMutationGuard({
+  env,
+  dependencies,
+}: GameplayRequestContext): () => Promise<void> {
+  return (
     dependencies.assertMutationAllowed ||
-    (() => assertProfileMutationAllowed(env));
-  const defaultEnqueueEventProgress = async (plan: EventProgressPlan) => {
-    ctx.waitUntil(
-      ensureEventProgressWorkflow(env, plan).catch(() => {
-        console.error(
-          JSON.stringify({
-            event: "event_progress_enqueue_failed",
-            eventId: plan.params.eventId,
-            sourceKey: plan.params.sourceKey,
-          }),
-        );
-      }),
-    );
-  };
+    (() => assertProfileMutationAllowed(env))
+  );
+}
+
+export function createGameplayMutationLocks({
+  env,
+  dependencies,
+  repository,
+}: GameplayRequestContext) {
+  return repository.automatchPersistence.decorateLocks(
+    dependencies.coordination?.mutationLocks ||
+      createGameSessionMutationLockStore(env.PROFILE_GAMES_DB),
+  );
+}
+
+export function createGameplayProjectionDispatch({
+  env,
+  ctx,
+  repository,
+}: GameplayRequestContext) {
   const defaultEnqueueTelegramProjection = async (
     task: TelegramProjectionTask,
   ) => {
@@ -130,60 +122,8 @@ export async function createGameplayRuntime(context: GameplayRequestContext) {
       }),
     );
   };
-  const automatchDependencies: AutomatchDependencies = {
-    ...dependencies.automatch,
-    assertMutationAllowed,
-    enqueueProfileGameProjection:
-      dependencies.automatch?.enqueueProfileGameProjection ||
-      defaultEnqueueProfileGameProjection,
-    enqueueTelegramProjection:
-      dependencies.automatch?.enqueueTelegramProjection ||
-      defaultEnqueueTelegramProjection,
-    mutationLocks: coordination.mutationLocks,
-  };
-  const ratingDependencies: RatingUpdateDependencies = {
-    ...dependencies.rating,
-    assertMutationAllowed,
-    enqueueEventProgress:
-      dependencies.rating?.enqueueEventProgress || defaultEnqueueEventProgress,
-    enqueueProfileGameProjection:
-      dependencies.rating?.enqueueProfileGameProjection ||
-      defaultEnqueueProfileGameProjection,
-    enqueueTelegramProjection:
-      dependencies.rating?.enqueueTelegramProjection ||
-      defaultEnqueueTelegramProjection,
-    timerStarts: coordination.timerStarts,
-  };
-  const gameSessionDependencies: GameSessionMutationDependencies = {
-    ...dependencies.gameSession,
-    assertMutationAllowed,
-    enqueueProfileGameProjection:
-      dependencies.gameSession?.enqueueProfileGameProjection ||
-      defaultEnqueueProfileGameProjection,
-    mutationLocks: coordination.mutationLocks,
-  };
-  const wagerDependencies: WagerProposalDependencies = {
-    ...dependencies.wager,
-    assertMutationAllowed,
-    mutationLocks: coordination.mutationLocks,
-  };
-  const canonical = pathname.startsWith("/matches/")
-    ? await canonicalMatchOperations(
-        env,
-        pathname === "/matches/ensure" ? undefined : context.admittedMatchEpoch,
-      )
-    : null;
   return {
-    ...context,
-    coordination,
-    assertMutationAllowed,
-    defaultEnqueueEventProgress,
     defaultEnqueueTelegramProjection,
     defaultEnqueueProfileGameProjection,
-    automatchDependencies,
-    ratingDependencies,
-    gameSessionDependencies,
-    wagerDependencies,
-    canonical,
   };
 }

@@ -245,13 +245,7 @@ export class InviteReactions
         throw new TypeError("match-state-invalid-read-batch");
       }
       this.inviteChannels.pinInvite(input.inviteId);
-      return input.requests.map((request) =>
-        this.matchState.readRecord({
-          ...request,
-          inviteId: input.inviteId,
-          epoch: input.epoch,
-        }),
-      );
+      return this.matchState.readRecords(input);
     });
   }
 

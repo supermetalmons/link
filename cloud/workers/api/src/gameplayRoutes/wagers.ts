@@ -21,13 +21,35 @@ import {
   acceptWagerProposal,
   removeWagerProposal,
   sendWagerProposal,
+  type WagerProposalDependencies,
 } from "../wagerProposal.ts";
 import {
   defineGameplayRoute,
   invalidRequest,
   validateBody,
 } from "./definition.ts";
-import { createGameplayRuntime, type GameplayRuntime } from "./runtime.ts";
+import {
+  createGameplayMutationLocks,
+  gameplayMutationGuard,
+  type GameplayRequestContext,
+} from "./runtime.ts";
+
+function createWagerRuntime(context: GameplayRequestContext) {
+  return {
+    ...context,
+    assertMutationAllowed: gameplayMutationGuard(context),
+  };
+}
+
+function createWagerProposalRuntime(context: GameplayRequestContext) {
+  const runtime = createWagerRuntime(context);
+  const wagerDependencies: WagerProposalDependencies = {
+    ...context.dependencies.wager,
+    assertMutationAllowed: runtime.assertMutationAllowed,
+    mutationLocks: createGameplayMutationLocks(context),
+  };
+  return { ...runtime, wagerDependencies };
+}
 
 function normalizeWagerIds(value: { inviteId: string; matchId: string }) {
   const inviteId = value.inviteId.trim();
@@ -43,7 +65,7 @@ function parseWagerProposalIds(body: Record<string, unknown>) {
 }
 
 function runWager<T>(
-  runtime: GameplayRuntime,
+  runtime: ReturnType<typeof createWagerRuntime>,
   work: (
     admittedRepository: GameplayRepository,
     guard: () => Promise<void>,
@@ -104,7 +126,7 @@ export const wagerRoutes = [
   defineGameplayRoute({
     path: "/wagers/proposals/send",
     readOnly: false,
-    runtime: createGameplayRuntime,
+    runtime: createWagerProposalRuntime,
     parse: (body) => {
       const value = validateBody(body, isWagerProposalSendRequest);
       return {
@@ -124,7 +146,7 @@ export const wagerRoutes = [
   defineGameplayRoute({
     path: "/wagers/proposals/accept",
     readOnly: false,
-    runtime: createGameplayRuntime,
+    runtime: createWagerProposalRuntime,
     parse: parseWagerProposalIds,
     handle: (body, runtime) =>
       runWager(runtime, (admittedRepository, guard) =>
@@ -137,7 +159,7 @@ export const wagerRoutes = [
   defineGameplayRoute({
     path: "/wagers/proposals/cancel",
     readOnly: false,
-    runtime: createGameplayRuntime,
+    runtime: createWagerProposalRuntime,
     parse: parseWagerProposalIds,
     handle: (body, runtime) =>
       runWager(runtime, (admittedRepository, guard) =>
@@ -153,7 +175,7 @@ export const wagerRoutes = [
   defineGameplayRoute({
     path: "/wagers/proposals/decline",
     readOnly: false,
-    runtime: createGameplayRuntime,
+    runtime: createWagerProposalRuntime,
     parse: parseWagerProposalIds,
     handle: (body, runtime) =>
       runWager(runtime, (admittedRepository, guard) =>
@@ -169,7 +191,7 @@ export const wagerRoutes = [
   defineGameplayRoute({
     path: "/wagers/outcomes/resolve",
     readOnly: false,
-    runtime: createGameplayRuntime,
+    runtime: createWagerRuntime,
     parse: (body) =>
       normalizeWagerIds(validateBody(body, isWagerOutcomeResolveRequest)),
     handle: (body, runtime) =>

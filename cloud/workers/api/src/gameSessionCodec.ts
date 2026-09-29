@@ -3,6 +3,7 @@ import {
   STATE_VALUE_FIELD,
 } from "./stateCompatibility.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
+import { canonicalJson, sha256Hex } from "./canonicalJson.ts";
 import type { MatchStateCreation } from "./matchStateTypes.ts";
 import type { GameSessionChange } from "./gameSessionContracts.ts";
 
@@ -97,27 +98,11 @@ function record(value: unknown): value is JsonRecord {
 }
 
 export function canonical(value: unknown): string {
-  if (value === null) return "null";
-  if (typeof value === "string" || typeof value === "boolean")
-    return JSON.stringify(value);
-  if (typeof value === "number" && Number.isFinite(value))
-    return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  if (!record(value)) return fail("invalid-json");
-  return `{${Object.keys(value)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`)
-    .join(",")}}`;
+  return canonicalJson(value, () => fail("invalid-json"));
 }
 
 export async function digest(value: unknown): Promise<string> {
-  const bytes = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(canonical(value)),
-  );
-  return Array.from(new Uint8Array(bytes), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
+  return sha256Hex(canonical(value));
 }
 
 function pathParts(path: string): string[] {

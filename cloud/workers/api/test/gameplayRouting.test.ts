@@ -442,6 +442,114 @@ test("top-level router dispatches every gameplay endpoint to its domain behavior
   }
 });
 
+test("gameplay routes only construct coordination used by their domain", async (t) => {
+  const lockPaths = new Set([
+    "/automatch/cancel",
+    "/automatch/start",
+    "/invites/create",
+    "/invites/join",
+    "/matches/ensure",
+    "/rematches/end",
+    "/rematches/propose",
+    "/wagers/proposals/accept",
+    "/wagers/proposals/cancel",
+    "/wagers/proposals/decline",
+    "/wagers/proposals/send",
+  ]);
+  for (const route of routes) {
+    await t.test(route.path, async () => {
+      const f = fixture(route);
+      const coordination = createMemoryGameplayCoordinationStores();
+      const usesLocks = lockPaths.has(route.path);
+      const usesTimerStarts = route.path === "/ratings/update";
+      let decoratedLocks = 0;
+      const repository = f.dependencies.repository!;
+      const dependencies: GameplayRouteDependencies = {
+        ...f.dependencies,
+        get coordination() {
+          assert.ok(usesLocks || usesTimerStarts, "unexpected coordination");
+          return {
+            get mutationLocks() {
+              assert.ok(usesLocks, "unexpected mutation locks");
+              return coordination.mutationLocks;
+            },
+            get timerStarts() {
+              assert.ok(usesTimerStarts, "unexpected timer starts");
+              return coordination.timerStarts;
+            },
+          };
+        },
+        repository: {
+          ...repository,
+          automatchPersistence: {
+            ...repository.automatchPersistence,
+            decorateLocks(locks) {
+              assert.ok(usesLocks, "unexpected lock decoration");
+              assert.strictEqual(locks, coordination.mutationLocks);
+              decoratedLocks++;
+              return repository.automatchPersistence.decorateLocks(locks);
+            },
+          },
+        },
+      };
+      const env: Env = {
+        ...TELEGRAM_TEST_ENV,
+        get EVENT_DB(): D1Database {
+          throw new Error("unexpected-event-database");
+        },
+      };
+      const path =
+        route.path === "/automatch/start"
+          ? `${route.path}?operationId=${operationId}`
+          : route.path;
+      const response = await handleRequest(
+        request(path, route.body),
+        env,
+        { gameplay: dependencies },
+        f.context,
+      );
+      await Promise.all(f.pending);
+      assert.equal(response.status, route.response ? 200 : 409);
+      assert.deepEqual(f.effects, [route.effect]);
+      assert.equal(decoratedLocks, usesLocks ? 1 : 0);
+    });
+  }
+});
+
+test("default gameplay repository construction does not access the event database", async () => {
+  let rateLimited = false;
+  const env: Env = {
+    ...TELEGRAM_TEST_ENV,
+    get EVENT_DB(): D1Database {
+      throw new Error("unexpected-event-database");
+    },
+    AUTH_RATE_LIMITER: {
+      async limit() {
+        rateLimited = true;
+        return { success: false };
+      },
+    },
+  };
+  const response = await handleRequest(
+    request(`/automatch/start?operationId=${operationId}`, presentation),
+    env,
+    {
+      gameplay: {
+        verifyIdentity: async () => ({ uid }),
+        logFailure: assert.fail,
+      },
+    },
+    { waitUntil: () => assert.fail("unexpected-background-work") },
+  );
+  assert.equal(response.status, 429);
+  assert.equal(rateLimited, true);
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    error: "resource-exhausted",
+    message: "Too many game session attempts.",
+  });
+});
+
 type MatchControlState = "active" | "draining" | "frozen" | "unreadable";
 
 function withMatchControl(

@@ -236,6 +236,22 @@ describe("scheduled event recovery D1 cursor", () => {
     expect(await store.readCursor()).toEqual({ cursor: first, revision: 1 });
   });
 
+  it("rejects a mismatched admission generation without advancing the cursor", async () => {
+    const { store, admission } = await recoveryStore();
+    const first = { eventId: "first", startAtMs: 100 };
+    const next = { eventId: "next", startAtMs: 200 };
+    expect(await store.checkpoint(0, first, 1)).toBe(true);
+    const mismatched = createEventScheduledRecoveryStore(db, {
+      ...admission,
+      freezeGeneration: admission.freezeGeneration + 1,
+    });
+
+    await expect(mismatched.checkpoint(1, next, 2)).rejects.toThrow();
+    expect(await store.readCursor()).toEqual({ cursor: first, revision: 1 });
+    expect(await store.checkpoint(1, next, 3)).toBe(true);
+    expect(await store.readCursor()).toEqual({ cursor: next, revision: 2 });
+  });
+
   it("leaves the cursor unchanged when the write admission expires or storage freezes", async () => {
     const { store, admission } = await recoveryStore();
     await db

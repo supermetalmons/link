@@ -45,6 +45,7 @@ import {
   timerTerminal,
   type TimerPair,
 } from "./matchStateTimerPolicy.ts";
+import { MAX_MATCH_STATE_RECORD_READS } from "./matchStateTypes.ts";
 import type {
   MatchStateAuthority,
   MatchStateClaimTimerRequest,
@@ -57,6 +58,7 @@ import type {
   MatchStatePairRequest,
   MatchStateRecord,
   MatchStateRecordRequest,
+  MatchStateRecordsRequest,
   MatchStateSource,
   MatchStateStartTimerRequest,
   MatchStateSurrenderRequest,
@@ -266,6 +268,38 @@ export class MatchStateStore {
     this.authority(input);
     this.target(input);
     return this.record(input.matchId, input.playerId);
+  }
+
+  readRecords(input: MatchStateRecordsRequest): Array<MatchStateRecord | null> {
+    if (
+      !Array.isArray(input.requests) ||
+      input.requests.length === 0 ||
+      input.requests.length > MAX_MATCH_STATE_RECORD_READS
+    ) {
+      throw new TypeError("match-state-invalid-read-batch");
+    }
+    this.authority(input);
+    for (const request of input.requests)
+      this.target({ ...request, inviteId: input.inviteId, epoch: input.epoch });
+    const rows = this.storage.sql
+      .exec<{ match_id: string; player_id: string; value_json: string }>(
+        `SELECT match_id, player_id, value_json FROM match_state_records WHERE ${input.requests.map(() => "(match_id = ? AND player_id = ?)").join(" OR ")}`,
+        ...input.requests.flatMap(({ matchId, playerId }) => [
+          matchId,
+          playerId,
+        ]),
+      )
+      .toArray();
+    const records = new Map(
+      rows.map((row) => [
+        JSON.stringify([row.match_id, row.player_id]),
+        row.value_json,
+      ]),
+    );
+    return input.requests.map(({ matchId, playerId }) => {
+      const value = records.get(JSON.stringify([matchId, playerId]));
+      return value === undefined ? null : JSON.parse(value);
+    });
   }
 
   readPair(input: MatchStatePairRequest): MatchStatePair {

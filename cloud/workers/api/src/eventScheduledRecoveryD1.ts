@@ -3,6 +3,7 @@ import {
   type EventD1Connection,
   type EventWriteAdmission,
 } from "./eventD1.ts";
+import { eventWriteAdmissionGuard } from "./eventD1/guards.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 
 export const SCHEDULED_EVENT_RECOVERY_PAGE_SIZE = 100;
@@ -161,22 +162,7 @@ export function createEventScheduledRecoveryStore(
     },
     async checkpoint(expectedRevision, next, nowMs) {
       const results = await db.batch([
-        db
-          .prepare(
-            `INSERT INTO event_transaction_guards (singleton)
-             SELECT 0 WHERE NOT EXISTS (
-               SELECT 1 FROM event_write_admissions AS admission
-               JOIN event_runtime_control AS control ON control.singleton = 1
-               WHERE admission.admission_id = ?
-                 AND admission.freeze_generation = ?
-                 AND admission.freeze_generation = control.freeze_generation
-                 AND admission.expires_at_ms > CAST(
-                   (julianday('now') - 2440587.5) * 86400000 AS INTEGER
-                 )
-                 AND control.storage_mode = 'd1'
-             )`,
-          )
-          .bind(admission.admissionId, admission.freezeGeneration),
+        eventWriteAdmissionGuard(db, admission),
         db
           .prepare(
             `UPDATE event_scheduled_recovery_cursor

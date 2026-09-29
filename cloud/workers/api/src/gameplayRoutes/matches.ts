@@ -17,23 +17,33 @@ import {
   enforceMatchTimerRateLimit,
   startMatchTimer,
 } from "../matchTimer.ts";
+import { defineGameplayRoute, validateBody } from "./definition.ts";
+import { canonicalMatchOperations } from "../matchStateClient.ts";
 import {
-  defineGameplayRoute,
-  invalidRequest,
-  validateBody,
-} from "./definition.ts";
-import { createGameplayRuntime } from "./runtime.ts";
+  gameplayMutationGuard,
+  type GameplayRequestContext,
+} from "./runtime.ts";
+
+async function createMatchRuntime(context: GameplayRequestContext) {
+  return {
+    ...context,
+    assertMutationAllowed: gameplayMutationGuard(context),
+    canonical: await canonicalMatchOperations(
+      context.env,
+      context.admittedMatchEpoch,
+    ),
+  };
+}
 
 export const matchRoutes = [
   defineGameplayRoute({
     path: MATCH_MOVE_PATH,
     readOnly: false,
     maxBodyBytes: MAX_MATCH_MOVE_REQUEST_BYTES,
-    runtime: createGameplayRuntime,
+    runtime: createMatchRuntime,
     parse: (body) => validateBody(body, isSubmitMoveRequest),
     handle: async (body, runtime) => {
       const { canonical, dependencies } = runtime;
-      if (!canonical) throw invalidRequest();
       await enforceMatchMoveRateLimit(
         runtime.env.MOVE_RATE_LIMITER,
         runtime.identity.uid,
@@ -49,11 +59,10 @@ export const matchRoutes = [
   defineGameplayRoute({
     path: "/matches/surrender",
     readOnly: false,
-    runtime: createGameplayRuntime,
+    runtime: createMatchRuntime,
     parse: (body) => validateBody(body, isSurrenderMatchRequest),
     handle: async (body, runtime) => {
       const { canonical, dependencies } = runtime;
-      if (!canonical) throw invalidRequest();
       await enforceGameSessionMutationRateLimit(
         runtime.env.AUTH_RATE_LIMITER,
         runtime.identity.uid,
@@ -70,7 +79,7 @@ export const matchRoutes = [
   defineGameplayRoute({
     path: "/matches/timer/start",
     readOnly: false,
-    runtime: createGameplayRuntime,
+    runtime: createMatchRuntime,
     parse: (body) => {
       const value = validateBody(body, isStartMatchTimerRequest);
       return {
@@ -82,7 +91,6 @@ export const matchRoutes = [
     },
     handle: async (body, runtime) => {
       const { canonical, dependencies } = runtime;
-      if (!canonical) throw invalidRequest();
       await enforceMatchTimerRateLimit(
         runtime.env.AUTH_RATE_LIMITER,
         runtime.identity.uid,
@@ -98,7 +106,7 @@ export const matchRoutes = [
   defineGameplayRoute({
     path: "/matches/timer/claim",
     readOnly: false,
-    runtime: createGameplayRuntime,
+    runtime: createMatchRuntime,
     parse: (body) => {
       const value = validateBody(body, isClaimMatchVictoryByTimerRequest);
       return {
@@ -110,7 +118,6 @@ export const matchRoutes = [
     },
     handle: async (body, runtime) => {
       const { canonical, dependencies } = runtime;
-      if (!canonical) throw invalidRequest();
       await enforceMatchTimerClaimRateLimit(
         runtime.env.AUTH_RATE_LIMITER,
         runtime.identity.uid,

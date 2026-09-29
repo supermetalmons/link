@@ -3,19 +3,63 @@ import { isSafeRecordKey } from "../recordKeys.ts";
 import { isSafeOperationId } from "../operationIds.ts";
 import { createRatingRepository } from "../ratingRepository.ts";
 import { createEventProgressOutboxWriter } from "../eventRepository.ts";
-import { updateRatings } from "../ratingUpdate.ts";
+import {
+  updateRatings,
+  type RatingUpdateDependencies,
+} from "../ratingUpdate.ts";
+import { createMatchTimerStartStore } from "../gameplayCoordinationD1.ts";
+import { ensureEventProgressWorkflow } from "../eventProgressDispatch.ts";
+import type { EventProgressPlan } from "../eventProgressCodec.ts";
 import {
   defineGameplayRoute,
   invalidRequest,
   validateBody,
 } from "./definition.ts";
-import { createGameplayRuntime } from "./runtime.ts";
+import {
+  createGameplayProjectionDispatch,
+  gameplayMutationGuard,
+  type GameplayRequestContext,
+} from "./runtime.ts";
+
+function createRatingRuntime(context: GameplayRequestContext) {
+  const { env, ctx, dependencies } = context;
+  const dispatch = createGameplayProjectionDispatch(context);
+  const enqueueEventProgress = async (plan: EventProgressPlan) => {
+    ctx.waitUntil(
+      ensureEventProgressWorkflow(env, plan).catch(() => {
+        console.error(
+          JSON.stringify({
+            event: "event_progress_enqueue_failed",
+            eventId: plan.params.eventId,
+            sourceKey: plan.params.sourceKey,
+          }),
+        );
+      }),
+    );
+  };
+  const ratingDependencies: RatingUpdateDependencies = {
+    ...dependencies.rating,
+    assertMutationAllowed: gameplayMutationGuard(context),
+    enqueueEventProgress:
+      dependencies.rating?.enqueueEventProgress || enqueueEventProgress,
+    enqueueProfileGameProjection:
+      dependencies.rating?.enqueueProfileGameProjection ||
+      dispatch.defaultEnqueueProfileGameProjection,
+    enqueueTelegramProjection:
+      dependencies.rating?.enqueueTelegramProjection ||
+      dispatch.defaultEnqueueTelegramProjection,
+    timerStarts:
+      dependencies.coordination?.timerStarts ||
+      createMatchTimerStartStore(env.PROFILE_GAMES_DB),
+  };
+  return { ...context, ratingDependencies };
+}
 
 export const ratingRoutes = [
   defineGameplayRoute({
     path: "/ratings/update",
     readOnly: false,
-    runtime: createGameplayRuntime,
+    runtime: createRatingRuntime,
     parse(body) {
       const value = validateBody(body, isRatingUpdateRequest);
       const playerId = value.playerId.trim();

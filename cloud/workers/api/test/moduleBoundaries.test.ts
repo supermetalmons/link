@@ -72,6 +72,34 @@ test("gameplay and ratings repositories keep their factory boundaries", () => {
   }
 });
 
+test("gameplay route runtimes keep event and rating dependencies scoped", () => {
+  const sourceRoot = resolve(import.meta.dirname, "../src");
+  for (const entry of [
+    "runtime",
+    "navigation",
+    "matches",
+    "automatch",
+    "sessions",
+    "wagers",
+  ]) {
+    const reachable = new Set(
+      reachableRuntimeFiles(
+        resolve(sourceRoot, "gameplayRoutes", `${entry}.ts`),
+      ),
+    );
+    for (const dependency of [
+      "eventProgress.ts",
+      "eventRepository.ts",
+      "ratingRepository.ts",
+    ]) {
+      assert.ok(
+        !reachable.has(resolve(sourceRoot, dependency)),
+        `${entry} depends on ${dependency}`,
+      );
+    }
+  }
+});
+
 test("canonical profile internals never import their public facade", () => {
   const facade = resolve(import.meta.dirname, "../src/profileCanonicalD1.ts");
   const internalRoot = resolve(import.meta.dirname, "../src/profileCanonical");

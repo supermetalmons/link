@@ -1809,8 +1809,7 @@ export async function didSelectRematchSeriesMatch(
     Board.setBoardFlipped(activeBoardShouldBeFlipped());
   }
   if (isOnlineGame) {
-    const hadRecentMissBeforeLookup =
-      rematchHistory.hasRecentMiss(matchId);
+    const hadRecentMissBeforeLookup = rematchHistory.hasRecentMiss(matchId);
     let pair = await rematchHistory.load(matchId);
     if (!pair && !hadRecentMissBeforeLookup) {
       if (
