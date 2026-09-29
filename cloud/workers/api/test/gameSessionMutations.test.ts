@@ -19,16 +19,18 @@ import {
   GAME_SESSION_MUTATION_RECEIPT_SWEEP_LIMIT,
   GameSessionMutationLeaseReleaseFailure,
   acquireGameSessionMutationLease as acquireGameSessionMutationLeaseImpl,
+  refreshGameSessionMutationLease as refreshGameSessionMutationLeaseImpl,
+  releaseGameSessionMutationLease as releaseGameSessionMutationLeaseImpl,
+  sweepGameSessionMutationReceipts,
+  withGameSessionMutationLease,
+} from "../src/gameSessionMutationRunner.ts";
+import {
   createManualInvite as createManualInviteImpl,
   endRematchSeries as endRematchSeriesImpl,
   ensureParticipantMatch as ensureParticipantMatchImpl,
   joinInvite as joinInviteImpl,
   nextRematchIndex,
   proposeRematch as proposeRematchImpl,
-  refreshGameSessionMutationLease as refreshGameSessionMutationLeaseImpl,
-  releaseGameSessionMutationLease as releaseGameSessionMutationLeaseImpl,
-  sweepGameSessionMutationReceipts,
-  withGameSessionMutationLease,
   type GameSessionMutationDependencies,
 } from "../src/gameSessionMutations.ts";
 import { resolveInviteRole } from "../src/inviteAccess.ts";
@@ -1025,10 +1027,14 @@ test("creates and replays one atomic manual invite mutation", async () => {
     identity.uid,
   );
   assert.ok(patch["players/login-1/matches/abcdefghijk"]);
+  const receipt = patch[`gameplayMutationReceipts/${ids.create}`] as Record<
+    string,
+    unknown
+  >;
+  assert.equal(receipt.requesterUid, identity.uid);
   assert.equal(
-    (patch[`gameplayMutationReceipts/${ids.create}`] as Record<string, unknown>)
-      .requesterUid,
-    identity.uid,
+    receipt.fingerprint,
+    "889dc12c6289c74835aaf18b7873460f60c315b9d2100869fb415526164ec02a",
   );
   assert.ok(patch[`gameplayMutationReceiptExpirations/${ids.create}`]);
   const outboxPath = "profileGameProjectionOutbox/automatch/abcdefghijk";

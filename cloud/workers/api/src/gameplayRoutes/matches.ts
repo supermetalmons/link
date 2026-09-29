@@ -8,7 +8,7 @@ import {
   isClaimMatchVictoryByTimerRequest,
   isStartMatchTimerRequest,
 } from "@mons/shared/timers";
-import { enforceGameSessionMutationRateLimit } from "../gameSessionMutations.ts";
+import { enforceGameSessionMutationRateLimit } from "../gameSessionMutationRunner.ts";
 import { enforceMatchMoveRateLimit, submitMove } from "../matchMove.ts";
 import { surrenderMatch } from "../matchSurrender.ts";
 import {

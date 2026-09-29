@@ -10,11 +10,11 @@ import { isAutoInviteId } from "@mons/shared/ids";
 import {
   createManualInvite,
   endRematchSeries,
-  enforceGameSessionMutationRateLimit,
   ensureParticipantMatch,
   joinInvite,
   proposeRematch,
 } from "../gameSessionMutations.ts";
+import { enforceGameSessionMutationRateLimit } from "../gameSessionMutationRunner.ts";
 import { resolveInviteRole } from "../inviteAccess.ts";
 import { defineGameplayRoute, validateBody } from "./definition.ts";
 import { createGameplayRuntime } from "./runtime.ts";

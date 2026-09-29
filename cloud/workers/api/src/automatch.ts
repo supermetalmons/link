@@ -50,7 +50,7 @@ import type { AutomatchTelegramProjectionTask } from "./telegramProjectionTasks.
 import {
   GameSessionMutationLeaseReleaseFailure,
   withGameSessionMutationLease,
-} from "./gameSessionMutations.ts";
+} from "./gameSessionMutationRunner.ts";
 import {
   getLoginProfileId,
   getOwnershipProfile,

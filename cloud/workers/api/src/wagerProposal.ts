@@ -19,7 +19,7 @@ import type { RequestIdentity } from "./requestIdentity.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import type { GameSessionMutationLockStore } from "./gameplayCoordinationD1.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
-import { withGameSessionMutationLease } from "./gameSessionMutations.ts";
+import { withGameSessionMutationLease } from "./gameSessionMutationRunner.ts";
 import { ensureWagerAgreementLineageReady } from "./wagerAgreementLineage.ts";
 import {
   getLoginProfileId,

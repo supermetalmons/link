@@ -13,7 +13,7 @@ import {
   startAutomatch,
   type AutomatchDependencies,
 } from "../automatch.ts";
-import { enforceGameSessionMutationRateLimit } from "../gameSessionMutations.ts";
+import { enforceGameSessionMutationRateLimit } from "../gameSessionMutationRunner.ts";
 import type { GameplayRepository } from "../gameplayRepository.ts";
 import type { AutomatchRepository } from "../gameplayContracts.ts";
 import type { RequestIdentity } from "../requestIdentity.ts";

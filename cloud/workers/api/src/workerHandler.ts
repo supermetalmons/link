@@ -36,7 +36,7 @@ import {
   PROFILE_GAME_PROJECTION_QUEUE_NAME,
   type ProfileGameProjectionTask,
 } from "./profileGameProjectionTasks.ts";
-import { sweepGameSessionMutationReceipts } from "./gameSessionMutations.ts";
+import { sweepGameSessionMutationReceipts } from "./gameSessionMutationRunner.ts";
 import { sweepExpiredAuthState } from "./authStateD1.ts";
 import {
   handleTelegramCommand,
