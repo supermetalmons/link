@@ -13,12 +13,18 @@ export type ApiErrorPolicy = {
 
 type AuthenticatedJsonRequest<T> = {
   url: string;
-  createRequestInit: () => Omit<RequestInit, "cache" | "headers" | "signal">;
+  createRequestInit: () => Omit<RequestInit, "cache" | "signal">;
   tokenProvider: AuthTokenProvider;
   validate: (value: unknown) => value is T;
   timeoutMs: number;
   maxResponseBytes: number;
   fetcher?: typeof fetch;
+  signal?: AbortSignal;
+  readJson?: (
+    response: Response,
+    maxResponseBytes: number,
+    signal: AbortSignal,
+  ) => Promise<unknown>;
   assertCurrentUser?: () => void;
   errors: ApiErrorPolicy;
 };
@@ -208,9 +214,14 @@ export async function authenticatedJsonRequest<T>({
   timeoutMs,
   maxResponseBytes,
   fetcher,
+  signal,
+  readJson,
   assertCurrentUser,
   errors,
 }: AuthenticatedJsonRequest<T>): Promise<T> {
+  if (signal?.aborted) {
+    throw errors.createError("aborted", "request-aborted");
+  }
   const controller = new AbortController();
   const unavailableError = () =>
     errors.createError("unavailable", errors.unavailableMessage);
@@ -220,12 +231,19 @@ export async function authenticatedJsonRequest<T>({
       errors.timeoutMessage,
     );
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  let rejectCancellation: (error: Error) => void = () => undefined;
+  const handleCallerAbort = () => {
+    controller.abort();
+    rejectCancellation(errors.createError("aborted", "request-aborted"));
+  };
   const deadline = new Promise<never>((_resolve, reject) => {
+    rejectCancellation = reject;
     timeoutId = setTimeout(() => {
       controller.abort();
       reject(timeoutError());
     }, timeoutMs);
   });
+  signal?.addEventListener("abort", handleCallerAbort, { once: true });
   const run = async (): Promise<T> => {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -235,10 +253,9 @@ export async function authenticatedJsonRequest<T>({
         }
         assertCurrentUser?.();
         const init = createRequestInit();
-        const headers = new Headers({
-          Accept: "application/json",
-          Authorization: `Bearer ${token}`,
-        });
+        const headers = new Headers(init.headers);
+        headers.set("Accept", "application/json");
+        headers.set("Authorization", `Bearer ${token}`);
         if (init.body !== undefined) {
           headers.set("Content-Type", "application/json");
         }
@@ -252,13 +269,15 @@ export async function authenticatedJsonRequest<T>({
           cancelBody(response);
           continue;
         }
-        const payload = await readBoundedJson(
-          response,
-          maxResponseBytes,
-          controller.signal,
-          unavailableError,
-          errors.normalizeResponseError,
-        );
+        const payload = await (readJson
+          ? readJson(response, maxResponseBytes, controller.signal)
+          : readBoundedJson(
+              response,
+              maxResponseBytes,
+              controller.signal,
+              unavailableError,
+              errors.normalizeResponseError,
+            ));
         if (!response.ok) {
           throw responseError(payload, response.status, errors);
         }
@@ -277,5 +296,6 @@ export async function authenticatedJsonRequest<T>({
     return await Promise.race([run(), deadline]);
   } finally {
     if (timeoutId !== undefined) clearTimeout(timeoutId);
+    signal?.removeEventListener("abort", handleCallerAbort);
   }
 }

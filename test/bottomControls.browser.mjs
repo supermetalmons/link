@@ -25,6 +25,7 @@ export const environment = {
   callbacks: {},
   automatchRequests: [],
   cancelRequests: [],
+  inviteRequests: [],
   subscriptions: [],
   eventSubscriptions: [],
   activeContext: null,
@@ -43,6 +44,7 @@ export const pendingGame = (inviteId) => ({
 });
 `;
 const controllerSource = `
+import { updateGameControlsContext } from '/src/game/gameControlsStore.ts';
 import { environment } from 'bottom-environment';
 const invoke = (name, ...args) => {
   environment.calls.push([name, ...args]);
@@ -57,7 +59,7 @@ export const canHandleUndo = () => true;
 export const isGameWithBot = false;
 export const puzzleMode = false;
 export let isOnlineGame = false;
-export const setOnlineGame = value => { isOnlineGame = value; };
+export const setOnlineGame = value => { isOnlineGame = value; updateGameControlsContext({ isOnlineGame: value }); };
 export const isWatchOnly = false;
 export const isMatchOver = () => false;
 export const getBoardViewMode = () => 'activeLive';
@@ -86,6 +88,7 @@ export const connection = {
   },
   getProfileGamesPage: async () => ({ items: [], nextCursor: null, hasMore: false }),
   removeWaitingNavigationGame: async () => ({ ok: true }),
+  didClickInviteButton: callback => environment.inviteRequests.push(callback),
   createOptimisticPendingAutomatchItem: pendingGame,
   cancelAutomatch: () => new Promise((resolve, reject) => environment.cancelRequests.push({ resolve, reject })),
   connectToInvite(inviteId) {
@@ -176,6 +179,7 @@ import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import BottomControls from '/src/ui/BottomControls.tsx';
 import * as port from '/src/ui/controls/bottomControlsPort.ts';
+import * as controlsStore from '/src/game/gameControlsStore.ts';
 import { getLifecycleCounters } from '/src/lifecycle/lifecycleDiagnostics.ts';
 import { environment, pendingGame } from 'bottom-environment';
 import { setOnlineGame } from 'bottom-controller';
@@ -189,7 +193,7 @@ const settle = async callback => {
   finally { globalThis.IS_REACT_ACT_ENVIRONMENT = false; }
 };
 window.harness = {
-  environment, port, run,
+  environment, port, run, controlsStore,
   render(profileId = 'a') {
     run(() => root.render(React.createElement(React.StrictMode, null,
       React.createElement(BottomControls, {
@@ -252,6 +256,11 @@ window.harness = {
     }));
   },
   counters: getLifecycleCounters,
+  remount() {
+    run(() => root.unmount());
+    root = createRoot(document.getElementById('root'));
+    window.harness.render();
+  },
   dispose() { run(() => root.unmount()); },
 };
 `;
@@ -418,7 +427,7 @@ import { setHomeVisible } from '/src/ui/controls/bottomControlsPort.ts';
 environment.bootstraps = [];
 export const go = async target => {
   environment.bootstraps.push(target.inviteId);
-  isOnlineGame = target.mode === 'invite';
+  setOnlineGame(target.mode === 'invite');
   setHomeVisible(isOnlineGame);
   const gate = environment.bootstrapGate;
   if (gate?.inviteId === target.inviteId) await gate.promise;
@@ -1564,6 +1573,197 @@ test(
         await page.evaluate(() => window.harness.environment.calls),
         [],
       );
+    });
+  },
+);
+
+test(
+  "published context rerenders primary actions without a presentation command",
+  { timeout: 60000 },
+  async () => {
+    await fixture(async (page) => {
+      await page.evaluate(() =>
+        window.harness.run(() => {
+          window.harness.port.showPrimaryAction(
+            window.harness.port.PrimaryActionType.Rematch,
+          );
+        }),
+      );
+      assert.equal(await count(page, "Play Again"), 1);
+      await page.evaluate(() =>
+        window.harness.run(() => {
+          window.harness.controlsStore.updateGameControlsContext({
+            puzzleMode: true,
+            selectedPuzzleId: "test-puzzle",
+          });
+        }),
+      );
+      assert.equal(await count(page, "Play Again"), 0);
+      assert.equal(await count(page, "Next Lesson"), 1);
+      await page.evaluate(() =>
+        window.harness.run(() => {
+          window.harness.controlsStore.updateGameControlsContext({
+            puzzleMode: false,
+            selectedPuzzleId: null,
+          });
+        }),
+      );
+      assert.equal(await count(page, "Next Lesson"), 0);
+      assert.equal(await count(page, "Play Again"), 1);
+    });
+  },
+);
+
+test(
+  "a real remount starts fresh presentation while rerender and StrictMode preserve it",
+  { timeout: 60000 },
+  async () => {
+    await fixture(async (page) => {
+      await page.evaluate(() =>
+        window.harness.run(() => {
+          const { port, controlsStore } = window.harness;
+          controlsStore.updateGameControlsContext({
+            puzzleMode: true,
+            selectedPuzzleId: "test-puzzle",
+          });
+          port.showResignButton();
+          port.showPrimaryAction(port.PrimaryActionType.Rematch);
+          port.setEndMatchVisible(true);
+          port.setEndMatchConfirmed(true);
+        }),
+      );
+      await click(page, "Resign");
+      assert.equal((await popupState(page)).bottom, true);
+      await page.evaluate(() => window.harness.render());
+      assert.equal(await count(page, "Next Lesson"), 1);
+      assert.equal(await count(page, "Finished"), 1);
+      assert.equal((await popupState(page)).bottom, true);
+      await page.evaluate(() => window.harness.remount());
+      assert.equal(await count(page, "Next Lesson"), 0);
+      assert.equal(await count(page, "Finished"), 0);
+      assert.equal((await popupState(page)).bottom, false);
+      assert.deepEqual(
+        await page.evaluate(() => {
+          const { context, presentation } =
+            window.harness.controlsStore.getGameControlsSnapshot();
+          return {
+            puzzleMode: context.puzzleMode,
+            selectedPuzzleId: context.selectedPuzzleId,
+            confirmation: presentation.gameControls.confirmation,
+          };
+        }),
+        {
+          puzzleMode: true,
+          selectedPuzzleId: "test-puzzle",
+          confirmation: "none",
+        },
+      );
+    });
+  },
+);
+
+test(
+  "reaction callbacks read the current context during synchronous mode changes",
+  { timeout: 60000 },
+  async () => {
+    await fixture(async (page) => {
+      await page.evaluate(() =>
+        window.harness.run(() =>
+          window.harness.port.showVoiceReactionButton(true),
+        ),
+      );
+      await click(page, "Voice Reaction");
+      await button(page, "yo").evaluate((element) =>
+        window.harness.run(() => {
+          window.harness.controlsStore.updateGameControlsContext({
+            isGameWithBot: true,
+          });
+          element.click();
+        }),
+      );
+      assert.deepEqual(
+        await page.evaluate(() =>
+          window.harness.environment.calls.filter(
+            ([name]) => name === "reaction",
+          ),
+        ),
+        [],
+      );
+      await page.clock.runFor(2000);
+      await click(page, "Voice Reaction");
+      await button(page, "yo").evaluate((element) =>
+        window.harness.run(() => {
+          window.harness.controlsStore.updateGameControlsContext({
+            isGameWithBot: false,
+            puzzleMode: true,
+          });
+          element.click();
+        }),
+      );
+      assert.deepEqual(
+        await page.evaluate(() =>
+          window.harness.environment.calls.filter(
+            ([name]) => name === "reaction",
+          ),
+        ),
+        [],
+      );
+    });
+  },
+);
+
+test(
+  "repeating a hidden reaction command still dismisses an open picker",
+  { timeout: 60000 },
+  async () => {
+    await fixture(async (page) => {
+      await page.evaluate(() =>
+        window.harness.run(() => window.harness.port.toggleReactionPicker()),
+      );
+      assert.equal(await count(page, "yo"), 1);
+      await page.evaluate(() =>
+        window.harness.run(() =>
+          window.harness.port.showVoiceReactionButton(false),
+        ),
+      );
+      assert.equal(await count(page, "yo"), 0);
+    });
+  },
+);
+
+test(
+  "late invite callbacks from a disposed instance cannot update a remounted presentation",
+  { timeout: 60000 },
+  async () => {
+    await fixture(async (page) => {
+      await page.evaluate(() =>
+        window.harness.run(() =>
+          window.harness.port.setInviteLinkActionVisible(true),
+        ),
+      );
+      await click(page, "New Link Game");
+      assert.equal(await count(page, "Creating a Link..."), 1);
+      await page.evaluate(() => window.harness.remount());
+      await page.evaluate(() =>
+        window.harness.run(() =>
+          window.harness.environment.inviteRequests[0](true),
+        ),
+      );
+      assert.equal(
+        await page.evaluate(
+          () =>
+            window.harness.controlsStore.getGameControlsSnapshot().presentation
+              .inviteReadyToCopy,
+        ),
+        false,
+      );
+      await page.evaluate(() =>
+        window.harness.run(() =>
+          window.harness.port.setInviteLinkActionVisible(true),
+        ),
+      );
+      assert.equal(await count(page, "New Link Game"), 1);
+      assert.equal(await count(page, "Copy Link"), 0);
     });
   },
 );

@@ -7,78 +7,31 @@ import React, {
   useState,
 } from "react";
 import { FaLink, FaShareAlt } from "react-icons/fa";
-import { connection } from "../../connection/connection";
-import { useEventProfileIds } from "./useEventProfileIds";
 import {
   EventMatch,
-  EventParticipant,
   EventPrizeAssignment,
   EventPrizeId,
   EventRecord,
-  PlayerProfile,
 } from "../../connection/connectionModels";
-import {
-  closeEventModal,
-  type EventModalState,
-  getEventModalState,
-  prepareEventModalGameLaunch,
-  subscribeToEventModalState,
-} from "./modalState";
-import { storage } from "../../utils/storage";
-import { openProfileSignInPopupForEvent } from "../identity/profileUiPort";
-import {
-  getCurrentRouteState,
-  getCurrentViewUrl,
-} from "../../navigation/routeState";
+import { BottomPillButton } from "../BottomControlsStyles";
 import {
   didDismissSomethingWithOutsideTapJustNow,
   didNotDismissAnythingWithOutsideTapJustNow,
 } from "../controls/outsideTapState";
-import { showShinyCard, showsShinyCardSomewhere } from "../shinyCardUiPort";
-import { getStashedPlayerProfile } from "../../utils/playerMetadata";
-import { BottomPillButton } from "../BottomControlsStyles";
-import {
-  EVENT_POSTPONE_OPTIONS_MINUTES,
-  isMonsLinkAdmin,
-} from "@mons/shared/events";
-import {
-  getEventPrizeConfig,
-  isEventPrizeRevealOpen,
-} from "@mons/shared/event-prizes";
-import {
-  EVENT_AUTO_RECOVERY_DELAY_MS,
-  EVENT_AUTO_RECOVERY_MAX_ATTEMPTS_PER_REASON,
-  EVENT_AUTO_RECOVERY_MIN_GAP_MS,
-  PENDING_JOIN_POLL_INTERVAL_MS,
-  PENDING_JOIN_POLL_TIMEOUT_MS,
-  type BracketMatchAction,
-  canLeaveEvent,
-  canSelectEventPrize as isEventPrizeSelectionAvailable,
-  formatAbsoluteStart,
-  formatRelativeStart,
-  getActivePendingMatches,
-  getBracketMatchAction,
-  getCurrentUiState,
-  getDisplayedMatchSides,
-  getEventAutoRecoveryReason,
-  getEventMatchInviteId,
-  getEventNowRefreshDelayMs,
-  getMatchSideData,
-  getMatchSideLabel,
-  getSortedMatches,
-  getSortedParticipants,
-  getSortedRounds,
-  getThirdPlaceMatch,
-  getWatchableMatch,
-  isLocalEventCreator,
-  isLocalEventParticipant,
-  isMatchSideBlocked,
-} from "./eventState";
+import { showsShinyCardSomewhere } from "../shinyCardUiPort";
 import {
   type ThirdPlaceMatchLayout,
   canRenderSymmetricalBracket,
   computeSymmetricalBracket,
 } from "./bracketGeometry";
+import {
+  DEV_STUB_DEFAULT_PLAYERS,
+  DEV_STUB_MAX_PLAYERS,
+  DEV_STUB_MIN_PLAYERS,
+  clampDevStubPlayerCount,
+  createStubEventRecord,
+} from "./devFixtures";
+import { EventAvatar } from "./EventAvatar";
 import {
   BRACKET_AVATAR_PX,
   BRACKET_EDGE_PADDING_X,
@@ -87,12 +40,10 @@ import {
   BRACKET_THIRD_PLACE_GAP,
   BRACKET_THIRD_PLACE_MATCH_H,
   BRACKET_THIRD_PLACE_MATCH_W,
-  CONTENT_AREA_PADDING_PX,
-  EMPTY_EVENT_PRIZES,
-  FALLBACK_AVATAR_PX,
-  PARTICIPANT_PROFILE_CACHE_TTL_MS,
-  PRIZE_DISPLAY_PLACES,
   type BracketCardInteraction,
+  CONTENT_AREA_PADDING_PX,
+  FALLBACK_AVATAR_PX,
+  PRIZE_DISPLAY_PLACES,
   WINNER_PODIUM_AVATAR_PX,
   WINNER_PODIUM_COLUMN_GAP,
   WINNER_PODIUM_COLUMN_W,
@@ -140,29 +91,26 @@ import {
 import {
   getEndedEventWinnerPodiumEntries,
   getParticipantDisplayName,
-  getParticipantProfileCacheKey,
 } from "./eventPresentation";
-import {
-  DEV_STUB_DEFAULT_PLAYERS,
-  DEV_STUB_MAX_PLAYERS,
-  DEV_STUB_MIN_PLAYERS,
-  clampDevStubPlayerCount,
-  createStubEventRecord,
-} from "./devFixtures";
-import { EventAvatar } from "./EventAvatar";
 import { EventPrizePanel } from "./EventPrizePanel";
-import { useEventPrizeSelection } from "./useEventPrizeSelection";
-
-type ParticipantLookupGroup = {
-  profileId: string;
-  loginUid: string;
-  modalState: EventModalState;
-  displayName: string;
-};
-type ParticipantProfileCacheEntry = {
-  profile: PlayerProfile;
-  cachedAtMs: number;
-};
+import {
+  type BracketMatchAction,
+  canLeaveEvent,
+  formatAbsoluteStart,
+  formatRelativeStart,
+  getBracketMatchAction,
+  getDisplayedMatchSides,
+  getEventMatchInviteId,
+  getMatchSideData,
+  getSortedMatches,
+  getSortedRounds,
+  getThirdPlaceMatch,
+  canSelectEventPrize as isEventPrizeSelectionAvailable,
+  isLocalEventCreator,
+  isMatchSideBlocked,
+} from "./eventState";
+import { closeEventModal } from "./modalState";
+import { useEventModalController } from "./useEventModalController";
 
 const getWinnerPodiumWidth = (entryCount: number): number => {
   const normalizedEntryCount = Math.max(1, Math.round(entryCount));
@@ -200,105 +148,77 @@ const getViewportSize = (): { width: number; height: number } => {
 };
 
 const EventModal: React.FC = () => {
-  const [modalState, setModalState] = useState(() => getEventModalState());
-  const [eventRecord, setEventRecord] = useState<EventRecord | null>(null);
   const [devStubRecord, setDevStubRecord] = useState<EventRecord | null>(null);
   const [showDevHelperPanel, setShowDevHelperPanel] = useState(false);
   const [devStubPlayerCount, setDevStubPlayerCount] = useState(
     DEV_STUB_DEFAULT_PLAYERS,
   );
-  const [isLoading, setIsLoading] = useState(false);
-  const [isJoining, setIsJoining] = useState(false);
-  const activeJoinRequestRef = useRef<object | null>(null);
-  const [isLeaving, setIsLeaving] = useState(false);
-  const activeLeaveRequestRef = useRef<object | null>(null);
-  const [isEventFresh, setIsEventFresh] = useState(false);
-  const loadTimingRef = useRef<{
-    eventId: string;
-    startedAt: number;
-    displayed: boolean;
-    fresh: boolean;
-  } | null>(null);
-  const [isDisqualifying, setIsDisqualifying] = useState(false);
-  const [isPostponing, setIsPostponing] = useState(false);
-  const [isRemovingParticipant, setIsRemovingParticipant] = useState(false);
   const [endedAwardsHeight, setEndedAwardsHeight] = useState(0);
-  const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
-  const [nowMs, setNowMs] = useState(() => Date.now());
   const [viewportSize, setViewportSize] = useState(getViewportSize);
   const [bracketInsets, setBracketInsets] = useState({ top: 0, bottom: 0 });
   const [participantsScale, setParticipantsScale] = useState(1);
   const [participantsHeight, setParticipantsHeight] = useState(0);
-  const [pendingJoinEventId, setPendingJoinEventId] = useState<string | null>(
-    null,
-  );
-  const [pendingJoinRequestedAtMs, setPendingJoinRequestedAtMs] = useState(0);
-  const activeParticipantLookupRef = useRef<ParticipantLookupGroup | null>(
-    null,
-  );
-  const participantProfileCacheRef = useRef<
-    Map<string, ParticipantProfileCacheEntry>
-  >(new Map());
-  const participantLookupModalStateRef = useRef(modalState);
   const ignoreNextBackdropClickRef = useRef(false);
   const ignoreBackdropMouseDownUntilMsRef = useRef(0);
   const pendingBackdropTouchDismissTouchIdRef = useRef<number | null>(null);
   const backdropGhostClickGuardCleanupRef = useRef<(() => void) | null>(null);
-  const copyResetTimeoutRef = useRef<number | null>(null);
-  const eventAutoRecoveryTimeoutRef = useRef<number | null>(null);
-  const eventAutoRecoveryAttemptsRef = useRef<Record<string, number>>({});
-  const eventAutoRecoveryLastAttemptAtMsRef = useRef<Record<string, number>>(
-    {},
-  );
-  const eventAutoRecoveryInFlightRef = useRef<Set<string>>(new Set());
   const topBarRef = useRef<HTMLDivElement | null>(null);
   const bottomBarRef = useRef<HTMLDivElement | null>(null);
   const participantsCloudRef = useRef<HTMLDivElement | null>(null);
   const endedAwardsRowRef = useRef<HTMLDivElement | null>(null);
-  const displayedEventRecord = devStubRecord ?? eventRecord;
-  const eventPrizeConfig = getEventPrizeConfig(modalState.eventId);
-  const eventPrizes = eventPrizeConfig?.prizes ?? EMPTY_EVENT_PRIZES;
-  const areEventPrizesConcealed = !isEventPrizeRevealOpen(
-    displayedEventRecord?.status,
-    displayedEventRecord?.startAtMs,
-    nowMs,
-  );
-  const currentProfileId = storage.getProfileId("");
-  const currentLoginUid = storage.getLoginId("");
-  const participantsById = useMemo(
-    () => displayedEventRecord?.participants ?? {},
-    [displayedEventRecord],
-  );
-  const participants = useMemo(
-    () => getSortedParticipants(displayedEventRecord),
-    [displayedEventRecord],
-  );
-  const prizeSelection = useEventPrizeSelection({
-    eventId: modalState.eventId,
-    isOpen: modalState.isOpen,
-    currentProfileId,
-    prizeConfig: eventPrizeConfig,
-    concealed: areEventPrizesConcealed,
-    participants,
-  });
+  const controller = useEventModalController(devStubRecord);
   const {
-    isUpdating: isUpdatingPrizeSelection,
-    isPending: isPrizeSelectionPending,
-    toggle: togglePrizeSelection,
-  } = prizeSelection;
-  const { profileIds: eventProfileIds, pending: isResolvingEventProfileIds } =
-    useEventProfileIds(
-      !devStubRecord && eventRecord?.status === "scheduled"
-        ? eventRecord
-        : null,
-      currentProfileId,
-      currentLoginUid,
-      modalState,
-    );
-  const invalidateParticipantLookups = useCallback(() => {
-    activeParticipantLookupRef.current = null;
-    participantProfileCacheRef.current.clear();
-  }, []);
+    modalState,
+    eventRecord,
+    displayedEventRecord,
+    isLoading,
+    isEventFresh,
+    nowMs,
+  } = controller.session;
+  const {
+    currentProfileId,
+    currentLoginUid,
+    eventProfileIds,
+    isResolvingEventProfileIds,
+  } = controller.identity;
+  const {
+    participants,
+    participantsById,
+    eventUiState,
+    watchableMatch,
+    openParticipant: handleParticipantClick,
+  } = controller.participants;
+  const {
+    eventPrizeConfig,
+    eventPrizes,
+    areEventPrizesConcealed,
+    prizeSelection,
+    isUpdatingPrizeSelection,
+  } = controller.prizes;
+  const {
+    isJoining,
+    isLeaving,
+    join: handleJoinClick,
+    leave: handleLeaveClick,
+    selectPrize: handlePrizeSelectionClick,
+  } = controller.participation;
+  const {
+    isDisqualifying,
+    isPostponing,
+    isRemovingParticipant,
+    canManageDisqualifications,
+    livePendingMatches,
+    removableScheduledParticipants,
+    disqualify: handleDisqualifyClick,
+    postpone: handlePostponeClick,
+    removeParticipant: handleRemoveParticipantClick,
+  } = controller.administration;
+  const {
+    copyState,
+    copy: handleCopyClick,
+    share: handleShareClick,
+    openMatch,
+  } = controller.navigation;
   const measureBracketInsets = useCallback(() => {
     const nextTop = Math.round(
       topBarRef.current?.getBoundingClientRect().height ?? 0,
@@ -313,48 +233,13 @@ const EventModal: React.FC = () => {
     );
   }, []);
 
-  useEffect(() => {
-    const eventAutoRecoveryInFlightSet = eventAutoRecoveryInFlightRef.current;
-    return () => {
+  useEffect(
+    () => () => {
       backdropGhostClickGuardCleanupRef.current?.();
       backdropGhostClickGuardCleanupRef.current = null;
-      if (eventAutoRecoveryTimeoutRef.current !== null) {
-        window.clearTimeout(eventAutoRecoveryTimeoutRef.current);
-        eventAutoRecoveryTimeoutRef.current = null;
-      }
-      eventAutoRecoveryInFlightSet.clear();
-    };
-  }, []);
-
-  useEffect(() => {
-    const unsubscribe = subscribeToEventModalState((nextState) => {
-      if (participantLookupModalStateRef.current !== nextState) {
-        activeJoinRequestRef.current = null;
-        setIsJoining(false);
-        activeLeaveRequestRef.current = null;
-        setIsLeaving(false);
-        participantLookupModalStateRef.current = nextState;
-        invalidateParticipantLookups();
-      }
-      setModalState(nextState);
-    });
-    return () => {
-      unsubscribe();
-      activeJoinRequestRef.current = null;
-      activeLeaveRequestRef.current = null;
-      invalidateParticipantLookups();
-    };
-  }, [invalidateParticipantLookups]);
-
-  useEffect(() => {
-    if (eventAutoRecoveryTimeoutRef.current !== null) {
-      window.clearTimeout(eventAutoRecoveryTimeoutRef.current);
-      eventAutoRecoveryTimeoutRef.current = null;
-    }
-    eventAutoRecoveryAttemptsRef.current = {};
-    eventAutoRecoveryLastAttemptAtMsRef.current = {};
-    eventAutoRecoveryInFlightRef.current.clear();
-  }, [modalState.eventId, modalState.isOpen]);
+    },
+    [],
+  );
 
   useEffect(() => {
     setDevStubRecord(null);
@@ -362,247 +247,11 @@ const EventModal: React.FC = () => {
   }, [modalState.eventId, modalState.isOpen]);
 
   useEffect(() => {
-    setIsPostponing(false);
-    setIsRemovingParticipant(false);
+    if (modalState.isOpen && modalState.eventId) return;
+    ignoreNextBackdropClickRef.current = false;
+    ignoreBackdropMouseDownUntilMsRef.current = 0;
+    pendingBackdropTouchDismissTouchIdRef.current = null;
   }, [modalState.eventId, modalState.isOpen]);
-
-  useEffect(() => {
-    const eventId = modalState.eventId;
-    if (!modalState.isOpen || !eventId) {
-      loadTimingRef.current = null;
-      if (copyResetTimeoutRef.current !== null) {
-        window.clearTimeout(copyResetTimeoutRef.current);
-        copyResetTimeoutRef.current = null;
-      }
-      setEventRecord(null);
-      setIsEventFresh(false);
-      setCopyState("idle");
-      setIsLoading(false);
-      setIsDisqualifying(false);
-      setIsPostponing(false);
-      setIsRemovingParticipant(false);
-      setPendingJoinEventId(null);
-      setPendingJoinRequestedAtMs(0);
-      ignoreNextBackdropClickRef.current = false;
-      ignoreBackdropMouseDownUntilMsRef.current = 0;
-      pendingBackdropTouchDismissTouchIdRef.current = null;
-      return;
-    }
-
-    setIsLoading(true);
-    loadTimingRef.current = {
-      eventId,
-      startedAt: performance.now(),
-      displayed: false,
-      fresh: false,
-    };
-    for (const name of [
-      "event:open",
-      "event:first-content",
-      "event:first-fresh-content",
-    ]) {
-      performance.clearMarks(name);
-      performance.clearMeasures(name);
-    }
-    performance.mark("event:open");
-    const unsubscribeFreshness = connection.subscribeToEventFreshness(
-      eventId,
-      setIsEventFresh,
-    );
-    const unsubscribeEvent = connection.subscribeToEvent(
-      eventId,
-      (nextEvent) => {
-        setEventRecord(nextEvent);
-        setIsLoading(false);
-      },
-      () => setIsLoading(false),
-    );
-    return () => {
-      unsubscribeEvent();
-      unsubscribeFreshness();
-    };
-  }, [modalState.eventId, modalState.isOpen]);
-
-  useLayoutEffect(() => {
-    const timing = loadTimingRef.current;
-    if (
-      !modalState.isOpen ||
-      !timing ||
-      eventRecord?.eventId !== timing.eventId
-    )
-      return;
-    const mark = (name: string) => {
-      performance.mark(name);
-      performance.measure(name, {
-        start: timing.startedAt,
-        end: performance.now(),
-      });
-    };
-    if (!timing.displayed) {
-      timing.displayed = true;
-      mark("event:first-content");
-    }
-    if (isEventFresh && !timing.fresh) {
-      timing.fresh = true;
-      mark("event:first-fresh-content");
-    }
-  }, [eventRecord, isEventFresh, modalState.isOpen]);
-
-  useEffect(() => {
-    return () => {
-      if (copyResetTimeoutRef.current !== null) {
-        window.clearTimeout(copyResetTimeoutRef.current);
-        copyResetTimeoutRef.current = null;
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!modalState.isOpen || typeof window === "undefined") {
-      return;
-    }
-
-    let isDisposed = false;
-    let timeoutId: number | null = null;
-
-    const scheduleNextTick = () => {
-      if (isDisposed) {
-        return;
-      }
-      if (timeoutId !== null) {
-        window.clearTimeout(timeoutId);
-      }
-      const currentNowMs = Date.now();
-      setNowMs(currentNowMs);
-      timeoutId = window.setTimeout(
-        scheduleNextTick,
-        getEventNowRefreshDelayMs(
-          displayedEventRecord?.status ?? null,
-          displayedEventRecord?.startAtMs ?? null,
-          currentNowMs,
-        ),
-      );
-    };
-
-    const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") {
-        scheduleNextTick();
-      }
-    };
-
-    scheduleNextTick();
-    window.addEventListener("focus", scheduleNextTick);
-    document.addEventListener("visibilitychange", refreshWhenVisible);
-
-    return () => {
-      isDisposed = true;
-      window.removeEventListener("focus", scheduleNextTick);
-      document.removeEventListener("visibilitychange", refreshWhenVisible);
-      if (timeoutId !== null) {
-        window.clearTimeout(timeoutId);
-      }
-    };
-  }, [
-    displayedEventRecord?.eventId,
-    displayedEventRecord?.startAtMs,
-    displayedEventRecord?.status,
-    modalState.eventId,
-    modalState.isOpen,
-  ]);
-
-  useEffect(() => {
-    if (!modalState.isOpen || typeof window === "undefined") {
-      return;
-    }
-    if (!modalState.eventId || !eventRecord || devStubRecord) {
-      if (eventAutoRecoveryTimeoutRef.current !== null) {
-        window.clearTimeout(eventAutoRecoveryTimeoutRef.current);
-        eventAutoRecoveryTimeoutRef.current = null;
-      }
-      return;
-    }
-    if (eventRecord.eventId !== modalState.eventId) {
-      return;
-    }
-    const autoRecoveryReason = getEventAutoRecoveryReason(
-      eventRecord,
-      nowMs,
-      isEventFresh,
-    );
-    if (!autoRecoveryReason) {
-      if (eventAutoRecoveryTimeoutRef.current !== null) {
-        window.clearTimeout(eventAutoRecoveryTimeoutRef.current);
-        eventAutoRecoveryTimeoutRef.current = null;
-      }
-      return;
-    }
-    const canAttemptRecovery =
-      autoRecoveryReason === "ended-missing-prize-assignments"
-        ? isLocalEventParticipant(eventRecord)
-        : isLocalEventCreator(eventRecord);
-    if (!canAttemptRecovery) {
-      return;
-    }
-
-    const attemptKey = `${eventRecord.eventId}:${autoRecoveryReason}`;
-    const attempts = eventAutoRecoveryAttemptsRef.current[attemptKey] ?? 0;
-    if (attempts >= EVENT_AUTO_RECOVERY_MAX_ATTEMPTS_PER_REASON) {
-      return;
-    }
-    if (eventAutoRecoveryInFlightRef.current.has(attemptKey)) {
-      return;
-    }
-    const lastAttemptAtMs =
-      eventAutoRecoveryLastAttemptAtMsRef.current[attemptKey] ?? 0;
-    if (Date.now() - lastAttemptAtMs < EVENT_AUTO_RECOVERY_MIN_GAP_MS) {
-      return;
-    }
-
-    if (eventAutoRecoveryTimeoutRef.current !== null) {
-      window.clearTimeout(eventAutoRecoveryTimeoutRef.current);
-    }
-
-    const targetEventId = eventRecord.eventId;
-    eventAutoRecoveryTimeoutRef.current = window.setTimeout(() => {
-      eventAutoRecoveryTimeoutRef.current = null;
-
-      const inFlightSet = eventAutoRecoveryInFlightRef.current;
-      if (inFlightSet.has(attemptKey)) {
-        return;
-      }
-
-      const currentAttempts =
-        eventAutoRecoveryAttemptsRef.current[attemptKey] ?? 0;
-      if (currentAttempts >= EVENT_AUTO_RECOVERY_MAX_ATTEMPTS_PER_REASON) {
-        return;
-      }
-
-      eventAutoRecoveryAttemptsRef.current[attemptKey] = currentAttempts + 1;
-      eventAutoRecoveryLastAttemptAtMsRef.current[attemptKey] = Date.now();
-      inFlightSet.add(attemptKey);
-
-      void connection
-        .syncEventState(targetEventId)
-        .catch(() => {})
-        .finally(() => {
-          inFlightSet.delete(attemptKey);
-        });
-    }, EVENT_AUTO_RECOVERY_DELAY_MS);
-
-    return () => {
-      if (eventAutoRecoveryTimeoutRef.current !== null) {
-        window.clearTimeout(eventAutoRecoveryTimeoutRef.current);
-        eventAutoRecoveryTimeoutRef.current = null;
-      }
-    };
-  }, [
-    devStubRecord,
-    eventRecord,
-    isEventFresh,
-    modalState.eventId,
-    modalState.isOpen,
-    nowMs,
-  ]);
 
   useEffect(() => {
     if (!modalState.isOpen || typeof window === "undefined") {
@@ -726,91 +375,6 @@ const EventModal: React.FC = () => {
     };
   }, [measureBracketInsets, modalState.isOpen]);
 
-  const submitJoin = useCallback((eventId: string) => {
-    if (activeJoinRequestRef.current) return;
-    const request = {};
-    activeJoinRequestRef.current = request;
-    setIsJoining(true);
-    void connection
-      .joinEvent(eventId)
-      .catch(() => {})
-      .finally(() => {
-        if (activeJoinRequestRef.current === request) {
-          activeJoinRequestRef.current = null;
-          setIsJoining(false);
-        }
-      });
-  }, []);
-
-  useEffect(() => {
-    if (
-      !modalState.isOpen ||
-      !modalState.eventId ||
-      eventRecord?.eventId !== modalState.eventId ||
-      pendingJoinEventId !== modalState.eventId
-    ) {
-      return;
-    }
-    const requestedAtMs =
-      pendingJoinRequestedAtMs > 0 ? pendingJoinRequestedAtMs : Date.now();
-    const intervalId = window.setInterval(() => {
-      if (Date.now() - requestedAtMs >= PENDING_JOIN_POLL_TIMEOUT_MS) {
-        setPendingJoinEventId(null);
-        setPendingJoinRequestedAtMs(0);
-        return;
-      }
-      if (
-        getEventModalState() !== modalState ||
-        storage.getProfileId("") === "" ||
-        activeLeaveRequestRef.current ||
-        isPrizeSelectionPending()
-      ) {
-        return;
-      }
-      const eventId = pendingJoinEventId;
-      setPendingJoinEventId(null);
-      setPendingJoinRequestedAtMs(0);
-      if (!eventId) {
-        return;
-      }
-      submitJoin(eventId);
-    }, PENDING_JOIN_POLL_INTERVAL_MS);
-    return () => {
-      window.clearInterval(intervalId);
-    };
-  }, [
-    eventRecord?.eventId,
-    modalState,
-    pendingJoinEventId,
-    pendingJoinRequestedAtMs,
-    isPrizeSelectionPending,
-    submitJoin,
-  ]);
-
-  const removableScheduledParticipants = useMemo(() => {
-    if (!eventRecord || eventRecord.status !== "scheduled") {
-      return [];
-    }
-    if (nowMs >= eventRecord.startAtMs || !isLocalEventCreator(eventRecord)) {
-      return [];
-    }
-    const creatorProfileId = eventRecord.createdByProfileId?.trim() ?? "";
-    const creatorLoginUid = eventRecord.createdByLoginUid?.trim() ?? "";
-    return getSortedParticipants(eventRecord).filter((participant) => {
-      const profileId = participant.profileId?.trim() ?? "";
-      const loginUid = participant.loginUid?.trim() ?? "";
-      if (!profileId) {
-        return false;
-      }
-      if (creatorProfileId && profileId === creatorProfileId) {
-        return false;
-      }
-      if (creatorLoginUid && loginUid === creatorLoginUid) {
-        return false;
-      }
-      return true;
-    });
-  }, [eventRecord, nowMs]);
   const rounds = useMemo(
     () => getSortedRounds(displayedEventRecord),
     [displayedEventRecord],
@@ -856,57 +420,6 @@ const EventModal: React.FC = () => {
         })),
     ];
   }, [displayedEventRecord?.status, eventPrizeAssignments, eventPrizes]);
-  const eventUiState = useMemo(
-    () =>
-      getCurrentUiState(
-        displayedEventRecord,
-        currentProfileId,
-        currentLoginUid,
-        eventProfileIds,
-      ),
-    [currentLoginUid, currentProfileId, displayedEventRecord, eventProfileIds],
-  );
-  const watchableMatch = useMemo(
-    () =>
-      getWatchableMatch(displayedEventRecord, currentProfileId, eventUiState),
-    [currentProfileId, displayedEventRecord, eventUiState],
-  );
-  const currentUsername = storage.getUsername("").trim().toLowerCase();
-  const canManageDisqualifications = isMonsLinkAdmin(currentUsername);
-  const livePendingMatches = useMemo(
-    () => getActivePendingMatches(eventRecord),
-    [eventRecord],
-  );
-  const handlePrizeSelectionClick = useCallback(
-    (prizeId: EventPrizeId) => {
-      if (
-        devStubRecord ||
-        !eventPrizeConfig ||
-        !isEventFresh ||
-        isLoading ||
-        activeJoinRequestRef.current ||
-        activeLeaveRequestRef.current ||
-        !isEventPrizeSelectionAvailable(
-          eventRecord,
-          currentProfileId,
-          Date.now(),
-        )
-      ) {
-        return;
-      }
-      togglePrizeSelection(prizeId);
-    },
-    [
-      currentProfileId,
-      devStubRecord,
-      eventRecord,
-      eventPrizeConfig,
-      isEventFresh,
-      isLoading,
-      togglePrizeSelection,
-    ],
-  );
-
   useEffect(() => {
     if (displayedEventRecord?.status === "dismissed") {
       setShowDevHelperPanel(false);
@@ -1325,272 +838,6 @@ const EventModal: React.FC = () => {
     [showDevHelperPanel, shouldKeepVisibleForOutsideDismiss],
   );
 
-  const copyEventLinkToClipboard = useCallback(
-    (link?: string) => {
-      if (!modalState.eventId || typeof window === "undefined") {
-        return;
-      }
-      connection.writeEventLinkToClipboard(modalState.eventId, link);
-      setCopyState("copied");
-      if (copyResetTimeoutRef.current !== null) {
-        window.clearTimeout(copyResetTimeoutRef.current);
-      }
-      copyResetTimeoutRef.current = window.setTimeout(() => {
-        copyResetTimeoutRef.current = null;
-        setCopyState("idle");
-      }, 1200);
-    },
-    [modalState.eventId],
-  );
-
-  const handleCopyClick = useCallback(() => {
-    copyEventLinkToClipboard();
-  }, [copyEventLinkToClipboard]);
-
-  const handleShareClick = useCallback(async () => {
-    if (!modalState.eventId || typeof window === "undefined") {
-      return;
-    }
-    const link = getCurrentViewUrl();
-    const shareData = {
-      url: link,
-      title: "Play Mons",
-    };
-    if (typeof navigator.share !== "function") {
-      copyEventLinkToClipboard(link);
-      return;
-    }
-    if (typeof navigator.canShare === "function") {
-      let canShareData = false;
-      try {
-        canShareData = navigator.canShare(shareData);
-      } catch {
-        canShareData = false;
-      }
-      if (!canShareData) {
-        copyEventLinkToClipboard(link);
-        return;
-      }
-    }
-    try {
-      await navigator.share(shareData);
-    } catch (error) {
-      const errorName =
-        typeof error === "object" &&
-        error !== null &&
-        "name" in error &&
-        typeof (error as { name?: unknown }).name === "string"
-          ? (error as { name: string }).name
-          : "";
-      if (errorName === "AbortError") {
-        return;
-      }
-      copyEventLinkToClipboard(link);
-    }
-  }, [copyEventLinkToClipboard, modalState.eventId]);
-
-  const handleJoinClick = useCallback(() => {
-    if (
-      !modalState.eventId ||
-      !modalState.isOpen ||
-      getEventModalState() !== modalState ||
-      eventRecord?.eventId !== modalState.eventId ||
-      activeJoinRequestRef.current ||
-      activeLeaveRequestRef.current ||
-      isPrizeSelectionPending()
-    ) {
-      return;
-    }
-    if (storage.getProfileId("") === "") {
-      setPendingJoinEventId(modalState.eventId);
-      setPendingJoinRequestedAtMs(Date.now());
-      openProfileSignInPopupForEvent();
-      return;
-    }
-    setPendingJoinEventId(null);
-    setPendingJoinRequestedAtMs(0);
-    submitJoin(modalState.eventId);
-  }, [eventRecord?.eventId, isPrizeSelectionPending, modalState, submitJoin]);
-
-  const handleLeaveClick = useCallback(async () => {
-    const profileId = storage.getProfileId("");
-    const loginUid = storage.getLoginId("");
-    if (
-      !modalState.eventId ||
-      !modalState.isOpen ||
-      getEventModalState() !== modalState ||
-      eventRecord?.eventId !== modalState.eventId ||
-      devStubRecord ||
-      !isEventFresh ||
-      isResolvingEventProfileIds ||
-      isLoading ||
-      activeJoinRequestRef.current ||
-      activeLeaveRequestRef.current ||
-      isPrizeSelectionPending() ||
-      !canLeaveEvent(
-        eventRecord,
-        profileId,
-        Date.now(),
-        loginUid,
-        eventProfileIds,
-      )
-    ) {
-      return;
-    }
-    const request = {};
-    activeLeaveRequestRef.current = request;
-    setIsLeaving(true);
-    try {
-      await connection.leaveEvent(modalState.eventId);
-    } catch (error) {
-      if (
-        activeLeaveRequestRef.current !== request ||
-        getEventModalState() !== modalState ||
-        storage.getProfileId("") !== profileId ||
-        storage.getLoginId("") !== loginUid ||
-        (error instanceof Error && error.message === "authentication-changed")
-      ) {
-        return;
-      }
-      const message = error instanceof Error ? error.message.trim() : "";
-      window.alert(message || "Failed to leave event. Please try again.");
-    } finally {
-      if (activeLeaveRequestRef.current === request) {
-        activeLeaveRequestRef.current = null;
-        if (getEventModalState() === modalState) {
-          setIsLeaving(false);
-        }
-      }
-    }
-  }, [
-    devStubRecord,
-    eventRecord,
-    eventProfileIds,
-    isEventFresh,
-    isLoading,
-    isPrizeSelectionPending,
-    isResolvingEventProfileIds,
-    modalState,
-  ]);
-
-  const openMatch = useCallback(async (inviteId: string) => {
-    if (!inviteId) {
-      return;
-    }
-    const currentRoute = getCurrentRouteState();
-    if (currentRoute.mode === "invite" && currentRoute.inviteId === inviteId) {
-      await closeEventModal({ reason: "launch_game" });
-      return;
-    }
-    prepareEventModalGameLaunch(inviteId);
-    connection.connectToInvite(inviteId);
-  }, []);
-
-  const resolveParticipantProfile = useCallback(
-    async (participant: EventParticipant) => {
-      const cachedProfile = participant.loginUid
-        ? getStashedPlayerProfile(participant.loginUid)
-        : undefined;
-      if (cachedProfile && cachedProfile.id === participant.profileId) {
-        return cachedProfile;
-      }
-      const profileCacheKey = getParticipantProfileCacheKey(participant);
-      const eventCachedProfile = profileCacheKey
-        ? participantProfileCacheRef.current.get(profileCacheKey)
-        : undefined;
-      if (
-        eventCachedProfile &&
-        Date.now() - eventCachedProfile.cachedAtMs <=
-          PARTICIPANT_PROFILE_CACHE_TTL_MS
-      ) {
-        return eventCachedProfile.profile;
-      }
-      if (profileCacheKey) {
-        participantProfileCacheRef.current.delete(profileCacheKey);
-      }
-      let profileById: PlayerProfile | null = null;
-      if (participant.profileId) {
-        try {
-          profileById = await connection.getProfileById(participant.profileId);
-        } catch (error) {
-          if (!participant.loginUid) {
-            throw error;
-          }
-        }
-      }
-      if (profileById) {
-        return profileById;
-      }
-      const exactProfile = participant.loginUid
-        ? await connection.getProfileByLoginId(participant.loginUid)
-        : null;
-      return exactProfile ?? null;
-    },
-    [],
-  );
-
-  const handleParticipantClick = useCallback(
-    async (participant: EventParticipant) => {
-      const lookupModalState = getEventModalState();
-      const isCurrentModalRender = lookupModalState === modalState;
-      const participantKey = participant.profileId || participant.loginUid;
-      if (
-        !participantKey ||
-        !isCurrentModalRender ||
-        !lookupModalState.isOpen ||
-        !lookupModalState.eventId
-      ) {
-        return;
-      }
-      const displayName = getParticipantDisplayName(participant);
-      const profileCacheKey = getParticipantProfileCacheKey(participant);
-      let lookupGroup = activeParticipantLookupRef.current;
-      if (
-        !lookupGroup ||
-        lookupGroup.profileId !== participant.profileId ||
-        lookupGroup.loginUid !== participant.loginUid ||
-        lookupGroup.modalState !== lookupModalState
-      ) {
-        lookupGroup = {
-          profileId: participant.profileId,
-          loginUid: participant.loginUid,
-          modalState: lookupModalState,
-          displayName,
-        };
-        activeParticipantLookupRef.current = lookupGroup;
-      } else {
-        lookupGroup.displayName = displayName;
-      }
-      try {
-        const profile = await resolveParticipantProfile(participant);
-        if (
-          !profile ||
-          activeParticipantLookupRef.current !== lookupGroup ||
-          getEventModalState() !== lookupGroup.modalState
-        ) {
-          return;
-        }
-        const profileCacheEntry = {
-          profile,
-          cachedAtMs: Date.now(),
-        };
-        participantProfileCacheRef.current.set(
-          profileCacheKey,
-          profileCacheEntry,
-        );
-        if (profile.id) {
-          participantProfileCacheRef.current.set(
-            `profile:${profile.id}`,
-            profileCacheEntry,
-          );
-        }
-        activeParticipantLookupRef.current = null;
-        await showShinyCard(profile, lookupGroup.displayName, true);
-      } catch {}
-    },
-    [modalState, resolveParticipantProfile],
-  );
-
   const handleBracketMatchAction = useCallback(
     (action: BracketMatchAction) => {
       if (action.kind === "game") {
@@ -1603,193 +850,6 @@ const EventModal: React.FC = () => {
     },
     [handleParticipantClick, openMatch],
   );
-
-  const handleDisqualifyClick = useCallback(() => {
-    if (
-      !canManageDisqualifications ||
-      !modalState.eventId ||
-      !eventRecord ||
-      eventRecord.status !== "active" ||
-      devStubRecord ||
-      isDisqualifying
-    ) {
-      return;
-    }
-
-    const activeMatches = getActivePendingMatches(eventRecord);
-    if (activeMatches.length <= 0) {
-      return;
-    }
-
-    const selectionLines = activeMatches.map(({ label, match }, index) => {
-      const hostLabel = getMatchSideLabel(match, "host");
-      const guestLabel = getMatchSideLabel(match, "guest");
-      return `${index + 1}. ${label}: ${hostLabel} vs ${guestLabel}`;
-    });
-    const rawSelection = window.prompt(
-      `Select active game to disqualify:\n${selectionLines.join("\n")}`,
-      "1",
-    );
-    if (!rawSelection) {
-      return;
-    }
-    const selectedIndex = Math.floor(Number(rawSelection)) - 1;
-    const selected = activeMatches[selectedIndex];
-    if (!selected) {
-      return;
-    }
-
-    const hostLabel = getMatchSideLabel(selected.match, "host");
-    const guestLabel = getMatchSideLabel(selected.match, "guest");
-    const didConfirm = window.confirm(
-      `disqualify ${hostLabel} and ${guestLabel}?`,
-    );
-    if (!didConfirm) {
-      return;
-    }
-
-    setIsDisqualifying(true);
-    void connection
-      .disqualifyEventMatchWinners(modalState.eventId, selected.match.matchKey)
-      .catch((error) => {
-        const rawMessage =
-          typeof error === "object" &&
-          error !== null &&
-          "message" in error &&
-          typeof (error as { message?: unknown }).message === "string"
-            ? (error as { message: string }).message.trim()
-            : "";
-        window.alert(
-          rawMessage ||
-            "Failed to disqualify selected match. Please try again.",
-        );
-      })
-      .finally(() => {
-        setIsDisqualifying(false);
-      });
-  }, [
-    canManageDisqualifications,
-    devStubRecord,
-    eventRecord,
-    isDisqualifying,
-    modalState.eventId,
-  ]);
-
-  const handlePostponeClick = useCallback(() => {
-    if (
-      !modalState.eventId ||
-      !eventRecord ||
-      devStubRecord ||
-      eventRecord.status !== "scheduled" ||
-      nowMs >= eventRecord.startAtMs ||
-      !isLocalEventCreator(eventRecord) ||
-      isPostponing
-    ) {
-      return;
-    }
-    const rawSelection = window.prompt(
-      `Postpone by how many minutes?\n${EVENT_POSTPONE_OPTIONS_MINUTES.join(" / ")}`,
-      "5",
-    );
-    if (!rawSelection) {
-      return;
-    }
-    const selectedMinutes = Math.floor(Number(rawSelection.trim()));
-    if (
-      !EVENT_POSTPONE_OPTIONS_MINUTES.includes(selectedMinutes as 5 | 10 | 15)
-    ) {
-      window.alert("Please enter 5, 10, or 15.");
-      return;
-    }
-    const didConfirm = window.confirm(
-      `postpone event by ${selectedMinutes} minutes?`,
-    );
-    if (!didConfirm) {
-      return;
-    }
-    setIsPostponing(true);
-    void connection
-      .postponeEventStart(modalState.eventId, selectedMinutes)
-      .catch((error) => {
-        const rawMessage =
-          typeof error === "object" &&
-          error !== null &&
-          "message" in error &&
-          typeof (error as { message?: unknown }).message === "string"
-            ? (error as { message: string }).message.trim()
-            : "";
-        window.alert(
-          rawMessage || "Failed to postpone event start. Please try again.",
-        );
-      })
-      .finally(() => {
-        setIsPostponing(false);
-      });
-  }, [devStubRecord, eventRecord, isPostponing, modalState.eventId, nowMs]);
-
-  const handleRemoveParticipantClick = useCallback(() => {
-    if (
-      !modalState.eventId ||
-      !eventRecord ||
-      devStubRecord ||
-      eventRecord.status !== "scheduled" ||
-      nowMs >= eventRecord.startAtMs ||
-      !isLocalEventCreator(eventRecord) ||
-      isRemovingParticipant ||
-      removableScheduledParticipants.length <= 0
-    ) {
-      return;
-    }
-    const selectionLines = removableScheduledParticipants.map(
-      (participant, index) =>
-        `${index + 1}. ${getParticipantDisplayName(participant)}`,
-    );
-    const rawSelection = window.prompt(
-      `Select participant to remove:\n${selectionLines.join("\n")}`,
-      "1",
-    );
-    if (!rawSelection) {
-      return;
-    }
-    const selectedIndex = Math.floor(Number(rawSelection)) - 1;
-    const selectedParticipant = removableScheduledParticipants[selectedIndex];
-    if (!selectedParticipant || !selectedParticipant.profileId) {
-      return;
-    }
-    const didConfirm = window.confirm(
-      `remove ${getParticipantDisplayName(selectedParticipant)} from this event?`,
-    );
-    if (!didConfirm) {
-      return;
-    }
-
-    setIsRemovingParticipant(true);
-    void connection
-      .removeEventParticipant(modalState.eventId, selectedParticipant.profileId)
-      .catch((error) => {
-        const rawMessage =
-          typeof error === "object" &&
-          error !== null &&
-          "message" in error &&
-          typeof (error as { message?: unknown }).message === "string"
-            ? (error as { message: string }).message.trim()
-            : "";
-        window.alert(
-          rawMessage ||
-            "Failed to remove selected participant. Please try again.",
-        );
-      })
-      .finally(() => {
-        setIsRemovingParticipant(false);
-      });
-  }, [
-    devStubRecord,
-    eventRecord,
-    isRemovingParticipant,
-    modalState.eventId,
-    nowMs,
-    removableScheduledParticipants,
-  ]);
 
   const handleCreateStubBracket = useCallback(() => {
     const normalizedPlayerCount = clampDevStubPlayerCount(devStubPlayerCount);

@@ -149,6 +149,144 @@ test("preserves request options and omits Content-Type on GET", async () => {
   });
 });
 
+test("retains custom headers and runs guards around each token and validated result", async () => {
+  const sequence = [];
+  let calls = 0;
+  let requestSignal;
+  assert.deepEqual(
+    await request({
+      tokenProvider: async (refresh) => {
+        sequence.push(refresh ? "refresh" : "token");
+        return refresh ? "fresh-token" : "token";
+      },
+      assertCurrentUser: () => sequence.push("guard"),
+      createRequestInit: () => {
+        sequence.push("body");
+        return {
+          method: "POST",
+          body: "{}",
+          headers: { "X-Storage-Version": "v2" },
+          keepalive: true,
+        };
+      },
+      fetcher: async (_url, init) => {
+        sequence.push("fetch");
+        requestSignal = init.signal;
+        const headers = new Headers(init.headers);
+        assert.equal(headers.get("X-Storage-Version"), "v2");
+        assert.equal(headers.get("Accept"), "application/json");
+        assert.equal(headers.get("Content-Type"), "application/json");
+        assert.equal(
+          headers.get("Authorization"),
+          calls === 0 ? "Bearer token" : "Bearer fresh-token",
+        );
+        assert.equal(init.keepalive, true);
+        return jsonResponse({ ok: true }, calls++ === 0 ? 401 : 200);
+      },
+      readJson: async (response, maxBytes, signal) => {
+        sequence.push("read");
+        assert.equal(maxBytes, 128);
+        assert.equal(signal, requestSignal);
+        return response.json();
+      },
+      validate: (value) => {
+        sequence.push("validate");
+        return value.ok === true;
+      },
+    }),
+    { ok: true },
+  );
+  assert.deepEqual(sequence, [
+    "token",
+    "guard",
+    "body",
+    "fetch",
+    "refresh",
+    "guard",
+    "body",
+    "fetch",
+    "read",
+    "validate",
+    "guard",
+  ]);
+});
+
+test("an already canceled request never acquires a token", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let tokenCalls = 0;
+  await assert.rejects(
+    request({
+      signal: controller.signal,
+      tokenProvider: async () => {
+        tokenCalls++;
+        return "token";
+      },
+    }),
+    { name: "EndpointError", code: "aborted", message: "request-aborted" },
+  );
+  assert.equal(tokenCalls, 0);
+});
+
+test("caller cancellation covers authentication, fetch, and the default response reader", async (t) => {
+  for (const stage of ["token", "fetch", "body"]) {
+    await t.test(stage, async () => {
+      const controller = new AbortController();
+      const started = Promise.withResolvers();
+      const token = Promise.withResolvers();
+      let fetches = 0;
+      let signal;
+      let body;
+      let cancellations = 0;
+      const pending = request({
+        signal: controller.signal,
+        tokenProvider: () => {
+          if (stage === "token") {
+            started.resolve();
+            return token.promise;
+          }
+          return Promise.resolve("token");
+        },
+        fetcher: async (_url, init) => {
+          fetches++;
+          signal = init.signal;
+          if (stage === "fetch") {
+            started.resolve();
+            return new Promise(() => {});
+          }
+          body = new ReadableStream({
+            pull() {
+              started.resolve();
+              return new Promise(() => {});
+            },
+            cancel() {
+              cancellations++;
+              return new Promise(() => {});
+            },
+          });
+          return new Response(body);
+        },
+      });
+      const rejected = assert.rejects(pending, {
+        name: "EndpointError",
+        code: "aborted",
+        message: "request-aborted",
+      });
+      await started.promise;
+      controller.abort();
+      await rejected;
+      token.resolve("late-token");
+      await setImmediate();
+      assert.equal(fetches, stage === "token" ? 0 : 1);
+      if (signal) assert.equal(signal.aborted, true);
+      if (body) {
+        assert.equal(cancellations, 1);
+        assert.equal(body.locked, false);
+      }
+    });
+  }
+});
+
 test("never retries server, network, parsing, or validation failures", async (t) => {
   for (const [name, respond, expected] of [
     [

@@ -33,6 +33,7 @@ const source = ts.createSourceFile(
   true,
 );
 const functions = [
+  "publishGameControlsContext",
   "mergeHistoricalMatchPresentation",
   "scheduleHistoricalMatchArchiveRefresh",
   "enterHistoricalView",
@@ -71,6 +72,7 @@ const deferred = () => {
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 function harness(load = async () => null, buildGame = () => ({})) {
+  const contexts = [];
   const timers = [];
   const retryWaits = [];
   let nextTimerId = 0;
@@ -99,6 +101,14 @@ function harness(load = async () => null, buildGame = () => ({})) {
     },
   });
   const dependencies = {
+    getCurrentSessionId: () => sessionVersion,
+    isGameConnectionBound: () => false,
+    updateGameControlsContext: (context) => contexts.push(context),
+    isWatchOnly: false,
+    isGameWithBot: false,
+    puzzleMode: false,
+    isGameOver: false,
+    selectedProblem: null,
     rematchHistory,
     historicalMatchPairRetryDelayMs: HISTORICAL_MATCH_RETRY_DELAY_MS,
     isOnlineGame: true,
@@ -166,6 +176,7 @@ function harness(load = async () => null, buildGame = () => ({})) {
   )(...Object.values(dependencies));
   return {
     ...api,
+    contexts,
     history: rematchHistory,
     timers,
     retryWaits,
@@ -333,6 +344,7 @@ test("instant provisional history retries archival and refreshes frozen cosmetic
   const seed = pair();
   h.provisional(seed);
   assert.equal(h.select(seed), true);
+  assert.equal(h.contexts.at(-1).boardViewMode, "historicalView");
   assert.equal(h.timers[0].delay, 250);
   await h.runTimer();
   assert.equal(h.timers[0].delay, 3000);

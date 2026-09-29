@@ -119,6 +119,7 @@ import {
   type SyncEventStateResponse,
 } from "@mons/shared/events";
 import { AuthApiError, type AuthTokenProvider } from "./authApi";
+import { authenticatedJsonRequest, type ApiErrorPolicy } from "./apiTransport";
 import {
   GAMEPLAY_API_ROOT,
   GAMEPLAY_API_TIMEOUT_MS,
@@ -156,6 +157,20 @@ type RatingRetryOptions = {
   sleep?: (milliseconds: number) => Promise<void>;
 };
 
+const gameplayErrorPolicy: ApiErrorPolicy = {
+  createError: (code, message, details) =>
+    new GameplayApiError(code, message, details),
+  normalizeError: (error) => {
+    if (error instanceof GameplayApiError) return error;
+    if (error instanceof AuthApiError) {
+      return new GameplayApiError(error.code, error.message, error.details);
+    }
+    return undefined;
+  },
+  unavailableMessage: "Gameplay service is unavailable.",
+  timeoutMessage: "Gameplay request timed out.",
+};
+
 async function gameplayMutation<T>(
   path: string,
   body: unknown,
@@ -164,93 +179,28 @@ async function gameplayMutation<T>(
   timeoutMs = GAMEPLAY_API_TIMEOUT_MS,
   options: { signal?: AbortSignal; maxResponseBytes?: number } = {},
 ): Promise<T> {
-  if (options.signal?.aborted) {
-    throw new GameplayApiError("aborted", "request-aborted");
-  }
-  const controller = new AbortController();
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  let rejectCancellation: (error: GameplayApiError) => void = () => {};
-  const handleCallerAbort = () => {
-    controller.abort();
-    rejectCancellation(new GameplayApiError("aborted", "request-aborted"));
-  };
-  const deadline = new Promise<never>((_resolve, reject) => {
-    rejectCancellation = reject;
-    timeoutId = setTimeout(() => {
-      controller.abort();
-      reject(
-        new GameplayApiError("unavailable", "Gameplay request timed out."),
-      );
-    }, timeoutMs);
+  return authenticatedJsonRequest({
+    url: `${GAMEPLAY_API_ROOT}${path}`,
+    createRequestInit: () => ({
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(WAGER_WRITE_PATHS.has(path)
+          ? { [WAGER_STORAGE_VERSION_HEADER]: WAGER_STORAGE_VERSION }
+          : {}),
+      },
+      body: JSON.stringify(body),
+    }),
+    tokenProvider,
+    validate,
+    timeoutMs,
+    maxResponseBytes:
+      options.maxResponseBytes ?? GAMEPLAY_API_MAX_RESPONSE_BYTES,
+    signal: options.signal,
+    readJson: (response, maxBytes) => readBoundedJson(response, maxBytes),
+    assertCurrentUser: () => tokenProvider.assertCurrentUser?.(),
+    errors: gameplayErrorPolicy,
   });
-  options.signal?.addEventListener("abort", handleCallerAbort, { once: true });
-  const run = async (): Promise<T> => {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const token = await tokenProvider(attempt === 1);
-        if (controller.signal.aborted) {
-          throw new GameplayApiError(
-            "unavailable",
-            "Gameplay request timed out.",
-          );
-        }
-        tokenProvider.assertCurrentUser?.();
-        const response = await fetch(`${GAMEPLAY_API_ROOT}${path}`, {
-          method: "POST",
-          headers: {
-            Accept: "application/json",
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-            ...(WAGER_WRITE_PATHS.has(path)
-              ? { [WAGER_STORAGE_VERSION_HEADER]: WAGER_STORAGE_VERSION }
-              : {}),
-          },
-          body: JSON.stringify(body),
-          cache: "no-store",
-          signal: controller.signal,
-        });
-        if (response.status === 401 && attempt === 0) {
-          cancelBody(response);
-          continue;
-        }
-        const payload = await readBoundedJson(
-          response,
-          options.maxResponseBytes ?? GAMEPLAY_API_MAX_RESPONSE_BYTES,
-        );
-        if (!response.ok) {
-          throw responseError(payload, response.status);
-        }
-        if (!validate(payload)) {
-          throw new GameplayApiError(
-            "unavailable",
-            "Gameplay service is unavailable.",
-          );
-        }
-        tokenProvider.assertCurrentUser?.();
-        return payload;
-      } catch (error) {
-        if (error instanceof GameplayApiError) {
-          throw error;
-        }
-        if (error instanceof AuthApiError) {
-          throw new GameplayApiError(error.code, error.message, error.details);
-        }
-        throw new GameplayApiError(
-          "unavailable",
-          "Gameplay service is unavailable.",
-        );
-      }
-    }
-    throw new GameplayApiError("unauthenticated", "authentication-required");
-  };
-  try {
-    return await Promise.race([run(), deadline]);
-  } finally {
-    if (timeoutId !== undefined) {
-      clearTimeout(timeoutId);
-    }
-    options.signal?.removeEventListener("abort", handleCallerAbort);
-  }
 }
 
 export function readWagerFrozenViaApi(

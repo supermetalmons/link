@@ -14,6 +14,7 @@ const source = ts.createSourceFile(
   true,
 );
 const declarations = [
+  "publishGameControlsContext",
   "clearViewedRematchState",
   "nextBoardRenderSession",
   "isBoardRenderSessionActive",
@@ -36,7 +37,10 @@ const declarations = [
 
 function harness(overrides = {}) {
   const events = [];
+  const contexts = [];
   const initial = {
+    selectedProblem: null,
+    puzzleMode: false,
     boardViewMode: "historicalView",
     isOnlineGame: true,
     isWatchOnly: false,
@@ -82,6 +86,9 @@ function harness(overrides = {}) {
   );
   board.hasMonsBoardDisplayAnimationRunning = () => false;
   const dependencies = {
+    getCurrentSessionId: () => 1,
+    isGameConnectionBound: () => false,
+    updateGameControlsContext: (context) => contexts.push(context),
     initial,
     deriveBoardViewControls,
     Board: board,
@@ -144,7 +151,12 @@ function harness(overrides = {}) {
   api = new Function(...Object.keys(dependencies), outputText)(
     ...Object.values(dependencies),
   );
-  return { ...api, events, names: () => events.map(({ name }) => name) };
+  return {
+    ...api,
+    contexts,
+    events,
+    names: () => events.map(({ name }) => name),
+  };
 }
 
 function assertLivePreparation(h, mode) {
@@ -178,6 +190,7 @@ test("waiting entry clears historical input and orientation before waiting UI an
   const h = harness();
   h.wait();
   assertLivePreparation(h, "waitingLive");
+  assert.equal(h.contexts.at(-1).boardViewMode, "waitingLive");
   assert.deepEqual(h.names().slice(5), [
     "clearTimerVictoryClaimTimeout",
     "runMonsBoardAsDisplayWaitingAnimation",
@@ -201,6 +214,7 @@ test("active restoration refreshes appearance before rendering and restores time
   const h = harness();
   h.restore();
   assertLivePreparation(h, "activeLive");
+  assert.equal(h.contexts.at(-1).boardViewMode, "activeLive");
   const refreshIndex = h.names().indexOf("refreshDisplayedMatchPresentation");
   assert.deepEqual(h.names().slice(refreshIndex), [
     "refreshDisplayedMatchPresentation",

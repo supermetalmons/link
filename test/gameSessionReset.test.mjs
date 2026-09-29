@@ -13,6 +13,7 @@ const source = ts.createSourceFile(
   true,
 );
 const declarations = [
+  "publishGameControlsContext",
   "go",
   "disposeGameSession",
   "cancelSessionPreload",
@@ -64,6 +65,7 @@ function harness({
   let api;
   let wagerMatch = "old";
   let wagerSnapshot = { agreed: "old" };
+  const contexts = [];
   const initial = {
     activeRouteState: route,
     initialWagersMatchId: "old",
@@ -189,6 +191,9 @@ function harness({
     "hideItemSelectionOrConfirmationOverlay",
   ];
   const dependencies = {
+    getCurrentSessionId: () => 1,
+    isGameConnectionBound: () => false,
+    updateGameControlsContext: (context) => contexts.push(context),
     initial,
     MonsRules: { Color: { White: "white" } },
     PrimaryActionType: { None: "none" },
@@ -289,6 +294,7 @@ function harness({
   );
   return {
     ...api,
+    contexts,
     events,
     ui,
     subscriptions,
@@ -306,6 +312,17 @@ for (const action of ["go", "disposeGameSession"]) {
     const h = harness();
     await h[action](home);
     const state = h.state();
+    assert.deepEqual(h.contexts.at(-1), {
+      sessionId: 1,
+      isOnlineGame: false,
+      isWatchOnly: false,
+      isGameWithBot: false,
+      puzzleMode: false,
+      isGameOver: false,
+      boardViewMode: "activeLive",
+      isSeriesEnded: false,
+      selectedPuzzleId: null,
+    });
     assert.deepEqual(h.events.slice(0, 3), [
       ["preload-cancel", null],
       ["timeouts-clear"],

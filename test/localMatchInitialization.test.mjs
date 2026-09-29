@@ -21,6 +21,7 @@ const source = ts.createSourceFile(
   true,
 );
 const declarations = [
+  "publishGameControlsContext",
   "initializeLocalMatch",
   "startFreshLocalMatch",
   "startBotMatch",
@@ -60,7 +61,9 @@ const declarations = [
 
 function harness({ bot = false } = {}) {
   const originalGame = variants.createGameModelForStoredVariant(randomVariant);
+  const contexts = [];
   const initial = {
+    selectedProblem: null,
     game: originalGame,
     currentGameVariant: randomVariant,
     isOnlineGame: false,
@@ -142,6 +145,9 @@ function harness({ bot = false } = {}) {
     "showWaitingStateText",
   ];
   const dependencies = {
+    getCurrentSessionId: () => 1,
+    isGameConnectionBound: () => false,
+    updateGameControlsContext: (context) => contexts.push(context),
     initial,
     MonsRules,
     ...variants,
@@ -196,7 +202,16 @@ function harness({ bot = false } = {}) {
   api = new Function(...Object.keys(dependencies), outputText)(
     ...Object.values(dependencies),
   );
-  return { ...api, originalGame, ui, renders, automoves, seeds, scores };
+  return {
+    ...api,
+    contexts,
+    originalGame,
+    ui,
+    renders,
+    automoves,
+    seeds,
+    scores,
+  };
 }
 
 function assertFreshMatch(state, bot) {
@@ -272,6 +287,8 @@ test("local rematch clears historical and terminal state while preserving histor
 test("white bot start opens with one automove only after the new model, colors and controls are ready", () => {
   const h = harness();
   h.startBot();
+  assert.equal(h.contexts.at(-1).isGameWithBot, true);
+  assert.equal(h.contexts.at(-1).isGameOver, false);
   assert.equal(h.automoves.length, 1);
   const started = h.automoves[0];
   assertFreshMatch(started, true);

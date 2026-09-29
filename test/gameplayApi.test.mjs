@@ -1747,10 +1747,11 @@ test("submits authenticated move fields and accepts applied and replay acknowled
   for (const { input, init } of calls) {
     assert.equal(input, "https://api.mons.link/matches/move");
     assert.equal(init.method, "POST");
-    assert.equal(init.headers.Authorization, "Bearer session-token");
+    const headers = new Headers(init.headers);
+    assert.equal(headers.get("Authorization"), "Bearer session-token");
     assert.equal(init.cache, "no-store");
     assert.deepEqual(JSON.parse(init.body), submitMoveRequest);
-    assert.equal(init.headers[WAGER_STORAGE_VERSION_HEADER], undefined);
+    assert.equal(headers.get(WAGER_STORAGE_VERSION_HEADER), null);
   }
 });
 
@@ -2007,10 +2008,11 @@ test("sends only surrender identity through authenticated API requests and accep
   for (const { input, init } of calls) {
     assert.equal(input, "https://api.mons.link/matches/surrender");
     assert.equal(init.method, "POST");
-    assert.equal(init.headers.Authorization, "Bearer session-token");
+    const headers = new Headers(init.headers);
+    assert.equal(headers.get("Authorization"), "Bearer session-token");
     assert.equal(init.cache, "no-store");
     assert.deepEqual(JSON.parse(init.body), surrenderRequest);
-    assert.equal(init.headers[WAGER_STORAGE_VERSION_HEADER], undefined);
+    assert.equal(headers.get(WAGER_STORAGE_VERSION_HEADER), null);
   }
   for (const request of [
     { ...surrenderRequest, playerId: "" },
@@ -3475,6 +3477,56 @@ test("only automatch uses the larger bootstrap response budget", async () => {
   await assert.rejects(
     cancelAutomatchViaApi(async () => "token"),
     GameplayApiError,
+  );
+});
+
+test("gameplay mutation authentication initializes before checking the bound user", async () => {
+  const sequence = [];
+  const tokenProvider = createPollingAuthTokenProvider({
+    ensureAuthenticated: async () => sequence.push("authenticate"),
+    getUserBoundProvider: () =>
+      Object.assign(
+        async () => {
+          sequence.push("token");
+          return "token";
+        },
+        { assertCurrentUser: () => sequence.push("guard") },
+      ),
+    isSessionCurrent: () => true,
+  });
+  globalThis.fetch = async () => {
+    sequence.push("fetch");
+    return jsonResponse({ ok: true });
+  };
+  assert.deepEqual(await cancelAutomatchViaApi(tokenProvider), { ok: true });
+  assert.deepEqual(sequence, [
+    "authenticate",
+    "token",
+    "guard",
+    "fetch",
+    "guard",
+  ]);
+});
+
+test("gameplay mutations retain their streamed limit for a nonfinite declared length", async () => {
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ ok: true }), {
+      headers: { "Content-Length": "Infinity" },
+    });
+  assert.deepEqual(await cancelAutomatchViaApi(async () => "token"), {
+    ok: true,
+  });
+  globalThis.fetch = async () =>
+    new Response(" ".repeat(MAX_GAME_SESSION_RESPONSE_BYTES + 1), {
+      headers: { "Content-Length": "Infinity" },
+    });
+  await assert.rejects(
+    cancelAutomatchViaApi(async () => "token"),
+    {
+      name: "GameplayApiError",
+      code: "unavailable",
+      message: "Gameplay service is unavailable.",
+    },
   );
 });
 

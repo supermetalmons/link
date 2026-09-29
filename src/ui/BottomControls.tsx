@@ -3,7 +3,6 @@ import React, {
   useEffect,
   useLayoutEffect,
   useState,
-  useReducer,
   useCallback,
   useMemo,
   useSyncExternalStore,
@@ -12,7 +11,6 @@ import {
   FIXED_STICKER_IDS,
   STICKER_ID_WHITELIST,
 } from "@mons/shared/reactions";
-import { MATCH_TIMER_DURATION_SECONDS } from "@mons/shared/timers";
 import { useAvailableMaterials } from "../hooks/useAvailableMaterials";
 import { useMaterialImages } from "../hooks/useMaterialImages";
 import {
@@ -46,18 +44,11 @@ import {
   didClickStartBotGameButton,
   didClickEndMatchButton,
   didClickConfirmResignButton,
-  isGameWithBot,
-  puzzleMode,
   playSameCompletedPuzzleAgain,
   dismissPendingAutomatchTransition,
-  isOnlineGame,
-  isWatchOnly,
-  isMatchOver,
-  getBoardViewMode,
   getRematchSeriesNavigatorItems,
   didSelectRematchSeriesMatch,
   preloadRematchSeriesScores,
-  getSelectedPuzzleId,
   didSelectPuzzle,
 } from "../game/gameController";
 import type { RematchSeriesNavigatorItem } from "../game/gameController";
@@ -153,11 +144,16 @@ import {
   type CloseNavigationAndAppearancePopupOptions,
 } from "./controls/bottomControlsPort";
 import type { GameControlsAction } from "./controls/bottomControlsState";
+import { hasBottomControlsPopups } from "./controls/bottomControlsUiState";
+import { useBottomControlsUi } from "./controls/useBottomControlsUi";
 import {
-  bottomControlsUiReducer,
-  createBottomControlsUiState,
-  hasBottomControlsPopups,
-} from "./controls/bottomControlsUiState";
+  deriveGameControlsView,
+  type GameControlsViewContext,
+} from "../game/gameControlsModel";
+import {
+  getGameControlsSnapshot,
+  subscribeGameControls,
+} from "../game/gameControlsStore";
 import { didDismissSomethingWithOutsideTapJustNow } from "./controls/outsideTapState";
 import { observeBottomControlsViewport } from "./controls/bottomControlsViewport";
 import {
@@ -543,20 +539,42 @@ interface BottomControlsProps {
 const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const { authStatus, profileId } = authState;
   const isAuthenticated = authStatus === "authenticated";
-  const [controlsUi, dispatchControlsUi] = useReducer(
-    bottomControlsUiReducer,
-    undefined,
-    () =>
-      createBottomControlsUiState({
-        duration: MATCH_TIMER_DURATION_SECONDS,
-        progress: 0,
-        requestDate: Date.now(),
-      }),
+  const controlsSnapshot = useSyncExternalStore(
+    subscribeGameControls,
+    getGameControlsSnapshot,
+    getGameControlsSnapshot,
   );
-  const { gameControls, popups } = controlsUi;
-  const dispatchGameControls = useCallback((action: GameControlsAction) => {
-    dispatchControlsUi({ type: "gameControls", action });
-  }, []);
+  const { context, presentation } = controlsSnapshot;
+  const { puzzleMode } = context;
+  const {
+    gameControls,
+    endMatchVisible: isEndMatchButtonVisible,
+    endMatchConfirmed: isEndMatchConfirmed,
+    inviteLinkVisible: isInviteLinkButtonVisible,
+    inviteReadyToCopy: didCreateInvite,
+    botGameVisible: isBotGameButtonVisible,
+    watchOnlyVisible: isWatchOnlyIndicatorVisible,
+    homeVisible: isDeepHomeButtonVisible,
+    navigationDimmed: isNavigationButtonDimmed,
+    appearanceDimmed: isBrushButtonDimmed,
+    waitingText: waitingStateText,
+    voiceReactionVisible: isVoiceReactionButtonVisible,
+    moveHistoryVisible: isMoveHistoryButtonVisible,
+    replayPuzzleVisible: isSamePuzzleAgainVisible,
+  } = presentation;
+  const controlsView = deriveGameControlsView(controlsSnapshot);
+  const {
+    popups,
+    dispatch: dispatchControlsUi,
+    updatePresentation: updateGameControlsPresentation,
+  } = useBottomControlsUi();
+  const controlsUi = { gameControls, popups };
+  const dispatchGameControls = useCallback(
+    (action: GameControlsAction) => {
+      dispatchControlsUi({ type: "gameControls", action });
+    },
+    [dispatchControlsUi],
+  );
   const isNavigationPopupVisible = popups.navigation;
   const isBoardStylePickerVisible = popups.appearance;
   const isMoveHistoryPopupVisible = popups.history;
@@ -577,22 +595,9 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const isResignConfirmVisible = gameControls.confirmation === "resign";
   const isTimerConfirmVisible = gameControls.confirmation === "timer";
   const isClaimVictoryConfirmVisible = gameControls.confirmation === "claim";
-  const [isEndMatchButtonVisible, setIsEndMatchButtonVisible] = useState(false);
-  const [isEndMatchConfirmed, setIsEndMatchConfirmed] = useState(false);
-  const [isInviteLinkButtonVisible, setIsInviteLinkButtonVisible] =
-    useState(false);
-  const [isBotGameButtonVisible, setIsBotGameButtonVisible] = useState(false);
-  const [isWatchOnlyIndicatorVisible, setIsWatchOnlyIndicatorVisible] =
-    useState(false);
-  const [isDeepHomeButtonVisible, setIsDeepHomeButtonVisible] = useState(false);
   const [isInviteLoading, setIsInviteLoading] = useState(false);
-  const [didCreateInvite, setDidCreateInvite] = useState(false);
   const [inviteCopiedTmpState, setInviteCopiedTmpState] = useState(false);
   const [isVoiceReactionDisabled, setIsVoiceReactionDisabled] = useState(false);
-  const [isNavigationButtonDimmed, setIsNavigationButtonDimmed] =
-    useState(false);
-  const [isBrushButtonDimmed, setIsBrushButtonDimmed] = useState(false);
-  const [, setIsNavigationListButtonVisible] = useState(false);
   const {
     topGames: topNavigationGames,
     pagedGames: pagedNavigationGames,
@@ -651,18 +656,11 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     inviteId: string;
   } | null>(null);
 
-  const [waitingStateText, setWaitingStateText] = useState("");
-  const [isVoiceReactionButtonVisible, setIsVoiceReactionButtonVisible] =
-    useState(false);
-  const [isMoveHistoryButtonVisible, setIsMoveHistoryButtonVisible] =
-    useState(false);
   const [
     isRematchSeriesSelectionInFlight,
     setIsRematchSeriesSelectionInFlight,
   ] = useState(false);
   const [historyUiVersion, setHistoryUiVersion] = useState(0);
-  const [isSamePuzzleAgainVisible, setIsSamePuzzleAgainVisible] =
-    useState(false);
   const [isEndMatchTemporarilyDisabled, setIsEndMatchTemporarilyDisabled] =
     useState(false);
   const {
@@ -917,7 +915,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         handleClickOutside,
       );
     };
-  }, [isEventModalVisible]);
+  }, [dispatchControlsUi, isEventModalVisible]);
 
   useEffect(() => {
     if (!isReactionPickerVisible) {
@@ -1146,7 +1144,10 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         preserveNavigation: shouldSuppressNavigationAutoClose,
       });
     },
-    [shouldSuppressNavigationPopupProgrammaticAutoCloseForEventModal],
+    [
+      dispatchControlsUi,
+      shouldSuppressNavigationPopupProgrammaticAutoCloseForEventModal,
+    ],
   );
 
   useEffect(() => {
@@ -1186,7 +1187,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
           }, 699);
         }
         setIsInviteLoading(false);
-        setDidCreateInvite(true);
+        updateGameControlsPresentation({ inviteReadyToCopy: true });
       } else {
         setIsInviteLoading(false);
       }
@@ -1201,7 +1202,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const hasNavigationPopupVisibleHandler = () => isNavigationPopupVisible;
 
   const setNavigationListButtonVisibleHandler = (visible: boolean) => {
-    setIsNavigationListButtonVisible(visible);
+    updateGameControlsPresentation({ navigationVisible: visible });
     if (
       !visible &&
       !shouldSuppressNavigationPopupProgrammaticAutoCloseForEventModal()
@@ -1211,19 +1212,21 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   };
 
   const setBrushAndNavigationButtonDimmedHandler = (dimmed: boolean) => {
-    setIsNavigationButtonDimmed(dimmed);
-    setIsBrushButtonDimmed(dimmed);
+    updateGameControlsPresentation({
+      navigationDimmed: dimmed,
+      appearanceDimmed: dimmed,
+    });
   };
 
   const showVoiceReactionButtonHandler = (show: boolean) => {
-    setIsVoiceReactionButtonVisible(show);
+    updateGameControlsPresentation({ voiceReactionVisible: show });
     if (!show) {
       dispatchControlsUi({ type: "dismissPopups", reaction: true });
     }
   };
 
   const showMoveHistoryButtonHandler = (show: boolean) => {
-    setIsMoveHistoryButtonVisible(show);
+    updateGameControlsPresentation({ moveHistoryVisible: show });
   };
 
   const showResignButtonHandler = () => {
@@ -1231,11 +1234,11 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   };
 
   const showWaitingStateTextHandler = (text: string) => {
-    setWaitingStateText(text);
+    updateGameControlsPresentation({ waitingText: text });
   };
 
   const setIsReadyToCopyExistingInviteLinkHandler = () => {
-    setDidCreateInvite(true);
+    updateGameControlsPresentation({ inviteReadyToCopy: true });
   };
 
   const hideTimerButtonsHandler = () => {
@@ -1292,32 +1295,32 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   };
 
   const setPlaySamePuzzleAgainButtonVisibleHandler = (visible: boolean) => {
-    setIsSamePuzzleAgainVisible(visible);
+    updateGameControlsPresentation({ replayPuzzleVisible: visible });
   };
 
   const setEndMatchVisibleHandler = (visible: boolean) => {
-    setIsEndMatchButtonVisible(visible);
+    updateGameControlsPresentation({ endMatchVisible: visible });
   };
 
   const setEndMatchConfirmedHandler = (confirmed: boolean) => {
-    setIsEndMatchConfirmed(confirmed);
+    updateGameControlsPresentation({ endMatchConfirmed: confirmed });
   };
 
   const setBotGameOptionVisibleHandler = (visible: boolean) => {
-    setIsBotGameButtonVisible(visible);
+    updateGameControlsPresentation({ botGameVisible: visible });
   };
 
   const setInviteLinkActionVisibleHandler = (visible: boolean) => {
-    setIsInviteLinkButtonVisible(visible);
+    updateGameControlsPresentation({ inviteLinkVisible: visible });
     if (!visible) {
       setIsInviteLoading(false);
-      setDidCreateInvite(false);
+      updateGameControlsPresentation({ inviteReadyToCopy: false });
       setInviteCopiedTmpState(false);
     }
   };
 
   const setHomeVisibleHandler = (visible: boolean) => {
-    setIsDeepHomeButtonVisible(visible);
+    updateGameControlsPresentation({ homeVisible: visible });
   };
 
   const setAutomoveActionEnabledHandler = (enabled: boolean) => {
@@ -1333,7 +1336,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   };
 
   const setWatchOnlyVisibleHandler = (visible: boolean) => {
-    setIsWatchOnlyIndicatorVisible(visible);
+    updateGameControlsPresentation({ watchOnlyVisible: visible });
   };
 
   const setUndoEnabledHandler = (enabled: boolean) => {
@@ -1516,7 +1519,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         stickerId,
       );
       playSounds([Sound.EmoteSent]);
-      if (isGameWithBot) {
+      if (getGameControlsSnapshot().context.isGameWithBot) {
         const sessionGuard = connection.createSessionGuard();
         const responseStickerId =
           STICKER_ID_WHITELIST[
@@ -1532,7 +1535,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
           );
           playSounds([Sound.EmoteReceived]);
         }, 5000);
-      } else if (!puzzleMode) {
+      } else if (!getGameControlsSnapshot().context.puzzleMode) {
         connection.sendVoiceReaction(newStickerReaction(stickerId));
         setIsVoiceReactionDisabled(true);
         setMatchScopedTimeout(() => {
@@ -1540,7 +1543,12 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         }, 9999);
       }
     },
-    [canSendSticker, isVoiceReactionButtonVisible, setMatchScopedTimeout],
+    [
+      canSendSticker,
+      dispatchControlsUi,
+      isVoiceReactionButtonVisible,
+      setMatchScopedTimeout,
+    ],
   );
 
   const handleReactionSelect = useCallback(
@@ -1554,7 +1562,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
       playReaction(reactionObj);
       showVoiceReactionText(reaction, false);
 
-      if (isGameWithBot) {
+      if (getGameControlsSnapshot().context.isGameWithBot) {
         const sessionGuard = connection.createSessionGuard();
         const responseReaction = reaction;
         const responseReactionObj = newReactionOfKind(responseReaction);
@@ -1565,7 +1573,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
           playReaction(responseReactionObj);
           showVoiceReactionText(reaction, true);
         }, 2000);
-      } else if (!puzzleMode) {
+      } else if (!getGameControlsSnapshot().context.puzzleMode) {
         connection.sendVoiceReaction(reactionObj);
         setIsVoiceReactionDisabled(true);
         setMatchScopedTimeout(() => {
@@ -1573,7 +1581,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         }, 9999);
       }
     },
-    [isVoiceReactionButtonVisible, setMatchScopedTimeout],
+    [dispatchControlsUi, isVoiceReactionButtonVisible, setMatchScopedTimeout],
   );
 
   const playerUid = getPlayerReactionUid();
@@ -1594,16 +1602,11 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     !!(playerUid && wagerState?.proposals && wagerState.proposals[playerUid]);
   const hasPlayers = !!playerUid && !!opponentUid;
   const isEligibleForWager =
-    isOnlineGame &&
-    !isWatchOnly &&
-    !isGameWithBot &&
-    getBoardViewMode() === "activeLive" &&
-    !isMatchOver() &&
+    controlsView.canWagerInCurrentGame &&
     playerHasProfile &&
     opponentHasProfile &&
     hasPlayers;
-  const isWatchOnlyMatchFinished =
-    isWatchOnly && isMatchOver() && !!connection.rematchSeriesEndIsIndicated();
+  const { isWatchOnlyMatchFinished } = controlsView;
   const isEndMatchPillVisible =
     (isEndMatchButtonVisible && !isEndMatchTemporarilyDisabled) ||
     isWatchOnlyMatchFinished;
@@ -1629,7 +1632,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
 
   const handleWagerModeToggle = useCallback(() => {
     dispatchControlsUi({ type: "enterWager" });
-  }, []);
+  }, [dispatchControlsUi]);
 
   const handleMaterialSelect = useCallback(
     (name: MaterialName) => {
@@ -1638,7 +1641,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
       if (total <= 0) return;
       dispatchControlsUi({ type: "selectWagerMaterial", name, total });
     },
-    [materialAmounts, frozenMaterialsStatus],
+    [dispatchControlsUi, materialAmounts, frozenMaterialsStatus],
   );
 
   const handleWagerSubmit = useCallback(() => {
@@ -1649,7 +1652,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     const material = wagerMaterial;
     const count = wagerCount;
     connection.sendWagerProposal(material, count).catch(() => {});
-  }, [wagerReady, wagerCount, wagerMaterial]);
+  }, [dispatchControlsUi, wagerReady, wagerCount, wagerMaterial]);
 
   const handleUndo = (
     event:
@@ -1713,16 +1716,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     void cancelAutomatch();
   };
 
-  const getPrimaryActionButtonText = () => {
-    switch (primaryAction) {
-      case PrimaryActionType.JoinGame:
-        return "Join Game";
-      case PrimaryActionType.Rematch:
-        return puzzleMode ? "Next Lesson" : "Play Again";
-      default:
-        return "";
-    }
-  };
+  const getPrimaryActionButtonText = () => controlsView.primaryActionText;
 
   const handleNavigationButtonClick = () => {
     if (!isNavigationPopupVisible) {
@@ -1800,7 +1794,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const routeState = getCurrentRouteState();
   const selectedProblemId =
     routeState.mode === "home" || routeState.mode === "event"
-      ? getSelectedPuzzleId()
+      ? context.selectedPuzzleId
       : null;
   const selectedNavigationItemId = selectedEventModalId
     ? `event_${selectedEventModalId}`
@@ -1818,6 +1812,10 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     hasCurrentInviteContext && connection.isCurrentInviteEventOwned()
       ? connection.getCurrentInviteEventId()
       : null;
+  const eventControlsContext: GameControlsViewContext = {
+    ...context,
+    currentInviteEventId,
+  };
   const shouldRetainEventGameButton =
     !!retainedEventGame &&
     retainedEventGame.inviteId === routeInviteId &&
@@ -1827,7 +1825,9 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     currentInviteEventId ??
     (shouldRetainEventGameButton ? retainedEventGame.eventId : null);
   const isEventGameButtonVisible =
-    (isOnlineGame && !!currentInviteEventId) || shouldRetainEventGameButton;
+    (eventControlsContext.isOnlineGame &&
+      !!eventControlsContext.currentInviteEventId) ||
+    shouldRetainEventGameButton;
 
   useEffect(() => {
     if (retainedEventGame && !shouldRetainEventGameButton) {

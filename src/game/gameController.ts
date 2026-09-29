@@ -35,6 +35,7 @@ import { colors } from "../content/boardStyles";
 import { playSounds, playReaction, newReactionOfKind } from "../content/sounds";
 import {
   gameConnection as connection,
+  isGameConnectionBound,
   type AutomatchResponse,
 } from "./gameConnectionPort";
 import {
@@ -101,7 +102,8 @@ import {
   isTransitionInProgress,
   transitionToHome,
 } from "../session/sessionTransitionPort";
-import { getSessionGuard } from "./matchSession";
+import { getCurrentSessionId, getSessionGuard } from "./matchSession";
+import { updateGameControlsContext } from "./gameControlsStore";
 import {
   createRematchHistory,
   HISTORICAL_MATCH_RETRY_DELAY_MS as historicalMatchPairRetryDelayMs,
@@ -157,6 +159,21 @@ import {
   type TrustedMatchPairGame,
 } from "./historicalMatchModels";
 import { deriveBoardViewControls, type BoardViewMode } from "./boardViewPolicy";
+
+function publishGameControlsContext() {
+  updateGameControlsContext({
+    sessionId: getCurrentSessionId(),
+    isOnlineGame,
+    isWatchOnly,
+    isGameWithBot,
+    puzzleMode,
+    isGameOver,
+    boardViewMode,
+    isSeriesEnded:
+      isGameConnectionBound() && !!connection.rematchSeriesEndIsIndicated(),
+    selectedPuzzleId: puzzleMode ? (selectedProblem?.id ?? null) : null,
+  });
+}
 
 export let isWatchOnly = false;
 export let isOnlineGame = false;
@@ -762,6 +779,7 @@ const setWatchOnlyState = (value: boolean) => {
     return;
   }
   isWatchOnly = value;
+  publishGameControlsContext();
   watchOnlyListeners.forEach((listener) => listener(value));
 };
 
@@ -921,6 +939,7 @@ function clearBoardViewInputs() {
 function prepareLiveBoardView(mode: "activeLive" | "waitingLive") {
   nextBoardRenderSession();
   boardViewMode = mode;
+  publishGameControlsContext();
   clearViewedRematchState();
   connection.setWagerViewMatchId(null);
   flashbackMode = false;
@@ -1011,6 +1030,7 @@ function enterHistoricalView(
   }
   displayedHistoryViewId += 1;
   boardViewMode = "historicalView";
+  publishGameControlsContext();
   viewedRematchMatchId = matchId;
   connection.setWagerViewMatchId(matchId);
   viewedRematchGame = historicalGame;
@@ -2105,6 +2125,7 @@ function resetSessionBoardState() {
   clearRematchHistoryCaches();
   Board.resetPlayersMetadataForSession();
   Board.setBoardFlipped(false);
+  publishGameControlsContext();
 }
 
 function resetSessionFlags() {
@@ -2117,6 +2138,7 @@ function resetSessionFlags() {
   isGameOver = false;
   isReconnect = false;
   didConnect = false;
+  publishGameControlsContext();
 }
 
 export async function go(routeStateOverride?: RouteState) {
@@ -2173,6 +2195,7 @@ export async function go(routeStateOverride?: RouteState) {
 
   if (isAutomatchTransition) {
     isOnlineGame = true;
+    publishGameControlsContext();
     isWaitingForInviteToGetAccepted = true;
     setHomeVisible(true);
     setIslandButtonDimmed(true);
@@ -2238,6 +2261,7 @@ export async function go(routeStateOverride?: RouteState) {
     setNavigationListButtonVisible(true);
   } else {
     isOnlineGame = true;
+    publishGameControlsContext();
     setHomeVisible(true);
     setIslandButtonDimmed(true);
 
@@ -2306,6 +2330,7 @@ export function disposeGameSession(nextRouteState?: RouteState) {
   }
   resetSessionFlags();
   selectedProblem = null;
+  publishGameControlsContext();
   isWaitingForInviteToGetAccepted = preserveAutomatchUi;
   resetOnlineReconnectRequestState();
   isInviteBotIntoLocalGameUnavailable = false;
@@ -2381,6 +2406,7 @@ export function failedToCreateRematchProposal() {
   isWaitingForRematchResponse = false;
   pendingRematchNavigationToLiveBoard = false;
   boardViewMode = "activeLive";
+  publishGameControlsContext();
   nextBoardRenderSession();
   Board.setBoardFlipped(activeBoardShouldBeFlipped());
   applyBoardUiForCurrentView();
@@ -2391,6 +2417,7 @@ export function failedToCreateRematchProposal() {
 
 function rematchInLoopMode() {
   isGameOver = false;
+  publishGameControlsContext();
   applyGameSeedToCurrentGame(buildRandomGameSeed());
   Board.toggleBoardFlipped();
   playerSideColor =
@@ -2429,6 +2456,7 @@ function initializeLocalMatch(mode: "local" | "bot") {
   blackFlatMovesString = null;
   currentInputs = [];
   resetTimerStateForMatch(null);
+  publishGameControlsContext();
   setHomeVisible(true);
   setIslandButtonDimmed(true);
   setUndoVisible(true);
@@ -2518,6 +2546,7 @@ export function didJustCreateRematchProposalSuccessfully(
   showWaitingStateText("");
 
   isGameOver = false;
+  publishGameControlsContext();
   isReconnect = false;
   didConnect = false;
   isWaitingForInviteToGetAccepted = false;
@@ -2599,6 +2628,7 @@ export function didClickInviteBotIntoLocalGameButton() {
   resetBotScoreReactionState();
   isInviteBotIntoLocalGameUnavailable = true;
   isGameWithBot = true;
+  publishGameControlsContext();
   botPlayerColor = MonsRules.Color.Black;
   playerSideColor = MonsRules.Color.White;
   const boardWasFlippedBeforeTransition = Board.isFlipped;
@@ -2742,6 +2772,7 @@ export function showItemsAfterChangingAssetsStyle() {
 
 function navigateFromWaitingLiveToLastCompletedMatch() {
   boardViewMode = "activeLive";
+  publishGameControlsContext();
   const renderSessionId = nextBoardRenderSession();
   Board.setBoardFlipped(activeBoardShouldBeFlipped());
   const descriptor = getActiveRematchSeriesDescriptor();
@@ -2805,6 +2836,7 @@ function tryRestoreLiveViewAfterRematchAcceptance() {
 }
 
 export function didReceiveRematchesSeriesEndIndicator() {
+  publishGameControlsContext();
   if (isWatchOnly) {
     setEndMatchVisible(true);
     setEndMatchConfirmed(true);
@@ -2826,11 +2858,13 @@ export function didReceiveRematchesSeriesEndIndicator() {
 }
 
 export function didUpdateRematchSeriesMetadata() {
+  publishGameControlsContext();
   if (isWatchOnly) {
     const didNavigate = connection.tryNavigateWatchOnlyToLatestApprovedMatch();
     if (didNavigate) {
       didConnect = false;
       isGameOver = false;
+      publishGameControlsContext();
       whiteProcessedMovesCount = 0;
       blackProcessedMovesCount = 0;
       didSetWhiteProcessedMovesCount = false;
@@ -3995,6 +4029,7 @@ function applyOutput(
 
             clearTimerActivationCooldownState();
             isGameOver = true;
+            publishGameControlsContext();
             wagerOutcomeAnimationAllowed = !isWatchOnly;
             disableAndHideUndoResignAndTimerControls();
             Board.hideTimerCountdownDigits();
@@ -4860,6 +4895,7 @@ function didConnectTo(
   if (shouldRenderLiveBoard) {
     clearViewedRematchState();
     boardViewMode = "activeLive";
+    publishGameControlsContext();
     nextBoardRenderSession();
     applyBoardUiForCurrentView();
   }
@@ -4867,6 +4903,7 @@ function didConnectTo(
   resetBotScoreReactionState();
   resetLocalRematchSeriesState();
   isOnlineGame = true;
+  publishGameControlsContext();
   currentInputs = [];
   if (shouldRenderLiveBoard) {
     applyBoardUiForCurrentView();
@@ -5245,6 +5282,7 @@ function handleVictoryByTimer(
 
   clearTimerActivationCooldownState();
   isGameOver = true;
+  publishGameControlsContext();
   wagerOutcomeAnimationAllowed = !onConnect;
 
   Board.hideTimerCountdownDigits();
@@ -5287,12 +5325,14 @@ function handleResignStatusWithoutRender(
   clearTimerActivationCooldownState();
   if (game.winner !== undefined || winnerByTimerColor !== undefined) {
     isGameOver = true;
+    publishGameControlsContext();
     syncInviteBotIntoLocalGameButton();
     resignedColor = undefined;
     return;
   }
   const justConfirmedResignYourself = resignSenderColor === "";
   isGameOver = true;
+  publishGameControlsContext();
   syncInviteBotIntoLocalGameButton();
   wagerOutcomeAnimationAllowed = !onConnect;
   if (justConfirmedResignYourself) {
@@ -5320,6 +5360,7 @@ function handleResignStatus(onConnect: boolean, resignSenderColor: string) {
   clearTimerActivationCooldownState();
   if (game.winner !== undefined || winnerByTimerColor !== undefined) {
     isGameOver = true;
+    publishGameControlsContext();
     syncInviteBotIntoLocalGameButton();
     resignedColor = undefined;
     return;
@@ -5327,6 +5368,7 @@ function handleResignStatus(onConnect: boolean, resignSenderColor: string) {
 
   const justConfirmedResignYourself = resignSenderColor === "";
   isGameOver = true;
+  publishGameControlsContext();
   syncInviteBotIntoLocalGameButton();
   wagerOutcomeAnimationAllowed = !onConnect;
 
@@ -5433,6 +5475,7 @@ export function didSelectPuzzle(
   showPrimaryAction(PrimaryActionType.None);
   setPlaySamePuzzleAgainButtonVisible(false);
   isGameOver = false;
+  publishGameControlsContext();
   currentInputs = [];
 
   if (!loadCurrentGameFromFen(problem.fen)) return;
@@ -5454,6 +5497,7 @@ export function didSelectPuzzle(
 
   puzzleMode = true;
   selectedProblem = problem;
+  publishGameControlsContext();
 
   if (!skipInstructions) {
     showPuzzleInstructions();
@@ -5820,7 +5864,10 @@ export function didReceiveMatchUpdate(
   }
   if (!shouldRenderLiveBoard && didReplayMoves) {
     didMutateLiveGameWithoutRender = true;
-    if (game.winner !== undefined) isGameOver = true;
+    if (game.winner !== undefined) {
+      isGameOver = true;
+      publishGameControlsContext();
+    }
   }
 
   const surrenderedMatch = !hasPendingRemoteMoves()
@@ -5867,6 +5914,7 @@ export function didRecoverMyMatch(match: Match, matchId: string) {
   if (shouldRenderLiveBoard) {
     clearViewedRematchState();
     boardViewMode = "activeLive";
+    publishGameControlsContext();
     nextBoardRenderSession();
   }
   resetWagerStateForMatch(matchId);

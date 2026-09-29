@@ -660,6 +660,7 @@ function historyAppearanceHarness({
   const opponent = { uid: "opponent", emojiId: "4", aura: "" };
   const requests = [];
   const order = [];
+  const contexts = [];
   const noop = () => {};
   const board = {
     playerSideMetadata: player,
@@ -690,10 +691,14 @@ function historyAppearanceHarness({
     let flashbackMode = true;
     let currentInputs = [];
     let pendingTimerResolutionOnRestore = null;
-    ${functions(controllerSource, ["getDisplayedMatchPresentation", "refreshDisplayedMatchPresentation", "enterWaitingLiveView", "restoreLiveBoardView", "prepareLiveBoardView", "clearBoardViewInputs", "didConfirmRematchProposal"])}
+    ${functions(controllerSource, ["publishGameControlsContext", "getDisplayedMatchPresentation", "refreshDisplayedMatchPresentation", "enterWaitingLiveView", "restoreLiveBoardView", "prepareLiveBoardView", "clearBoardViewInputs", "didConfirmRematchProposal"])}
     function clearViewedRematchState() { viewedRematchMatchId = null; viewedRematchPair = null; }
   `,
     {
+      getCurrentSessionId: () => 1,
+      isGameConnectionBound: () => false,
+      updateGameControlsContext: (context) => contexts.push(context),
+      selectedProblem: null,
       Board: board,
       connection: {
         getActiveMatchId: () => (active ? "current-match" : null),
@@ -749,7 +754,7 @@ function historyAppearanceHarness({
       "({ updateEmojiAndAuraIfNeeded, getPlayersEmojiId })",
     ),
   );
-  return { controller, player, requests, order };
+  return { controller, player, requests, order, contexts };
 }
 
 test("local and bot synthetic history preserve the signed-in avatar through history and live restoration", () => {
@@ -763,6 +768,8 @@ test("local and bot synthetic history preserve the signed-in avatar through hist
       aura: "rainbow",
     });
     h.controller.restore();
+    assert.equal(h.contexts.at(-1).boardViewMode, "activeLive");
+    assert.equal(h.contexts.at(-1).isGameWithBot, bot);
     assert.deepEqual(h.player, {
       uid: "signed-in-login",
       emojiId: "1001",
@@ -781,6 +788,7 @@ test("proposing a rematch from online history restores current appearance before
     aura: "",
   });
   h.controller.rematch();
+  assert.equal(h.contexts.at(-1).boardViewMode, "waitingLive");
   assert.deepEqual(h.requests, [{ emojiId: 1001, aura: "rainbow" }]);
   assert.deepEqual(h.player, {
     uid: "signed-in-login",
