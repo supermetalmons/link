@@ -206,7 +206,7 @@ export function eventRevisionGuard(
 export function eventMutationGuard(
   db: EventD1Connection,
   eventId: string,
-  state: EventMutationState,
+  state: Pick<EventMutationState, "revision" | "pendingTransitionId">,
 ): D1PreparedStatement {
   if (state.revision === 0) return eventRevisionGuard(db, eventId, 0);
   return guardStatement(

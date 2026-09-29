@@ -77,6 +77,36 @@ export function prepareSelectionsRead(
     .bind(eventId);
 }
 
+export async function readEventPrizeSelectionSnapshot(
+  db: EventD1Connection,
+  eventId: string,
+  profileId: string,
+): Promise<{ event: DecodedEventRow | null; value: string | null }> {
+  const eventStatement = prepareEventRecordRead(db, eventId);
+  if (!exactKey(profileId)) throw new EventD1Failure("invalid-event-path");
+  const results = await db.batch([
+    eventStatement,
+    db
+      .prepare(
+        `SELECT profile_id, prize_id FROM event_prize_selections
+         WHERE event_id = ? AND profile_id = ?`,
+      )
+      .bind(eventId, profileId),
+  ]);
+  const row = results[0].results[0] as EventRow | undefined;
+  if (!row) return { event: null, value: null };
+  if (row.event_id !== eventId) throw new EventD1Failure("event-row-mismatch");
+  const event = decodeEventRow(row);
+  const selection = results[1].results[0] as
+    { profile_id: string; prize_id: string } | undefined;
+  if (selection && selection.profile_id !== profileId)
+    throw new EventD1Failure("invalid-event-prize-selection");
+  return {
+    event,
+    value: selection ? parseStoredPrizeSelection(selection.prize_id) : null,
+  };
+}
+
 export async function readEvent(
   db: EventD1Connection,
   eventId: string,

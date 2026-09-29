@@ -42,6 +42,7 @@ import {
   releaseEventWriteAdmission,
   transactEventField,
   transactEventLease,
+  transactEventPrizeSelection,
   validateEventAggregate,
   type EventD1Connection,
 } from "../src/eventD1.ts";
@@ -1459,6 +1460,374 @@ describe("event D1 store", () => {
         ...(suffix ? { "profile-two": "1111" } : {}),
       });
     }
+  });
+
+  describe("targeted prize selection transactions", () => {
+    it("inserts, changes, removes, and retains one selection without rewriting event JSON or sibling rows", async () => {
+      await seedPrizeRows();
+      const raw = JSON.stringify(eventRecord(), null, 2).replace(
+        '"createdAtMs": 100',
+        '"createdAtMs": 1e2',
+      );
+      await testEnv.EVENT_DB.batch([
+        testEnv.EVENT_DB.prepare(
+          "UPDATE event_records SET record_json = ? WHERE event_id = ?",
+        ).bind(raw, eventId),
+        testEnv.EVENT_DB.prepare(
+          "UPDATE event_prize_selections SET prize_id = 'invalid#sibling' WHERE event_id = ? AND profile_id = 'profile-two'",
+        ).bind(eventId),
+      ]);
+      const before = await readPrizeStorage();
+      const targetProfileId = "new-profile";
+      const observed = observePrizeMutationBatches();
+      const decisions: Array<string | null> = [];
+      const values = [prizeId, "1514", "1514", null, null];
+      let previous: string | null = null;
+      let selectionUpdatedAtMs = 0;
+      for (const [index, value] of values.entries()) {
+        const nowMs = 300 + index;
+        await expect(
+          withD1Admission((admission) =>
+            transactEventPrizeSelection(
+              observed.database,
+              eventId,
+              targetProfileId,
+              (current) => {
+                decisions.push(current);
+                return { value, decision: "selected" };
+              },
+              { admission, now: () => nowMs },
+            ),
+          ),
+        ).resolves.toEqual({ committed: true, value, decision: "selected" });
+        const after = await readPrizeStorage();
+        expect(after.events).toEqual(
+          before.events.map((row) =>
+            row.event_id === eventId
+              ? { ...row, revision: Number(row.revision) + index + 1 }
+              : row,
+          ),
+        );
+        expect(
+          after.selections.filter((row) => row.profile_id !== targetProfileId),
+        ).toEqual(before.selections);
+        const selection = after.selections.find(
+          (row) => row.profile_id === targetProfileId,
+        );
+        if (value !== previous) selectionUpdatedAtMs = nowMs;
+        expect(selection).toEqual(
+          value === null
+            ? undefined
+            : {
+                event_id: eventId,
+                profile_id: targetProfileId,
+                prize_id: value,
+                updated_at_ms: selectionUpdatedAtMs,
+              },
+        );
+        previous = value;
+      }
+      expect(decisions).toEqual([null, prizeId, "1514", "1514", null]);
+      expect(observed.readBatches).toHaveLength(values.length);
+      for (const batch of observed.readBatches) {
+        const selectionReads = batch.statements.filter(({ query }) =>
+          query.includes("FROM event_prize_selections"),
+        );
+        expect(selectionReads).toHaveLength(1);
+        expect(selectionReads[0].query).toMatch(/event_id\s*=\s*\?/);
+        expect(selectionReads[0].query).toMatch(/profile_id\s*=\s*\?/);
+        expect(selectionReads[0].values).toEqual([eventId, targetProfileId]);
+        expect(
+          batch.results.every((result) => result.results.length <= 1),
+        ).toBe(true);
+      }
+      expect(observed.writeBatches).toHaveLength(values.length);
+    });
+
+    it.each(["target", "sibling"] as const)(
+      "retries after a concurrent %s selection changes the event revision",
+      async (changed) => {
+        await seedPrizeRows();
+        const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
+          async beforeWriteBatch(attempt) {
+            if (attempt !== 1) return;
+            await patchEventOwnedPaths(testEnv.EVENT_DB, {
+              [`eventPrizeSelections/${eventId}/${changed === "target" ? profileId : "profile-two"}`]:
+                changed === "target" ? "1111" : "1514",
+            });
+          },
+        });
+        const decisions: unknown[] = [];
+        await expect(
+          transactEventOwnedPath(
+            observed.database,
+            `eventPrizeSelections/${eventId}/${profileId}`,
+            (current) => {
+              decisions.push(current);
+              return { value: current === prizeId ? null : "1514" };
+            },
+          ),
+        ).resolves.toMatchObject({
+          committed: true,
+          value: changed === "target" ? "1514" : null,
+        });
+        expect(decisions).toEqual([
+          prizeId,
+          changed === "target" ? "1111" : prizeId,
+        ]);
+        expect(observed.writeBatches).toHaveLength(2);
+        expect(observed.errors).toHaveLength(1);
+        expect(
+          await readEventSnapshot(testEnv.EVENT_DB, eventId),
+        ).toMatchObject({
+          revision: 3,
+          prizeSelections:
+            changed === "target"
+              ? { [profileId]: "1514", "profile-two": "1111" }
+              : { "profile-two": "1514" },
+        });
+      },
+    );
+
+    it.each(["before the read", "after the read"] as const)(
+      "rejects a pending transition attached %s without modifying selections",
+      async (timing) => {
+        await seedPrizeRows();
+        const intent = {
+          schemaVersion: 1 as const,
+          transitionId: "selection-pending-transition",
+          eventId,
+          expectedRevision: 1,
+          canonicalUpdates: { [`events/${eventId}/status`]: "active" },
+          rtdbEffects: {},
+          createdAtMs: 200,
+          updatedAtMs: 200,
+        };
+        const before = await readEventSnapshot(testEnv.EVENT_DB, eventId);
+        if (timing === "before the read")
+          await createEventTransitionIntent(testEnv.EVENT_DB, intent);
+        const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
+          async beforeWriteBatch(attempt) {
+            if (timing === "after the read" && attempt === 1)
+              await createEventTransitionIntent(testEnv.EVENT_DB, intent);
+          },
+        });
+        await expect(
+          transactEventOwnedPath(
+            observed.database,
+            `eventPrizeSelections/${eventId}/${profileId}`,
+            () => ({ value: null }),
+          ),
+        ).rejects.toThrow("event-transition-pending");
+        expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toEqual(
+          before,
+        );
+        expect(observed.writeBatches).toHaveLength(
+          timing === "after the read" ? 1 : 0,
+        );
+        expect(
+          await listPendingEventTransitionIntents(testEnv.EVENT_DB),
+        ).toEqual([{ ...intent, attempts: 0 }]);
+      },
+    );
+
+    it.each(["expired admission", "lost lease"] as const)(
+      "rolls back the selection and revision after %s without retrying",
+      async (failure) => {
+        await seedPrizeRows();
+        const before = await readPrizeStorage();
+        const admission = await acquireEventWriteAdmission(
+          testEnv.EVENT_DB,
+          failure === "expired admission" ? { nowMs: 1, ttlMs: 1 } : {},
+        );
+        const observed = observeD1FailureDatabase(testEnv.EVENT_DB);
+        let decisions = 0;
+        try {
+          await expect(
+            transactEventPrizeSelection(
+              observed.database,
+              eventId,
+              profileId,
+              () => {
+                decisions++;
+                return { value: null };
+              },
+              {
+                admission,
+                ...(failure === "lost lease"
+                  ? {
+                      eventLease: {
+                        eventId,
+                        lockId: "missing",
+                        ownerUid: "missing",
+                      },
+                    }
+                  : {}),
+              },
+            ),
+          ).rejects.toThrow(
+            failure === "expired admission"
+              ? "event-write-admission-invalid"
+              : "event-lease-lost",
+          );
+          expect(decisions).toBe(1);
+          expect(observed.writeBatches).toHaveLength(1);
+          expect(await readPrizeStorage()).toEqual(before);
+        } finally {
+          await releaseEventWriteAdmission(testEnv.EVENT_DB, admission);
+        }
+      },
+    );
+
+    it("rejects malformed target selections before calling the updater and invalid new prizes before writing", async () => {
+      await seedPrizeRows();
+      for (const value of ["unknown-prize", "invalid#prize"]) {
+        const before = await readPrizeStorage();
+        const observed = observeD1FailureDatabase(testEnv.EVENT_DB);
+        await expect(
+          transactEventOwnedPath(
+            observed.database,
+            `eventPrizeSelections/${eventId}/${profileId}`,
+            () => ({ value }),
+          ),
+        ).rejects.toThrow("invalid-event-prize-selection");
+        expect(observed.writeBatches).toHaveLength(0);
+        expect(await readPrizeStorage()).toEqual(before);
+      }
+      await testEnv.EVENT_DB.prepare(
+        "UPDATE event_prize_selections SET prize_id = 'invalid#prize' WHERE event_id = ? AND profile_id = ?",
+      )
+        .bind(eventId, profileId)
+        .run();
+      const before = await readPrizeStorage();
+      let decisions = 0;
+      await expect(
+        transactEventOwnedPath(
+          testEnv.EVENT_DB,
+          `eventPrizeSelections/${eventId}/${profileId}`,
+          () => {
+            decisions++;
+            return { value: null };
+          },
+        ),
+      ).rejects.toThrow("invalid-event-prize-selection");
+      expect(decisions).toBe(0);
+      expect(await readPrizeStorage()).toEqual(before);
+    });
+
+    it("allows reading and removing a stored prize that is no longer in the catalog", async () => {
+      await seedPrizeRows();
+      await testEnv.EVENT_DB.prepare(
+        "UPDATE event_prize_selections SET prize_id = 'retired-prize' WHERE event_id = ? AND profile_id = ?",
+      )
+        .bind(eventId, profileId)
+        .run();
+      const before = await readPrizeStorage();
+      await expect(
+        transactEventOwnedPath(
+          testEnv.EVENT_DB,
+          `eventPrizeSelections/${eventId}/${profileId}`,
+          () => ({ commit: false, decision: "retained" }),
+        ),
+      ).resolves.toEqual({
+        committed: false,
+        value: "retired-prize",
+        decision: "retained",
+      });
+      expect(await readPrizeStorage()).toEqual(before);
+      await expect(
+        transactEventOwnedPath(
+          testEnv.EVENT_DB,
+          `eventPrizeSelections/${eventId}/${profileId}`,
+          (current) => ({
+            value: current === "retired-prize" ? null : prizeId,
+          }),
+        ),
+      ).resolves.toMatchObject({ committed: true, value: null });
+      expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toMatchObject({
+        revision: 2,
+        prizeSelections: { "profile-two": "1111" },
+      });
+    });
+
+    it("returns a declined missing selection and rejects commits for a missing event", async () => {
+      const observed = observeD1FailureDatabase(testEnv.EVENT_DB);
+      await expect(
+        transactEventOwnedPath(
+          observed.database,
+          `eventPrizeSelections/${eventId}/${profileId}`,
+          () => ({ commit: false, decision: "missing" }),
+        ),
+      ).resolves.toEqual({
+        committed: false,
+        value: null,
+        decision: "missing",
+      });
+      for (const value of [null, prizeId]) {
+        await expect(
+          transactEventOwnedPath(
+            observed.database,
+            `eventPrizeSelections/${eventId}/${profileId}`,
+            () => ({ value }),
+          ),
+        ).rejects.toThrow("event-not-found");
+      }
+      expect(observed.writeBatches).toHaveLength(0);
+    });
+
+    it("rejects a malformed Unicode event identity without changing another event", async () => {
+      const storedEventId = "\ufffd";
+      await patchEventOwnedPaths(testEnv.EVENT_DB, {
+        [`events/${storedEventId}`]: eventRecord({ eventId: storedEventId }),
+      });
+      const before = await readPrizeStorage();
+      const observed = observeD1FailureDatabase(testEnv.EVENT_DB);
+      await expect(
+        withD1Admission((admission) =>
+          transactEventPrizeSelection(
+            observed.database,
+            "\ud800",
+            profileId,
+            () => ({ value: null }),
+            { admission },
+          ),
+        ),
+      ).rejects.toBeInstanceOf(EventD1Failure);
+      expect(observed.writeBatches).toHaveLength(0);
+      expect(await readPrizeStorage()).toEqual(before);
+    });
+
+    it.each(["before reading", "after reading", "in the updater"] as const)(
+      "does not write after cancellation %s",
+      async (timing) => {
+        await seedPrizeRows();
+        const before = await readPrizeStorage();
+        const controller = new AbortController();
+        const reason = new Error("selection-cancelled");
+        if (timing === "before reading") controller.abort(reason);
+        const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
+          async afterRead() {
+            if (timing === "after reading") controller.abort(reason);
+          },
+        });
+        let decisions = 0;
+        await expect(
+          transactEventOwnedPath(
+            observed.database,
+            `eventPrizeSelections/${eventId}/${profileId}`,
+            () => {
+              decisions++;
+              controller.abort(reason);
+              return { value: null };
+            },
+            { signal: controller.signal },
+          ),
+        ).rejects.toBe(reason);
+        expect(decisions).toBe(timing === "in the updater" ? 1 : 0);
+        expect(observed.writeBatches).toHaveLength(0);
+        expect(await readPrizeStorage()).toEqual(before);
+      },
+    );
   });
 
   describe("outbox transaction snapshots", () => {

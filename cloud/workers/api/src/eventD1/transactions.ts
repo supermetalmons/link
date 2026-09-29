@@ -16,6 +16,7 @@ import type {
 import type { EventMutation } from "../../../../runtime/eventCommands.js";
 import { commitEventMutationsInternal } from "./commit.ts";
 import {
+  readEventPrizeSelectionSnapshot,
   readStoredEventSnapshotIfChanged,
   readProfilePrizeAssignmentSnapshot,
   readEventProgressOutboxSnapshot,
@@ -28,7 +29,18 @@ import type {
   EventPrizeAssignmentRecord,
   EventJsonRecord,
 } from "../../../../runtime/eventReads.js";
-import { cloneJson, decodeJson } from "./validation.ts";
+import {
+  cloneJson,
+  decodeJson,
+  safeInteger,
+  validatePrizeSelection,
+} from "./validation.ts";
+import {
+  eventWriteAdmissionGuard,
+  eventLeaseGuard,
+  eventMutationGuard,
+  rethrowEventBatchFailure,
+} from "./guards.ts";
 import { runOptimisticTransaction } from "../optimisticTransaction.ts";
 
 async function transactEventValue<T>(
@@ -83,29 +95,69 @@ export function transactEventPrizeSelection(
   updater: (current: string | null) => TransactionDecision<string>,
   options: EventTransactionOptions,
 ) {
-  return transactEventValue(
-    db,
-    updater,
-    async () => {
-      const result = await readStoredEventSnapshotIfChanged(db, eventId);
-      if (result.notModified) throw new EventD1Failure();
-      const snapshot = result.snapshot;
-      return {
-        value: snapshot.prizeSelections[profileId] ?? null,
-        mutation: (value: string | null): EventMutation => ({
-          kind: "prize-selection",
-          eventId,
-          profileId,
-          value,
-        }),
-        options: {
-          eventSnapshot: snapshot,
-          expectedEventRevisions: { [eventId]: snapshot.revision },
-        },
-      };
+  return runOptimisticTransaction({
+    maxAttempts: MAX_EVENT_TRANSACTION_ATTEMPTS,
+    signal: options.signal,
+    read: () => readEventPrizeSelectionSnapshot(db, eventId, profileId),
+    getValue: (snapshot) => snapshot.value,
+    decide(current) {
+      const decision = updater(current);
+      options.signal?.throwIfAborted();
+      return decision;
     },
-    options,
-  );
+    async write(snapshot, value) {
+      const nowMs = safeInteger((options.now || Date.now)());
+      if (!snapshot.event) throw new EventD1Failure("event-not-found");
+      const selection =
+        value === null ? null : validatePrizeSelection(eventId, value);
+      if (snapshot.event.pendingTransitionId)
+        throw new EventD1Failure("event-transition-pending");
+      const statements = [eventWriteAdmissionGuard(db, options.admission)];
+      if (options.eventLease)
+        statements.push(eventLeaseGuard(db, options.eventLease));
+      statements.push(
+        eventMutationGuard(db, eventId, snapshot.event),
+        db
+          .prepare(
+            "UPDATE event_records SET revision = revision + 1 WHERE event_id = ?",
+          )
+          .bind(eventId),
+      );
+      if (selection !== snapshot.value) {
+        statements.push(
+          selection === null
+            ? db
+                .prepare(
+                  "DELETE FROM event_prize_selections WHERE event_id = ? AND profile_id = ?",
+                )
+                .bind(eventId, profileId)
+            : db
+                .prepare(
+                  `INSERT INTO event_prize_selections (
+                     event_id, profile_id, prize_id, updated_at_ms
+                   ) VALUES (?, ?, ?, ?)
+                   ON CONFLICT (event_id, profile_id) DO UPDATE SET
+                     prize_id = excluded.prize_id,
+                     updated_at_ms = excluded.updated_at_ms`,
+                )
+                .bind(eventId, profileId, selection, nowMs),
+        );
+      }
+      try {
+        await db
+          .batch(statements)
+          .catch((error) => rethrowEventBatchFailure(db, error, options));
+        return { applied: true, value: selection };
+      } catch (error) {
+        if (error instanceof EventD1Conflict) {
+          options.signal?.throwIfAborted();
+          return { applied: false, value: selection };
+        }
+        throw error;
+      }
+    },
+    conflictError: () => new EventD1Conflict(),
+  });
 }
 
 function transactProfileEventPrizeInternal(
