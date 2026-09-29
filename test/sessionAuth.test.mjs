@@ -17,12 +17,8 @@ registerHooks({
   },
 });
 
-const {
-  SessionAuth,
-  retireLegacySessionIdentity,
-  consumeSessionResetNotice,
-  hasPendingSessionResetNotice,
-} = await import("../src/session/sessionAuth.ts");
+const { SessionAuth, retireLegacySessionIdentity } =
+  await import("../src/session/sessionAuth.ts");
 const { SessionApiError } = await import("../src/services/sessionApi.ts");
 const {
   createEmptySessionState,
@@ -1616,7 +1612,7 @@ test("listeners receive a resolved initial state, unsubscribe, and ignore ordina
   assert.equal(observed.length, 2);
 });
 
-test("legacy retirement clears identity and old pending actions, preserves preferences, and queues one notice", () => {
+test("legacy retirement clears identity and old pending actions and preserves preferences", () => {
   const originalLocal = globalThis.localStorage;
   const originalSession = globalThis.sessionStorage;
   const browserStorage = (initial) => {
@@ -1662,11 +1658,7 @@ test("legacy retirement clears identity and old pending actions, preserves prefe
     assert.equal(localStorage.getItem("isMuted"), "true");
     assert.equal(localStorage.getItem("boardStyleSet"), '"wood"');
     assert.equal(localStorage.getItem("preferredAssetsSet"), '"original"');
-    assert.equal(hasPendingSessionResetNotice(), true);
-    assert.equal(hasPendingSessionResetNotice(), true);
-    assert.equal(consumeSessionResetNotice(), true);
-    assert.equal(hasPendingSessionResetNotice(), false);
-    assert.equal(consumeSessionResetNotice(), false);
+    assert.equal(localStorage.length, 3);
   } finally {
     if (originalLocal === undefined) delete globalThis.localStorage;
     else globalThis.localStorage = originalLocal;

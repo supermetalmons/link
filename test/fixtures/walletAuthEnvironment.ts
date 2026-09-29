@@ -106,7 +106,6 @@ export const notifyOtherTabsAboutSignIn = noop;
 export const resetNftCache = noop;
 export const NameEditModal = () => null;
 export const LogoutConfirmModal = () => null;
-export const SessionResetNotice = () => null;
 export const isMobile = new URLSearchParams(location.search).has("mobile");
 export const defaultEarlyInputEventName = isMobile ? "touchstart" : "mousedown";
 export const hideShinyCard = () => (environment.hiddenCards += 1);

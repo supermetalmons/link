@@ -28,7 +28,6 @@ import {
 } from "./sessionStore";
 
 const SESSION_SYNC_KEY = "__mons_link_session_revision__";
-const SESSION_RESET_NOTICE_KEY = "__mons_link_session_reset_notice__";
 const REFRESH_MARGIN_MS = 30_000;
 
 export type SessionUser = {
@@ -895,10 +894,7 @@ function secret(): string {
 let channel: BroadcastChannel | null = null;
 
 export function retireLegacySessionIdentity(): void {
-  const legacy =
-    storage.getLoginId("") !== "" || storage.getProfileId("") !== "";
   storage.resetSessionIdentity();
-  if (legacy) localStorage.setItem(SESSION_RESET_NOTICE_KEY, "1");
 }
 
 export const sessionAuth = new SessionAuth({
@@ -925,24 +921,6 @@ export const sessionAuth = new SessionAuth({
     } catch {}
   },
 });
-
-export function hasPendingSessionResetNotice(): boolean {
-  try {
-    return localStorage.getItem(SESSION_RESET_NOTICE_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-export function consumeSessionResetNotice(): boolean {
-  try {
-    const pending = hasPendingSessionResetNotice();
-    if (pending) localStorage.removeItem(SESSION_RESET_NOTICE_KEY);
-    return pending;
-  } catch {
-    return false;
-  }
-}
 
 if (typeof window !== "undefined") {
   const reconcile = () => {

@@ -20,7 +20,7 @@ const deferred = () => {
 };
 
 test(
-  "the real React sign-in popup retains the cutoff notice through auth readiness and null-user transitions",
+  "the real React sign-in popup stays silent after a legacy session reset, including an old pending notice",
   { timeout: 60_000 },
   async () => {
     const server = await createServer({
@@ -130,7 +130,7 @@ test(
       );
       assert.equal(
         await page.evaluate((key) => localStorage.getItem(key), noticeKey),
-        "1",
+        null,
       );
       assert.equal(
         await page.getByText(noticeText, { exact: true }).count(),
@@ -138,11 +138,12 @@ test(
       );
       await signIn.click();
       const notice = page.getByText(noticeText, { exact: true });
-      await notice.waitFor({ state: "visible" });
-      await page.waitForFunction(
-        (key) => localStorage.getItem(key) === null,
-        noticeKey,
-      );
+      const ethereum = page.getByRole("button", {
+        name: "Ethereum",
+        exact: true,
+      });
+      await ethereum.waitFor({ state: "visible" });
+      assert.equal(await notice.count(), 0);
       releaseCreate.resolve();
       await page.evaluate(async () => {
         const { sessionAuth } = await import("/src/session/sessionAuth.ts");
@@ -152,19 +153,16 @@ test(
         (expected) => globalThis.testSessionAuth.currentUser?.uid === expected,
         uid,
       );
-      assert.equal(await notice.isVisible(), true);
-      await signIn.click();
-      await notice.waitFor({ state: "hidden" });
-      await signIn.click();
-      await page
-        .getByRole("button", { name: "Ethereum", exact: true })
-        .waitFor({ state: "visible" });
       assert.equal(await notice.count(), 0);
+      await signIn.click();
+      await ethereum.waitFor({ state: "hidden" });
+      await signIn.click();
+      await ethereum.waitFor({ state: "visible" });
+      assert.equal(await notice.count(), 0);
+      await page.evaluate((key) => localStorage.setItem(key, "1"), noticeKey);
       await page.reload({ waitUntil: "domcontentloaded" });
       await signIn.click();
-      await page
-        .getByRole("button", { name: "Ethereum", exact: true })
-        .waitFor({ state: "visible" });
+      await ethereum.waitFor({ state: "visible" });
       assert.equal(await notice.count(), 0);
     } finally {
       releaseCreate.resolve();

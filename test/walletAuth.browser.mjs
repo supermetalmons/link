@@ -34,7 +34,6 @@ const mockedModules = new Set(
     "ui/shinyCardUiPort",
     "ui/uiSession",
     "ui/eventModalController",
-    "ui/identity/SessionResetNotice",
     "ui/identity/useAppleAuthFlow",
   ].map((name) => path.join(repository, "src", name)),
 );

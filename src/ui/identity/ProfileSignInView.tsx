@@ -9,7 +9,6 @@ import styled from "styled-components";
 import { storage } from "../../utils/storage";
 import { connection } from "../../connection/connection";
 import { ModalOverlay, ModalPopup, ModalTitle } from "../SharedModalComponents";
-import { SessionResetNotice } from "./SessionResetNotice";
 import { didDismissSomethingWithOutsideTapJustNow } from "../controls/outsideTapState";
 import {
   closeMenuAndInfoIfAllowedForEvent,
@@ -1066,7 +1065,6 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
       <CustomConnectButton disabled={isXBusy} onClick={handleXClick}>
         {xText}
       </CustomConnectButton>
-      <SessionResetNotice />
       {inlineAuthError ? (
         <InlineAuthError>{inlineAuthError}</InlineAuthError>
       ) : null}
