@@ -2,6 +2,7 @@ import type { TransactionDecision } from "./repositoryContracts.ts";
 import type { AutomatchD1StoreOptions } from "./automatchD1/types.ts";
 import { createAutomatchReads } from "./automatchD1/reads.ts";
 import { createAutomatchMutations } from "./automatchD1/mutations.ts";
+import { createAutomatchProjectionOutboxes } from "./automatchD1/projectionOutboxes.ts";
 
 export {
   AUTOMATCH_RECORD_TABLES,
@@ -44,6 +45,7 @@ export function createAutomatchD1Store(
     listEntriesByLogins,
   } = reads;
   const {
+    buildWriteGuardStatements,
     buildRevisionGuardStatements,
     buildCommitStatements,
     commit,
@@ -52,6 +54,11 @@ export function createAutomatchD1Store(
     expireReceipts,
   } = createAutomatchMutations(db, { now, writeGuards }, reads);
   return {
+    ...createAutomatchProjectionOutboxes(db, {
+      read,
+      now,
+      buildWriteGuardStatements,
+    }),
     read,
     prepareChanges,
     readAutomatchEntry: async (inviteId: string, signal?: AbortSignal) =>

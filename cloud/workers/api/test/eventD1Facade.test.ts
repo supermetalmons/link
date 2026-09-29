@@ -8,9 +8,18 @@ import * as types from "../src/eventD1/types.ts";
 import * as reads from "../src/eventD1/reads.ts";
 import * as transactions from "../src/eventD1/transactions.ts";
 import * as validation from "../src/eventD1/validation.ts";
+import * as projectionOutboxes from "../src/eventD1/projectionOutboxes.ts";
 
 test("event D1 preserves its exact public facade and implementation identities", () => {
   const expected = {
+    claimEventProfileGameProjectionOutbox:
+      projectionOutboxes.claimEventProfileGameProjectionOutbox,
+    acknowledgeEventProfileGameProjectionOutbox:
+      projectionOutboxes.acknowledgeEventProfileGameProjectionOutbox,
+    claimEventTelegramProjectionOutbox:
+      projectionOutboxes.claimEventTelegramProjectionOutbox,
+    acknowledgeEventTelegramProjectionOutbox:
+      projectionOutboxes.acknowledgeEventTelegramProjectionOutbox,
     acquireEventWriteAdmission: coordination.acquireEventWriteAdmission,
     assertEventWritesAllowed: coordination.assertEventWritesAllowed,
     commitEventMutations: commit.commitEventMutations,

@@ -152,3 +152,35 @@ export function parseEventProfileGameProjectionOutbox(
       }
     : null;
 }
+
+export type AutomatchProfileOutboxCompletion =
+  | { status: "superseded" | "continued" | "projected" }
+  | {
+      status: "deferred";
+      archiveRetry: { requestId: string; notBeforeMs: number };
+    };
+
+export function decideAutomatchProfileOutboxCompletion(
+  current: unknown,
+  requestId: string,
+  nowMs: number,
+): AutomatchProfileOutboxCompletion {
+  const outbox = parseAutomatchProfileGameProjectionOutbox(current);
+  if (!outbox || outbox.requestId !== requestId)
+    return { status: "superseded" };
+  const descriptors = outbox.historicalMatches || [];
+  if (descriptors.length === 0) return { status: "projected" };
+  if (
+    descriptors.some(({ retryNotBeforeMs }) => (retryNotBeforeMs || 0) <= nowMs)
+  )
+    return { status: "continued" };
+  return {
+    status: "deferred",
+    archiveRetry: {
+      requestId,
+      notBeforeMs: Math.min(
+        ...descriptors.map(({ retryNotBeforeMs }) => retryNotBeforeMs!),
+      ),
+    },
+  };
+}

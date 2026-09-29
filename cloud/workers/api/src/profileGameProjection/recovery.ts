@@ -109,54 +109,28 @@ export async function claimAutomatchSweepCandidate(
   candidate: AutomatchSweepCandidate,
   nowMs: number,
 ): Promise<boolean> {
-  const result = await state.transactAutomatchProfileOutbox(
+  return state.claimAutomatchProfileOutbox(
     candidate.task.inviteId,
-    (current) => {
-      const outbox = parseAutomatchProfileGameProjectionOutbox(current);
-      if (
-        !outbox ||
-        outbox.requestId !== candidate.task.requestId ||
-        outbox.lastQueuedAtMs !== candidate.lastQueuedAtMs ||
-        outbox.lastQueuedAtMs > nowMs
-      ) {
-        return { commit: false, decision: "not-due" };
-      }
-      return {
-        value: { ...toRecord(current), lastQueuedAtMs: nowMs },
-        decision: "claimed",
-      };
-    },
+    candidate.task.requestId,
+    candidate.lastQueuedAtMs,
+    nowMs,
   );
-  return result.committed;
 }
 
 export async function claimEventSweepCandidate(
   state: Pick<
     EventProfileProjectionState,
-    "transactEventProfileGameProjectionOutbox"
+    "claimEventProfileGameProjectionOutbox"
   >,
   candidate: EventSweepCandidate,
   nowMs: number,
 ): Promise<boolean> {
-  const result = await state.transactEventProfileGameProjectionOutbox(
+  return state.claimEventProfileGameProjectionOutbox(
     candidate.task.eventId,
-    (current) => {
-      const outbox = parseEventProfileGameProjectionOutbox(current);
-      if (
-        !outbox ||
-        outbox.requestId !== candidate.task.requestId ||
-        outbox.lastQueuedAtMs !== candidate.lastQueuedAtMs ||
-        outbox.lastQueuedAtMs > nowMs
-      ) {
-        return { commit: false, decision: "not-due" };
-      }
-      return {
-        value: { ...toRecord(current), lastQueuedAtMs: nowMs },
-        decision: "claimed",
-      };
-    },
+    candidate.task.requestId,
+    candidate.lastQueuedAtMs,
+    nowMs,
   );
-  return result.committed;
 }
 
 type InvalidEventSweepResult =

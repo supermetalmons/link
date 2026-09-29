@@ -62,6 +62,12 @@ export {
 } from "./eventD1/transitions.ts";
 export { commitEventMutations } from "./eventD1/commit.ts";
 export {
+  claimEventProfileGameProjectionOutbox,
+  acknowledgeEventProfileGameProjectionOutbox,
+  claimEventTelegramProjectionOutbox,
+  acknowledgeEventTelegramProjectionOutbox,
+} from "./eventD1/projectionOutboxes.ts";
+export {
   transactEventPrizeSelection,
   transactProfileEventPrize,
   transactStoredProfileEventPrize,

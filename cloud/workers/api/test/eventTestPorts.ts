@@ -3,6 +3,8 @@ import { encodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
 import type { EventStore } from "../src/eventStoreContracts.ts";
 import type { MatchStatePort } from "../src/repositoryContracts.ts";
 import type { EventLeaseKey } from "../../../runtime/eventLeases.js";
+import { parseEventProfileGameProjectionOutbox } from "../src/profileGameProjectionOutbox.ts";
+import { parseEventProjectionOutbox } from "../src/telegramProjectionOutbox.ts";
 import type {
   TransactionDecision,
   TransactionResult,
@@ -100,7 +102,11 @@ export function attachEventTestPorts<T>(
     | "transactEventProgressOutbox"
     | "transactEventProgressDeadOutbox"
     | "transactEventProfileGameProjectionOutbox"
+    | "claimEventProfileGameProjectionOutbox"
+    | "acknowledgeEventProfileGameProjectionOutbox"
     | "transactEventTelegramProjectionOutbox"
+    | "claimEventTelegramProjectionOutbox"
+    | "acknowledgeEventTelegramProjectionOutbox"
     | "transactEventTelegramProjectionState"
   > = {
     async commitEventPlan(plan, signal) {
@@ -160,8 +166,91 @@ export function attachEventTestPorts<T>(
       transact(`eventProgressOutboxDead/${id}`, updater, signal),
     transactEventProfileGameProjectionOutbox: (id, updater, signal) =>
       transact(`profileGameProjectionOutbox/event/${id}`, updater, signal),
+    async claimEventProfileGameProjectionOutbox(
+      id,
+      requestId,
+      expectedLastQueuedAtMs,
+      nowMs,
+      signal,
+    ) {
+      const result = await transact<Record<string, unknown>>(
+        `profileGameProjectionOutbox/event/${id}`,
+        (current) => {
+          const outbox = parseEventProfileGameProjectionOutbox(current);
+          if (
+            !outbox ||
+            outbox.requestId !== requestId ||
+            outbox.lastQueuedAtMs !== expectedLastQueuedAtMs ||
+            outbox.lastQueuedAtMs > nowMs
+          ) {
+            return { commit: false, decision: "not-due" };
+          }
+          return {
+            value: { ...current, lastQueuedAtMs: nowMs },
+            decision: "claimed",
+          };
+        },
+        signal,
+      );
+      return result.committed;
+    },
+    async acknowledgeEventProfileGameProjectionOutbox(id, requestId, signal) {
+      const result = await transact<Record<string, unknown>>(
+        `profileGameProjectionOutbox/event/${id}`,
+        (current) =>
+          parseEventProfileGameProjectionOutbox(current)?.requestId ===
+          requestId
+            ? { value: null, decision: "cleared" }
+            : { commit: false, decision: "stale" },
+        signal,
+      );
+      return result.committed;
+    },
     transactEventTelegramProjectionOutbox: (id, updater, signal) =>
       transact(`telegramProjectionOutbox/event/${id}`, updater, signal),
+    async claimEventTelegramProjectionOutbox(
+      id,
+      requestId,
+      expectedUpdatedAtMs,
+      nowMs,
+      signal,
+    ) {
+      const result = await transact<Record<string, unknown>>(
+        `telegramProjectionOutbox/event/${id}`,
+        (current) => {
+          const outbox = parseEventProjectionOutbox(current);
+          if (
+            !outbox ||
+            outbox.requestId !== requestId ||
+            outbox.updatedAtMs !== expectedUpdatedAtMs ||
+            outbox.updatedAtMs > nowMs
+          ) {
+            return { commit: false, decision: "not-due" };
+          }
+          return {
+            value: {
+              ...current,
+              firstQueuedAtMs: outbox.firstQueuedAtMs,
+              updatedAtMs: nowMs,
+            },
+            decision: "claimed",
+          };
+        },
+        signal,
+      );
+      return result.committed;
+    },
+    async acknowledgeEventTelegramProjectionOutbox(id, requestId, signal) {
+      const result = await transact<Record<string, unknown>>(
+        `telegramProjectionOutbox/event/${id}`,
+        (current) =>
+          parseEventProjectionOutbox(current)?.requestId === requestId
+            ? { value: null, decision: "cleared" }
+            : { commit: false, decision: "stale" },
+        signal,
+      );
+      return result.committed;
+    },
     transactEventTelegramProjectionState: (id, updater, signal) =>
       transact(`eventTelegramProjections/${id}`, updater, signal),
   };

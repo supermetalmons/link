@@ -36,7 +36,7 @@ function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-export function encodeValue(value: unknown): string | null {
+export function validateAutomatchJson(value: unknown): void {
   const active = new Set<object>();
   const validate = (nested: unknown, depth: number): void => {
     if (depth > 64) throw new TypeError("invalid-automatch-json");
@@ -64,6 +64,10 @@ export function encodeValue(value: unknown): string | null {
     active.delete(nested);
   };
   validate(value, 0);
+}
+
+export function encodeValue(value: unknown): string | null {
+  validateAutomatchJson(value);
   return value === null ? null : JSON.stringify(value);
 }
 

@@ -2108,8 +2108,24 @@ test("scheduled recovery bounds concurrent claims", async () => {
   assert.equal(maximum, 10);
 });
 
-test("event recovery helpers accept only the outbox transaction capability", async () => {
-  const state: Pick<EventStore, "transactEventProfileGameProjectionOutbox"> = {
+test("event recovery helpers accept only their required outbox capabilities", async () => {
+  const state: Pick<
+    EventStore,
+    | "claimEventProfileGameProjectionOutbox"
+    | "transactEventProfileGameProjectionOutbox"
+  > = {
+    async claimEventProfileGameProjectionOutbox(
+      eventId,
+      requestId,
+      expectedLastQueuedAtMs,
+      nowMs,
+    ) {
+      assert.deepEqual(
+        [eventId, requestId, expectedLastQueuedAtMs, nowMs],
+        ["event-1", "request-1", 0, 600_000],
+      );
+      return false;
+    },
     async transactEventProfileGameProjectionOutbox(_eventId, updater) {
       const decision = updater(null);
       assert.ok("commit" in decision);

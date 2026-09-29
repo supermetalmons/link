@@ -92,6 +92,30 @@ export type EventStore = EventReads &
     } | null>;
     transactEventProgressOutbox: EventRecordTransaction;
     transactEventProgressDeadOutbox: EventRecordTransaction;
+    claimEventProfileGameProjectionOutbox(
+      eventId: string,
+      requestId: string,
+      expectedLastQueuedAtMs: number,
+      nowMs: number,
+      signal?: AbortSignal,
+    ): Promise<boolean>;
+    acknowledgeEventProfileGameProjectionOutbox(
+      eventId: string,
+      requestId: string,
+      signal?: AbortSignal,
+    ): Promise<boolean>;
+    claimEventTelegramProjectionOutbox(
+      eventId: string,
+      requestId: string,
+      expectedUpdatedAtMs: number,
+      nowMs: number,
+      signal?: AbortSignal,
+    ): Promise<boolean>;
+    acknowledgeEventTelegramProjectionOutbox(
+      eventId: string,
+      requestId: string,
+      signal?: AbortSignal,
+    ): Promise<boolean>;
     transactEventProfileGameProjectionOutbox: EventRecordTransaction;
     transactEventTelegramProjectionOutbox: EventRecordTransaction;
     transactEventTelegramProjectionState: EventRecordTransaction;

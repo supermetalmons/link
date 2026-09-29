@@ -1669,6 +1669,10 @@ describe("typed event repository", () => {
             client.readEventProfileGameProjectionOutbox,
           transactEventProfileGameProjectionOutbox:
             client.transactEventProfileGameProjectionOutbox,
+          claimEventProfileGameProjectionOutbox:
+            client.claimEventProfileGameProjectionOutbox,
+          acknowledgeEventProfileGameProjectionOutbox:
+            client.acknowledgeEventProfileGameProjectionOutbox,
           transactEventLease: client.transactEventLease,
         },
         {

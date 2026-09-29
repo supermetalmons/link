@@ -675,6 +675,54 @@ function createEventStore(
           signal,
         }),
       ),
+    claimEventProfileGameProjectionOutbox: (
+      id,
+      requestId,
+      expected,
+      nowMs,
+      signal,
+    ) =>
+      admit((admission) =>
+        eventD1.claimEventProfileGameProjectionOutbox(
+          db,
+          id,
+          requestId,
+          expected,
+          nowMs,
+          { admission, signal },
+        ),
+      ),
+    acknowledgeEventProfileGameProjectionOutbox: (id, requestId, signal) =>
+      admit((admission) =>
+        eventD1.acknowledgeEventProfileGameProjectionOutbox(db, id, requestId, {
+          admission,
+          signal,
+        }),
+      ),
+    claimEventTelegramProjectionOutbox: (
+      id,
+      requestId,
+      expected,
+      nowMs,
+      signal,
+    ) =>
+      admit((admission) =>
+        eventD1.claimEventTelegramProjectionOutbox(
+          db,
+          id,
+          requestId,
+          expected,
+          nowMs,
+          { admission, signal },
+        ),
+      ),
+    acknowledgeEventTelegramProjectionOutbox: (id, requestId, signal) =>
+      admit((admission) =>
+        eventD1.acknowledgeEventTelegramProjectionOutbox(db, id, requestId, {
+          admission,
+          signal,
+        }),
+      ),
     transactEventTelegramProjectionOutbox: (id, updater, signal) =>
       admit((admission) =>
         eventD1.transactEventTelegramProjectionOutbox(db, id, updater, {

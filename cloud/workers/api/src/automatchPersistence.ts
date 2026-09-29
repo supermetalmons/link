@@ -7,6 +7,7 @@ import {
   readAutomatchRuntimeControl,
   type AutomatchRoot,
   type AutomatchWriteAdmission,
+  type AutomatchD1Store,
 } from "./automatchD1.ts";
 import {
   createGameSessionTransitions,
@@ -189,6 +190,20 @@ export function createAutomatchPersistence(
       return snapshot.value;
     }
   };
+  const withProjectionWrite = <T>(
+    inviteId: string,
+    operation: (guarded: AutomatchD1Store) => Promise<T>,
+  ): Promise<T> =>
+    write("automatch-persistence-transaction", async (admission) => {
+      const guarded = createAutomatchD1Store(db, {
+        now,
+        writeGuards: () => [
+          ...automatchAdmissionGuardStatements(db, admission),
+          ...gameSessionResourceGuardStatements(db, [inviteId]),
+        ],
+      });
+      return operation(guarded);
+    });
   const transactProjection = (
     method:
       | "transactAutomatchTelegramSource"
@@ -198,17 +213,59 @@ export function createAutomatchPersistence(
     update: (current: unknown) => TransactionDecision<unknown>,
     signal?: AbortSignal,
   ) =>
-    write("automatch-persistence-transaction", async (admission) => {
-      const guarded = createAutomatchD1Store(db, {
-        now,
-        writeGuards: () => [
-          ...automatchAdmissionGuardStatements(db, admission),
-          ...gameSessionResourceGuardStatements(db, [inviteId]),
-        ],
-      });
-      return guarded[method](inviteId, update, signal);
-    });
+    withProjectionWrite(inviteId, (guarded) =>
+      guarded[method](inviteId, update, signal),
+    );
   const client: GameSessionPort = {
+    claimAutomatchProfileOutbox: (
+      inviteId,
+      requestId,
+      expected,
+      nowMs,
+      signal,
+    ) =>
+      withProjectionWrite(inviteId, (guarded) =>
+        guarded.claimAutomatchProfileOutbox(
+          inviteId,
+          requestId,
+          expected,
+          nowMs,
+          signal,
+        ),
+      ),
+    acknowledgeAutomatchProfileOutbox: (inviteId, requestId, signal) =>
+      withProjectionWrite(inviteId, (guarded) =>
+        guarded.acknowledgeAutomatchProfileOutbox(inviteId, requestId, signal),
+      ),
+    finishAutomatchProfileOutbox: (inviteId, requestId, nowMs, signal) =>
+      withProjectionWrite(inviteId, (guarded) =>
+        guarded.finishAutomatchProfileOutbox(
+          inviteId,
+          requestId,
+          nowMs,
+          signal,
+        ),
+      ),
+    claimAutomatchTelegramOutbox: (
+      inviteId,
+      requestId,
+      expected,
+      nowMs,
+      signal,
+    ) =>
+      withProjectionWrite(inviteId, (guarded) =>
+        guarded.claimAutomatchTelegramOutbox(
+          inviteId,
+          requestId,
+          expected,
+          nowMs,
+          signal,
+        ),
+      ),
+    acknowledgeAutomatchTelegramOutbox: (inviteId, requestId, signal) =>
+      withProjectionWrite(inviteId, (guarded) =>
+        guarded.acknowledgeAutomatchTelegramOutbox(inviteId, requestId, signal),
+      ),
     readInviteMetadata: async (inviteId, signal) =>
       (await readResource(inviteId, "invite", inviteId, signal)) as Record<
         string,

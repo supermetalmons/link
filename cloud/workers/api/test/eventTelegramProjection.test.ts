@@ -1172,20 +1172,28 @@ function eventSweepFixture(
   );
   state.client.listDueEventTelegramProjectionOutboxes = async () => records;
   const transact = state.client.transactEventTelegramProjectionOutbox;
+  const claim = state.client.claimEventTelegramProjectionOutbox;
   const visited: string[] = [];
   let active = false;
-  state.client.transactEventTelegramProjectionOutbox = async (...args) => {
+  const visit = async <T>(
+    eventId: string,
+    run: () => Promise<T>,
+  ): Promise<T> => {
     assert.equal(active, false);
     active = true;
-    visited.push(args[0]);
+    visited.push(eventId);
     try {
       await Promise.resolve();
-      if (failures.has(args[0])) throw failures.get(args[0]);
-      return await transact(...args);
+      if (failures.has(eventId)) throw failures.get(eventId);
+      return await run();
     } finally {
       active = false;
     }
   };
+  state.client.transactEventTelegramProjectionOutbox = (...args) =>
+    visit(args[0], () => transact(...args));
+  state.client.claimEventTelegramProjectionOutbox = (...args) =>
+    visit(args[0], () => claim(...args));
   const batches: TelegramProjectionTask[][] = [];
   const queue = {
     ...TELEGRAM_TEST_ENV.TELEGRAM_PROJECTION_QUEUE,

@@ -5,6 +5,11 @@ import type {
 import type { MatchStatePort } from "../src/repositoryContracts.ts";
 import type { StateRepository } from "../test/stateRepositoryTestTypes.ts";
 import { encodeSessionChanges } from "../src/gameSessionCodec.ts";
+import {
+  decideAutomatchProfileOutboxCompletion,
+  parseAutomatchProfileGameProjectionOutbox,
+} from "../src/profileGameProjectionOutbox.ts";
+import { parseAutomatchTelegramProjectionOutbox } from "../src/telegramProjectionOutbox.ts";
 
 export function legacySessionChanges(
   updates: Record<string, unknown>,
@@ -190,6 +195,53 @@ export function gameplayTestPort(
         update,
         signal,
       ),
+    async claimAutomatchTelegramOutbox(
+      id,
+      requestId,
+      expectedUpdatedAtMs,
+      nowMs,
+      signal,
+    ) {
+      const result = await state.transactPath(
+        `telegramProjectionOutbox/automatch/${id}`,
+        (current) => {
+          const outbox = parseAutomatchTelegramProjectionOutbox(current);
+          if (
+            !outbox ||
+            outbox.requestId !== requestId ||
+            outbox.updatedAtMs !== expectedUpdatedAtMs ||
+            outbox.updatedAtMs > nowMs
+          ) {
+            return { commit: false, decision: "not-due" };
+          }
+          return {
+            value: {
+              ...(current as Record<string, unknown>),
+              updatedAtMs: nowMs,
+            },
+            decision: "claimed",
+          };
+        },
+        signal,
+      );
+      return result.committed;
+    },
+    async acknowledgeAutomatchTelegramOutbox(id, requestId, signal) {
+      const result = await state.transactPath(
+        `telegramProjectionOutbox/automatch/${id}`,
+        (current) => {
+          const record =
+            current && typeof current === "object" && !Array.isArray(current)
+              ? (current as Record<string, unknown>)
+              : null;
+          return record?.requestId === requestId
+            ? { value: null, decision: "cleared" }
+            : { commit: false, decision: "stale" };
+        },
+        signal,
+      );
+      return result.committed;
+    },
     listDueAutomatchTelegramOutboxes: async (now, limit, signal) =>
       (await state.getPath(
         "telegramProjectionOutbox/automatch",
@@ -208,6 +260,83 @@ export function gameplayTestPort(
         update,
         signal,
       ),
+    async claimAutomatchProfileOutbox(
+      id,
+      requestId,
+      expectedLastQueuedAtMs,
+      nowMs,
+      signal,
+    ) {
+      const result = await state.transactPath(
+        `profileGameProjectionOutbox/automatch/${id}`,
+        (current) => {
+          const outbox = parseAutomatchProfileGameProjectionOutbox(current);
+          if (
+            !outbox ||
+            outbox.requestId !== requestId ||
+            outbox.lastQueuedAtMs !== expectedLastQueuedAtMs ||
+            outbox.lastQueuedAtMs > nowMs
+          ) {
+            return { commit: false, decision: "not-due" };
+          }
+          return {
+            value: {
+              ...(current as Record<string, unknown>),
+              lastQueuedAtMs: nowMs,
+            },
+            decision: "claimed",
+          };
+        },
+        signal,
+      );
+      return result.committed;
+    },
+    async acknowledgeAutomatchProfileOutbox(id, requestId, signal) {
+      const result = await state.transactPath(
+        `profileGameProjectionOutbox/automatch/${id}`,
+        (current) => {
+          const outbox = parseAutomatchProfileGameProjectionOutbox(current);
+          return outbox?.requestId === requestId
+            ? { value: null, decision: "cleared" }
+            : { commit: false, decision: "stale" };
+        },
+        signal,
+      );
+      return result.committed;
+    },
+    async finishAutomatchProfileOutbox(id, requestId, nowMs, signal) {
+      const result = await state.transactPath(
+        `profileGameProjectionOutbox/automatch/${id}`,
+        (current) => {
+          const decision = decideAutomatchProfileOutboxCompletion(
+            current,
+            requestId,
+            nowMs,
+          );
+          if (
+            decision.status === "continued" ||
+            decision.status === "superseded"
+          ) {
+            return { commit: false, decision: decision.status };
+          }
+          return {
+            value:
+              decision.status === "deferred"
+                ? {
+                    ...(current as Record<string, unknown>),
+                    lastQueuedAtMs: nowMs,
+                    archiveRetry: decision.archiveRetry,
+                  }
+                : null,
+            decision: decision.status,
+          };
+        },
+        signal,
+      );
+      if (result.decision === "continued") return "continued";
+      if (!result.committed) return "superseded";
+      return result.decision === "deferred" ? "deferred" : "projected";
+    },
     listDueAutomatchProfileOutboxes: async (now, limit, signal) =>
       (await state.getPath(
         "profileGameProjectionOutbox/automatch",

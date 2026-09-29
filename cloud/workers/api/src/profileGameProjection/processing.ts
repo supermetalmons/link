@@ -60,17 +60,7 @@ export async function settleAutomatchProfileGameProjectionOutbox(
   task: AutomatchProfileGameProjectionTask,
   state: AutomatchProjectionState,
 ): Promise<boolean> {
-  const result = await state.transactAutomatchProfileOutbox(
-    task.inviteId,
-    (current) => {
-      const outbox = parseAutomatchProfileGameProjectionOutbox(current);
-      if (!outbox || outbox.requestId !== task.requestId) {
-        return { commit: false, decision: "stale" };
-      }
-      return { value: null, decision: "cleared" };
-    },
-  );
-  return result.committed;
+  return state.acknowledgeAutomatchProfileOutbox(task.inviteId, task.requestId);
 }
 
 export async function processAutomatchProfileGameProjection(
@@ -169,17 +159,10 @@ export async function settleEventProfileGameProjectionOutbox(
   task: EventProfileGameProjectionTask,
   state: EventProfileProjectionState,
 ): Promise<boolean> {
-  const result = await state.transactEventProfileGameProjectionOutbox(
+  return state.acknowledgeEventProfileGameProjectionOutbox(
     task.eventId,
-    (current) => {
-      const outbox = parseEventProfileGameProjectionOutbox(current);
-      if (!outbox || outbox.requestId !== task.requestId) {
-        return { commit: false, decision: "stale" };
-      }
-      return { value: null, decision: "cleared" };
-    },
+    task.requestId,
   );
-  return result.committed;
 }
 
 export async function processEventProfileGameProjection(

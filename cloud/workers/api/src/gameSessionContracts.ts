@@ -24,6 +24,18 @@ export type AutomatchProjectionPort = {
     update: (current: unknown) => TransactionDecision<unknown>,
     signal?: AbortSignal,
   ): Promise<TransactionResult<unknown>>;
+  claimAutomatchTelegramOutbox(
+    inviteId: string,
+    requestId: string,
+    expectedUpdatedAtMs: number,
+    nowMs: number,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
+  acknowledgeAutomatchTelegramOutbox(
+    inviteId: string,
+    requestId: string,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
   listDueAutomatchTelegramOutboxes(
     nowMs: number,
     limit: number,
@@ -38,6 +50,24 @@ export type AutomatchProjectionPort = {
     update: (current: unknown) => TransactionDecision<unknown>,
     signal?: AbortSignal,
   ): Promise<TransactionResult<unknown>>;
+  claimAutomatchProfileOutbox(
+    inviteId: string,
+    requestId: string,
+    expectedLastQueuedAtMs: number,
+    nowMs: number,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
+  acknowledgeAutomatchProfileOutbox(
+    inviteId: string,
+    requestId: string,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
+  finishAutomatchProfileOutbox(
+    inviteId: string,
+    requestId: string,
+    nowMs: number,
+    signal?: AbortSignal,
+  ): Promise<"superseded" | "continued" | "deferred" | "projected">;
   listDueAutomatchProfileOutboxes(
     beforeMs: number,
     limit: number,

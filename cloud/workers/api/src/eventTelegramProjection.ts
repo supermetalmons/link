@@ -15,7 +15,7 @@ import type { EventStore } from "./eventStoreContracts.ts";
 import type { EventOutboxReads } from "./eventOutboxReadRepository.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import type { RatingProjectionRepository } from "./ratingContracts.ts";
-import { EVENT_TELEGRAM_PROJECTION_SCHEMA_VERSION } from "./eventTelegramProjectionProducer.ts";
+import { parseEventProjectionOutbox } from "./telegramProjectionOutbox.ts";
 import type {
   EventTelegramProjectionTask,
   TelegramProjectionTask,
@@ -31,14 +31,6 @@ import {
 
 const EVENT_TELEGRAM_PROJECTION_OWNER_UID = "event-telegram-projector";
 const EVENT_PROJECTION_SWEEP_LIMIT = 100;
-
-type EventOutbox = {
-  firstQueuedAtMs: number;
-  requestId: string;
-  schemaVersion: number;
-  status: string;
-  updatedAtMs: number;
-};
 
 export type EventProjectionSweepCandidate = {
   task: EventTelegramProjectionTask;
@@ -59,45 +51,14 @@ function asObject(value: unknown): Record<string, unknown> {
   return toRecord(value) || {};
 }
 
-export function parseEventProjectionOutbox(value: unknown): EventOutbox | null {
-  const record = toRecord(value);
-  const updatedAtMs = record?.updatedAtMs;
-  const firstQueuedAtMs = record?.firstQueuedAtMs ?? updatedAtMs;
-  return record?.schemaVersion === EVENT_TELEGRAM_PROJECTION_SCHEMA_VERSION &&
-    record.status === "pending" &&
-    typeof record.requestId === "string" &&
-    isSafeRecordKey(record.requestId) &&
-    typeof updatedAtMs === "number" &&
-    Number.isSafeInteger(updatedAtMs) &&
-    updatedAtMs >= 0 &&
-    typeof firstQueuedAtMs === "number" &&
-    Number.isSafeInteger(firstQueuedAtMs) &&
-    firstQueuedAtMs >= 0
-    ? {
-        schemaVersion: EVENT_TELEGRAM_PROJECTION_SCHEMA_VERSION,
-        status: "pending",
-        requestId: record.requestId,
-        firstQueuedAtMs,
-        updatedAtMs,
-      }
-    : null;
-}
-
 async function settleEventOutbox(
   state: EventStore,
   task: EventTelegramProjectionTask,
 ): Promise<boolean> {
-  const result = await state.transactEventTelegramProjectionOutbox(
+  return state.acknowledgeEventTelegramProjectionOutbox(
     task.eventId,
-    (current) => {
-      const outbox = parseEventProjectionOutbox(current);
-      if (!outbox || outbox.requestId !== task.requestId) {
-        return { commit: false, decision: "stale" };
-      }
-      return { value: null, decision: "cleared" };
-    },
+    task.requestId,
   );
-  return result.committed === true;
 }
 
 function createProjectionLockManager(state: EventStore) {
@@ -425,29 +386,12 @@ export async function claimEventProjectionSweepCandidate(
   candidate: EventProjectionSweepCandidate,
   nowMs: number,
 ): Promise<boolean> {
-  const result = await state.transactEventTelegramProjectionOutbox(
+  return state.claimEventTelegramProjectionOutbox(
     candidate.task.eventId,
-    (current) => {
-      const outbox = parseEventProjectionOutbox(current);
-      if (
-        !outbox ||
-        outbox.requestId !== candidate.task.requestId ||
-        outbox.updatedAtMs !== candidate.updatedAtMs ||
-        outbox.updatedAtMs > nowMs
-      ) {
-        return { commit: false, decision: "not-due" };
-      }
-      return {
-        value: {
-          ...asObject(current),
-          firstQueuedAtMs: outbox.firstQueuedAtMs,
-          updatedAtMs: nowMs,
-        },
-        decision: "claimed",
-      };
-    },
+    candidate.task.requestId,
+    candidate.updatedAtMs,
+    nowMs,
   );
-  return result.committed;
 }
 
 async function markInvalidEventProjectionSweepEntry(
@@ -522,4 +466,8 @@ export async function sweepEventTelegramProjections(
   return sentCount;
 }
 
-export { EVENT_PROJECTION_SWEEP_LIMIT, settleEventOutbox };
+export {
+  EVENT_PROJECTION_SWEEP_LIMIT,
+  parseEventProjectionOutbox,
+  settleEventOutbox,
+};

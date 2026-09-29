@@ -23,6 +23,9 @@ export type ProfileGameProjectionState = Pick<
   | "readMatchRecord"
   | "readAutomatchProfileOutbox"
   | "transactAutomatchProfileOutbox"
+  | "claimAutomatchProfileOutbox"
+  | "acknowledgeAutomatchProfileOutbox"
+  | "finishAutomatchProfileOutbox"
   | "listDueAutomatchProfileOutboxes"
   | "listMalformedAutomatchProfileOutboxes"
 >;
@@ -31,6 +34,8 @@ export type EventProfileProjectionState = Pick<
   EventStore,
   | "readEventProfileGameProjectionOutbox"
   | "transactEventProfileGameProjectionOutbox"
+  | "claimEventProfileGameProjectionOutbox"
+  | "acknowledgeEventProfileGameProjectionOutbox"
   | "transactEventLease"
 >;
 
@@ -72,18 +77,22 @@ export type AutomatchProjectionState = Pick<
   | "readMatchPair"
   | "readAutomatchProfileOutbox"
   | "transactAutomatchProfileOutbox"
+  | "acknowledgeAutomatchProfileOutbox"
+  | "finishAutomatchProfileOutbox"
 >;
 
 export type AutomatchRecoveryState = Pick<
   ProfileGameProjectionState,
   | "transactAutomatchProfileOutbox"
+  | "claimAutomatchProfileOutbox"
   | "listDueAutomatchProfileOutboxes"
   | "listMalformedAutomatchProfileOutboxes"
 >;
 
 export type EventProjectionRecoveryState = Pick<
   EventProfileProjectionState,
-  "transactEventProfileGameProjectionOutbox"
+  | "transactEventProfileGameProjectionOutbox"
+  | "claimEventProfileGameProjectionOutbox"
 > &
   Pick<EventOutboxReads, "listDueEventProfileGameProjectionOutboxes">;
 

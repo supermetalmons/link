@@ -6,12 +6,14 @@ import { STATE_FAILURE_MESSAGES } from "./stateCompatibility.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import type { EventTelegramProjectionTask } from "./telegramProjectionTasks.ts";
 import type { PreparedEventMutation } from "./eventMutationCommit.ts";
+import { EVENT_TELEGRAM_PROJECTION_SCHEMA_VERSION } from "./telegramProjectionOutbox.ts";
+
+export { EVENT_TELEGRAM_PROJECTION_SCHEMA_VERSION } from "./telegramProjectionOutbox.ts";
 
 export const EVENT_TELEGRAM_PROJECTION_OUTBOX_ROOT =
   "telegramProjectionOutbox/event";
 export const EVENT_TELEGRAM_PROJECTION_GENERATION_ROOT =
   "eventTelegramProjectionGenerations";
-export const EVENT_TELEGRAM_PROJECTION_SCHEMA_VERSION = 1;
 
 type ProducerDependencies = {
   createRequestId?: () => string;

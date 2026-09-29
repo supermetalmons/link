@@ -29,6 +29,7 @@ import {
   type RatingTelegramProjectionTask,
   type TelegramProjectionTask,
 } from "./telegramProjectionTasks.ts";
+import { parseAutomatchTelegramProjectionOutbox as parseOutbox } from "./telegramProjectionOutbox.ts";
 import {
   enqueueInitialTelegramDelivery,
   type InitialTelegramDelivery,
@@ -59,13 +60,6 @@ import {
 const PROJECTION_SWEEP_LIMIT = PROFILE_BACKGROUND_SWEEP_LIMIT;
 const PROJECTION_INPUT_RETRIES = 5;
 
-type AutomatchProjectionOutbox = {
-  requestId: string;
-  schemaVersion: number;
-  status: string;
-  updatedAtMs: number;
-};
-
 type ProjectionLogger = Pick<Console, "error" | "info">;
 
 type ProjectionDependencies = {
@@ -94,25 +88,6 @@ type AutomatchProjectionResult = {
 function toRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
-    : null;
-}
-
-function parseOutbox(value: unknown): AutomatchProjectionOutbox | null {
-  const record = toRecord(value);
-  const updatedAtMs = record?.updatedAtMs;
-  return record?.schemaVersion === TELEGRAM_PROJECTION_SCHEMA_VERSION &&
-    record.status === "pending" &&
-    typeof record.requestId === "string" &&
-    isSafeRecordKey(record.requestId) &&
-    typeof updatedAtMs === "number" &&
-    Number.isFinite(updatedAtMs) &&
-    updatedAtMs >= 0
-    ? {
-        schemaVersion: record.schemaVersion,
-        status: record.status,
-        requestId: record.requestId,
-        updatedAtMs: Math.floor(updatedAtMs),
-      }
     : null;
 }
 
@@ -200,6 +175,12 @@ async function settleAutomatchOutbox(
   now: () => number,
   reason = "",
 ): Promise<boolean> {
+  if (disposition === "clear") {
+    return state.acknowledgeAutomatchTelegramOutbox(
+      task.inviteId,
+      task.requestId,
+    );
+  }
   const result = await state.transactAutomatchTelegramOutbox(
     task.inviteId,
     (current) => {
@@ -207,18 +188,16 @@ async function settleAutomatchOutbox(
       if (record?.requestId !== task.requestId) {
         return { commit: false, decision: "stale" };
       }
-      return disposition === "clear"
-        ? { value: null, decision: "cleared" }
-        : {
-            value: {
-              ...record,
-              status: "dead",
-              reason,
-              updatedAtMs: null,
-              deadAtMs: now(),
-            },
-            decision: "dead",
-          };
+      return {
+        value: {
+          ...record,
+          status: "dead",
+          reason,
+          updatedAtMs: null,
+          deadAtMs: now(),
+        },
+        decision: "dead",
+      };
     },
   );
   return result.committed;
@@ -486,25 +465,12 @@ async function claimAutomatchSweepCandidate(
   candidate: AutomatchSweepCandidate,
   nowMs: number,
 ): Promise<boolean> {
-  const result = await state.transactAutomatchTelegramOutbox(
+  return state.claimAutomatchTelegramOutbox(
     candidate.task.inviteId,
-    (current) => {
-      const outbox = parseOutbox(current);
-      if (
-        !outbox ||
-        outbox.requestId !== candidate.task.requestId ||
-        outbox.updatedAtMs !== candidate.updatedAtMs ||
-        outbox.updatedAtMs > nowMs
-      ) {
-        return { commit: false, decision: "not-due" };
-      }
-      return {
-        value: { ...asObject(current), updatedAtMs: nowMs },
-        decision: "claimed",
-      };
-    },
+    candidate.task.requestId,
+    candidate.updatedAtMs,
+    nowMs,
   );
-  return result.committed;
 }
 
 async function markInvalidAutomatchSweepEntry(

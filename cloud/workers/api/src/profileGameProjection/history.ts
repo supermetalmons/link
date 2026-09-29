@@ -143,37 +143,9 @@ export async function finishAutomatchProjectionBatch(
   state: AutomatchProjectionState,
   nowMs: number,
 ): Promise<"continued" | "deferred" | "projected" | "superseded"> {
-  const result = await state.transactAutomatchProfileOutbox(
+  return state.finishAutomatchProfileOutbox(
     task.inviteId,
-    (current) => {
-      const outbox = parseAutomatchProfileGameProjectionOutbox(current);
-      if (!outbox || outbox.requestId !== task.requestId)
-        return { commit: false, decision: "superseded" };
-      const descriptors = outbox.historicalMatches || [];
-      if (descriptors.length === 0)
-        return { value: null, decision: "projected" };
-      if (
-        descriptors.some(
-          ({ retryNotBeforeMs }) => (retryNotBeforeMs || 0) <= nowMs,
-        )
-      )
-        return { commit: false, decision: "continued" };
-      return {
-        value: {
-          ...toRecord(current),
-          lastQueuedAtMs: nowMs,
-          archiveRetry: {
-            requestId: task.requestId,
-            notBeforeMs: Math.min(
-              ...descriptors.map(({ retryNotBeforeMs }) => retryNotBeforeMs!),
-            ),
-          },
-        },
-        decision: "deferred",
-      };
-    },
+    task.requestId,
+    nowMs,
   );
-  if (result.decision === "continued") return "continued";
-  if (!result.committed) return "superseded";
-  return result.decision === "deferred" ? "deferred" : "projected";
 }

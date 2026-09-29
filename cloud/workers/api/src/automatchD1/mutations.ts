@@ -43,6 +43,11 @@ export function createAutomatchMutations(
        )`,
     );
 
+  function buildWriteGuardStatements(): D1PreparedStatement[] {
+    if (!writeGuards) throw new AutomatchD1Failure("automatch-state-read-only");
+    return [...writeGuards(), backendGuard()];
+  }
+
   function buildRevisionGuardStatements(
     mutations: readonly AutomatchRecordMutation[],
   ): D1PreparedStatement[] {
@@ -297,6 +302,7 @@ export function createAutomatchMutations(
   }
 
   return {
+    buildWriteGuardStatements,
     buildRevisionGuardStatements,
     buildCommitStatements,
     commit,
