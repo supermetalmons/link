@@ -7,7 +7,7 @@ import {
   type MatchSyncSnapshot,
 } from "@mons/shared/match-sync";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import { createGameplayRepository } from "../src/gameplayRepository.ts";
+import type { InviteAccessRepository } from "../src/gameplayContracts.ts";
 import type { InviteMetadataSnapshot } from "@mons/shared/invite-metadata";
 import {
   handleMatchSyncRoute,
@@ -102,21 +102,19 @@ function setup({
     hostMatch: null,
     guestMatch: null,
   };
-  const repository = createGameplayRepository(env);
-  repository.readMatchRecord = async () => {
-    throw new Error("unexpected-full-state-read");
+  const repository: InviteAccessRepository = {
+    readInviteMetadata: async (inviteId) => {
+      calls.existence++;
+      assert.equal(inviteId, "invite-one");
+      return source;
+    },
+    readProfileOwnershipSnapshot: async (query) => ({
+      canonicalProfileIdByProfileId: new Map(),
+      loginOwnerByUid: new Map(query.loginUids.map((uid) => [uid, null])),
+      loginUidsByProfileId: new Map(),
+      profileById: new Map(),
+    }),
   };
-  repository.readInviteMetadata = async (inviteId) => {
-    calls.existence++;
-    assert.equal(inviteId, "invite-one");
-    return source;
-  };
-  repository.readProfileOwnershipSnapshot = async (query) => ({
-    canonicalProfileIdByProfileId: new Map(),
-    loginOwnerByUid: new Map(query.loginUids.map((uid) => [uid, null])),
-    loginUidsByProfileId: new Map(),
-    profileById: new Map(),
-  });
   const identity = socketTestIdentity(caller);
   const dependencies: MatchSyncRouteDependencies = {
     repository,
@@ -374,27 +372,92 @@ test("socket origin, upgrade and bearer protocol checks precede storage", async 
   );
 });
 
-test("socket admission retries one canonical refresh after a concurrent change", async () => {
-  const state = setup();
+test("socket admission retries fresh revisions at most twice and cancels conflict bodies", async () => {
+  for (const finalStatus of [200, 409]) {
+    const state = setup();
+    let canceled = 0;
+    state.dependencies.room!.fetch = async (incoming) => {
+      state.calls.sockets.push(incoming);
+      if (state.calls.sockets.length === 2 && finalStatus === 200)
+        return new Response("upgrade");
+      state.snapshot.revision++;
+      return new Response(
+        new ReadableStream({
+          cancel() {
+            canceled++;
+          },
+        }),
+        { status: 409 },
+      );
+    };
+    const response = await state.handle(
+      request({ socket: true, authenticated: true }),
+    );
+    assert.equal(response.status, finalStatus === 200 ? 200 : 503);
+    assert.equal(state.calls.auth, 1);
+    assert.equal(state.calls.existence, 1);
+    assert.deepEqual(state.calls.rates, [
+      "connect:match-connect:identity:host-login",
+    ]);
+    assert.equal(state.calls.reads, 2);
+    assert.deepEqual(
+      state.calls.sockets.map((value) =>
+        value.headers.get("X-Mons-Match-Revision"),
+      ),
+      ["7", "8"],
+    );
+    assert.equal(canceled, finalStatus === 200 ? 1 : 2);
+  }
+});
+
+test("socket admission retry rechecks changed access before another upgrade", async () => {
+  const state = setup({ caller: "outsider" });
+  const readMatches = state.dependencies.room!.readMatches;
+  let privatePending = false;
+  state.dependencies.room!.readMatches = async (inviteId, matchId) => {
+    const read = await readMatches(inviteId, matchId);
+    assert.equal(read.status, "ok");
+    return {
+      ...read,
+      metadata: {
+        ...read.metadata,
+        snapshot: {
+          ...read.metadata.snapshot,
+          guestId: privatePending ? null : "guest-login",
+        },
+        passwordProtected: privatePending,
+      },
+    };
+  };
   state.dependencies.room!.fetch = async (incoming) => {
     state.calls.sockets.push(incoming);
-    if (state.calls.sockets.length === 1) {
-      state.snapshot.revision++;
-      return new Response("stale", { status: 409 });
-    }
-    return new Response("upgrade");
+    privatePending = true;
+    state.snapshot.guestPlayerId = null;
+    state.snapshot.revision++;
+    return new Response("changed", { status: 409 });
   };
-  assert.equal((await state.handle(request({ socket: true }))).status, 200);
-  assert.equal(state.calls.reads, 2);
-  assert.deepEqual(
-    state.calls.sockets.map((value) =>
-      value.headers.get("X-Mons-Match-Revision"),
-    ),
-    ["7", "8"],
+  const response = await state.handle(
+    request({ socket: true, authenticated: true }),
   );
-  state.dependencies.room!.fetch = async () =>
-    new Response("stale", { status: 409 });
-  assert.equal((await state.handle(request({ socket: true }))).status, 503);
+  assert.equal(response.status, 403);
+  assert.equal(state.calls.reads, 2);
+  assert.equal(state.calls.sockets.length, 1);
+});
+
+test("socket admission passes through non-conflict room responses without another read", async () => {
+  for (const status of [200, 400, 401, 429, 503]) {
+    const state = setup();
+    const upstream = new Response("upstream response", {
+      status,
+      headers: { "Retry-After": "30" },
+    });
+    state.dependencies.room!.fetch = async () => upstream;
+    const response = await state.handle(request({ socket: true }));
+    assert.equal(response, upstream);
+    assert.equal(response.headers.get("Retry-After"), "30");
+    assert.equal(await response.text(), "upstream response");
+    assert.equal(state.calls.reads, 1);
+  }
 });
 
 test("missing, invalid and oversized or mismatched snapshots fail closed", async () => {

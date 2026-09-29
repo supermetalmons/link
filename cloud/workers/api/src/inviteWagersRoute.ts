@@ -10,6 +10,7 @@ import type { InviteReactions } from "./inviteReactions.ts";
 import {
   handleInviteReadRoute,
   isInviteReadPath,
+  readInviteRoute,
   resolveInviteReadRole,
   type InviteReadRouteDependencies,
 } from "./inviteReadRoute.ts";
@@ -31,6 +32,7 @@ export async function handleInviteWagersRoute(
   return handleInviteReadRoute(request, env, ctx, {
     channel: "wagers",
     dependencies,
+    readRoute: (request) => readInviteRoute(request, "wagers"),
     getRoom: (inviteId) =>
       dependencies.room || env.INVITE_REACTIONS.getByName(inviteId),
     async prepare(room, access) {

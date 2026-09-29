@@ -10,6 +10,7 @@ import type { InviteReactions } from "./inviteReactions.ts";
 import {
   handleInviteReadRoute,
   isInviteReadPath,
+  readInviteRoute,
   resolveInviteReadRole,
   type InviteReadRouteDependencies,
 } from "./inviteReadRoute.ts";
@@ -31,6 +32,7 @@ export async function handleInviteMetadataRoute(
   return handleInviteReadRoute(request, env, ctx, {
     channel: "metadata",
     dependencies,
+    readRoute: (request) => readInviteRoute(request, "metadata"),
     getRoom: (inviteId) =>
       dependencies.room || env.INVITE_REACTIONS.getByName(inviteId),
     async prepare(room, access) {

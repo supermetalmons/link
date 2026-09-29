@@ -7,6 +7,10 @@ import {
   INVITE_WAGERS_SOCKET_PROTOCOL,
   type ReadInviteWagersResponse,
 } from "@mons/shared/invite-wagers";
+import {
+  MATCH_SYNC_SOCKET_PROTOCOL,
+  type ReadMatchSyncResponse,
+} from "@mons/shared/match-sync";
 import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
 import {
   authJsonResponse,
@@ -16,10 +20,8 @@ import {
 } from "./authHttp.ts";
 import { cancelResponseBody } from "./boundedStreams.ts";
 import { resolveInviteRoleFromSnapshot } from "./inviteAccess.ts";
-import {
-  createGameplayRepository,
-  type GameplayRepository,
-} from "./gameplayRepository.ts";
+import { createGameplayRepository } from "./gameplayRepository.ts";
+import type { InviteAccessRepository } from "./gameplayContracts.ts";
 import type { InviteReactions } from "./inviteReactions.ts";
 import { readInviteSocketToken } from "./inviteSocketAuth.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
@@ -31,7 +33,8 @@ import {
 import { socketSessionHeaders } from "./socketSession.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 
-type InviteReadChannel = "metadata" | "wagers";
+type InviteReadChannel = "metadata" | "wagers" | "matches";
+type InviteReadTarget = { inviteId: string; socket: boolean };
 
 const channels = {
   metadata: {
@@ -44,10 +47,14 @@ const channels = {
     protocol: INVITE_WAGERS_SOCKET_PROTOCOL,
     headerPrefix: "X-Mons-Wagers",
   },
+  matches: {
+    protocol: MATCH_SYNC_SOCKET_PROTOCOL,
+    headerPrefix: "X-Mons-Match",
+  },
 };
 
 export type InviteReadRouteDependencies = {
-  repository?: GameplayRepository;
+  repository?: InviteAccessRepository;
   verifyIdentity?: (
     request: Request,
     env: Env,
@@ -59,7 +66,7 @@ export type InviteReadRouteDependencies = {
 type InviteReadAccess = {
   inviteId: string;
   identity: RequestIdentity | null;
-  repository: GameplayRepository;
+  repository: InviteAccessRepository;
 };
 
 type InviteReadRole = {
@@ -68,30 +75,42 @@ type InviteReadRole = {
 };
 
 type PreparedInviteRead = {
-  body: ReadInviteMetadataResponse | ReadInviteWagersResponse;
+  body:
+    | ReadInviteMetadataResponse
+    | ReadInviteWagersResponse
+    | ReadMatchSyncResponse;
   revision: number;
   passwordProtected: boolean;
   role: InviteReadRole;
+  socketHeaders?: Record<string, string>;
 };
 
-type InviteReadRouteOptions<Room extends Pick<InviteReactions, "fetch">> = {
+type InviteReadRouteOptions<
+  Room extends Pick<InviteReactions, "fetch">,
+  Target extends InviteReadTarget,
+> = {
   channel: InviteReadChannel;
   dependencies: InviteReadRouteDependencies;
+  readRoute: (request: Request) => Target;
+  validateInvite?: (invite: unknown, target: Target) => void;
   getRoom: (inviteId: string) => Room;
   prepare: (
     room: Room,
-    access: InviteReadAccess,
+    access: InviteReadAccess & Target,
   ) => Promise<PreparedInviteRead>;
 };
 
 export function isInviteReadPath(
   pathname: string,
-  channel: InviteReadChannel,
+  channel: Exclude<InviteReadChannel, "matches">,
 ): boolean {
   return channels[channel].pattern.test(pathname);
 }
 
-function readRoute(request: Request, channel: InviteReadChannel) {
+export function readInviteRoute(
+  request: Request,
+  channel: Exclude<InviteReadChannel, "matches">,
+) {
   const url = new URL(request.url);
   const match = channels[channel].pattern.exec(url.pathname);
   let inviteId = "";
@@ -130,21 +149,33 @@ export async function resolveInviteReadRole(
 
 export async function handleInviteReadRoute<
   Room extends Pick<InviteReactions, "fetch">,
+  Target extends InviteReadTarget,
 >(
   request: Request,
   env: Env,
   ctx: WorkerExecutionContext,
-  { channel, dependencies, getRoom, prepare }: InviteReadRouteOptions<Room>,
+  {
+    channel,
+    dependencies,
+    readRoute,
+    validateInvite,
+    getRoom,
+    prepare,
+  }: InviteReadRouteOptions<Room, Target>,
 ): Promise<Response> {
   const { protocol, headerPrefix } = channels[channel];
-  const unavailable = `invite-${channel}-unavailable`;
+  const unavailable =
+    channel === "matches"
+      ? "match-sync-unavailable"
+      : `invite-${channel}-unavailable`;
   let corsHeaders: Record<string, string> = { Vary: "Origin" };
   try {
     corsHeaders = {
       ...getAuthCorsHeaders(request),
       "Access-Control-Expose-Headers": "Retry-After",
     };
-    const { inviteId, socket } = readRoute(request, channel);
+    const target = readRoute(request);
+    const { inviteId, socket } = target;
     if (request.method === "OPTIONS") return authPreflightResponse(corsHeaders);
     if (request.method !== "GET") {
       throw new AuthApiFailure(405, "method-not-allowed", "method-not-allowed");
@@ -170,7 +201,7 @@ export async function handleInviteReadRoute<
       const token = readInviteSocketToken(
         request,
         protocol,
-        `invalid-${channel}-auth`,
+        `invalid-${channel === "matches" ? "match" : channel}-auth`,
       );
       identityRequest = token
         ? new Request(request.url, {
@@ -186,8 +217,13 @@ export async function handleInviteReadRoute<
         )
       : null;
     const ip = request.headers.get("CF-Connecting-IP")?.trim() || "unknown";
-    const limited = await env.REACTION_RATE_LIMITER.limit({
-      key: `${channel}:${socket ? "connect" : "read"}:${identity ? `identity:${identity.uid}` : `spectator:${ip}`}`,
+    const limiter =
+      channel === "matches" && !socket
+        ? env.MATCH_SYNC_RATE_LIMITER
+        : env.REACTION_RATE_LIMITER;
+    const rateLimitPrefix = channel === "matches" ? "match-" : `${channel}:`;
+    const limited = await limiter.limit({
+      key: `${rateLimitPrefix}${socket ? "connect" : "read"}:${identity ? `identity:${identity.uid}` : `spectator:${ip}`}`,
     });
     if (!limited.success) {
       return authJsonResponse(
@@ -201,14 +237,16 @@ export async function handleInviteReadRoute<
     if (invite === null || invite === undefined) {
       throw new AuthApiFailure(404, "not-found", "invite-not-found");
     }
+    validateInvite?.(invite, target);
     const room = getRoom(inviteId);
     for (let attempt = 0; attempt < 2; attempt++) {
-      const prepared = await prepare(room, { inviteId, identity, repository });
+      const prepared = await prepare(room, { ...target, identity, repository });
       if (!socket) return authJsonResponse(prepared.body, 200, corsHeaders);
       const { role, actorUid } = prepared.role;
       const response = await room.fetch(
         new Request(`https://reactions.internal/${channel}/socket`, {
           headers: {
+            ...prepared.socketHeaders,
             Upgrade: "websocket",
             "Sec-WebSocket-Protocol": protocol,
             [`${headerPrefix}-Invite`]: encodeURIComponent(inviteId),
@@ -235,7 +273,13 @@ export async function handleInviteReadRoute<
       return authErrorResponse(error, corsHeaders);
     (
       dependencies.logFailure ||
-      (() => console.error({ event: `invite_${channel}_failure` }))
+      (() =>
+        console.error({
+          event:
+            channel === "matches"
+              ? "match_sync_failure"
+              : `invite_${channel}_failure`,
+        }))
     )();
     return authErrorResponse(
       new AuthApiFailure(503, "unavailable", unavailable),

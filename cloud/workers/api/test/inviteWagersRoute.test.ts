@@ -9,7 +9,7 @@ import {
   type InviteWagersSnapshot,
 } from "@mons/shared/invite-wagers";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import { createGameplayRepository } from "../src/gameplayRepository.ts";
+import type { InviteAccessRepository } from "../src/gameplayContracts.ts";
 import type { InviteWagersReadResult } from "../src/inviteWagers.ts";
 import {
   handleInviteWagersRoute,
@@ -17,7 +17,7 @@ import {
   type InviteWagersRouteDependencies,
 } from "../src/inviteWagersRoute.ts";
 import { handleRequest } from "../src/router.ts";
-import { TELEGRAM_TEST_ENV, withInviteSourceReads } from "./testEnv.ts";
+import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const ctx = { waitUntil: (_promise: Promise<unknown>) => undefined };
 const token = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJob3N0LWxvZ2luIn0.signature";
@@ -128,53 +128,28 @@ function setup({
       },
     } as InviteWagersReadResult,
   };
-  const env = withInviteSourceReads(
-    {
-      ...TELEGRAM_TEST_ENV,
-      REACTION_RATE_LIMITER: {
-        limit: async ({ key }: { key: string }) => {
-          calls.rates.push(key);
-          return { success: true };
-        },
+  const env = {
+    ...TELEGRAM_TEST_ENV,
+    REACTION_RATE_LIMITER: {
+      limit: async ({ key }: { key: string }) => {
+        calls.rates.push(key);
+        return { success: true };
       },
-    } as Env,
-    (inviteId) => {
+    },
+  } as Env;
+  const repository: InviteAccessRepository = {
+    readInviteMetadata: async (inviteId) => {
       calls.sources++;
       assert.equal(inviteId, metadata.inviteId);
-      return { hostId: metadata.hostId, guestId: guestId };
+      return { hostId: metadata.hostId, guestId };
     },
-  );
-  const repository = createGameplayRepository(env, {
-    stateClient: {
-      readMatchRecord: async () => {
-        throw new Error("unexpected-source-read");
-      },
-      readMatchRecords: async () => {
-        throw new Error("unexpected-source-read");
-      },
-      readMatchPair: async () => {
-        throw new Error("unexpected-source-read");
-      },
-      readMatchPairs: async () => {
-        throw new Error("unexpected-source-read");
-      },
-      createMatchRecords: async () => {
-        throw new Error("unexpected-write");
-      },
-      applyMatchEventEffects: async () => {
-        throw new Error("unexpected-write");
-      },
-    },
-  });
-  repository.readMatchRecord = async () => {
-    throw new Error("unexpected-full-state-read");
+    readProfileOwnershipSnapshot: async (query) => ({
+      canonicalProfileIdByProfileId: new Map(),
+      loginOwnerByUid: new Map(query.loginUids.map((uid) => [uid, null])),
+      loginUidsByProfileId: new Map(),
+      profileById: new Map(),
+    }),
   };
-  repository.readProfileOwnershipSnapshot = async (query) => ({
-    canonicalProfileIdByProfileId: new Map(),
-    loginOwnerByUid: new Map(query.loginUids.map((uid) => [uid, null])),
-    loginUidsByProfileId: new Map(),
-    profileById: new Map(),
-  });
   const identity = socketTestIdentity(caller);
   const dependencies: InviteWagersRouteDependencies = {
     repository,

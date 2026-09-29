@@ -1,31 +1,17 @@
 import {
   MATCH_SYNC_MAX_MESSAGE_BYTES,
-  MATCH_SYNC_SOCKET_PROTOCOL,
   isReadMatchSyncResponse,
   type ReadMatchSyncResponse,
 } from "@mons/shared/match-sync";
-import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
-import {
-  authJsonResponse,
-  authPreflightResponse,
-  getAuthCorsHeaders,
-  isAllowedAuthOrigin,
-} from "./authHttp.ts";
-import { cancelResponseBody } from "./boundedStreams.ts";
-import {
-  verifySessionRequest,
-  type SessionIdentity,
-  type WorkerExecutionContext,
-} from "./sessionAuth.ts";
+import { AuthApiFailure } from "./authErrors.ts";
+import type { WorkerExecutionContext } from "./sessionAuth.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
-import { resolveInviteRoleFromSnapshot } from "./inviteAccess.ts";
 import {
-  createGameplayRepository,
-  type GameplayRepository,
-} from "./gameplayRepository.ts";
+  handleInviteReadRoute,
+  resolveInviteReadRole,
+  type InviteReadRouteDependencies,
+} from "./inviteReadRoute.ts";
 import { normalizeInviteMetadata } from "./inviteMetadata.ts";
-import { readInviteSocketToken } from "./inviteSocketAuth.ts";
-import { socketSessionHeaders } from "./socketSession.ts";
 import {
   isRegisteredSyncMatch,
   type MatchSyncReadResult,
@@ -34,8 +20,7 @@ import {
 const MATCH_SYNC_ROUTE_PATTERN =
   /^\/invites\/([^/]+)\/matches\/([^/]+)\/(snapshot|socket)$/;
 
-export type MatchSyncRouteDependencies = {
-  repository?: GameplayRepository;
+export type MatchSyncRouteDependencies = InviteReadRouteDependencies & {
   room?: {
     readMatches(
       inviteId: string,
@@ -43,12 +28,6 @@ export type MatchSyncRouteDependencies = {
     ): Promise<MatchSyncReadResult>;
     fetch(request: Request): Promise<Response>;
   };
-  verifyIdentity?: (
-    request: Request,
-    env: Env,
-    ctx: WorkerExecutionContext,
-  ) => Promise<SessionIdentity>;
-  logFailure?: () => void;
 };
 
 export function isMatchSyncPath(pathname: string): boolean {
@@ -84,83 +63,26 @@ export async function handleMatchSyncRoute(
   ctx: WorkerExecutionContext,
   dependencies: MatchSyncRouteDependencies = {},
 ): Promise<Response> {
-  let corsHeaders: Record<string, string> = { Vary: "Origin" };
-  try {
-    corsHeaders = {
-      ...getAuthCorsHeaders(request),
-      "Access-Control-Expose-Headers": "Retry-After",
-    };
-    const { inviteId, matchId, socket } = readRoute(request);
-    if (request.method === "OPTIONS") return authPreflightResponse(corsHeaders);
-    if (request.method !== "GET") {
-      throw new AuthApiFailure(405, "method-not-allowed", "method-not-allowed");
-    }
-    let identityRequest: Request | null = request.headers.has("Authorization")
-      ? request
-      : null;
-    if (socket) {
-      if (!isAllowedAuthOrigin(request.headers.get("Origin") || "")) {
-        throw new AuthApiFailure(
-          403,
-          "permission-denied",
-          "origin-not-allowed",
-        );
+  return handleInviteReadRoute(request, env, ctx, {
+    channel: "matches",
+    dependencies,
+    readRoute,
+    validateInvite(invite, { inviteId, matchId }) {
+      const existence = normalizeInviteMetadata(inviteId, invite);
+      if (existence.status === "missing") {
+        throw new AuthApiFailure(404, "not-found", "invite-not-found");
       }
-      if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
-        return authJsonResponse(
-          { ok: false, error: "websocket-upgrade-required" },
-          426,
-          corsHeaders,
-        );
+      if (existence.status !== "ok") {
+        throw new AuthApiFailure(409, "failed-precondition", "invite-invalid");
       }
-      const token = readInviteSocketToken(
-        request,
-        MATCH_SYNC_SOCKET_PROTOCOL,
-        "invalid-match-auth",
-      );
-      identityRequest = token
-        ? new Request(request.url, {
-            headers: { Authorization: `Bearer ${token}` },
-          })
-        : null;
-    }
-    const identity = identityRequest
-      ? await (dependencies.verifyIdentity || verifySessionRequest)(
-          identityRequest,
-          env,
-          ctx,
-        )
-      : null;
-    const ip = request.headers.get("CF-Connecting-IP")?.trim() || "unknown";
-    const limiter = socket
-      ? env.REACTION_RATE_LIMITER
-      : env.MATCH_SYNC_RATE_LIMITER;
-    const limited = await limiter.limit({
-      key: `match-${socket ? "connect" : "read"}:${identity ? `identity:${identity.uid}` : `spectator:${ip}`}`,
-    });
-    if (!limited.success) {
-      return authJsonResponse(
-        { ok: false, error: "resource-exhausted", message: "rate-limited" },
-        429,
-        { ...corsHeaders, "Retry-After": "60" },
-      );
-    }
-    const repository = dependencies.repository || createGameplayRepository(env);
-    const existence = normalizeInviteMetadata(
-      inviteId,
-      await repository.readInviteMetadata(inviteId),
-    );
-    if (existence.status === "missing") {
-      throw new AuthApiFailure(404, "not-found", "invite-not-found");
-    }
-    if (existence.status !== "ok") {
-      throw new AuthApiFailure(409, "failed-precondition", "invite-invalid");
-    }
-    if (!isRegisteredSyncMatch(existence, matchId)) {
-      throw new AuthApiFailure(404, "not-found", "match-not-found");
-    }
-    const room = dependencies.room || env.INVITE_REACTIONS.getByName(inviteId);
-    for (let attempt = 0; attempt < 2; attempt++) {
+      if (!isRegisteredSyncMatch(existence, matchId)) {
+        throw new AuthApiFailure(404, "not-found", "match-not-found");
+      }
+    },
+    getRoom: (inviteId) =>
+      dependencies.room || env.INVITE_REACTIONS.getByName(inviteId),
+    async prepare(room, access) {
+      const { inviteId, matchId } = access;
       const read = await room.readMatches(inviteId, matchId);
       if (read.status === "missing") {
         throw new AuthApiFailure(404, "not-found", "match-not-found");
@@ -169,20 +91,11 @@ export async function handleMatchSyncRoute(
         throw new AuthApiFailure(409, "failed-precondition", "match-invalid");
       }
       const metadata = read.metadata;
-      if (!identity && !metadata.snapshot.guestId) {
-        throw new AuthApiFailure(403, "permission-denied", "permission-denied");
-      }
-      const role = identity
-        ? await resolveInviteRoleFromSnapshot(
-            identity,
-            { inviteId },
-            {
-              ...metadata.snapshot,
-              ...(metadata.passwordProtected ? { password: true } : {}),
-            },
-            repository,
-          )
-        : { role: "watch" as const, actorUid: null };
+      const role = await resolveInviteReadRole(
+        access,
+        metadata.snapshot,
+        metadata.passwordProtected,
+      );
       const body: ReadMatchSyncResponse = { ok: true, snapshot: read.snapshot };
       if (
         !isReadMatchSyncResponse(body) ||
@@ -195,41 +108,13 @@ export async function handleMatchSyncRoute(
       ) {
         throw new AuthApiFailure(503, "unavailable", "match-sync-unavailable");
       }
-      if (!socket) return authJsonResponse(body, 200, corsHeaders);
-      const response = await room.fetch(
-        new Request("https://reactions.internal/matches/socket", {
-          headers: {
-            Upgrade: "websocket",
-            "Sec-WebSocket-Protocol": MATCH_SYNC_SOCKET_PROTOCOL,
-            "X-Mons-Match-Invite": encodeURIComponent(inviteId),
-            "X-Mons-Match-Match": encodeURIComponent(matchId),
-            "X-Mons-Match-Role":
-              role.role === "watch" ? "spectator" : role.role,
-            "X-Mons-Match-IP": ip,
-            "X-Mons-Match-Revision": String(read.snapshot.revision),
-            "X-Mons-Match-Protected": metadata.passwordProtected ? "1" : "0",
-            "X-Mons-Match-Authenticated": identity ? "1" : "0",
-            ...socketSessionHeaders(identity),
-            ...(role.actorUid
-              ? { "X-Mons-Match-Actor": encodeURIComponent(role.actorUid) }
-              : {}),
-          },
-        }),
-      );
-      if (response.status !== 409) return response;
-      await cancelResponseBody(response);
-    }
-    throw new AuthApiFailure(503, "unavailable", "match-sync-unavailable");
-  } catch (error) {
-    if (error instanceof AuthApiFailure)
-      return authErrorResponse(error, corsHeaders);
-    (
-      dependencies.logFailure ||
-      (() => console.error({ event: "match_sync_failure" }))
-    )();
-    return authErrorResponse(
-      new AuthApiFailure(503, "unavailable", "match-sync-unavailable"),
-      corsHeaders,
-    );
-  }
+      return {
+        body,
+        role,
+        revision: read.snapshot.revision,
+        passwordProtected: metadata.passwordProtected,
+        socketHeaders: { "X-Mons-Match-Match": encodeURIComponent(matchId) },
+      };
+    },
+  });
 }
