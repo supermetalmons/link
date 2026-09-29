@@ -36,6 +36,7 @@ const functions = [
   "mergeHistoricalMatchPresentation",
   "scheduleHistoricalMatchArchiveRefresh",
   "enterHistoricalView",
+  "clearBoardViewInputs",
   "clearViewedRematchState",
   "nextBoardRenderSession",
   "isBoardRenderSessionActive",

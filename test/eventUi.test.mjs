@@ -663,10 +663,11 @@ test("sizes event prize artwork from catalog image dimensions", () => {
     new URL("../src/ui/event/EventModal.styles.ts", import.meta.url),
     "utf8",
   );
-  const view = readFileSync(
-    new URL("../src/ui/event/EventModalView.tsx", import.meta.url),
-    "utf8",
-  );
+  const view = ["EventModalView.tsx", "EventPrizePanel.tsx"]
+    .map((file) =>
+      readFileSync(new URL(`../src/ui/event/${file}`, import.meta.url), "utf8"),
+    )
+    .join("\n");
 
   assert.doesNotMatch(styles, /aspect-ratio:\s*4\s*\/\s*5/);
   assert.equal(styles.match(/props\.\$imageWidth/g)?.length, 2);

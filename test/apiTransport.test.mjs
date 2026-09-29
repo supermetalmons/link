@@ -16,7 +16,7 @@ registerHooks({
   },
 });
 
-const { authenticatedJsonRequest } =
+const { authenticatedJsonRequest, readSnapshotJson } =
   await import("../src/services/apiTransport.ts");
 
 class EndpointError extends Error {
@@ -60,6 +60,15 @@ const timeout = {
   code: "unavailable",
   message: "Endpoint timed out.",
 };
+const snapshotRequest = (overrides = {}) =>
+  readSnapshotJson({
+    url: "https://api.mons.link/snapshot",
+    timeoutMs: 10_000,
+    maxResponseBytes: 128,
+    validate: (value) => value?.ok === true,
+    createError: (code) => new EndpointError(code, code),
+    ...overrides,
+  });
 
 test("retries one 401 with a fresh token without waiting for cancellation", async () => {
   const refreshes = [];
@@ -445,4 +454,100 @@ test("uses a caller-supplied timeout code", async (t) => {
   });
   t.mock.timers.tick(100);
   await rejected;
+});
+
+test("rejects positive infinite declared lengths in snapshot and authenticated responses", async (t) => {
+  for (const contentLength of ["Infinity", "+Infinity", "1e999"]) {
+    for (const snapshot of [true, false]) {
+      await t.test(
+        `${snapshot ? "snapshot" : "authenticated"}: ${contentLength}`,
+        async (t) => {
+          let cancellations = 0;
+          const fetcher = async () =>
+            new Response(
+              new ReadableStream({
+                cancel() {
+                  cancellations++;
+                  return new Promise(() => {});
+                },
+              }),
+              { headers: { "Content-Length": contentLength } },
+            );
+          t.mock.method(globalThis, "fetch", fetcher);
+          await assert.rejects(
+            snapshot ? snapshotRequest() : request({ fetcher }),
+            snapshot ? { code: "invalid-response" } : unavailable,
+          );
+          assert.equal(cancellations, 1);
+        },
+      );
+    }
+  }
+});
+
+test("snapshot byte limits remain authoritative for missing or unusable declared lengths", async (t) => {
+  const payload = { ok: true, label: "☀️" };
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  for (const contentLength of [
+    undefined,
+    "NaN",
+    "bogus",
+    "-Infinity",
+    "-1",
+    "0",
+  ]) {
+    await t.test(contentLength ?? "missing", async (t) => {
+      t.mock.method(
+        globalThis,
+        "fetch",
+        async () =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                for (const byte of bytes)
+                  controller.enqueue(Uint8Array.of(byte));
+                controller.close();
+              },
+            }),
+            contentLength === undefined
+              ? undefined
+              : { headers: { "Content-Length": contentLength } },
+          ),
+      );
+      assert.deepEqual(
+        await snapshotRequest({ maxResponseBytes: bytes.length }),
+        payload,
+      );
+      await assert.rejects(
+        snapshotRequest({ maxResponseBytes: bytes.length - 1 }),
+        { code: "invalid-response" },
+      );
+    });
+  }
+});
+
+test("snapshot reads reject missing, malformed, invalid UTF-8, and failed response bodies", async (t) => {
+  for (const [name, response] of [
+    ["missing", () => new Response(null)],
+    ["empty", () => new Response("")],
+    ["JSON", () => new Response("{bad}")],
+    ["UTF-8", () => new Response(Uint8Array.of(0xff))],
+    ["truncated UTF-8", () => new Response(Uint8Array.of(0xe2, 0x98))],
+    [
+      "stream failure",
+      () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new Error("read failed"));
+            },
+          }),
+        ),
+    ],
+  ]) {
+    await t.test(name, async (t) => {
+      t.mock.method(globalThis, "fetch", async () => response());
+      await assert.rejects(snapshotRequest(), { code: "invalid-response" });
+    });
+  }
 });

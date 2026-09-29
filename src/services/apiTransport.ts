@@ -45,7 +45,7 @@ async function readBoundedJson(
   normalizeError?: (error: unknown) => Error | undefined,
 ): Promise<unknown> {
   const contentLength = Number(response.headers.get("Content-Length"));
-  if (Number.isFinite(contentLength) && contentLength > maxResponseBytes) {
+  if (contentLength > maxResponseBytes) {
     cancelBody(response);
     throw unavailableError();
   }

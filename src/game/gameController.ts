@@ -156,6 +156,7 @@ import {
   toMonsColor,
   type TrustedMatchPairGame,
 } from "./historicalMatchModels";
+import { deriveBoardViewControls, type BoardViewMode } from "./boardViewPolicy";
 
 export let isWatchOnly = false;
 export let isOnlineGame = false;
@@ -501,7 +502,6 @@ let viewedRematchPair: HistoricalMatchPair | null = null;
 let viewedRematchRequestToken = 0;
 let displayedHistoryViewId = 0;
 let currentGameVariant: StoredGameVariant = legacyDefaultGameVariant;
-type BoardViewMode = "activeLive" | "waitingLive" | "historicalView";
 let boardViewMode: BoardViewMode = "activeLive";
 let isMoveHistoryPopupOpen = false;
 let boardRenderSessionId = 0;
@@ -848,28 +848,33 @@ function playIncomingInviteReaction(
 }
 
 function applyBoardUiForCurrentView() {
+  const controls = deriveBoardViewControls({
+    mode: boardViewMode,
+    isOnlineGame,
+    isWatchOnly,
+    isGameWithBot,
+    isGameOver,
+    isWaitingForRematchResponse,
+    isSeriesEnded:
+      boardViewMode === "historicalView" &&
+      !isWatchOnly &&
+      isOnlineGame &&
+      !!connection.rematchSeriesEndIsIndicated(),
+  });
   if (boardViewMode === "historicalView") {
     clearTimerVictoryClaimTimeout();
     Board.stopMonsBoardAsDisplayAnimations();
     Board.showBoardPlayersInfo();
     showWaitingStateText("");
-    if (
-      !isWatchOnly &&
-      isOnlineGame &&
-      connection.rematchSeriesEndIsIndicated()
-    ) {
-      setEndMatchVisible(true);
-      setEndMatchConfirmed(true);
-    } else if (
-      !isWatchOnly &&
-      isOnlineGame &&
-      (isGameOver || isWaitingForRematchResponse)
-    ) {
-      setEndMatchVisible(true);
-    } else {
-      setEndMatchVisible(false);
+    if (controls.endMatchVisible !== null) {
+      setEndMatchVisible(controls.endMatchVisible);
     }
-    showVoiceReactionButton(isGameWithBot || (!isWatchOnly && isOnlineGame));
+    if (controls.endMatchConfirmed !== null) {
+      setEndMatchConfirmed(controls.endMatchConfirmed);
+    }
+    if (controls.voiceReactionVisible !== null) {
+      showVoiceReactionButton(controls.voiceReactionVisible);
+    }
     disableAndHideUndoResignAndTimerControls();
     hideTimerButtons();
     Board.hideTimerCountdownDigits();
@@ -881,9 +886,13 @@ function applyBoardUiForCurrentView() {
     clearTimerVictoryClaimTimeout();
     Board.runMonsBoardAsDisplayWaitingAnimation();
     Board.hideBoardPlayersInfo();
-    setEndMatchVisible(true);
+    if (controls.endMatchVisible !== null) {
+      setEndMatchVisible(controls.endMatchVisible);
+    }
     showWaitingStateText("");
-    showVoiceReactionButton(!isWatchOnly && isOnlineGame);
+    if (controls.voiceReactionVisible !== null) {
+      showVoiceReactionButton(controls.voiceReactionVisible);
+    }
     setAutomoveActionVisible(false);
     setUndoVisible(false);
     setUndoEnabled(false);
@@ -896,26 +905,32 @@ function applyBoardUiForCurrentView() {
   Board.stopMonsBoardAsDisplayAnimations();
   Board.showBoardPlayersInfo();
   showWaitingStateText("");
-  if (shouldShowOnlineReactionButton()) {
-    showVoiceReactionButton(true);
-  } else if (isOnlineGame) {
-    showVoiceReactionButton(false);
+  if (controls.voiceReactionVisible !== null) {
+    showVoiceReactionButton(controls.voiceReactionVisible);
   }
   ensureBoardViewInvariants("applyBoardUiForCurrentView");
   syncInviteBotIntoLocalGameButton();
 }
 
-function enterWaitingLiveView() {
-  nextBoardRenderSession();
-  boardViewMode = "waitingLive";
-  clearViewedRematchState();
-  connection.setWagerViewMatchId(null);
-  flashbackMode = false;
+function clearBoardViewInputs() {
   currentInputs = [];
   Board.removeHighlights();
   Board.hideItemSelectionOrConfirmationOverlay();
+}
+
+function prepareLiveBoardView(mode: "activeLive" | "waitingLive") {
+  nextBoardRenderSession();
+  boardViewMode = mode;
+  clearViewedRematchState();
+  connection.setWagerViewMatchId(null);
+  flashbackMode = false;
+  clearBoardViewInputs();
   Board.setBoardFlipped(activeBoardShouldBeFlipped());
   applyBoardUiForCurrentView();
+}
+
+function enterWaitingLiveView() {
+  prepareLiveBoardView("waitingLive");
   refreshDisplayedMatchPresentation();
   if (boardViewDebugLogsEnabled) {
     console.log("[board-view] entered waitingLive");
@@ -924,16 +939,9 @@ function enterWaitingLiveView() {
 }
 
 function restoreLiveBoardView() {
-  nextBoardRenderSession();
-  boardViewMode = isWaitingForRematchResponse ? "waitingLive" : "activeLive";
-  clearViewedRematchState();
-  connection.setWagerViewMatchId(null);
-  flashbackMode = false;
-  currentInputs = [];
-  Board.removeHighlights();
-  Board.hideItemSelectionOrConfirmationOverlay();
-  Board.setBoardFlipped(activeBoardShouldBeFlipped());
-  applyBoardUiForCurrentView();
+  prepareLiveBoardView(
+    isWaitingForRematchResponse ? "waitingLive" : "activeLive",
+  );
   refreshDisplayedMatchPresentation();
   if (boardViewMode === "activeLive") {
     setNewBoard(false);
@@ -989,16 +997,7 @@ function restoreLiveBoardView() {
 }
 
 function prepareForNewLocalLiveMatch() {
-  nextBoardRenderSession();
-  boardViewMode = "activeLive";
-  clearViewedRematchState();
-  connection.setWagerViewMatchId(null);
-  flashbackMode = false;
-  currentInputs = [];
-  Board.removeHighlights();
-  Board.hideItemSelectionOrConfirmationOverlay();
-  Board.setBoardFlipped(activeBoardShouldBeFlipped());
-  applyBoardUiForCurrentView();
+  prepareLiveBoardView("activeLive");
 }
 
 function enterHistoricalView(
@@ -1019,9 +1018,7 @@ function enterHistoricalView(
   Board.setBoardFlipped(getViewedMatchBoardFlipped(matchId, pair));
   flashbackMode = true;
   flashbackStateGame = historicalGame;
-  currentInputs = [];
-  Board.removeHighlights();
-  Board.hideItemSelectionOrConfirmationOverlay();
+  clearBoardViewInputs();
   applyBoardUiForCurrentView();
   applyWagerState();
   refreshDisplayedMatchPresentation();

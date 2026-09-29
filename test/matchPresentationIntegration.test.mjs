@@ -690,7 +690,7 @@ function historyAppearanceHarness({
     let flashbackMode = true;
     let currentInputs = [];
     let pendingTimerResolutionOnRestore = null;
-    ${functions(controllerSource, ["getDisplayedMatchPresentation", "refreshDisplayedMatchPresentation", "enterWaitingLiveView", "restoreLiveBoardView", "didConfirmRematchProposal"])}
+    ${functions(controllerSource, ["getDisplayedMatchPresentation", "refreshDisplayedMatchPresentation", "enterWaitingLiveView", "restoreLiveBoardView", "prepareLiveBoardView", "clearBoardViewInputs", "didConfirmRematchProposal"])}
     function clearViewedRematchState() { viewedRematchMatchId = null; viewedRematchPair = null; }
   `,
     {

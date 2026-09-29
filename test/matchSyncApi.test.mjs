@@ -1,13 +1,28 @@
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
 import test from "node:test";
 import { MATCH_SYNC_MAX_MESSAGE_BYTES } from "@mons/shared/match-sync";
-import {
+
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (
+      context.parentURL?.endsWith(".ts") &&
+      (specifier.startsWith("./") || specifier.startsWith("../")) &&
+      !/\.[^/]+$/.test(specifier)
+    ) {
+      return nextResolve(`${specifier}.ts`, context);
+    }
+    return nextResolve(specifier, context);
+  },
+});
+
+const {
   createMatchSyncSocketProtocols,
   getMatchSyncSocketUrl,
   MatchSyncApiError,
   MATCH_SYNC_REQUEST_TIMEOUT_MS,
   readMatchSyncViaApi,
-} from "../src/services/matchSyncApi.ts";
+} = await import("../src/services/matchSyncApi.ts");
 
 const originalFetch = globalThis.fetch;
 const match = (color, changes = {}) => ({
@@ -271,4 +286,81 @@ test("rejects auth-user replacement and cancels late response bodies", async () 
   );
   await assert.rejects(pending, /authentication-changed/);
   assert.equal(canceled, true);
+});
+
+test("public 401 reads stop after one request and cancel unread error bodies", async () => {
+  let calls = 0;
+  let canceled = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return new Response(
+      new ReadableStream({
+        cancel() {
+          canceled++;
+          return new Promise(() => {});
+        },
+      }),
+      { status: 401, headers: { "Retry-After": "2" } },
+    );
+  };
+  await assert.rejects(readMatchSyncViaApi("invite", "invite"), (error) => {
+    assert.ok(error instanceof MatchSyncApiError);
+    assert.equal(error.code, "http-401");
+    assert.equal(error.status, 401);
+    assert.equal(error.retryAfterMs, 2_000);
+    return true;
+  });
+  assert.equal(calls, 1);
+  assert.equal(canceled, 1);
+});
+
+test("validates identifiers before abort without starting token lookup or fetch", async () => {
+  let tokens = 0;
+  let fetches = 0;
+  globalThis.fetch = async () => {
+    fetches++;
+    return response();
+  };
+  await assert.rejects(
+    readMatchSyncViaApi(
+      "invite",
+      "invite",
+      async () => {
+        tokens++;
+        return "token";
+      },
+      { signal: AbortSignal.abort() },
+    ),
+    { name: "MatchSyncApiError", code: "aborted" },
+  );
+  await assert.rejects(
+    readMatchSyncViaApi("bad/invite", "invite", undefined, {
+      signal: AbortSignal.abort(),
+    }),
+    { name: "MatchSyncApiError", code: "invalid-invite" },
+  );
+  assert.equal(tokens, 0);
+  assert.equal(fetches, 0);
+});
+
+test("preserves raw token and network failures without retrying", async () => {
+  for (const stage of ["token", "fetch"]) {
+    const failure = new TypeError(`${stage} unavailable`);
+    let tokens = 0;
+    let fetches = 0;
+    globalThis.fetch = async () => {
+      fetches++;
+      throw failure;
+    };
+    await assert.rejects(
+      readMatchSyncViaApi("invite", "invite", async () => {
+        tokens++;
+        if (stage === "token") throw failure;
+        return "token";
+      }),
+      (error) => error === failure,
+    );
+    assert.equal(tokens, 1);
+    assert.equal(fetches, stage === "fetch" ? 1 : 0);
+  }
 });

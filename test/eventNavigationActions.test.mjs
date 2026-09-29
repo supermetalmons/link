@@ -578,7 +578,7 @@ function leaveHarness(overrides = {}) {
     isLoading: false,
     activeJoinRequestRef: { current: null },
     activeLeaveRequestRef,
-    prizeSelectionCoordinatorRef: { current: null },
+    isPrizeSelectionPending: () => false,
     storage: {
       getProfileId: () => profileId,
       getLoginId: () => loginUid,
@@ -630,7 +630,7 @@ test("leaving rechecks the start boundary and blocks stale or simulated events",
     { isLoading: true },
     { isResolvingEventProfileIds: true },
     { activeJoinRequestRef: { current: {} } },
-    { prizeSelectionCoordinatorRef: { current: { isPending: () => true } } },
+    { isPrizeSelectionPending: () => true },
     { devStubRecord: {} },
     { eventRecord: { eventId: "old-event", startAtMs: 1000 } },
     { canLeaveEvent: () => false },
@@ -654,8 +654,7 @@ test("leaving waits for queued prize mutations and then blocks new prize actions
     onPendingChange: () => {},
     onSelectionsChange: () => {},
   });
-  const prizeSelectionCoordinatorRef = { current: coordinator };
-  const h = leaveHarness({ prizeSelectionCoordinatorRef });
+  const h = leaveHarness({ isPrizeSelectionPending: coordinator.isPending });
   coordinator.toggle("1092");
   coordinator.toggle("1111");
   await h.action();
@@ -682,7 +681,7 @@ test("leaving waits for queued prize mutations and then blocks new prize actions
     isEventPrizeSelectionAvailable: () => true,
     eventRecord: {},
     currentProfileId: "profile-2",
-    prizeSelectionCoordinatorRef,
+    togglePrizeSelection: coordinator.toggle,
   });
   selectPrize("1514");
   assert.equal(mutations.length, 2);
@@ -700,9 +699,7 @@ test("joining is blocked while leaving or saving prize selections", () => {
       getEventModalState: () => modalState,
       activeJoinRequestRef: { current: null },
       activeLeaveRequestRef: { current: leaving ? {} : null },
-      prizeSelectionCoordinatorRef: {
-        current: { isPending: () => !leaving },
-      },
+      isPrizeSelectionPending: () => !leaving,
       storage: {
         getProfileId: () => assert.fail("Join must wait for active mutations."),
       },
@@ -754,7 +751,7 @@ function joinHarness(profileId = "profile-2") {
         onModalChange = callback;
         return () => {};
       },
-      prizeSelectionCoordinatorRef: { current: null },
+      isPrizeSelectionPending: () => false,
       loadTimingRef: { current: null },
       storage: { getProfileId: () => profileId },
       setIsLoading: (value) => (isLoading = value),

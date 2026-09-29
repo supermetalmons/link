@@ -27,6 +27,8 @@ const declarations = [
   "didClickStartBotGameButton",
   "didConfirmRematchProposal",
   "prepareForNewLocalLiveMatch",
+  "prepareLiveBoardView",
+  "clearBoardViewInputs",
   "nextBoardRenderSession",
   "clearViewedRematchState",
   "hasMoveHistoryFlipOverrideForCurrentSession",
