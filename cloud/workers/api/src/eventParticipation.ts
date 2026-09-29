@@ -274,16 +274,6 @@ function createDefaultLockManager(
   });
 }
 
-async function requireOwnedLock(
-  lockManager: EventLockManager,
-  lockHandle: Parameters<EventLockManager["isEventLockStillOwned"]>[0],
-  message: string,
-): Promise<void> {
-  if (!(await lockManager.isEventLockStillOwned(lockHandle))) {
-    throw new AuthApiFailure(503, "unavailable", message);
-  }
-}
-
 type ReconciliationCheck = (snapshot: EventSnapshot) => boolean;
 
 async function patchWithReconciliation(
@@ -350,10 +340,8 @@ async function persistDueTransition(
   eventId: string,
   dueTransition: EventDueTransition,
   repository: EventParticipationRepository,
-  lockManager: EventLockManager,
-  lockHandle: Parameters<EventLockManager["isEventLockStillOwned"]>[0],
+  assertOwned: () => Promise<void>,
   signal: AbortSignal,
-  busyMessage: string,
 ): Promise<void> {
   if (!dueTransition.didChange) {
     return;
@@ -373,7 +361,7 @@ async function persistDueTransition(
       "event-participation-service-unavailable",
     );
   }
-  await requireOwnedLock(lockManager, lockHandle, busyMessage);
+  await assertOwned();
   await patchWithReconciliation(
     eventId,
     dueTransition.updates,
@@ -476,12 +464,13 @@ function createDueUpdatesBuilder(
   };
 }
 
-async function acquireLock(
+async function withParticipationLock<T>(
   eventId: string,
   identity: RequestIdentity,
   lockManager: EventLockManager,
   message: string,
-) {
+  operation: (assertOwned: () => Promise<void>) => Promise<T>,
+): Promise<T> {
   const lockHandle = await lockManager.acquireEventLockWithRetry(
     eventId,
     identity.uid,
@@ -493,7 +482,17 @@ async function acquireLock(
   if (!lockHandle) {
     throw new AuthApiFailure(503, "unavailable", message);
   }
-  return lockHandle;
+  const stopHeartbeat = lockManager.startEventLockHeartbeat(lockHandle);
+  try {
+    return await operation(async () => {
+      if (!(await lockManager.isEventLockStillOwned(lockHandle))) {
+        throw new AuthApiFailure(503, "unavailable", message);
+      }
+    });
+  } finally {
+    stopHeartbeat();
+    await lockManager.releaseEventLock(lockHandle);
+  }
 }
 
 export async function joinEvent(
@@ -512,228 +511,220 @@ export async function joinEvent(
   const lockManager =
     dependencies.lockManager || createDefaultLockManager(repository, signal);
   await readEvent(eventId, repository, signal);
-  const lockHandle = await acquireLock(
+  return withParticipationLock(
     eventId,
     identity,
     lockManager,
     "Event is busy. Please try joining again.",
-  );
-  const stopHeartbeat = lockManager.startEventLockHeartbeat(lockHandle);
-  try {
-    const { event, prizeSelections: eventPrizeSelections } =
-      await readParticipationSnapshot(eventId, repository, signal);
-    const participants = toRecord(event.participants) || {};
-    const nowMs = now();
-    if (
-      event.status === "scheduled" &&
-      typeof event.startAtMs === "number" &&
-      nowMs >= event.startAtMs &&
-      participantCount(event) < 2
-    ) {
-      const prizeSelections = eventPrizeSelections;
-      const dueTransition = await buildDueUpdates({
-        eventId,
-        event,
-        nowMs,
-        ownershipSnapshot: null,
-        prizeSelections,
-      });
-      await persistDueTransition(
-        eventId,
-        dueTransition,
-        repository,
-        lockManager,
-        lockHandle,
-        signal,
-        "Event is busy. Please try joining again.",
-      );
-      throw new AuthApiFailure(
-        409,
-        "failed-precondition",
-        "This event is no longer accepting participants.",
-      );
-    }
-    const directParticipation = applyOwnershipPolicy(() =>
-      directParticipantParticipation(event, identity.uid),
-    );
-    let ownershipSnapshot: EventOwnershipSnapshot | null = null;
-    let prizeSelections: unknown;
-    let profile: GameplayProfile | null = null;
-    let existingParticipantProfileId = directParticipation.profileId || "";
-    if (
-      !directParticipation.isParticipant ||
-      (typeof event.startAtMs === "number" && nowMs >= event.startAtMs)
-    ) {
-      prizeSelections = eventPrizeSelections;
-      ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
-        loginUids: [identity.uid],
-        profileIds: getPrizeSelectionProfileIds(prizeSelections),
-      });
-    }
-    if (!directParticipation.isParticipant) {
-      const ownerProfileId = applyOwnershipPolicy(() =>
-        getLoginProfileId(ownershipSnapshot!, identity.uid),
-      );
-      profile = ownerProfileId
-        ? (getOwnershipProfile(
-            ownershipSnapshot!,
-            ownerProfileId,
-          ) as GameplayProfile | null)
-        : null;
-      if (!profile) {
+    async (assertOwned) => {
+      const { event, prizeSelections: eventPrizeSelections } =
+        await readParticipationSnapshot(eventId, repository, signal);
+      const participants = toRecord(event.participants) || {};
+      const nowMs = now();
+      if (
+        event.status === "scheduled" &&
+        typeof event.startAtMs === "number" &&
+        nowMs >= event.startAtMs &&
+        participantCount(event) < 2
+      ) {
+        const prizeSelections = eventPrizeSelections;
+        const dueTransition = await buildDueUpdates({
+          eventId,
+          event,
+          nowMs,
+          ownershipSnapshot: null,
+          prizeSelections,
+        });
+        await persistDueTransition(
+          eventId,
+          dueTransition,
+          repository,
+          assertOwned,
+          signal,
+        );
         throw new AuthApiFailure(
           409,
           "failed-precondition",
-          "Please sign in to join this event.",
+          "This event is no longer accepting participants.",
         );
       }
-      const ownedParticipation = applyOwnershipPolicy(() =>
-        resolveParticipantParticipation(event, identity.uid, ownershipSnapshot),
+      const directParticipation = applyOwnershipPolicy(() =>
+        directParticipantParticipation(event, identity.uid),
       );
-      existingParticipantProfileId =
-        ownedParticipation.profileId || profile.profileId;
-    }
-    if (event.status !== "scheduled") {
-      throw new AuthApiFailure(
-        409,
-        "failed-precondition",
-        "This event has already started.",
+      let ownershipSnapshot: EventOwnershipSnapshot | null = null;
+      let prizeSelections: unknown;
+      let profile: GameplayProfile | null = null;
+      let existingParticipantProfileId = directParticipation.profileId || "";
+      if (
+        !directParticipation.isParticipant ||
+        (typeof event.startAtMs === "number" && nowMs >= event.startAtMs)
+      ) {
+        prizeSelections = eventPrizeSelections;
+        ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
+          loginUids: [identity.uid],
+          profileIds: getPrizeSelectionProfileIds(prizeSelections),
+        });
+      }
+      if (!directParticipation.isParticipant) {
+        const ownerProfileId = applyOwnershipPolicy(() =>
+          getLoginProfileId(ownershipSnapshot!, identity.uid),
+        );
+        profile = ownerProfileId
+          ? (getOwnershipProfile(
+              ownershipSnapshot!,
+              ownerProfileId,
+            ) as GameplayProfile | null)
+          : null;
+        if (!profile) {
+          throw new AuthApiFailure(
+            409,
+            "failed-precondition",
+            "Please sign in to join this event.",
+          );
+        }
+        const ownedParticipation = applyOwnershipPolicy(() =>
+          resolveParticipantParticipation(
+            event,
+            identity.uid,
+            ownershipSnapshot,
+          ),
+        );
+        existingParticipantProfileId =
+          ownedParticipation.profileId || profile.profileId;
+      }
+      if (event.status !== "scheduled") {
+        throw new AuthApiFailure(
+          409,
+          "failed-precondition",
+          "This event has already started.",
+        );
+      }
+      if (typeof event.startAtMs === "number" && nowMs >= event.startAtMs) {
+        const dueTransition = await buildDueUpdates({
+          eventId,
+          event,
+          nowMs,
+          ownershipSnapshot,
+          prizeSelections,
+        });
+        await persistDueTransition(
+          eventId,
+          dueTransition,
+          repository,
+          assertOwned,
+          signal,
+        );
+        throw new AuthApiFailure(
+          409,
+          "failed-precondition",
+          "This event is no longer accepting participants.",
+        );
+      }
+
+      const existingParticipant = toRecord(
+        participants[existingParticipantProfileId],
       );
-    }
-    if (typeof event.startAtMs === "number" && nowMs >= event.startAtMs) {
+      if (
+        !existingParticipant &&
+        participantCount(event) >= MAX_EVENT_PARTICIPANTS
+      ) {
+        throw new AuthApiFailure(
+          409,
+          "failed-precondition",
+          `This event is full (${MAX_EVENT_PARTICIPANTS} players max).`,
+        );
+      }
+      const existingJoinedAtMs = existingParticipant?.joinedAtMs;
+      const participant = directParticipation.isParticipant
+        ? directParticipantSnapshot(
+            existingParticipant,
+            existingParticipantProfileId,
+            identity.uid,
+          )
+        : buildParticipant(
+            { ...profile!, profileId: existingParticipantProfileId },
+            identity.uid,
+            typeof existingJoinedAtMs === "number" ? existingJoinedAtMs : nowMs,
+          );
+      participants[existingParticipantProfileId] = participant;
+      event.participants = participants;
+      event.updatedAtMs = nowMs;
+      const updates: EventCommitPlan = [
+        {
+          kind: "event-participant",
+          eventId: eventId,
+          profileId: existingParticipantProfileId,
+          value: participant,
+        },
+        eventField(eventId, "updatedAtMs", nowMs),
+      ];
+      const settleNowMs = now();
+      const isDueAtSettle =
+        typeof event.startAtMs === "number" && settleNowMs >= event.startAtMs;
+      if (isDueAtSettle) {
+        prizeSelections = eventPrizeSelections;
+      }
+      if (!ownershipSnapshot && isDueAtSettle) {
+        ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
+          loginUids: [identity.uid],
+          profileIds: getPrizeSelectionProfileIds(prizeSelections),
+        });
+      }
       const dueTransition = await buildDueUpdates({
         eventId,
         event,
-        nowMs,
+        nowMs: settleNowMs,
         ownershipSnapshot,
-        prizeSelections,
+        prizeSelections: isDueAtSettle ? prizeSelections : undefined,
       });
-      await persistDueTransition(
-        eventId,
-        dueTransition,
-        repository,
-        lockManager,
-        lockHandle,
-        signal,
-        "Event is busy. Please try joining again.",
-      );
-      throw new AuthApiFailure(
-        409,
-        "failed-precondition",
-        "This event is no longer accepting participants.",
-      );
-    }
-
-    const existingParticipant = toRecord(
-      participants[existingParticipantProfileId],
-    );
-    if (
-      !existingParticipant &&
-      participantCount(event) >= MAX_EVENT_PARTICIPANTS
-    ) {
-      throw new AuthApiFailure(
-        409,
-        "failed-precondition",
-        `This event is full (${MAX_EVENT_PARTICIPANTS} players max).`,
-      );
-    }
-    const existingJoinedAtMs = existingParticipant?.joinedAtMs;
-    const participant = directParticipation.isParticipant
-      ? directParticipantSnapshot(
-          existingParticipant,
-          existingParticipantProfileId,
-          identity.uid,
-        )
-      : buildParticipant(
-          { ...profile!, profileId: existingParticipantProfileId },
-          identity.uid,
-          typeof existingJoinedAtMs === "number" ? existingJoinedAtMs : nowMs,
+      let expectedTransitionStatus: "active" | "dismissed" | undefined;
+      if (dueTransition.didChange) {
+        updates.push(...dueTransition.updates);
+        const transitionStatus = getEventField(
+          dueTransition.updates,
+          eventId,
+          "status",
         );
-    participants[existingParticipantProfileId] = participant;
-    event.participants = participants;
-    event.updatedAtMs = nowMs;
-    const updates: EventCommitPlan = [
-      {
-        kind: "event-participant",
-        eventId: eventId,
-        profileId: existingParticipantProfileId,
-        value: participant,
-      },
-      eventField(eventId, "updatedAtMs", nowMs),
-    ];
-    const settleNowMs = now();
-    const isDueAtSettle =
-      typeof event.startAtMs === "number" && settleNowMs >= event.startAtMs;
-    if (isDueAtSettle) {
-      prizeSelections = eventPrizeSelections;
-    }
-    if (!ownershipSnapshot && isDueAtSettle) {
-      ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
-        loginUids: [identity.uid],
-        profileIds: getPrizeSelectionProfileIds(prizeSelections),
-      });
-    }
-    const dueTransition = await buildDueUpdates({
-      eventId,
-      event,
-      nowMs: settleNowMs,
-      ownershipSnapshot,
-      prizeSelections: isDueAtSettle ? prizeSelections : undefined,
-    });
-    let expectedTransitionStatus: "active" | "dismissed" | undefined;
-    if (dueTransition.didChange) {
-      updates.push(...dueTransition.updates);
-      const transitionStatus = getEventField(
-        dueTransition.updates,
+        if (transitionStatus !== "active" && transitionStatus !== "dismissed") {
+          throw new AuthApiFailure(
+            503,
+            "unavailable",
+            "event-participation-service-unavailable",
+          );
+        }
+        expectedTransitionStatus = transitionStatus;
+      }
+      let storedParticipant = participant;
+      const canonicalParticipants = getEventField(
+        updates,
         eventId,
-        "status",
+        "participants",
       );
-      if (transitionStatus !== "active" && transitionStatus !== "dismissed") {
-        throw new AuthApiFailure(
-          503,
-          "unavailable",
-          "event-participation-service-unavailable",
+      if (canonicalParticipants !== undefined) {
+        const index = updates.findIndex(
+          (command) =>
+            command.kind === "event-participant" &&
+            command.eventId === eventId &&
+            command.profileId === existingParticipantProfileId,
+        );
+        if (index >= 0) updates.splice(index, 1);
+        storedParticipant = participantFromCanonicalParent(
+          canonicalParticipants,
+          participant.loginUid,
         );
       }
-      expectedTransitionStatus = transitionStatus;
-    }
-    let storedParticipant = participant;
-    const canonicalParticipants = getEventField(
-      updates,
-      eventId,
-      "participants",
-    );
-    if (canonicalParticipants !== undefined) {
-      const index = updates.findIndex(
-        (command) =>
-          command.kind === "event-participant" &&
-          command.eventId === eventId &&
-          command.profileId === existingParticipantProfileId,
+      await assertOwned();
+      storedParticipant = await persistJoin(
+        eventId,
+        storedParticipant,
+        updates,
+        expectedTransitionStatus,
+        repository,
+        signal,
       );
-      if (index >= 0) updates.splice(index, 1);
-      storedParticipant = participantFromCanonicalParent(
-        canonicalParticipants,
-        participant.loginUid,
-      );
-    }
-    await requireOwnedLock(
-      lockManager,
-      lockHandle,
-      "Event is busy. Please try joining again.",
-    );
-    storedParticipant = await persistJoin(
-      eventId,
-      storedParticipant,
-      updates,
-      expectedTransitionStatus,
-      repository,
-      signal,
-    );
-    return { ok: true, eventId, participant: storedParticipant };
-  } finally {
-    stopHeartbeat();
-    await lockManager.releaseEventLock(lockHandle);
-  }
+      return { ok: true, eventId, participant: storedParticipant };
+    },
+  );
 }
 
 export async function removeEventParticipant(
@@ -791,266 +782,258 @@ async function removeEventParticipation(
   const lockManager =
     dependencies.lockManager || createDefaultLockManager(repository, signal);
   await readEvent(eventId, repository, signal);
-  const lockHandle = await acquireLock(
+  return withParticipationLock(
     eventId,
     identity,
     lockManager,
     busyMessage,
-  );
-  const stopHeartbeat = lockManager.startEventLockHeartbeat(lockHandle);
-  try {
-    const { event, prizeSelections } = await readParticipationSnapshot(
-      eventId,
-      repository,
-      signal,
-    );
-    const creatorLoginUid = normalizeString(event.createdByLoginUid);
-    const creatorProfileId = normalizeString(event.createdByProfileId);
-    const participants = toRecord(event.participants) || {};
-    const directCreator = identity.uid === creatorLoginUid;
-    let ownershipSnapshot: EventOwnershipSnapshot | null = null;
-    if (!directCreator) {
-      ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
-        loginUids: [identity.uid],
-        profileIds: getPrizeSelectionProfileIds(prizeSelections),
-      });
-      if (
-        !isLeaving &&
-        !applyOwnershipPolicy(() =>
-          requesterOwnsProfileReference({
-            requesterUid: identity.uid,
-            snapshot: ownershipSnapshot,
-            storedLoginUid: creatorLoginUid,
-            storedProfileId: creatorProfileId,
-          }),
-        )
-      ) {
-        throw new AuthApiFailure(
-          403,
-          "permission-denied",
-          "Only the event creator can remove participants.",
-        );
-      }
-    }
-    if (isLeaving) {
-      participantProfileId =
-        applyOwnershipPolicy(() =>
-          resolveParticipantParticipation(
-            event,
-            identity.uid,
-            ownershipSnapshot,
-          ),
-        ).profileId || "";
-    }
-    const targetParticipant = toRecord(participants[participantProfileId]);
-    const targetLoginUid = normalizeString(targetParticipant?.loginUid);
-    const targetProfileId =
-      normalizeString(targetParticipant?.profileId) || participantProfileId;
-    if (isLeaving && targetParticipant && ownershipSnapshot) {
-      const snapshot = ownershipSnapshot;
-      const ownedParticipantIds = applyOwnershipPolicy(() => {
-        const ownerProfileId = getLoginProfileId(snapshot, identity.uid);
-        if (!ownerProfileId) return [];
-        return Object.entries(participants).flatMap(([key, value]) => {
-          const candidate = toRecord(value);
-          if (!candidate) return [];
-          const candidateProfileId =
-            normalizeString(candidate.profileId) || key;
-          return getCanonicalProfileId(snapshot, candidateProfileId) ===
-            ownerProfileId
-            ? [key]
-            : [];
-        });
-      });
-      if (
-        ownedParticipantIds.length !== 1 ||
-        ownedParticipantIds[0] !== participantProfileId
-      ) {
-        throw new AuthApiFailure(
-          503,
-          "unavailable",
-          "profile-ownership-unavailable",
-        );
-      }
-    }
-    if (event.status !== "scheduled") {
-      throw new AuthApiFailure(
-        409,
-        "failed-precondition",
-        isLeaving
-          ? closedMessage
-          : "Only scheduled events can remove participants.",
+    async (assertOwned) => {
+      const { event, prizeSelections } = await readParticipationSnapshot(
+        eventId,
+        repository,
+        signal,
       );
-    }
-    const nowMs = now();
-    if (
-      typeof event.startAtMs !== "number" ||
-      !Number.isFinite(event.startAtMs)
-    ) {
-      throw new AuthApiFailure(
-        409,
-        "failed-precondition",
-        "This event cannot be updated right now.",
-      );
-    }
-    const startAtMs = event.startAtMs;
-    const persistDueTransitionIfNeeded = async (
-      dueNowMs: number,
-    ): Promise<boolean> => {
-      if (dueNowMs < startAtMs) return false;
-      if (!ownershipSnapshot && participantCount(event) >= 2) {
+      const creatorLoginUid = normalizeString(event.createdByLoginUid);
+      const creatorProfileId = normalizeString(event.createdByProfileId);
+      const participants = toRecord(event.participants) || {};
+      const directCreator = identity.uid === creatorLoginUid;
+      let ownershipSnapshot: EventOwnershipSnapshot | null = null;
+      if (!directCreator) {
         ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
           loginUids: [identity.uid],
           profileIds: getPrizeSelectionProfileIds(prizeSelections),
         });
-      }
-      const dueTransition = await buildDueUpdates({
-        eventId,
-        event,
-        nowMs: dueNowMs,
-        ownershipSnapshot,
-        prizeSelections,
-      });
-      await persistDueTransition(
-        eventId,
-        dueTransition,
-        repository,
-        lockManager,
-        lockHandle,
-        signal,
-        busyMessage,
-      );
-      return true;
-    };
-    if (await persistDueTransitionIfNeeded(nowMs)) {
-      throw new AuthApiFailure(409, "failed-precondition", closedMessage);
-    }
-    if (isLeaving && directCreator) {
-      throw new AuthApiFailure(
-        409,
-        "failed-precondition",
-        "Event creator cannot leave.",
-      );
-    }
-    if (!targetParticipant) {
-      throw new AuthApiFailure(
-        409,
-        "failed-precondition",
-        isLeaving
-          ? "You are not participating in this event."
-          : "Selected participant was not found.",
-      );
-    }
-    let targetIsCreator =
-      participantProfileId === creatorProfileId ||
-      targetProfileId === creatorProfileId ||
-      targetLoginUid === creatorLoginUid;
-    if (!targetIsCreator && directCreator) {
-      const hasSeparateCreatorParticipant = Object.entries(participants).some(
-        ([candidateProfileId, value]) => {
-          if (candidateProfileId === participantProfileId) return false;
-          const candidate = toRecord(value);
-          return (
-            candidateProfileId === creatorProfileId ||
-            normalizeString(candidate?.profileId) === creatorProfileId ||
-            normalizeString(candidate?.loginUid) === creatorLoginUid
-          );
-        },
-      );
-      targetIsCreator = !hasSeparateCreatorParticipant;
-    }
-    if (!targetIsCreator && ownershipSnapshot) {
-      targetIsCreator = applyOwnershipPolicy(
-        () =>
-          getCanonicalProfileId(ownershipSnapshot!, targetProfileId) ===
-          getCanonicalProfileId(ownershipSnapshot!, creatorProfileId),
-      );
-    }
-    if (targetIsCreator) {
-      throw new AuthApiFailure(
-        409,
-        "failed-precondition",
-        isLeaving
-          ? "Event creator cannot leave."
-          : "Event creator cannot be removed.",
-      );
-    }
-    await requireOwnedLock(lockManager, lockHandle, busyMessage);
-    const commitNowMs = now();
-    if (await persistDueTransitionIfNeeded(commitNowMs)) {
-      throw new AuthApiFailure(409, "failed-precondition", closedMessage);
-    }
-    try {
-      await persistRemoval(
-        eventId,
-        participantProfileId,
-        [
-          {
-            kind: "event-participant",
-            eventId: eventId,
-            profileId: participantProfileId,
-            value: null,
-          },
-          {
-            kind: "prize-selection",
-            eventId: eventId,
-            profileId: participantProfileId,
-            value: null,
-          },
-          eventField(eventId, "updatedAtMs", commitNowMs),
-        ],
-        repository,
-        signal,
-        isLeaving ? { upcomingEventId: eventId } : undefined,
-      );
-    } catch (error) {
-      if (!isLeaving || !(error instanceof EventNotUpcoming)) throw error;
-      const latest = await readParticipationSnapshot(
-        eventId,
-        repository,
-        signal,
-      );
-      if (latest.event.status === "scheduled") {
-        const latestStartAtMs = requireTimestamp(latest.event.startAtMs);
-        const dueNowMs =
-          latestStartAtMs === startAtMs
-            ? Math.max(now(), latestStartAtMs)
-            : now();
-        if (dueNowMs >= latestStartAtMs) {
-          const latestOwnership =
-            participantCount(latest.event) >= 2
-              ? await loadOwnershipSnapshot(latest.event, repository, {
-                  loginUids: [identity.uid],
-                  profileIds: getPrizeSelectionProfileIds(
-                    latest.prizeSelections,
-                  ),
-                })
-              : null;
-          const dueTransition = await buildDueUpdates({
-            eventId,
-            event: latest.event,
-            nowMs: dueNowMs,
-            ownershipSnapshot: latestOwnership,
-            prizeSelections: latest.prizeSelections,
-          });
-          await persistDueTransition(
-            eventId,
-            dueTransition,
-            repository,
-            lockManager,
-            lockHandle,
-            signal,
-            busyMessage,
+        if (
+          !isLeaving &&
+          !applyOwnershipPolicy(() =>
+            requesterOwnsProfileReference({
+              requesterUid: identity.uid,
+              snapshot: ownershipSnapshot,
+              storedLoginUid: creatorLoginUid,
+              storedProfileId: creatorProfileId,
+            }),
+          )
+        ) {
+          throw new AuthApiFailure(
+            403,
+            "permission-denied",
+            "Only the event creator can remove participants.",
           );
         }
       }
-      throw new AuthApiFailure(409, "failed-precondition", closedMessage);
-    }
-    return { ok: true, eventId, removedProfileId: participantProfileId };
-  } finally {
-    stopHeartbeat();
-    await lockManager.releaseEventLock(lockHandle);
-  }
+      if (isLeaving) {
+        participantProfileId =
+          applyOwnershipPolicy(() =>
+            resolveParticipantParticipation(
+              event,
+              identity.uid,
+              ownershipSnapshot,
+            ),
+          ).profileId || "";
+      }
+      const targetParticipant = toRecord(participants[participantProfileId]);
+      const targetLoginUid = normalizeString(targetParticipant?.loginUid);
+      const targetProfileId =
+        normalizeString(targetParticipant?.profileId) || participantProfileId;
+      if (isLeaving && targetParticipant && ownershipSnapshot) {
+        const snapshot = ownershipSnapshot;
+        const ownedParticipantIds = applyOwnershipPolicy(() => {
+          const ownerProfileId = getLoginProfileId(snapshot, identity.uid);
+          if (!ownerProfileId) return [];
+          return Object.entries(participants).flatMap(([key, value]) => {
+            const candidate = toRecord(value);
+            if (!candidate) return [];
+            const candidateProfileId =
+              normalizeString(candidate.profileId) || key;
+            return getCanonicalProfileId(snapshot, candidateProfileId) ===
+              ownerProfileId
+              ? [key]
+              : [];
+          });
+        });
+        if (
+          ownedParticipantIds.length !== 1 ||
+          ownedParticipantIds[0] !== participantProfileId
+        ) {
+          throw new AuthApiFailure(
+            503,
+            "unavailable",
+            "profile-ownership-unavailable",
+          );
+        }
+      }
+      if (event.status !== "scheduled") {
+        throw new AuthApiFailure(
+          409,
+          "failed-precondition",
+          isLeaving
+            ? closedMessage
+            : "Only scheduled events can remove participants.",
+        );
+      }
+      const nowMs = now();
+      if (
+        typeof event.startAtMs !== "number" ||
+        !Number.isFinite(event.startAtMs)
+      ) {
+        throw new AuthApiFailure(
+          409,
+          "failed-precondition",
+          "This event cannot be updated right now.",
+        );
+      }
+      const startAtMs = event.startAtMs;
+      const persistDueTransitionIfNeeded = async (
+        dueNowMs: number,
+      ): Promise<boolean> => {
+        if (dueNowMs < startAtMs) return false;
+        if (!ownershipSnapshot && participantCount(event) >= 2) {
+          ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
+            loginUids: [identity.uid],
+            profileIds: getPrizeSelectionProfileIds(prizeSelections),
+          });
+        }
+        const dueTransition = await buildDueUpdates({
+          eventId,
+          event,
+          nowMs: dueNowMs,
+          ownershipSnapshot,
+          prizeSelections,
+        });
+        await persistDueTransition(
+          eventId,
+          dueTransition,
+          repository,
+          assertOwned,
+          signal,
+        );
+        return true;
+      };
+      if (await persistDueTransitionIfNeeded(nowMs)) {
+        throw new AuthApiFailure(409, "failed-precondition", closedMessage);
+      }
+      if (isLeaving && directCreator) {
+        throw new AuthApiFailure(
+          409,
+          "failed-precondition",
+          "Event creator cannot leave.",
+        );
+      }
+      if (!targetParticipant) {
+        throw new AuthApiFailure(
+          409,
+          "failed-precondition",
+          isLeaving
+            ? "You are not participating in this event."
+            : "Selected participant was not found.",
+        );
+      }
+      let targetIsCreator =
+        participantProfileId === creatorProfileId ||
+        targetProfileId === creatorProfileId ||
+        targetLoginUid === creatorLoginUid;
+      if (!targetIsCreator && directCreator) {
+        const hasSeparateCreatorParticipant = Object.entries(participants).some(
+          ([candidateProfileId, value]) => {
+            if (candidateProfileId === participantProfileId) return false;
+            const candidate = toRecord(value);
+            return (
+              candidateProfileId === creatorProfileId ||
+              normalizeString(candidate?.profileId) === creatorProfileId ||
+              normalizeString(candidate?.loginUid) === creatorLoginUid
+            );
+          },
+        );
+        targetIsCreator = !hasSeparateCreatorParticipant;
+      }
+      if (!targetIsCreator && ownershipSnapshot) {
+        targetIsCreator = applyOwnershipPolicy(
+          () =>
+            getCanonicalProfileId(ownershipSnapshot!, targetProfileId) ===
+            getCanonicalProfileId(ownershipSnapshot!, creatorProfileId),
+        );
+      }
+      if (targetIsCreator) {
+        throw new AuthApiFailure(
+          409,
+          "failed-precondition",
+          isLeaving
+            ? "Event creator cannot leave."
+            : "Event creator cannot be removed.",
+        );
+      }
+      await assertOwned();
+      const commitNowMs = now();
+      if (await persistDueTransitionIfNeeded(commitNowMs)) {
+        throw new AuthApiFailure(409, "failed-precondition", closedMessage);
+      }
+      try {
+        await persistRemoval(
+          eventId,
+          participantProfileId,
+          [
+            {
+              kind: "event-participant",
+              eventId: eventId,
+              profileId: participantProfileId,
+              value: null,
+            },
+            {
+              kind: "prize-selection",
+              eventId: eventId,
+              profileId: participantProfileId,
+              value: null,
+            },
+            eventField(eventId, "updatedAtMs", commitNowMs),
+          ],
+          repository,
+          signal,
+          isLeaving ? { upcomingEventId: eventId } : undefined,
+        );
+      } catch (error) {
+        if (!isLeaving || !(error instanceof EventNotUpcoming)) throw error;
+        const latest = await readParticipationSnapshot(
+          eventId,
+          repository,
+          signal,
+        );
+        if (latest.event.status === "scheduled") {
+          const latestStartAtMs = requireTimestamp(latest.event.startAtMs);
+          const dueNowMs =
+            latestStartAtMs === startAtMs
+              ? Math.max(now(), latestStartAtMs)
+              : now();
+          if (dueNowMs >= latestStartAtMs) {
+            const latestOwnership =
+              participantCount(latest.event) >= 2
+                ? await loadOwnershipSnapshot(latest.event, repository, {
+                    loginUids: [identity.uid],
+                    profileIds: getPrizeSelectionProfileIds(
+                      latest.prizeSelections,
+                    ),
+                  })
+                : null;
+            const dueTransition = await buildDueUpdates({
+              eventId,
+              event: latest.event,
+              nowMs: dueNowMs,
+              ownershipSnapshot: latestOwnership,
+              prizeSelections: latest.prizeSelections,
+            });
+            await persistDueTransition(
+              eventId,
+              dueTransition,
+              repository,
+              assertOwned,
+              signal,
+            );
+          }
+        }
+        throw new AuthApiFailure(409, "failed-precondition", closedMessage);
+      }
+      return { ok: true, eventId, removedProfileId: participantProfileId };
+    },
+  );
 }
 
 export async function toggleEventPrizeSelection(
@@ -1069,103 +1052,103 @@ export async function toggleEventPrizeSelection(
     dependencies.lockManager || createDefaultLockManager(repository, signal);
   const busyMessage = "Event is busy. Please try selecting again.";
   await readEvent(eventId, repository, signal);
-  const lockHandle = await acquireLock(
+  return withParticipationLock(
     eventId,
     identity,
     lockManager,
     busyMessage,
+    async (assertOwned) => {
+      const event = await readEvent(eventId, repository, signal);
+      if (event.status !== "scheduled" && event.status !== "active") {
+        throw new AuthApiFailure(
+          409,
+          "failed-precondition",
+          "Prize selection is closed for this event.",
+        );
+      }
+      if (
+        event.prizeSelectionsLockedAtMs !== undefined &&
+        event.prizeSelectionsLockedAtMs !== null
+      ) {
+        throw new AuthApiFailure(
+          409,
+          "failed-precondition",
+          "Prize selection is locked for this event.",
+        );
+      }
+      const startAtMs =
+        event.status === "scheduled"
+          ? requireTimestamp(event.startAtMs)
+          : event.startAtMs;
+      if (
+        !isEventPrizeRevealOpen(
+          event.status,
+          startAtMs,
+          (dependencies.now ?? Date.now)(),
+        )
+      ) {
+        throw new AuthApiFailure(
+          409,
+          "failed-precondition",
+          "Prize selection opens less than one hour before the event starts.",
+        );
+      }
+      const directParticipation = applyOwnershipPolicy(() =>
+        directParticipantParticipation(event, identity.uid),
+      );
+      let participantProfileId = directParticipation.profileId || "";
+      if (!directParticipation.isParticipant) {
+        const ownershipSnapshot = await loadOwnershipSnapshot(
+          event,
+          repository,
+          {
+            loginUids: [identity.uid],
+          },
+        );
+        participantProfileId =
+          applyOwnershipPolicy(() =>
+            resolveParticipantParticipation(
+              event,
+              identity.uid,
+              ownershipSnapshot,
+            ),
+          ).profileId || "";
+      }
+      if (!participantProfileId) {
+        throw new AuthApiFailure(
+          403,
+          "permission-denied",
+          "Only event participants can select prizes.",
+        );
+      }
+      await assertOwned();
+      const result = await repository.transactEventPrizeSelection(
+        eventId,
+        participantProfileId,
+        (current) => ({
+          value: current === request.prizeId ? null : request.prizeId,
+        }),
+        signal,
+      );
+      if (!result.committed) {
+        throw new AuthApiFailure(503, "unavailable", busyMessage);
+      }
+      const selectedPrizeId =
+        result.value === null
+          ? null
+          : isEventPrizeId(eventId, result.value)
+            ? result.value
+            : undefined;
+      if (selectedPrizeId === undefined) {
+        throw new AuthApiFailure(
+          503,
+          "unavailable",
+          "event-participation-service-unavailable",
+        );
+      }
+      return { ok: true, eventId, selectedPrizeId };
+    },
   );
-  const stopHeartbeat = lockManager.startEventLockHeartbeat(lockHandle);
-  try {
-    const event = await readEvent(eventId, repository, signal);
-    if (event.status !== "scheduled" && event.status !== "active") {
-      throw new AuthApiFailure(
-        409,
-        "failed-precondition",
-        "Prize selection is closed for this event.",
-      );
-    }
-    if (
-      event.prizeSelectionsLockedAtMs !== undefined &&
-      event.prizeSelectionsLockedAtMs !== null
-    ) {
-      throw new AuthApiFailure(
-        409,
-        "failed-precondition",
-        "Prize selection is locked for this event.",
-      );
-    }
-    const startAtMs =
-      event.status === "scheduled"
-        ? requireTimestamp(event.startAtMs)
-        : event.startAtMs;
-    if (
-      !isEventPrizeRevealOpen(
-        event.status,
-        startAtMs,
-        (dependencies.now ?? Date.now)(),
-      )
-    ) {
-      throw new AuthApiFailure(
-        409,
-        "failed-precondition",
-        "Prize selection opens less than one hour before the event starts.",
-      );
-    }
-    const directParticipation = applyOwnershipPolicy(() =>
-      directParticipantParticipation(event, identity.uid),
-    );
-    let participantProfileId = directParticipation.profileId || "";
-    if (!directParticipation.isParticipant) {
-      const ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
-        loginUids: [identity.uid],
-      });
-      participantProfileId =
-        applyOwnershipPolicy(() =>
-          resolveParticipantParticipation(
-            event,
-            identity.uid,
-            ownershipSnapshot,
-          ),
-        ).profileId || "";
-    }
-    if (!participantProfileId) {
-      throw new AuthApiFailure(
-        403,
-        "permission-denied",
-        "Only event participants can select prizes.",
-      );
-    }
-    await requireOwnedLock(lockManager, lockHandle, busyMessage);
-    const result = await repository.transactEventPrizeSelection(
-      eventId,
-      participantProfileId,
-      (current) => ({
-        value: current === request.prizeId ? null : request.prizeId,
-      }),
-      signal,
-    );
-    if (!result.committed) {
-      throw new AuthApiFailure(503, "unavailable", busyMessage);
-    }
-    const selectedPrizeId =
-      result.value === null
-        ? null
-        : isEventPrizeId(eventId, result.value)
-          ? result.value
-          : undefined;
-    if (selectedPrizeId === undefined) {
-      throw new AuthApiFailure(
-        503,
-        "unavailable",
-        "event-participation-service-unavailable",
-      );
-    }
-    return { ok: true, eventId, selectedPrizeId };
-  } finally {
-    stopHeartbeat();
-    await lockManager.releaseEventLock(lockHandle);
-  }
 }
 
 export {

@@ -57,7 +57,10 @@ import {
   reconciliationFailure,
   retryCount,
 } from "./gameplayRepositoryPolicy.ts";
-import { readRatingCompletion } from "./ratingCompletionD1.ts";
+import {
+  readRatingCompletion,
+  readRatingLeaseSnapshot,
+} from "./ratingCompletionD1.ts";
 
 type CanonicalRatingRepository = RatingProjectionRepository &
   RatingEventProgressRepository &
@@ -443,19 +446,17 @@ export function createCanonicalRatingRepository(
 
     async tryAcquireRatingLease(input): Promise<RatingLeaseResult> {
       const operationId = `${input.inviteId}__${input.matchId}`;
-      if (await readRatingCompletion(db, input.inviteId, input.matchId)) {
-        const data = await readOperation(operationId);
-        if (
-          data &&
-          (data.inviteId !== input.inviteId || data.matchId !== input.matchId)
-        ) {
-          throw options.createFailure("tryAcquireRatingLease");
-        }
-        return { status: "done", data };
-      }
+      const initial = await readRatingLeaseSnapshot(
+        db,
+        input.inviteId,
+        input.matchId,
+      );
       let lastConflict: CanonicalProfileConflict | undefined;
       for (let attempt = 0; attempt < attempts; attempt++) {
-        const snapshot = await readCanonicalRatingUpdate(db, operationId);
+        const snapshot =
+          attempt === 0
+            ? initial.snapshot
+            : await readCanonicalRatingUpdate(db, operationId);
         const data = snapshot ? ratingData(snapshot) : null;
         if (
           data &&
@@ -463,7 +464,8 @@ export function createCanonicalRatingRepository(
         ) {
           throw options.createFailure("tryAcquireRatingLease");
         }
-        if (data?.status === "done") return { status: "done", data };
+        if (initial.legacyCompleted || data?.status === "done")
+          return { status: "done", data };
         const attemptNowMs = options.now();
         if (
           data?.status === "processing" &&

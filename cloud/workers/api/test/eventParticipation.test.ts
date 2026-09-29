@@ -6,6 +6,7 @@ import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { EventSnapshot } from "../../../runtime/eventReads.js";
+import type { EventLeaseRecord } from "../../../runtime/eventLeases.js";
 import type { EventLockManager } from "../../../runtime/events/lockManagerCore.js";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { EventNotUpcoming } from "../src/eventD1.ts";
@@ -16,6 +17,7 @@ import {
   leaveEvent,
   removeEventParticipant,
   toggleEventPrizeSelection,
+  type EventParticipationDependencies,
   type EventParticipationRepository,
 } from "../src/eventParticipation.ts";
 import type { GameplayProfile } from "../src/gameplayRepository.ts";
@@ -2692,3 +2694,216 @@ test("rejects a prize selection after losing its event lock", async () => {
   assert.equal(transactions, 0);
   assert.equal(lock.released(), 1);
 });
+
+const participationLockCases: Array<{
+  name: string;
+  run: (
+    repository: EventParticipationRepository,
+    dependencies: EventParticipationDependencies,
+  ) => Promise<unknown>;
+}> = [
+  {
+    name: "join",
+    run: (repository, dependencies) =>
+      joinEvent(
+        identity,
+        { eventId: LEGACY_CORE_PRIZES_EVENT_ID },
+        repository,
+        dependencies,
+      ),
+  },
+  {
+    name: "leave",
+    run: (repository, dependencies) =>
+      leaveEvent(
+        { uid: "target-login" },
+        { eventId: LEGACY_CORE_PRIZES_EVENT_ID },
+        repository,
+        dependencies,
+      ),
+  },
+  {
+    name: "remove",
+    run: (repository, dependencies) =>
+      removeEventParticipant(
+        identity,
+        {
+          eventId: LEGACY_CORE_PRIZES_EVENT_ID,
+          participantProfileId: "target-profile",
+        },
+        repository,
+        dependencies,
+      ),
+  },
+  {
+    name: "prize selection",
+    run: (repository, dependencies) =>
+      toggleEventPrizeSelection(
+        identity,
+        { eventId: LEGACY_CORE_PRIZES_EVENT_ID, prizeId: "1092" },
+        repository,
+        dependencies,
+      ),
+  },
+];
+
+function createParticipationLockRepository() {
+  return createRepository({
+    event: scheduledEvent({
+      eventId: LEGACY_CORE_PRIZES_EVENT_ID,
+      participants: {
+        [profileId]: creatorParticipant(1),
+        "target-profile": participant("target-profile", "target-login", 2),
+      },
+    }),
+  });
+}
+
+for (const operation of participationLockCases) {
+  test(`${operation.name} cleans up only an acquired participation lock`, async (t) => {
+    for (const outcome of [
+      "success",
+      "read failure",
+      "write failure",
+      "busy",
+      "acquisition failure",
+      "lost ownership",
+    ]) {
+      await t.test(outcome, async () => {
+        const { repository } = createParticipationLockRepository();
+        const failure = new Error(outcome);
+        const lifecycle: string[] = [];
+        let acquired = false;
+        let lockedReads = 0;
+        let writes = 0;
+        const lock = createLockManager({
+          acquired: outcome !== "busy",
+          owned: outcome !== "lost ownership",
+          onAcquire: () => {
+            lifecycle.push("acquire");
+            if (outcome === "acquisition failure") throw failure;
+            acquired = outcome !== "busy";
+          },
+        });
+        const startHeartbeat = lock.manager.startEventLockHeartbeat;
+        lock.manager.startEventLockHeartbeat = (handle) => {
+          lifecycle.push("start");
+          const stop = startHeartbeat(handle);
+          return () => {
+            lifecycle.push("stop");
+            stop();
+          };
+        };
+        const release = lock.manager.releaseEventLock;
+        lock.manager.releaseEventLock = async (handle) => {
+          lifecycle.push("release");
+          return release(handle);
+        };
+        const checkRead = () => {
+          if (!acquired) return;
+          lockedReads++;
+          if (outcome === "read failure") throw failure;
+        };
+        const read = repository.readEvent;
+        repository.readEvent = async (...args) => {
+          checkRead();
+          return read(...args);
+        };
+        const readSnapshot = repository.readEventSnapshot;
+        repository.readEventSnapshot = async (...args) => {
+          checkRead();
+          return readSnapshot(...args);
+        };
+        const checkWrite = () => {
+          writes++;
+          if (outcome === "write failure") throw failure;
+        };
+        const commit = repository.commitEventPlan;
+        repository.commitEventPlan = async (...args) => {
+          checkWrite();
+          return commit(...args);
+        };
+        repository.transactEventPrizeSelection = async () => {
+          checkWrite();
+          return { committed: true, value: "1092" };
+        };
+
+        const pending = operation.run(repository, {
+          lockManager: lock.manager,
+          now: () => 100,
+          buildDueUpdates: noDueTransition,
+        });
+        if (outcome === "success") await pending;
+        else
+          await assert.rejects(pending, (error) => {
+            if (outcome === "busy" || outcome === "lost ownership") {
+              assert.ok(error instanceof AuthApiFailure);
+              assert.equal(error.status, 503);
+            } else assert.equal(error, failure);
+            return true;
+          });
+
+        assert.deepEqual(
+          lifecycle,
+          acquired ? ["acquire", "start", "stop", "release"] : ["acquire"],
+        );
+        assert.equal(lock.stopped(), acquired ? 1 : 0);
+        assert.equal(lock.released(), acquired ? 1 : 0);
+        assert.equal(lockedReads > 0, acquired);
+        assert.equal(
+          writes,
+          outcome === "success" || outcome === "write failure" ? 1 : 0,
+        );
+      });
+    }
+  });
+
+  test(`${operation.name} releases its default lock after cancellation without the aborted signal`, async () => {
+    const { patches, repository } = createParticipationLockRepository();
+    const controller = new AbortController();
+    const failure = new Error("participation-cancelled");
+    const signals: Array<AbortSignal | undefined> = [];
+    let lease: EventLeaseRecord | null = null;
+    repository.transactEventLease = async (_key, updater, signal) => {
+      signals.push(signal);
+      signal?.throwIfAborted();
+      const decision = updater(lease);
+      if ("commit" in decision)
+        return { committed: false, value: lease, decision: decision.decision };
+      lease = decision.value;
+      return { committed: true, value: lease, decision: decision.decision };
+    };
+    const read = repository.readEvent;
+    repository.readEvent = async (...args) => {
+      const result = await read(...args);
+      if (lease) controller.abort(failure);
+      return result;
+    };
+    const readSnapshot = repository.readEventSnapshot;
+    repository.readEventSnapshot = async (...args) => {
+      const result = await readSnapshot(...args);
+      controller.abort(failure);
+      return result;
+    };
+    repository.transactEventPrizeSelection = async () => {
+      assert.fail("cancelled participation wrote a prize selection");
+    };
+
+    await assert.rejects(
+      operation.run(repository, {
+        signal: controller.signal,
+        now: () => 100,
+        buildDueUpdates: noDueTransition,
+      }),
+      (error) => error === failure,
+    );
+
+    assert.deepEqual(signals, [
+      controller.signal,
+      controller.signal,
+      undefined,
+    ]);
+    assert.equal(lease, null);
+    assert.deepEqual(patches, []);
+  });
+}

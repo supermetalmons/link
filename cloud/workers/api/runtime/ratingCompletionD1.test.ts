@@ -2,12 +2,45 @@ import { createEventProgressOutboxWriter } from "../src/eventRepository.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import { readRatingCompletion } from "../src/ratingCompletionD1.ts";
+import {
+  readRatingCompletion,
+  readRatingLeaseSnapshot,
+} from "../src/ratingCompletionD1.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { createRatingRepository } from "../src/ratingRepository.ts";
+import { CanonicalProfileCorruption } from "../src/profileCanonical/types.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
 const testEnv = env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] };
+
+function ratingRepository(db = testEnv.PROFILE_DB, nowMs = 5) {
+  return createRatingRepository(
+    db,
+    createGameplayRepository(testEnv),
+    createEventProgressOutboxWriter(testEnv.EVENT_DB),
+    { now: () => nowMs },
+  );
+}
+
+function leaseRequest(inviteId: string, matchId: string) {
+  return {
+    inviteId,
+    matchId,
+    playerId: "player",
+    opponentId: "opponent",
+    ownerUid: "player",
+    ownerToken: "new-owner",
+    leaseMs: 30_000,
+  };
+}
+
+function databaseReturningRow(row: unknown): D1Database {
+  return {
+    prepare: () => ({
+      bind: () => ({ first: async () => row }),
+    }),
+  } as unknown as D1Database;
+}
 
 async function insertRating(
   inviteId: string,
@@ -37,6 +70,9 @@ describe("D1 rating completion evidence", () => {
       {
         legacyRatingCompletions: [
           { inviteId: "legacy-invite", matchId: "legacy-match" },
+          { inviteId: "single-legacy", matchId: "match" },
+          { inviteId: "single-legacy-processing", matchId: "match" },
+          { inviteId: "legacy-mismatch", matchId: "match" },
         ],
       },
     );
@@ -77,6 +113,87 @@ describe("D1 rating completion evidence", () => {
         "absent-match",
       ),
     ).toBe(false);
+  });
+
+  it.each([
+    { kind: "fresh", stored: null, expected: "acquired" },
+    { kind: "done", stored: "done", expected: "done" },
+    { kind: "busy", stored: "processing", expected: "busy" },
+    { kind: "same-owner", stored: "processing", expected: "acquired" },
+    { kind: "expired", stored: "processing", expected: "acquired" },
+    { kind: "legacy", stored: null, expected: "done" },
+    { kind: "legacy-processing", stored: "processing", expected: "done" },
+  ] as const)(
+    "reads one initial snapshot for a $kind rating lease",
+    async ({ kind, stored, expected }) => {
+      const inviteId = `single-${kind}`;
+      if (stored) await insertRating(inviteId, "match", stored);
+      const queries: string[] = [];
+      let writeBatches = 0;
+      const db = new Proxy(testEnv.PROFILE_DB, {
+        get(target, property) {
+          if (property === "prepare") {
+            return (query: string) => {
+              queries.push(query);
+              return target.prepare(query);
+            };
+          }
+          if (property === "batch") {
+            return (statements: D1PreparedStatement[]) => {
+              writeBatches++;
+              return target.batch(statements);
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const request = leaseRequest(inviteId, "match");
+      if (kind === "same-owner") request.ownerToken = "owner";
+      const result = await ratingRepository(
+        db,
+        kind === "expired" ? 20 : 5,
+      ).tryAcquireRatingLease(request);
+      expect(result.status).toBe(expected);
+      if (stored) expect(result.data?.status).toBe(stored);
+      else expect(result.data).toBeNull();
+      expect(
+        queries.filter((query) => /^\s*SELECT\b/.test(query)),
+      ).toHaveLength(1);
+      expect(writeBatches).toBe(expected === "acquired" ? 1 : 0);
+      const durable = await testEnv.PROFILE_DB.prepare(
+        "SELECT status, owner_token, revision FROM rating_updates WHERE operation_id = ?",
+      )
+        .bind(`${inviteId}__match`)
+        .first();
+      if (expected === "acquired") {
+        expect(durable).toEqual({
+          status: "processing",
+          owner_token: request.ownerToken,
+          revision: stored ? 2 : 1,
+        });
+      } else if (stored) {
+        expect(durable).toEqual({
+          status: stored,
+          owner_token: "owner",
+          revision: 1,
+        });
+      } else expect(durable).toBeNull();
+    },
+  );
+
+  it("rejects mismatched rating identity even when legacy completion exists", async () => {
+    await insertRating(
+      "actual-invite",
+      "actual-match",
+      "processing",
+      "legacy-mismatch__match",
+    );
+    await expect(
+      ratingRepository().tryAcquireRatingLease(
+        leaseRequest("legacy-mismatch", "match"),
+      ),
+    ).rejects.toThrow("gameplay-repository-unavailable");
   });
 
   it("matches the operation, invite, and match together", async () => {
@@ -201,5 +318,42 @@ describe("D1 rating completion evidence", () => {
       status: 503,
       message: "rating-completions-unavailable",
     });
+    await expect(
+      ratingRepository(failingDb).tryAcquireRatingLease(
+        leaseRequest("invite", "match"),
+      ),
+    ).rejects.toMatchObject({
+      status: 503,
+      message: "rating-completions-unavailable",
+    });
+  });
+
+  it.each([null, { operation_id: null, legacy_completed: 2 }])(
+    "rejects malformed lease completion evidence without exposing details",
+    async (row) => {
+      await expect(
+        readRatingLeaseSnapshot(databaseReturningRow(row), "invite", "match"),
+      ).rejects.toMatchObject({
+        status: 503,
+        message: "rating-completions-unavailable",
+      });
+    },
+  );
+
+  it("preserves corruption failures when the stored rating cannot be decoded", async () => {
+    await insertRating("corrupt-invite", "match", "processing");
+    const row = await testEnv.PROFILE_DB.prepare(
+      "SELECT * FROM rating_updates WHERE operation_id = 'corrupt-invite__match'",
+    ).first<Record<string, unknown>>();
+    const db = databaseReturningRow({
+      ...row,
+      payload_json: "[]",
+      legacy_completed: 0,
+    });
+    await expect(
+      ratingRepository(db).tryAcquireRatingLease(
+        leaseRequest("corrupt-invite", "match"),
+      ),
+    ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
   });
 });
