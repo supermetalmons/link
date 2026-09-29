@@ -385,6 +385,8 @@ const EventModal: React.FC = () => {
     DEV_STUB_DEFAULT_PLAYERS,
   );
   const [isLoading, setIsLoading] = useState(false);
+  const [isJoining, setIsJoining] = useState(false);
+  const activeJoinRequestRef = useRef<object | null>(null);
   const [isLeaving, setIsLeaving] = useState(false);
   const activeLeaveRequestRef = useRef<object | null>(null);
   const [isEventFresh, setIsEventFresh] = useState(false);
@@ -598,6 +600,8 @@ const EventModal: React.FC = () => {
   useEffect(() => {
     const unsubscribe = subscribeToEventModalState((nextState) => {
       if (participantLookupModalStateRef.current !== nextState) {
+        activeJoinRequestRef.current = null;
+        setIsJoining(false);
         activeLeaveRequestRef.current = null;
         setIsLeaving(false);
         participantLookupModalStateRef.current = nextState;
@@ -607,6 +611,7 @@ const EventModal: React.FC = () => {
     });
     return () => {
       unsubscribe();
+      activeJoinRequestRef.current = null;
       activeLeaveRequestRef.current = null;
       invalidateParticipantLookups();
     };
@@ -1042,10 +1047,27 @@ const EventModal: React.FC = () => {
     };
   }, [measureBracketInsets, modalState.isOpen]);
 
+  const submitJoin = useCallback((eventId: string) => {
+    if (activeJoinRequestRef.current) return;
+    const request = {};
+    activeJoinRequestRef.current = request;
+    setIsJoining(true);
+    void connection
+      .joinEvent(eventId)
+      .catch(() => {})
+      .finally(() => {
+        if (activeJoinRequestRef.current === request) {
+          activeJoinRequestRef.current = null;
+          setIsJoining(false);
+        }
+      });
+  }, []);
+
   useEffect(() => {
     if (
       !modalState.isOpen ||
       !modalState.eventId ||
+      eventRecord?.eventId !== modalState.eventId ||
       pendingJoinEventId !== modalState.eventId
     ) {
       return;
@@ -1059,6 +1081,7 @@ const EventModal: React.FC = () => {
         return;
       }
       if (
+        getEventModalState() !== modalState ||
         storage.getProfileId("") === "" ||
         activeLeaveRequestRef.current ||
         prizeSelectionCoordinatorRef.current?.isPending()
@@ -1071,22 +1094,17 @@ const EventModal: React.FC = () => {
       if (!eventId) {
         return;
       }
-      setIsLoading(true);
-      void connection
-        .joinEvent(eventId)
-        .catch(() => {})
-        .finally(() => {
-          setIsLoading(false);
-        });
+      submitJoin(eventId);
     }, PENDING_JOIN_POLL_INTERVAL_MS);
     return () => {
       window.clearInterval(intervalId);
     };
   }, [
-    modalState.eventId,
-    modalState.isOpen,
+    eventRecord?.eventId,
+    modalState,
     pendingJoinEventId,
     pendingJoinRequestedAtMs,
+    submitJoin,
   ]);
 
   const participantsById = useMemo(
@@ -1251,6 +1269,7 @@ const EventModal: React.FC = () => {
         !eventPrizeConfig ||
         !isEventFresh ||
         isLoading ||
+        activeJoinRequestRef.current ||
         activeLeaveRequestRef.current ||
         !isEventPrizeSelectionAvailable(
           eventRecord,
@@ -1497,12 +1516,14 @@ const EventModal: React.FC = () => {
     !!displayedEventRecord &&
     displayedEventRecord.status === "scheduled" &&
     nowMs < displayedEventRecord.startAtMs;
-  const isParticipationPending =
+  const isJoinPending =
+    eventRecord?.eventId !== modalState.eventId ||
     isLoading ||
+    isJoining ||
     isLeaving ||
-    isUpdatingPrizeSelection ||
-    !isEventFresh ||
-    isResolvingEventProfileIds;
+    isUpdatingPrizeSelection;
+  const isLeavePending =
+    isJoinPending || !isEventFresh || isResolvingEventProfileIds;
 
   const shouldKeepVisibleForOutsideDismiss = useCallback(() => {
     const hasShinyCardElement =
@@ -1755,6 +1776,10 @@ const EventModal: React.FC = () => {
   const handleJoinClick = useCallback(() => {
     if (
       !modalState.eventId ||
+      !modalState.isOpen ||
+      getEventModalState() !== modalState ||
+      eventRecord?.eventId !== modalState.eventId ||
+      activeJoinRequestRef.current ||
       activeLeaveRequestRef.current ||
       prizeSelectionCoordinatorRef.current?.isPending()
     ) {
@@ -1768,14 +1793,8 @@ const EventModal: React.FC = () => {
     }
     setPendingJoinEventId(null);
     setPendingJoinRequestedAtMs(0);
-    setIsLoading(true);
-    void connection
-      .joinEvent(modalState.eventId)
-      .catch(() => {})
-      .finally(() => {
-        setIsLoading(false);
-      });
-  }, [modalState.eventId]);
+    submitJoin(modalState.eventId);
+  }, [eventRecord?.eventId, modalState, submitJoin]);
 
   const handleLeaveClick = useCallback(async () => {
     const profileId = storage.getProfileId("");
@@ -1789,6 +1808,7 @@ const EventModal: React.FC = () => {
       !isEventFresh ||
       isResolvingEventProfileIds ||
       isLoading ||
+      activeJoinRequestRef.current ||
       activeLeaveRequestRef.current ||
       prizeSelectionCoordinatorRef.current?.isPending() ||
       !canLeaveEvent(
@@ -2243,6 +2263,7 @@ const EventModal: React.FC = () => {
     showEventPrizes &&
     !devStubRecord &&
     !isLoading &&
+    !isJoining &&
     !isLeaving &&
     isEventFresh &&
     isEventPrizeSelectionAvailable(eventRecord, currentProfileId, nowMs)
@@ -2896,8 +2917,8 @@ const EventModal: React.FC = () => {
               <BottomPillButton
                 type="button"
                 onClick={handleJoinClick}
-                disabled={isParticipationPending}
-                $isViewOnly={isParticipationPending}
+                disabled={isJoinPending}
+                $isViewOnly={isJoinPending}
               >
                 Join
               </BottomPillButton>
@@ -2914,8 +2935,8 @@ const EventModal: React.FC = () => {
                 <BottomPillButton
                   type="button"
                   onClick={() => void handleLeaveClick()}
-                  disabled={isParticipationPending}
-                  $isViewOnly={isParticipationPending}
+                  disabled={isLeavePending}
+                  $isViewOnly={isLeavePending}
                 >
                   Leave
                 </BottomPillButton>

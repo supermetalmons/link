@@ -65,6 +65,45 @@ function createModalAction(name, dependencies) {
   );
 }
 
+function createModalEffect(marker, dependencies) {
+  let callback;
+  const visit = (node) => {
+    if (
+      ts.isCallExpression(node) &&
+      node.expression.getText() === "useEffect" &&
+      node.arguments[0].getText().includes(marker)
+    ) {
+      assert.equal(callback, undefined, `ambiguous modal effect ${marker}`);
+      callback = node.arguments[0];
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(modalSource);
+  assert.ok(callback, `missing modal effect ${marker}`);
+  return evaluate(
+    `const effect = ${callback.getText()};`,
+    "effect",
+    dependencies,
+  );
+}
+
+function evaluateModalValue(name, dependencies) {
+  let initializer;
+  const visit = (node) => {
+    if (ts.isVariableDeclaration(node) && node.name.getText() === name) {
+      initializer = node.initializer;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(modalSource);
+  assert.ok(initializer, `missing modal value ${name}`);
+  return evaluate(
+    `const value = ${initializer.getText()};`,
+    "value",
+    dependencies,
+  );
+}
+
 test("canonical profile ID resolution authenticates and discards stale auth replies", async () => {
   const calls = [];
   let authenticated = false;
@@ -537,6 +576,7 @@ function leaveHarness(overrides = {}) {
     eventProfileIds: {},
     isResolvingEventProfileIds: false,
     isLoading: false,
+    activeJoinRequestRef: { current: null },
     activeLeaveRequestRef,
     prizeSelectionCoordinatorRef: { current: null },
     storage: {
@@ -589,6 +629,7 @@ test("leaving rechecks the start boundary and blocks stale or simulated events",
     { isEventFresh: false },
     { isLoading: true },
     { isResolvingEventProfileIds: true },
+    { activeJoinRequestRef: { current: {} } },
     { prizeSelectionCoordinatorRef: { current: { isPending: () => true } } },
     { devStubRecord: {} },
     { eventRecord: { eventId: "old-event", startAtMs: 1000 } },
@@ -636,6 +677,7 @@ test("leaving waits for queued prize mutations and then blocks new prize actions
     eventPrizeConfig: {},
     isEventFresh: true,
     isLoading: false,
+    activeJoinRequestRef: { current: null },
     activeLeaveRequestRef: h.activeLeaveRequestRef,
     isEventPrizeSelectionAvailable: () => true,
     eventRecord: {},
@@ -651,8 +693,12 @@ test("leaving waits for queued prize mutations and then blocks new prize actions
 
 test("joining is blocked while leaving or saving prize selections", () => {
   for (const leaving of [true, false]) {
+    const modalState = { eventId: "event-1", isOpen: true };
     const join = createModalAction("handleJoinClick", {
-      modalState: { eventId: "event-1" },
+      modalState,
+      eventRecord: { eventId: "event-1" },
+      getEventModalState: () => modalState,
+      activeJoinRequestRef: { current: null },
       activeLeaveRequestRef: { current: leaving ? {} : null },
       prizeSelectionCoordinatorRef: {
         current: { isPending: () => !leaving },
@@ -665,18 +711,287 @@ test("joining is blocked while leaving or saving prize selections", () => {
   }
 });
 
+function joinHarness(profileId = "profile-2") {
+  let modalState;
+  let currentModal;
+  let eventRecord = null;
+  let isLoading = false;
+  let isJoining = false;
+  let isEventFresh = false;
+  let pendingJoinEventId = null;
+  let pendingJoinRequestedAtMs = 0;
+  let loadingCleanup;
+  let pendingCleanup;
+  let nextTimerId = 0;
+  let onModalChange;
+  const calls = [];
+  const responses = [];
+  const popups = [];
+  const subscriptions = new Map();
+  const timers = new Map();
+  const activeJoinRequestRef = { current: null };
+  const activeLeaveRequestRef = { current: null };
+  const participantLookupModalStateRef = { current: null };
+  const dependencies = () => {
+    const values = {
+      modalState,
+      eventRecord,
+      isLoading,
+      isJoining,
+      isEventFresh,
+      isResolvingEventProfileIds: true,
+      isLeaving: false,
+      isUpdatingPrizeSelection: false,
+      pendingJoinEventId,
+      pendingJoinRequestedAtMs,
+      getEventModalState: () => currentModal,
+      activeJoinRequestRef,
+      activeLeaveRequestRef,
+      participantLookupModalStateRef,
+      invalidateParticipantLookups: () => {},
+      setModalState: (value) => (modalState = value),
+      subscribeToEventModalState: (callback) => {
+        onModalChange = callback;
+        return () => {};
+      },
+      prizeSelectionCoordinatorRef: { current: null },
+      loadTimingRef: { current: null },
+      storage: { getProfileId: () => profileId },
+      setIsLoading: (value) => (isLoading = value),
+      setIsJoining: (value) => (isJoining = value),
+      setIsLeaving: () => {},
+      setIsEventFresh: (value) => (isEventFresh = value),
+      setEventRecord: (value) => (eventRecord = value),
+      setPendingJoinEventId: (value) => (pendingJoinEventId = value),
+      setPendingJoinRequestedAtMs: (value) =>
+        (pendingJoinRequestedAtMs = value),
+      openProfileSignInPopupForEvent: () => popups.push(modalState.eventId),
+      Date: { now: () => 1000 },
+      PENDING_JOIN_POLL_TIMEOUT_MS: 60_000,
+      PENDING_JOIN_POLL_INTERVAL_MS: 100,
+      performance: {
+        now: () => 0,
+        clearMarks: () => {},
+        clearMeasures: () => {},
+        mark: () => {},
+      },
+      connection: {
+        subscribeToEventFreshness: (_eventId, update) => {
+          update(false);
+          return () => {};
+        },
+        subscribeToEvent: (eventId, update, fail) => {
+          subscriptions.set(eventId, { update, fail });
+          return () => subscriptions.delete(eventId);
+        },
+        joinEvent: (eventId) => {
+          calls.push(eventId);
+          return new Promise((resolve, reject) => {
+            responses.push({ resolve, reject });
+          });
+        },
+      },
+      window: {
+        setInterval: (callback) => {
+          const id = ++nextTimerId;
+          timers.set(id, callback);
+          return id;
+        },
+        clearInterval: (id) => timers.delete(id),
+      },
+    };
+    return { ...values, submitJoin: createModalAction("submitJoin", values) };
+  };
+  createModalEffect("subscribeToEventModalState(", dependencies())();
+  return {
+    calls,
+    responses,
+    popups,
+    timers,
+    open(eventId) {
+      loadingCleanup?.();
+      currentModal = { eventId, isOpen: true };
+      onModalChange(currentModal);
+      loadingCleanup = createModalEffect(
+        "connection.subscribeToEvent(",
+        dependencies(),
+      )();
+    },
+    receive: (eventId) =>
+      subscriptions.get(eventId).update({
+        eventId,
+        status: "scheduled",
+        startAtMs: 2000,
+      }),
+    fail: (eventId) => subscriptions.get(eventId).fail(),
+    render: () => ({
+      eventRecord,
+      isLoading,
+      disabled: evaluateModalValue("isJoinPending", dependencies()),
+      join: createModalAction("handleJoinClick", dependencies()),
+    }),
+    runPendingEffect() {
+      pendingCleanup?.();
+      pendingCleanup = createModalEffect(
+        "PENDING_JOIN_POLL_TIMEOUT_MS",
+        dependencies(),
+      )();
+    },
+    signIn: () => (profileId = "profile-2"),
+    changeCurrentModal: (next) => (currentModal = next),
+    settle: () => new Promise((resolve) => setImmediate(resolve)),
+  };
+}
+
+test("joining remains blocked when another event fails to replace displayed content", () => {
+  for (const profileId of ["profile-2", ""]) {
+    const h = joinHarness(profileId);
+    h.open("event-a");
+    h.receive("event-a");
+    assert.equal(h.render().disabled, false);
+    h.open("event-b");
+    h.fail("event-b");
+    const view = h.render();
+    assert.equal(view.eventRecord.eventId, "event-a");
+    assert.equal(view.isLoading, false);
+    assert.equal(view.disabled, true);
+    view.join();
+    assert.deepEqual(h.calls, []);
+    assert.deepEqual(h.popups, []);
+  }
+});
+
+test("joining the displayed event stays enabled during freshness and profile refresh", () => {
+  const h = joinHarness();
+  h.open("event-a");
+  h.receive("event-a");
+  const view = h.render();
+  assert.equal(view.disabled, false);
+  view.join();
+  assert.deepEqual(h.calls, ["event-a"]);
+  assert.equal(h.render().disabled, true);
+});
+
+test("join callbacks from a previous or closed modal cannot submit", () => {
+  for (const nextModal of [
+    { eventId: "event-b", isOpen: true },
+    { eventId: "event-a", isOpen: false },
+  ]) {
+    const h = joinHarness();
+    h.open("event-a");
+    h.receive("event-a");
+    const { join } = h.render();
+    h.changeCurrentModal(nextModal);
+    join();
+    assert.deepEqual(h.calls, []);
+  }
+});
+
+test("joining after sign-in waits for matching event content", () => {
+  const h = joinHarness("");
+  h.open("event-a");
+  h.receive("event-a");
+  h.render().join();
+  assert.deepEqual(h.popups, ["event-a"]);
+  h.open("event-b");
+  h.receive("event-b");
+  h.open("event-a");
+  h.fail("event-a");
+  h.signIn();
+  h.runPendingEffect();
+  assert.equal(h.render().eventRecord.eventId, "event-b");
+  assert.equal(h.timers.size, 0);
+  assert.deepEqual(h.calls, []);
+  h.receive("event-a");
+  h.runPendingEffect();
+  assert.equal(h.timers.size, 1);
+  [...h.timers.values()][0]();
+  assert.deepEqual(h.calls, ["event-a"]);
+});
+
+test("a pending sign-in join cannot submit after the modal changes", () => {
+  const h = joinHarness("");
+  h.open("event-a");
+  h.receive("event-a");
+  h.render().join();
+  h.runPendingEffect();
+  assert.equal(h.timers.size, 1);
+  h.changeCurrentModal({ eventId: "event-b", isOpen: true });
+  h.signIn();
+  [...h.timers.values()][0]();
+  assert.deepEqual(h.calls, []);
+});
+
+test("pending joins survive background refreshes and prevent repeat submissions", async () => {
+  for (const profileId of ["profile-2", ""]) {
+    for (const refresh of ["receive", "fail"]) {
+      for (const outcome of ["resolve", "reject"]) {
+        const h = joinHarness(profileId);
+        h.open("event-a");
+        h.receive("event-a");
+        const { join } = h.render();
+        join();
+        if (!profileId) {
+          h.signIn();
+          h.runPendingEffect();
+          [...h.timers.values()][0]();
+        }
+        assert.equal(h.render().disabled, true);
+        h[refresh]("event-a");
+        assert.equal(h.render().isLoading, false);
+        assert.equal(h.render().disabled, true);
+        join();
+        h.render().join();
+        assert.deepEqual(h.calls, ["event-a"]);
+        h.responses[0][outcome](new Error("Join failed."));
+        await h.settle();
+        assert.equal(h.render().disabled, false);
+        h.render().join();
+        assert.deepEqual(h.calls, ["event-a", "event-a"]);
+      }
+    }
+  }
+});
+
+test("late join completions cannot release a newer modal's pending join", async () => {
+  for (const outcome of ["resolve", "reject"]) {
+    const h = joinHarness();
+    h.open("event-a");
+    h.receive("event-a");
+    h.render().join();
+    h.open("event-b");
+    h.receive("event-b");
+    assert.equal(h.render().disabled, false);
+    h.render().join();
+    h.responses[0][outcome](new Error("Old join failed."));
+    await h.settle();
+    assert.equal(h.render().disabled, true);
+    h.render().join();
+    assert.deepEqual(h.calls, ["event-a", "event-b"]);
+    h.responses[1].resolve();
+    await h.settle();
+    assert.equal(h.render().disabled, false);
+  }
+});
+
 test("prize actions require a fresh idle event", () => {
-  for (const loading of [true, false]) {
+  for (const overrides of [
+    { isLoading: true },
+    { isEventFresh: false },
+    { activeJoinRequestRef: { current: {} } },
+  ]) {
     const selectPrize = createModalAction("handlePrizeSelectionClick", {
       devStubRecord: null,
       eventPrizeConfig: {},
-      isEventFresh: loading,
-      isLoading: loading,
+      isEventFresh: true,
+      isLoading: false,
+      activeJoinRequestRef: { current: null },
       activeLeaveRequestRef: { current: null },
       eventRecord: {},
       currentProfileId: "profile-2",
       isEventPrizeSelectionAvailable: () =>
         assert.fail("Prize eligibility must wait for a fresh idle event."),
+      ...overrides,
     });
     selectPrize("1092");
   }
