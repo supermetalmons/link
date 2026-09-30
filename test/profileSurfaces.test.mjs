@@ -33,8 +33,11 @@ const {
   showShinyCard,
   updateShinyCardDisplayName,
 } = await import("../src/ui/shinyCardUiPort.ts");
-const { createLeaderboardEntry, getLeaderboardDisplayName } =
-  await import("../src/ui/leaderboardModels.ts");
+const {
+  createLeaderboardEntry,
+  getLeaderboardDisplayName,
+  populateMaterialLeaderboardCaches,
+} = await import("../src/ui/leaderboardModels.ts");
 
 const readSource = (relativePath) =>
   readFileSync(new URL(relativePath, import.meta.url), "utf8");
@@ -143,6 +146,51 @@ test("leaderboard models preserve defaults and display-name priority", () => {
       ensName: "mons.eth",
     }),
     "mons.eth",
+  );
+});
+
+test("material leaderboard warming deduplicates and caps missing rankings while preserving existing caches", () => {
+  const entries = Array.from({ length: 105 }, (_, index) =>
+    createLeaderboardEntry({
+      id: `profile-${index}`,
+      emoji: 7,
+      mining: { materials: { slime: index } },
+    }),
+  );
+  entries.push(
+    createLeaderboardEntry({
+      id: "profile-0",
+      emoji: 7,
+      mining: { materials: { slime: 200 } },
+    }),
+  );
+  const existing = [createLeaderboardEntry({ id: "existing", emoji: 7 })];
+  const cache = new Map([
+    ["dust", existing],
+    ["rating", existing],
+  ]);
+  const originalOrder = entries.map((entry) => entry.id);
+
+  populateMaterialLeaderboardCaches(cache, entries);
+
+  const expected = [
+    "profile-0",
+    ...Array.from({ length: 98 }, (_, index) => `profile-${104 - index}`),
+  ];
+  assert.deepEqual(
+    cache.get("slime").map((entry) => entry.id),
+    expected,
+  );
+  assert.deepEqual(
+    cache.get("total").map((entry) => entry.id),
+    expected,
+  );
+  assert.equal(cache.get("slime")[0].materials.slime, 200);
+  assert.strictEqual(cache.get("dust"), existing);
+  assert.strictEqual(cache.get("rating"), existing);
+  assert.deepEqual(
+    entries.map((entry) => entry.id),
+    originalOrder,
   );
 });
 
