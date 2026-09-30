@@ -406,7 +406,10 @@ export class InviteChannelsRoom {
     return this.queuedMetadataRead;
   }
 
-  private async refreshWagers(inviteId: string): Promise<WagerRead> {
+  private async refreshWagers(
+    inviteId: string,
+    alarmMetadata: MetadataRead | null = null,
+  ): Promise<WagerRead> {
     this.wagerResult = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       const generation = ++this.wagerRefreshGeneration;
@@ -417,7 +420,14 @@ export class InviteChannelsRoom {
       } catch (error) {
         logWagersRefreshFailure(inviteId, error);
       }
-      const metadata = await this.readMetadataSnapshot(inviteId);
+      const metadata =
+        alarmMetadata &&
+        this.metadataCurrent(alarmMetadata) &&
+        !this.queuedMetadataRead &&
+        !this.activeMetadataRead &&
+        Date.now() - this.metadataCheckedAt < INVITE_METADATA_REFRESH_MS
+          ? alarmMetadata
+          : await this.readMetadataSnapshot(inviteId);
       if (invalidationGeneration !== this.inviteInvalidationGeneration)
         continue;
       let source: InviteWagersSourceResult;
@@ -543,6 +553,7 @@ export class InviteChannelsRoom {
       nextAtMs,
     );
     const inviteId = this.pinnedInviteId();
+    let alarmMetadata: MetadataRead | null = null;
     const refresh = async (work: () => Promise<unknown>) => {
       try {
         await work();
@@ -560,11 +571,17 @@ export class InviteChannelsRoom {
       schedule: () => this.dependencies.scheduleAlarm(nextAtMs),
       metadata: async () => {
         if (this.inviteSockets(undefined, true).length > 0)
-          await refresh(() => this.readMetadataSnapshot(inviteId));
+          await refresh(async () => {
+            alarmMetadata = await this.readMetadataSnapshot(inviteId);
+          });
       },
       wagers: async () => {
         if (this.inviteSockets("wagers", true).length > 0)
-          await refresh(() => this.readWagerSnapshot(inviteId));
+          await refresh(() =>
+            this.serializeWagers(() =>
+              this.refreshWagers(inviteId, alarmMetadata),
+            ),
+          );
       },
     };
   }
@@ -638,9 +655,10 @@ export class InviteChannelsRoom {
       actorUid,
       ...session,
     };
+    const observedMetadataGeneration = this.metadataRefreshGeneration;
     const observedGeneration =
       channel === "metadata"
-        ? this.metadataRefreshGeneration
+        ? observedMetadataGeneration
         : this.wagerRefreshGeneration;
     const admit = async (): Promise<Response> => {
       if (this.inviteRoomFull(channel, role, ip)) {
@@ -714,6 +732,7 @@ export class InviteChannelsRoom {
         const latest =
           this.wagerResult &&
           this.wagerResult.generation > observedGeneration &&
+          this.wagerResult.metadata.generation > observedMetadataGeneration &&
           this.wagersCurrent(this.wagerResult)
             ? this.wagerResult
             : await this.refreshWagers(inviteId);

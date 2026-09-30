@@ -11,7 +11,10 @@ import {
   INVITE_WAGERS_SOCKET_PROTOCOL,
   isInviteWagersMessage,
 } from "@mons/shared/invite-wagers";
-import { INVITE_METADATA_SOCKET_PROTOCOL } from "@mons/shared/invite-metadata";
+import {
+  INVITE_METADATA_REFRESH_MS,
+  INVITE_METADATA_SOCKET_PROTOCOL,
+} from "@mons/shared/invite-metadata";
 import {
   REACTION_HEARTBEAT_REQUEST,
   REACTION_HEARTBEAT_RESPONSE,
@@ -427,7 +430,7 @@ describe("durable invite wagers", () => {
     const before = source.reads;
     const wagerReads = source.wagerReads;
     expect(await runScheduledAlarm(room)).toBe(true);
-    expect(source.reads).toBe(before + 2);
+    expect(source.reads).toBe(before + 1);
     expect(source.wagerReads).toBe(wagerReads + 1);
     expect(JSON.parse(await wager.read()).snapshot).toMatchObject({
       revision: 2,
@@ -446,6 +449,136 @@ describe("durable invite wagers", () => {
     expect(JSON.parse(await wager.read()).snapshot.revision).toBe(3);
     expect(metadata.messages).toEqual([]);
     expect(wager.messages).toEqual([]);
+  });
+
+  it.each(["invalidated", "expired", "replaced"] as const)(
+    "rechecks access when alarm metadata is %s during a wager read",
+    async (change) => {
+      const { room, inviteId, source } = await fixture();
+      const client = acceptSocket(await room.fetch(request(inviteId)));
+      await client.read();
+      const closed = new Promise<number>((resolve) =>
+        client.socket.addEventListener(
+          "close",
+          (event) => resolve(event.code),
+          { once: true },
+        ),
+      );
+      const before = source.reads;
+      await advanceToAlarm(room);
+      await runInDurableObject(room, async (instance) => {
+        const began = deferred();
+        const release = deferred();
+        source.wagerRead = async () => {
+          began.resolve();
+          await release.promise;
+          return [
+            {
+              inviteId,
+              matchId: inviteId,
+              wager: { proposals: { "host-login": { ...proposal, count: 5 } } },
+              resolutionMarker: null,
+              revision: 2,
+            },
+          ];
+        };
+        const reading = instance.alarm();
+        await began.promise;
+        if (change === "replaced") await instance.readMetadata(inviteId);
+        source.value = { ...invite, guestId: null, password: "private" };
+        if (change === "invalidated")
+          await instance.notifyMetadataChanged(inviteId);
+        if (change === "expired")
+          vi.spyOn(Date, "now").mockReturnValue(
+            Date.now() + INVITE_METADATA_REFRESH_MS,
+          );
+        release.resolve();
+        await reading;
+      });
+      expect(source.reads).toBeGreaterThanOrEqual(before + 2);
+      expect(await closed).toBe(1008);
+      expect(client.messages).toEqual([]);
+    },
+  );
+
+  it("keeps a foreground read separate from an alarm queued behind another wager read", async () => {
+    const { room, inviteId, source } = await fixture();
+    const client = acceptSocket(await room.fetch(request(inviteId)));
+    await client.read();
+    const before = source.wagerReads;
+    await advanceToAlarm(room);
+    await runInDurableObject(room, async (instance) => {
+      const began = deferred();
+      const release = deferred();
+      source.wagerRead = async () => {
+        began.resolve();
+        await release.promise;
+        return [];
+      };
+      const first = instance.readWagers(inviteId);
+      await began.promise;
+      const channels = (
+        instance as unknown as {
+          inviteChannels: import("../src/inviteChannelsRoom.ts").InviteChannelsRoom;
+        }
+      ).inviteChannels;
+      const alarm = channels.prepareAlarm()!;
+      await alarm.metadata();
+      const alarmWagers = alarm.wagers();
+      const second = instance.readWagers(inviteId);
+      release.resolve();
+      const [older, , newer] = await Promise.all([first, alarmWagers, second]);
+      expect(older.status).toBe("ok");
+      expect(newer.status).toBe("ok");
+    });
+    expect(source.wagerReads).toBe(before + 3);
+  });
+
+  it("refreshes metadata for admission when a queued alarm reuses an earlier snapshot", async () => {
+    const { room, inviteId, source } = await fixture();
+    const client = acceptSocket(await room.fetch(request(inviteId)));
+    await client.read();
+    const before = source.reads;
+    await advanceToAlarm(room);
+    const status = await runInDurableObject(room, async (instance) => {
+      const began = deferred();
+      const release = deferred();
+      const digest = crypto.subtle.digest.bind(crypto.subtle);
+      vi.spyOn(crypto.subtle, "digest").mockImplementationOnce(
+        async (algorithm, data) => {
+          began.resolve();
+          await release.promise;
+          return digest(algorithm, data);
+        },
+      );
+      const first = instance.readWagers(inviteId);
+      await began.promise;
+      const channels = (
+        instance as unknown as {
+          inviteChannels: import("../src/inviteChannelsRoom.ts").InviteChannelsRoom;
+        }
+      ).inviteChannels;
+      const alarm = channels.prepareAlarm()!;
+      await alarm.metadata();
+      const alarmWagers = alarm.wagers();
+      const admission = instance.fetch(request(inviteId));
+      source.value = {
+        ...invite,
+        guestId: null,
+        password: "private",
+        wagers: { [inviteId]: { proposals: { "host-login": proposal } } },
+      };
+      release.resolve();
+      const [, , response] = await Promise.all([first, alarmWagers, admission]);
+      if (response.webSocket) {
+        response.webSocket.accept();
+        await closeSocket(response.webSocket);
+      }
+      return response.status;
+    });
+    expect(status).toBe(409);
+    expect(source.reads).toBe(before + 3);
+    expect(client.messages).toEqual([]);
   });
 
   it("rejects stale wager admission after a metadata-only refresh leaves a private-only wager change unread", async () => {
@@ -799,7 +932,7 @@ describe("durable invite wagers", () => {
     source.value = { ...invite };
     const before = source.reads;
     expect(await runScheduledAlarm(room)).toBe(true);
-    expect(source.reads).toBe(before + 2);
+    expect(source.reads).toBe(before + 1);
     await wager.read();
     expect(
       await runInDurableObject(room, (_instance, state) =>
