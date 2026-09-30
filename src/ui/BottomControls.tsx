@@ -27,7 +27,6 @@ import {
   FaShareAlt,
   FaPaintBrush,
   FaScroll,
-  FaHourglassHalf,
 } from "react-icons/fa";
 import { IoSparklesSharp } from "react-icons/io5";
 import styled from "styled-components";
@@ -46,12 +45,8 @@ import {
   didClickConfirmResignButton,
   playSameCompletedPuzzleAgain,
   dismissPendingAutomatchTransition,
-  getRematchSeriesNavigatorItems,
-  didSelectRematchSeriesMatch,
-  preloadRematchSeriesScores,
   didSelectPuzzle,
 } from "../game/gameController";
-import type { RematchSeriesNavigatorItem } from "../game/gameController";
 import { connection } from "../connection/connection";
 import type { AuthState } from "../connection/authModels";
 import { defaultEarlyInputEventName, isMobile } from "../utils/misc";
@@ -68,6 +63,8 @@ import {
 import NavigationPicker from "./NavigationPicker";
 import { useNavigationGames } from "./controls/useNavigationGames";
 import { useAutomatchControls } from "./controls/useAutomatchControls";
+import { useRematchSeries } from "./controls/useRematchSeries";
+import { RematchSeriesControls } from "./controls/RematchSeriesControls";
 import {
   STICKER_IMAGE_BASE_URL,
   useReactionPicker,
@@ -97,10 +94,6 @@ import { closeMenuAndInfoIfAny } from "./controls/menuPort";
 import BoardStylePickerComponent from "./BoardStylePicker";
 import { Sound } from "../utils/gameModels";
 import MoveHistoryPopup from "./MoveHistoryPopup";
-import {
-  subscribeMoveHistoryPopupReload,
-  triggerMoveHistoryPopupSelectionReset,
-} from "./controls/moveHistoryPopupStore";
 import { MATERIALS, MaterialName } from "../services/rocksMiningService";
 import {
   EventNavigationPreviewParticipant,
@@ -202,20 +195,6 @@ export {
 } from "./controls/bottomControlsPort";
 
 const EVENT_MODAL_NAV_AUTOCLOSE_SUPPRESS_MS = 10000;
-const rematchSeriesDigitsFontFamily =
-  'ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, "Liberation Mono", "Courier New", monospace';
-const RematchSeriesInlineControl = styled.div`
-  flex: 1 1 0;
-  min-width: 0;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  padding: 0;
-  overflow: hidden;
-  mask-image: linear-gradient(to left, transparent 0px, black 6px);
-  -webkit-mask-image: linear-gradient(to left, transparent 0px, black 6px);
-`;
-
 const LeftCornerInlineControls = styled.div`
   flex: 1 1 0;
   min-width: 0;
@@ -227,158 +206,6 @@ const LeftCornerInlineControls = styled.div`
 
   > * {
     pointer-events: auto;
-  }
-`;
-
-const RematchSeriesScroll = styled.div`
-  width: 100%;
-  height: 100%;
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  overflow-x: auto;
-  overflow-y: hidden;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-
-  &::-webkit-scrollbar {
-    display: none;
-  }
-`;
-
-const RematchSeriesTrack = styled.div`
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  background: transparent;
-  border-radius: 16px;
-  height: 32px;
-  flex-shrink: 0;
-  padding: 0 1px;
-`;
-
-const RematchSeriesChip = styled.button<{ $isSelected: boolean }>`
-  border: none;
-  border-radius: 9px;
-  height: 30px;
-  min-width: 26px;
-  padding: 0 7px;
-  display: inline-flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 1px;
-  flex-shrink: 0;
-  cursor: pointer;
-  font-family: ${rematchSeriesDigitsFontFamily};
-  font-variant-numeric: tabular-nums;
-  background: transparent;
-  position: relative;
-
-  &::before {
-    content: "";
-    display: ${(props) => (props.$isSelected ? "block" : "none")};
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    width: 18px;
-    height: 30px;
-    transform: translate(-50%, -50%);
-    border-radius: 50%;
-    background: rgba(249, 249, 249, 0.77);
-    z-index: 0;
-
-    @media (prefers-color-scheme: dark) {
-      background: rgba(36, 36, 36, 0.77);
-    }
-  }
-
-  &:disabled {
-    cursor: default;
-    opacity: 0.5;
-  }
-`;
-
-const RematchScoreOpponent = styled.span<{ $isSelected: boolean }>`
-  font-size: 10px;
-  line-height: 1;
-  font-weight: 400;
-  position: relative;
-  z-index: 1;
-  color: ${(props) =>
-    props.$isSelected ? "rgba(0, 0, 0, 0.3)" : "rgba(0, 0, 0, 0.18)"};
-
-  @media (prefers-color-scheme: dark) {
-    color: ${(props) =>
-      props.$isSelected
-        ? "rgba(255, 255, 255, 0.34)"
-        : "rgba(255, 255, 255, 0.18)"};
-  }
-`;
-
-const RematchScorePlayer = styled.span<{ $isSelected: boolean }>`
-  font-size: 10px;
-  line-height: 1;
-  font-weight: 400;
-  position: relative;
-  z-index: 1;
-  color: ${(props) =>
-    props.$isSelected ? "rgba(0, 0, 0, 0.3)" : "rgba(0, 0, 0, 0.18)"};
-
-  @media (prefers-color-scheme: dark) {
-    color: ${(props) =>
-      props.$isSelected
-        ? "rgba(255, 255, 255, 0.34)"
-        : "rgba(255, 255, 255, 0.18)"};
-  }
-`;
-
-const RematchSeriesSeparator = styled.div<{ $hidden: boolean }>`
-  width: 0.5px;
-  height: 14px;
-  background: rgba(0, 0, 0, 0.1);
-  flex-shrink: 0;
-  opacity: ${(props) => (props.$hidden ? 0 : 1)};
-  transition: opacity 0.15s ease;
-
-  @media (prefers-color-scheme: dark) {
-    background: rgba(255, 255, 255, 0.12);
-  }
-`;
-
-const RematchWaitingIcon = styled.span<{ $isSelected: boolean }>`
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 10px;
-  position: relative;
-  z-index: 1;
-  color: ${(props) =>
-    props.$isSelected ? "rgba(0, 0, 0, 0.35)" : "rgba(0, 0, 0, 0.18)"};
-
-  @media (prefers-color-scheme: dark) {
-    color: ${(props) =>
-      props.$isSelected
-        ? "rgba(255, 255, 255, 0.4)"
-        : "rgba(255, 255, 255, 0.18)"};
-  }
-`;
-
-const RematchLoadingDots = styled.span<{ $isSelected: boolean }>`
-  font-size: 11px;
-  line-height: 1;
-  letter-spacing: 1px;
-  position: relative;
-  z-index: 1;
-  color: ${(props) =>
-    props.$isSelected ? "rgba(0, 0, 0, 0.35)" : "rgba(0, 0, 0, 0.15)"};
-
-  @media (prefers-color-scheme: dark) {
-    color: ${(props) =>
-      props.$isSelected
-        ? "rgba(255, 255, 255, 0.4)"
-        : "rgba(255, 255, 255, 0.15)"};
   }
 `;
 
@@ -656,11 +483,6 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     inviteId: string;
   } | null>(null);
 
-  const [
-    isRematchSeriesSelectionInFlight,
-    setIsRematchSeriesSelectionInFlight,
-  ] = useState(false);
-  const [historyUiVersion, setHistoryUiVersion] = useState(0);
   const [isEndMatchTemporarilyDisabled, setIsEndMatchTemporarilyDisabled] =
     useState(false);
   const {
@@ -718,7 +540,6 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const boardStylePickerRef = useRef<HTMLDivElement>(null);
   const brushButtonRef = useRef<HTMLButtonElement>(null);
   const moveHistoryPopupRef = useRef<HTMLDivElement>(null);
-  const rematchSeriesSelectionLockRef = useRef(false);
   const endMatchGracePeriodTimeoutRef = useRef<number | null>(null);
 
   useLayoutEffect(() => {
@@ -1050,86 +871,11 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
 
   useEffect(() => clearAllMatchScopedTimeouts, [clearAllMatchScopedTimeouts]);
 
-  useEffect(() => {
-    return subscribeMoveHistoryPopupReload(() => {
-      setHistoryUiVersion((value) => value + 1);
-    });
-  }, []);
-
-  const rematchSeriesItems: RematchSeriesNavigatorItem[] = (() => {
-    void historyUiVersion;
-    try {
-      return getRematchSeriesNavigatorItems();
-    } catch {
-      return [];
-    }
-  })();
-
-  const hasRematchSeriesNavigation = rematchSeriesItems.length > 0;
-  const rematchSeriesMatchesKey = rematchSeriesItems
-    .map((item) => item.matchId)
-    .join("|");
-
-  useEffect(() => {
-    if (rematchSeriesMatchesKey === "") {
-      return;
-    }
-    let isDisposed = false;
-    let retryTimeoutId: number | null = null;
-    let retryCount = 0;
-
-    const hasMissingHistoricalScores = (items: RematchSeriesNavigatorItem[]) =>
-      items.some(
-        (item) =>
-          !item.isActiveMatch &&
-          !item.isPendingResponse &&
-          (item.whiteScore === null || item.blackScore === null),
-      );
-
-    const runPreload = async () => {
-      let didChange = false;
-      try {
-        didChange = await preloadRematchSeriesScores();
-      } catch {
-        didChange = false;
-      }
-      if (isDisposed) {
-        return;
-      }
-      if (didChange) {
-        setHistoryUiVersion((value) => value + 1);
-      }
-      let latestItems: RematchSeriesNavigatorItem[] = [];
-      try {
-        latestItems = getRematchSeriesNavigatorItems();
-      } catch {
-        latestItems = [];
-      }
-      if (!hasMissingHistoricalScores(latestItems)) {
-        return;
-      }
-      if (retryCount >= 8) {
-        return;
-      }
-      retryCount += 1;
-      retryTimeoutId = setMatchScopedTimeout(() => {
-        void runPreload();
-      }, 650);
-    };
-
-    void runPreload();
-
-    return () => {
-      isDisposed = true;
-      if (retryTimeoutId !== null) {
-        clearTrackedMatchScopedTimeout(retryTimeoutId);
-      }
-    };
-  }, [
-    clearTrackedMatchScopedTimeout,
-    rematchSeriesMatchesKey,
+  const rematchSeries = useRematchSeries({
     setMatchScopedTimeout,
-  ]);
+    clearTrackedMatchScopedTimeout,
+  });
+  const hasRematchSeriesNavigation = rematchSeries.items.length > 0;
 
   const closeNavigationAndAppearancePopupIfAnyHandler = useCallback(
     (options?: CloseNavigationAndAppearancePopupOptions) => {
@@ -1371,57 +1117,6 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     }
     dispatchControlsUi({ type: "toggleHistory" });
   };
-
-  const handleRematchSeriesChipClick = useCallback(async (matchId: string) => {
-    if (rematchSeriesSelectionLockRef.current) {
-      return;
-    }
-    rematchSeriesSelectionLockRef.current = true;
-    setIsRematchSeriesSelectionInFlight(true);
-    try {
-      const didSwitch = await didSelectRematchSeriesMatch(matchId);
-      if (didSwitch) {
-        triggerMoveHistoryPopupSelectionReset();
-      }
-    } finally {
-      rematchSeriesSelectionLockRef.current = false;
-      setIsRematchSeriesSelectionInFlight(false);
-    }
-  }, []);
-
-  const renderRematchSeriesChipContent = useCallback(
-    (item: RematchSeriesNavigatorItem) => {
-      if (item.isPendingResponse) {
-        return (
-          <RematchWaitingIcon $isSelected={item.isSelected}>
-            <FaHourglassHalf />
-          </RematchWaitingIcon>
-        );
-      }
-      if (item.whiteScore !== null && item.blackScore !== null) {
-        const opponentScore = item.playerIsWhite
-          ? item.blackScore
-          : item.whiteScore;
-        const playerScore = item.playerIsWhite
-          ? item.whiteScore
-          : item.blackScore;
-        return (
-          <>
-            <RematchScoreOpponent $isSelected={item.isSelected}>
-              {opponentScore}
-            </RematchScoreOpponent>
-            <RematchScorePlayer $isSelected={item.isSelected}>
-              {playerScore}
-            </RematchScorePlayer>
-          </>
-        );
-      }
-      return (
-        <RematchLoadingDots $isSelected={item.isSelected}>·</RematchLoadingDots>
-      );
-    },
-    [],
-  );
 
   const handleBrushClick = () => {
     if (!isBoardStylePickerVisible) {
@@ -2066,32 +1761,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
                 })}
               </EventCloudButtonOuter>
             )}
-            {hasRematchSeriesNavigation && (
-              <RematchSeriesInlineControl>
-                <RematchSeriesScroll>
-                  <RematchSeriesTrack>
-                    {rematchSeriesItems.map((seriesItem, idx, arr) => (
-                      <React.Fragment key={seriesItem.matchId}>
-                        <RematchSeriesChip
-                          $isSelected={seriesItem.isSelected}
-                          disabled={isRematchSeriesSelectionInFlight}
-                          onClick={() =>
-                            void handleRematchSeriesChipClick(
-                              seriesItem.matchId,
-                            )
-                          }
-                        >
-                          {renderRematchSeriesChipContent(seriesItem)}
-                        </RematchSeriesChip>
-                        {idx < arr.length - 1 && (
-                          <RematchSeriesSeparator $hidden={false} />
-                        )}
-                      </React.Fragment>
-                    ))}
-                  </RematchSeriesTrack>
-                </RematchSeriesScroll>
-              </RematchSeriesInlineControl>
-            )}
+            <RematchSeriesControls {...rematchSeries} />
           </LeftCornerInlineControls>
         )}
         {isEndMatchPillVisible && (

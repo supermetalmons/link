@@ -37,6 +37,10 @@ export const environment = {
   transientHandlers: new Set(),
   wagerEligible: false,
   homeTransitionGate: null,
+  rematchItems: [],
+  rematchPreloads: [],
+  rematchSelections: [],
+  historySelectionResets: 0,
 };
 export const pendingGame = (inviteId) => ({
   id: inviteId, inviteId, entityType: 'game', kind: 'auto',
@@ -63,8 +67,8 @@ export const setOnlineGame = value => { isOnlineGame = value; updateGameControls
 export const isWatchOnly = false;
 export const isMatchOver = () => false;
 export const getBoardViewMode = () => 'activeLive';
-export const getRematchSeriesNavigatorItems = () => [];
-export const preloadRematchSeriesScores = async () => false;
+export const getRematchSeriesNavigatorItems = () => environment.rematchItems;
+export const preloadRematchSeriesScores = () => new Promise((resolve, reject) => environment.rematchPreloads.push({ resolve, reject }));
 export const getSelectedPuzzleId = () => null;
 export const didClickUndoButton = () => invoke('undo');
 export const didClickAutomoveButton = () => invoke('automove');
@@ -74,7 +78,7 @@ export const didClickStartBotGameButton = () => {};
 export const didClickEndMatchButton = () => invoke('end');
 export const didClickConfirmResignButton = () => invoke('resign');
 export const playSameCompletedPuzzleAgain = () => {};
-export const didSelectRematchSeriesMatch = () => {};
+export const didSelectRematchSeriesMatch = matchId => new Promise(resolve => environment.rematchSelections.push({ matchId, resolve }));
 export const didSelectPuzzle = problem => invoke('puzzle', problem.id);
 `;
 const connectionSource = `
@@ -180,12 +184,14 @@ import { flushSync } from 'react-dom';
 import BottomControls from '/src/ui/BottomControls.tsx';
 import * as port from '/src/ui/controls/bottomControlsPort.ts';
 import * as controlsStore from '/src/game/gameControlsStore.ts';
+import { triggerMoveHistoryPopupReload, subscribeMoveHistoryPopupSelectionReset } from '/src/ui/controls/moveHistoryPopupStore.ts';
 import { getLifecycleCounters } from '/src/lifecycle/lifecycleDiagnostics.ts';
 import { environment, pendingGame } from 'bottom-environment';
 import { setOnlineGame } from 'bottom-controller';
 import { setRoute } from 'bottom-app-navigation';
 import { openEventModal, closeEventModal } from 'bottom-event-modal';
 let root = createRoot(document.getElementById('root'));
+subscribeMoveHistoryPopupSelectionReset(() => environment.historySelectionResets++);
 const run = callback => flushSync(callback);
 const settle = async callback => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -221,6 +227,34 @@ window.harness = {
   },
   publishNavigation(items) {
     run(() => environment.subscriptions.findLast(subscription => subscription.active).update(items));
+  },
+  publishRematches(items) {
+    run(() => {
+      environment.rematchItems = items;
+      triggerMoveHistoryPopupReload();
+    });
+  },
+  async respondRematchPreload(index, updates = [], reject = false) {
+    await settle(async () => {
+      environment.rematchItems = environment.rematchItems.map(item => ({
+        ...item, ...updates.find(update => update.matchId === item.matchId),
+      }));
+      const request = environment.rematchPreloads[index];
+      if (reject) request.reject(new Error('temporary score load failure'));
+      else request.resolve(updates.length > 0);
+    });
+  },
+  async respondRematchSelection(index, didSwitch) {
+    await settle(async () => {
+      const request = environment.rematchSelections[index];
+      if (didSwitch) {
+        environment.rematchItems = environment.rematchItems.map(item => ({
+          ...item, isSelected: item.matchId === request.matchId,
+        }));
+        triggerMoveHistoryPopupReload();
+      }
+      request.resolve(didSwitch);
+    });
   },
   holdHomeTransition() { environment.homeTransitionGate = Promise.withResolvers(); },
   async releaseHomeTransition() {
@@ -362,10 +396,6 @@ async function fixture(run, { realNavigation = false, mobile = false } = {}) {
       "import React from 'react'; export default ({ ref }) => React.createElement('div', { ref, 'data-testid': 'history-popup', style: { position: 'fixed', top: 200, left: 10 } }, React.createElement('button', null, 'History contents'));",
     ],
     [
-      "./controls/moveHistoryPopupStore",
-      "export const subscribeMoveHistoryPopupReload = () => () => {}; export const triggerMoveHistoryPopupSelectionReset = () => {};",
-    ],
-    [
       "../services/rocksMiningService",
       "export const MATERIALS = ['dust', 'slime'];",
     ],
@@ -489,13 +519,13 @@ export const teardownProfileScope = () => {};
               return "\0bottom-lifecycle";
             if (id === "../game/mainGameLoadState") return "\0bottom-main-load";
           }
-          const isAutomatchHook = importer?.endsWith(
-            "/useAutomatchControls.ts",
-          );
+          const isControlsHook =
+            importer?.endsWith("/useAutomatchControls.ts") ||
+            importer?.endsWith("/useRematchSeries.ts");
           const replacementId =
-            isAutomatchHook && id.startsWith("../../") ? id.slice(3) : id;
+            isControlsHook && id.startsWith("../../") ? id.slice(3) : id;
           if (
-            (importer?.endsWith("/BottomControls.tsx") || isAutomatchHook) &&
+            (importer?.endsWith("/BottomControls.tsx") || isControlsHook) &&
             replacements.has(replacementId)
           ) {
             return "\0" + replacements.get(replacementId);
@@ -555,6 +585,19 @@ const click = async (page, name) =>
     window.harness.run(() => element.click()),
   );
 const count = (page, name) => button(page, name).count();
+const rematchButtons = (page) =>
+  page.getByRole("group", { name: "Rematch series" }).getByRole("button");
+const rematchItem = (matchId, overrides = {}) => ({
+  matchId,
+  index: 0,
+  whiteScore: null,
+  blackScore: null,
+  isPendingResponse: false,
+  isActiveMatch: false,
+  isSelected: false,
+  playerIsWhite: true,
+  ...overrides,
+});
 const popupState = (page) =>
   page.evaluate(() => ({
     appearance: !!document.querySelector('[data-testid="appearance-picker"]'),
@@ -645,6 +688,269 @@ const assertEventButtonRetained = async (page) => {
     },
   );
 };
+
+test(
+  "rematch scores refresh in player order and retry only while historical scores are missing",
+  { timeout: 60000 },
+  async () => {
+    await fixture(async (page) => {
+      const items = [
+        rematchItem("previous"),
+        rematchItem("live", {
+          index: 1,
+          whiteScore: 12,
+          blackScore: 7,
+          isActiveMatch: true,
+          isSelected: true,
+          playerIsWhite: false,
+        }),
+        rematchItem("pending", { index: 2, isPendingResponse: true }),
+      ];
+      await page.evaluate(
+        (items) => window.harness.publishRematches(items),
+        items,
+      );
+      assert.equal(await rematchButtons(page).count(), 3);
+      assert.equal(await rematchButtons(page).nth(0).textContent(), "·");
+      assert.deepEqual(
+        await rematchButtons(page).nth(1).locator("span").allTextContents(),
+        ["12", "7"],
+      );
+      assert.equal(await rematchButtons(page).nth(2).locator("svg").count(), 1);
+      await page.evaluate(() =>
+        window.harness.respondRematchPreload(0, [], true),
+      );
+      assert.equal(
+        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        1,
+      );
+      await page.clock.runFor(649);
+      assert.equal(
+        await page.evaluate(
+          () => window.harness.environment.rematchPreloads.length,
+        ),
+        1,
+      );
+      await page.clock.runFor(1);
+      assert.equal(
+        await page.evaluate(
+          () => window.harness.environment.rematchPreloads.length,
+        ),
+        2,
+      );
+      await page.evaluate(() =>
+        window.harness.respondRematchPreload(1, [
+          { matchId: "previous", whiteScore: 15, blackScore: 9 },
+        ]),
+      );
+      assert.deepEqual(
+        await rematchButtons(page).nth(0).locator("span").allTextContents(),
+        ["9", "15"],
+      );
+      assert.equal(
+        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        0,
+      );
+      await page.evaluate(() =>
+        window.harness.publishRematches(
+          window.harness.environment.rematchItems.map((item) =>
+            item.matchId === "live" ? { ...item, blackScore: 8 } : item,
+          ),
+        ),
+      );
+      assert.deepEqual(
+        await rematchButtons(page).nth(1).locator("span").allTextContents(),
+        ["12", "8"],
+      );
+      await page.clock.runFor(6500);
+      assert.equal(
+        await page.evaluate(
+          () => window.harness.environment.rematchPreloads.length,
+        ),
+        2,
+      );
+    });
+  },
+);
+
+test(
+  "rematch score retries are bounded and cancelled on series changes, match reset, and unmount",
+  { timeout: 60000 },
+  async () => {
+    await fixture(async (page) => {
+      await page.evaluate(
+        (items) => window.harness.publishRematches(items),
+        [rematchItem("missing")],
+      );
+      for (let index = 0; index < 9; index++) {
+        await page.evaluate(
+          (index) => window.harness.respondRematchPreload(index),
+          index,
+        );
+        await page.clock.runFor(650);
+      }
+      assert.equal(
+        await page.evaluate(
+          () => window.harness.environment.rematchPreloads.length,
+        ),
+        9,
+      );
+      assert.equal(
+        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        0,
+      );
+      await page.evaluate(
+        (items) => window.harness.publishRematches(items),
+        [rematchItem("old-series")],
+      );
+      await page.evaluate(() => window.harness.publishRematches([]));
+      await page.evaluate(() => window.harness.respondRematchPreload(9));
+      assert.equal(await rematchButtons(page).count(), 0);
+      assert.equal(
+        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        0,
+      );
+      await page.evaluate(
+        (items) => window.harness.publishRematches(items),
+        [rematchItem("reset-series")],
+      );
+      await page.evaluate(() => window.harness.respondRematchPreload(10));
+      assert.equal(
+        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        1,
+      );
+      await page.evaluate(() => window.harness.resetMatch());
+      assert.equal(
+        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        0,
+      );
+      await page.clock.runFor(650);
+      assert.equal(
+        await page.evaluate(
+          () => window.harness.environment.rematchPreloads.length,
+        ),
+        11,
+      );
+      await page.evaluate(
+        (items) => window.harness.publishRematches(items),
+        [rematchItem("unmounted-series")],
+      );
+      await page.evaluate(() => window.harness.dispose());
+      await page.evaluate(() => window.harness.respondRematchPreload(11));
+      await page.clock.runFor(650);
+      assert.equal(
+        await page.evaluate(
+          () => window.harness.environment.rematchPreloads.length,
+        ),
+        12,
+      );
+      assert.equal(
+        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        0,
+      );
+      assert.equal(await page.locator("#root").textContent(), "");
+    });
+  },
+);
+
+test(
+  "rematch selection locks simultaneous clicks and resets move history only after a successful switch",
+  { timeout: 60000 },
+  async () => {
+    await fixture(async (page) => {
+      await page.evaluate(
+        (items) => window.harness.publishRematches(items),
+        [
+          rematchItem("previous", { whiteScore: 15, blackScore: 9 }),
+          rematchItem("live", {
+            index: 1,
+            whiteScore: 3,
+            blackScore: 4,
+            isActiveMatch: true,
+            isSelected: true,
+          }),
+        ],
+      );
+      await page.evaluate(() => window.harness.respondRematchPreload(0));
+      assert.deepEqual(
+        await rematchButtons(page).evaluateAll((elements) =>
+          elements.map(
+            (element) => getComputedStyle(element, "::before").display,
+          ),
+        ),
+        ["none", "block"],
+      );
+      await rematchButtons(page).evaluateAll((elements) => {
+        window.harness.run(() => {
+          elements[0].click();
+          elements[1].click();
+        });
+      });
+      assert.deepEqual(
+        await page.evaluate(() =>
+          window.harness.environment.rematchSelections.map(
+            ({ matchId }) => matchId,
+          ),
+        ),
+        ["previous"],
+      );
+      assert.equal(
+        await rematchButtons(page).evaluateAll((elements) =>
+          elements.every((element) => element.disabled),
+        ),
+        true,
+      );
+      await page.evaluate(() =>
+        window.harness.respondRematchSelection(0, true),
+      );
+      assert.equal(
+        await page.evaluate(
+          () => window.harness.environment.historySelectionResets,
+        ),
+        1,
+      );
+      assert.deepEqual(
+        await rematchButtons(page).evaluateAll((elements) =>
+          elements.map(
+            (element) => getComputedStyle(element, "::before").display,
+          ),
+        ),
+        ["block", "none"],
+      );
+      assert.equal(
+        await rematchButtons(page).evaluateAll((elements) =>
+          elements.every((element) => !element.disabled),
+        ),
+        true,
+      );
+      await rematchButtons(page)
+        .nth(0)
+        .evaluate((element) => window.harness.run(() => element.click()));
+      await page.evaluate(() =>
+        window.harness.respondRematchSelection(1, false),
+      );
+      assert.equal(
+        await page.evaluate(
+          () => window.harness.environment.historySelectionResets,
+        ),
+        1,
+      );
+      assert.equal(await rematchButtons(page).nth(0).isDisabled(), false);
+      await rematchButtons(page)
+        .nth(1)
+        .evaluate((element) => window.harness.run(() => element.click()));
+      await page.evaluate(() =>
+        window.harness.respondRematchSelection(2, true),
+      );
+      assert.equal(
+        await page.evaluate(
+          () => window.harness.environment.historySelectionResets,
+        ),
+        2,
+      );
+    });
+  },
+);
 
 test(
   "popup transitions preserve coexistence and keep navigation separate from bottom visibility",
