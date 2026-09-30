@@ -12,6 +12,7 @@ import { INVITE_WAGERS_SOCKET_PROTOCOL } from "@mons/shared/invite-wagers";
 import type { InviteReactions } from "../src/inviteReactions.ts";
 import type { MatchSyncMetadata } from "../src/matchSync.ts";
 import type { MatchStatePair } from "../src/matchStateTypes.ts";
+import { MAX_CACHED_MATCH_SYNC_STATES } from "../src/matchSyncRoom.ts";
 
 type Room = DurableObjectStub<InviteReactions>;
 type Source = {
@@ -501,6 +502,45 @@ describe("live match socket admission", () => {
       due: null,
     });
     accept(await room.fetch(request(inviteId)));
+  });
+
+  it("retains an admitting match while other reads fill the cache", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.now());
+    const { room, inviteId, source } = await fixture();
+    source.invite.hostRematches = Array.from(
+      { length: MAX_CACHED_MATCH_SYNC_STATES + 1 },
+      (_, index) => index + 1,
+    ).join(";");
+    await room.readMatches(inviteId, inviteId);
+    let pressured = false;
+    await runInDurableObject(room, (instance) => {
+      const target = instance as unknown as {
+        matchSync: {
+          dependencies: { scheduleAlarm: (atMs: number) => Promise<void> };
+        };
+      };
+      const schedule = target.matchSync.dependencies.scheduleAlarm;
+      vi.spyOn(
+        target.matchSync.dependencies,
+        "scheduleAlarm",
+      ).mockImplementation(async (atMs) => {
+        if (!pressured) {
+          pressured = true;
+          for (
+            let index = 1;
+            index <= MAX_CACHED_MATCH_SYNC_STATES + 1;
+            index++
+          ) {
+            await instance.readMatches(inviteId, `${inviteId}${index}`);
+          }
+        }
+        await schedule(atMs);
+      });
+    });
+    const socket = accept(await room.fetch(request(inviteId)));
+    await baselines.get(socket);
+    expect(pressured).toBe(true);
+    expect(source.reads).toBe((MAX_CACHED_MATCH_SYNC_STATES + 2) * 2);
   });
 
   it("keeps recovery armed when an unchanged match is invalidated during admission", async () => {

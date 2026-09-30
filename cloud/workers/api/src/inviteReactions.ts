@@ -129,7 +129,8 @@ export class InviteReactions
       limits: INVITE_CHANNEL_SOCKET_LIMITS,
     });
     this.presentations = new MatchPresentationStore(ctx.storage, {
-      pinInvite: (inviteId) => this.inviteChannels.pinInvite(inviteId),
+      pinInvite: (inviteId) =>
+        this.inviteChannels.pinInvite(inviteId, { cache: false }),
     });
     this.reactions = new ReactionChannel(ctx, {
       presentations: this.presentations,

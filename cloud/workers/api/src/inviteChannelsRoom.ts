@@ -112,6 +112,7 @@ type InviteChannelsDependencies = {
 };
 
 export class InviteChannelsRoom {
+  private inviteId: string | null = null;
   private metadataSequence: Promise<void> = Promise.resolve();
   private wagerSequence: Promise<void> = Promise.resolve();
   private pendingAdmissions = 0;
@@ -141,8 +142,36 @@ export class InviteChannelsRoom {
     );
   }
 
-  pinInvite(inviteId: string): void {
-    this.pinInviteRow(inviteId);
+  pinInvite(inviteId: string, options: { cache?: boolean } = {}): void {
+    if (
+      inviteId !== inviteId.trim() ||
+      !isSafeRecordKey(inviteId) ||
+      (this.ctx.id.name && this.ctx.id.name !== inviteId)
+    ) {
+      throw new TypeError("invalid-metadata-invite");
+    }
+    if (this.inviteId !== null) {
+      if (this.inviteId !== inviteId)
+        throw new TypeError("metadata-invite-conflict");
+      return;
+    }
+    this.ctx.storage.sql.exec(
+      "INSERT OR IGNORE INTO invite_metadata (singleton, invite_id, snapshot_json, revision) VALUES (1, ?, NULL, 0)",
+      inviteId,
+    );
+    const stored = this.ctx.storage.sql
+      .exec<Pick<StoredMetadata, "invite_id">>(
+        "SELECT invite_id FROM invite_metadata WHERE singleton = 1",
+      )
+      .one();
+    if (stored.invite_id !== inviteId) {
+      throw new TypeError("metadata-invite-conflict");
+    }
+    this.ctx.storage.sql.exec(
+      "INSERT OR IGNORE INTO invite_wagers (singleton, invite_id, snapshot_json, revision, source_fingerprint) VALUES (1, ?, NULL, 0, NULL)",
+      inviteId,
+    );
+    if (options.cache !== false) this.inviteId = inviteId;
   }
 
   pinnedInviteId(): string {
@@ -178,31 +207,6 @@ export class InviteChannelsRoom {
       });
   }
 
-  private pinInviteRow(inviteId: string): StoredMetadata {
-    if (
-      inviteId !== inviteId.trim() ||
-      !isSafeRecordKey(inviteId) ||
-      (this.ctx.id.name && this.ctx.id.name !== inviteId)
-    ) {
-      throw new TypeError("invalid-metadata-invite");
-    }
-    this.ctx.storage.sql.exec(
-      "INSERT OR IGNORE INTO invite_metadata (singleton, invite_id, snapshot_json, revision) VALUES (1, ?, NULL, 0)",
-      inviteId,
-    );
-    const stored = this.ctx.storage.sql
-      .exec<StoredMetadata>("SELECT * FROM invite_metadata WHERE singleton = 1")
-      .one();
-    if (stored.invite_id !== inviteId) {
-      throw new TypeError("metadata-invite-conflict");
-    }
-    this.ctx.storage.sql.exec(
-      "INSERT OR IGNORE INTO invite_wagers (singleton, invite_id, snapshot_json, revision, source_fingerprint) VALUES (1, ?, NULL, 0, NULL)",
-      inviteId,
-    );
-    return stored;
-  }
-
   private serializeMetadata<T>(work: () => T | Promise<T>): Promise<T> {
     const pending = this.metadataSequence.then(work);
     this.metadataSequence = pending.then(
@@ -233,7 +237,10 @@ export class InviteChannelsRoom {
     inviteId: string,
     result: InviteMetadataReadResult,
   ): InviteMetadataReadResult {
-    const stored = this.pinInviteRow(inviteId);
+    this.pinInvite(inviteId);
+    const stored = this.ctx.storage.sql
+      .exec<StoredMetadata>("SELECT * FROM invite_metadata WHERE singleton = 1")
+      .one();
     const sockets = this.inviteSockets("metadata", true);
     if (result.status !== "ok") {
       for (const socket of sockets) {

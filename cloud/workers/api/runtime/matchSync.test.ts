@@ -23,7 +23,10 @@ import type {
   MatchStatePair,
   MatchStateRecord,
 } from "../src/matchStateTypes.ts";
-import { MATCH_SYNC_REPAIR_MS } from "../src/matchSyncRoom.ts";
+import {
+  MATCH_SYNC_REPAIR_MS,
+  MAX_CACHED_MATCH_SYNC_STATES,
+} from "../src/matchSyncRoom.ts";
 import { GameSessionTransitionFailure } from "../src/gameSessionCodec.ts";
 
 type Room = DurableObjectStub<InviteReactions>;
@@ -156,6 +159,14 @@ async function fixture(paired = true) {
   return { inviteId, room, source };
 }
 
+function addRematches(source: Source, inviteId: string, count: number) {
+  const ids = Array.from({ length: count }, (_, index) => index + 1);
+  source.invite.hostRematches = ids.join(";");
+  for (const index of ids) {
+    setMatch(source, `host-login/${inviteId}${index}`, match);
+  }
+}
+
 function accept(response: Response) {
   expect(response.status).toBe(101);
   const socket = response.webSocket!;
@@ -244,6 +255,124 @@ afterEach(async () => {
 });
 
 describe("live match snapshots", () => {
+  it("bounds idle snapshots, keeps recent reads cached and restores evicted revisions", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.now());
+    const { room, inviteId, source } = await fixture();
+    addRematches(source, inviteId, MAX_CACHED_MATCH_SYNC_STATES + 1);
+    await room.readMatches(inviteId, inviteId);
+    setMatch(source, `host-login/${inviteId}`, { ...match, fen: "updated" });
+    await room.notifyMatchesChanged(inviteId, [inviteId]);
+    const changed = await room.readMatches(inviteId, inviteId);
+    expect(changed).toMatchObject({ snapshot: { revision: 2 } });
+    for (let index = 1; index < MAX_CACHED_MATCH_SYNC_STATES; index++) {
+      await room.readMatches(inviteId, `${inviteId}${index}`);
+    }
+    await room.readMatches(inviteId, `${inviteId}1`);
+    await room.readMatches(
+      inviteId,
+      `${inviteId}${MAX_CACHED_MATCH_SYNC_STATES}`,
+    );
+    await room.readMatches(
+      inviteId,
+      `${inviteId}${MAX_CACHED_MATCH_SYNC_STATES + 1}`,
+    );
+    const reads = source.reads.length;
+    await room.readMatches(inviteId, `${inviteId}1`);
+    expect(source.reads).toHaveLength(reads);
+    expect(await room.readMatches(inviteId, inviteId)).toEqual(changed);
+    expect(source.reads).toHaveLength(reads + 2);
+    const retained = await runInDurableObject(room, (instance, state) => ({
+      cached: (
+        instance as unknown as { matchSync: { states: Map<string, unknown> } }
+      ).matchSync.states.size,
+      persisted: state.storage.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM match_sync_snapshots",
+        )
+        .one().count,
+    }));
+    expect(retained).toEqual({
+      cached: MAX_CACHED_MATCH_SYNC_STATES,
+      persisted: MAX_CACHED_MATCH_SYNC_STATES + 2,
+    });
+  });
+
+  it("preserves pending read coalescing and invalidation under cache pressure", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.now());
+    const { room, inviteId, source } = await fixture();
+    addRematches(source, inviteId, MAX_CACHED_MATCH_SYNC_STATES + 1);
+    await runInDurableObject(room, async (instance) => {
+      let started!: () => void;
+      let release!: () => void;
+      const began = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let paused = false;
+      source.read = async (playerId, matchId) => {
+        const value = structuredClone(
+          source.matches.get(`${playerId}/${matchId}`) ?? null,
+        );
+        if (!paused && playerId === "host-login" && matchId === inviteId) {
+          paused = true;
+          started();
+          await gate;
+        }
+        return value;
+      };
+      const first = instance.readMatches(inviteId, inviteId);
+      await began;
+      try {
+        for (
+          let index = 1;
+          index <= MAX_CACHED_MATCH_SYNC_STATES + 1;
+          index++
+        ) {
+          await instance.readMatches(inviteId, `${inviteId}${index}`);
+        }
+        setMatch(source, `host-login/${inviteId}`, { ...match, fen: "newest" });
+        await instance.notifyMatchesChanged(inviteId);
+        const second = instance.readMatches(inviteId, inviteId);
+        release();
+        const results = await Promise.all([first, second]);
+        expect(results[0]).toEqual(results[1]);
+        expect(results[0]).toMatchObject({
+          status: "ok",
+          snapshot: { revision: 1, hostMatch: { fen: "newest" } },
+        });
+        expect(
+          source.reads.filter((key) => key === `host-login/${inviteId}`),
+        ).toHaveLength(2);
+      } finally {
+        release();
+        await first;
+      }
+    });
+  });
+
+  it("retains subscribed matches during cache pressure and delivers later changes", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.now());
+    const { room, inviteId, source } = await fixture();
+    addRematches(source, inviteId, MAX_CACHED_MATCH_SYNC_STATES + 1);
+    const channel = await connect(room, inviteId);
+    await channel.snapshot();
+    for (let index = 1; index <= MAX_CACHED_MATCH_SYNC_STATES + 1; index++) {
+      await room.readMatches(inviteId, `${inviteId}${index}`);
+    }
+    const reads = source.reads.length;
+    await room.readMatches(inviteId, inviteId);
+    expect(source.reads).toHaveLength(reads);
+    setMatch(source, `host-login/${inviteId}`, { ...match, fen: "notified" });
+    await room.notifyMatchesChanged(inviteId, [inviteId]);
+    await runNextAlarm(room);
+    expect(await channel.snapshot()).toMatchObject({
+      revision: 2,
+      hostMatch: { fen: "notified" },
+    });
+  });
+
   it.each(["forced", "notification", "alarm"] as const)(
     "reuses an unchanged projection during a %s refresh while reading canonical state",
     async (refresh) => {

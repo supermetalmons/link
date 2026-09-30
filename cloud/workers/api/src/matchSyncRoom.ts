@@ -23,6 +23,7 @@ import { GameSessionTransitionFailure } from "./gameSessionCodec.ts";
 import type { MatchStatePair } from "./matchStateTypes.ts";
 
 export const MATCH_SYNC_REPAIR_MS = 5_000;
+export const MAX_CACHED_MATCH_SYNC_STATES = 64;
 
 type MatchSocketAttachment = {
   channel: "matches";
@@ -109,9 +110,30 @@ export class MatchSyncRoom {
         inviteGeneration: -1,
         sourceEpoch: -1,
       };
-      this.states.set(matchId, state);
     }
+    this.states.delete(matchId);
+    this.states.set(matchId, state);
     return state;
+  }
+
+  private pruneStates(): void {
+    if (this.states.size <= MAX_CACHED_MATCH_SYNC_STATES) return;
+    const subscribed = new Set(
+      this.sockets().map(
+        (socket) =>
+          (socket.deserializeAttachment() as MatchSocketAttachment).matchId,
+      ),
+    );
+    for (const [matchId, state] of this.states) {
+      if (this.states.size <= MAX_CACHED_MATCH_SYNC_STATES) break;
+      if (
+        state.pending ||
+        this.admissions.has(matchId) ||
+        subscribed.has(matchId)
+      )
+        continue;
+      this.states.delete(matchId);
+    }
   }
 
   hasSubscribers(): boolean {
@@ -322,9 +344,11 @@ export class MatchSyncRoom {
       return Promise.resolve(state.result);
     const pending = this.refresh(inviteId, matchId, state);
     state.pending = pending;
+    this.pruneStates();
     void pending
       .finally(() => {
         if (state.pending === pending) state.pending = undefined;
+        this.pruneStates();
       })
       .catch(() => undefined);
     return pending;
@@ -501,6 +525,7 @@ export class MatchSyncRoom {
           );
         }
       }
+      this.pruneStates();
     }
   }
 
@@ -576,6 +601,7 @@ export class MatchSyncRoom {
         "UPDATE match_sync_snapshots SET next_at_ms = NULL WHERE match_id = ?",
         attachment.matchId,
       );
+      this.pruneStates();
     }
   }
 }
