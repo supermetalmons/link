@@ -15,8 +15,6 @@ const {
   TELEGRAM_SAFE_RETRY_MAX_DELAY_MS,
   TELEGRAM_SAFE_RETRY_WINDOW_MS,
   buildErrorState,
-  buildRateLimitBarrierAtMs,
-  buildSafeRetryState,
   createTelegramLocalRetryBarrier,
   normalizeAttempts,
   normalizeRetrySequence,
@@ -29,6 +27,10 @@ const {
   TELEGRAM_PENDING_DELETE_TASK_KIND,
   TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND,
 } = require("./taskKinds");
+
+const {
+  createTelegramRetryCoordinator,
+} = require("./deliveryRetryCoordinator");
 
 const TELEGRAM_LEASE_TTL_MS = 60_000;
 
@@ -256,6 +258,15 @@ const createTelegramDeliveryEngine = ({
       ...(apiGateSettleOwner ? { apiGateSettleOwner } : {}),
     });
   };
+
+  const retryCoordinator = createTelegramRetryCoordinator({
+    now,
+    scheduleExactRetry,
+    releaseApiGate: (owner) => repository.releaseApiGate(owner),
+    extendRetryBarrierAndReleaseApiGate: (proof) =>
+      repository.extendRetryBarrierAndReleaseApiGate(proof),
+    localRetryBarrier,
+  });
 
   const applyRateLimitBarrierProof = async ({
     barrierProofOwner,
@@ -1197,157 +1208,101 @@ const createTelegramDeliveryEngine = ({
     preserveApiGateIdentity = false,
     persistBeforeSchedule = false,
   }) => {
-    const finalizedAtMs = now();
-    const retryState = buildSafeRetryState({
+    return retryCoordinator.finish({
       current: asObject(currentDelivery),
-      result,
-      nowMs: finalizedAtMs,
-    });
-    const rateLimited = result?.code === "rate-limited";
-    const barrierRetryNotBeforeMs = rateLimited
-      ? buildRateLimitBarrierAtMs({
-          result,
-          retryState,
-          nowMs: finalizedAtMs,
-        })
-      : 0;
-    if (rateLimited) {
-      if (!normalizeString(apiGateOwner)) {
-        const error = new Error("rate-limit-gate-owner-missing");
-        error.code = "rate-limit-gate-owner-missing";
-        error.retryable = true;
-        throw error;
-      }
-      ensureCommitted(
-        await updateOwned(messageKey, ownerToken, (record, delivery) => ({
-          ...record,
-          delivery: {
-            ...delivery,
-            apiGateProofRequired: {
-              owner: apiGateOwner,
-              retryNotBeforeMs: barrierRetryNotBeforeMs,
-              revision: desired.revision,
-              proofTaskKind,
-              ...retryState,
-              ...(safeRejectedAttemptId ? { safeRejectedAttemptId } : {}),
-              ...(pendingDeleteId ? { pendingDeleteId } : {}),
-              ...(!safeRejectedAttemptId
-                ? { retryProofLeaseOwner: ownerToken }
-                : {}),
-            },
-          },
-        })),
-        "rate-limit-proof-marker-failed",
-      );
-    }
-    const persistRetryableState = async () => {
-      const finalization = await updateOwned(
-        messageKey,
-        ownerToken,
-        (record, delivery) => {
-          const latestRevision = normalizeString(record.desired?.revision);
-          const desiredStillLatest = latestRevision === desired.revision;
-          return {
-            ...record,
-            delivery: {
-              ...omitRetryState(
-                omitKeys(delivery, [
-                  "leaseOwner",
-                  "leaseExpiresAtMs",
-                  "lastError",
-                  "sendInFlight",
-                  ...(preserveApiGateIdentity
-                    ? []
-                    : [
-                        "apiGateOwner",
-                        "apiGateGeneration",
-                        "apiGateStartedAtMs",
-                        "apiGateProofRequired",
-                        "apiGateSettleOwner",
-                      ]),
-                ]),
-              ),
-              status: desiredStillLatest ? "retryable" : "pending",
-              revision: desiredStillLatest ? desired.revision : latestRevision,
-              attempts: desiredStillLatest
-                ? normalizeAttempts(delivery.attempts)
-                : 0,
-              ...(desiredStillLatest
-                ? {
-                    ...retryState,
-                    lastError: buildErrorState(result, finalizedAtMs),
-                    ...(result?.code === "rate-limited"
-                      ? { safeRejectionAtMs: finalizedAtMs }
-                      : {}),
-                  }
-                : {}),
-            },
-          };
-        },
-      );
-      if (!finalization.committed) {
-        const current = asObject(await repository.getMessage(messageKey));
-        const currentDeliveryState = asObject(current.delivery);
-        const proofAlreadyApplied =
-          rateLimited &&
-          normalizeRetrySequence(currentDeliveryState.retrySequence) >=
-            retryState.retrySequence &&
-          normalizeString(currentDeliveryState.apiGateProofRequired?.owner) !==
-            normalizeString(apiGateOwner);
-        if (!proofAlreadyApplied) {
-          ensureCommitted(finalization, "retryable-finalization-failed");
-        }
-      }
-    };
-    if (persistBeforeSchedule && !rateLimited) {
-      await persistRetryableState();
-    }
-    await scheduleExactRetry({
+      failure: result,
+      target: { kind: proofTaskKind, safeRejectedAttemptId, pendingDeleteId },
       messageKey,
       revision: desired.revision,
-      taskKind: rateLimited
-        ? TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND
-        : proofTaskKind,
-      retryState,
-      safeRejectedAttemptId,
-      retryProofLeaseOwner:
-        safeRejectedAttemptId || persistBeforeSchedule ? "" : ownerToken,
-      pendingDeleteId,
-      proofTaskKind: rateLimited ? proofTaskKind : "",
-      barrierProofOwner: rateLimited ? apiGateOwner : "",
-      barrierRetryNotBeforeMs,
-      scheduleTimeMs: rateLimited ? finalizedAtMs : retryState.retryAtMs,
-      apiGateSettleOwner:
-        rateLimited || persistBeforeSchedule ? "" : apiGateOwner,
-    });
-    if (rateLimited) {
-      localRetryBarrier.extendRetryNotBeforeMs(barrierRetryNotBeforeMs);
-      let barrierApplied = false;
-      try {
-        const barrierResult =
-          await repository.extendRetryBarrierAndReleaseApiGate({
-            owner: apiGateOwner,
-            retryNotBeforeMs: barrierRetryNotBeforeMs,
-          });
-        if (barrierResult.applied) {
-          barrierApplied = true;
-          localRetryBarrier.extendRetryNotBeforeMs(
-            barrierResult.retryNotBeforeMs,
-          );
+      ownerToken,
+      apiGateOwner,
+      persistBeforeSchedule,
+      persistProof: async ({ retryState, barrierRetryNotBeforeMs }) => {
+        ensureCommitted(
+          await updateOwned(messageKey, ownerToken, (record, delivery) => ({
+            ...record,
+            delivery: {
+              ...delivery,
+              apiGateProofRequired: {
+                owner: apiGateOwner,
+                retryNotBeforeMs: barrierRetryNotBeforeMs,
+                revision: desired.revision,
+                proofTaskKind,
+                ...retryState,
+                ...(safeRejectedAttemptId ? { safeRejectedAttemptId } : {}),
+                ...(pendingDeleteId ? { pendingDeleteId } : {}),
+                ...(!safeRejectedAttemptId
+                  ? { retryProofLeaseOwner: ownerToken }
+                  : {}),
+              },
+            },
+          })),
+          "rate-limit-proof-marker-failed",
+        );
+      },
+      persistState: async ({ finalizedAtMs, retryState, rateLimited }) => {
+        const finalization = await updateOwned(
+          messageKey,
+          ownerToken,
+          (record, delivery) => {
+            const latestRevision = normalizeString(record.desired?.revision);
+            const desiredStillLatest = latestRevision === desired.revision;
+            return {
+              ...record,
+              delivery: {
+                ...omitRetryState(
+                  omitKeys(delivery, [
+                    "leaseOwner",
+                    "leaseExpiresAtMs",
+                    "lastError",
+                    "sendInFlight",
+                    ...(preserveApiGateIdentity
+                      ? []
+                      : [
+                          "apiGateOwner",
+                          "apiGateGeneration",
+                          "apiGateStartedAtMs",
+                          "apiGateProofRequired",
+                          "apiGateSettleOwner",
+                        ]),
+                  ]),
+                ),
+                status: desiredStillLatest ? "retryable" : "pending",
+                revision: desiredStillLatest
+                  ? desired.revision
+                  : latestRevision,
+                attempts: desiredStillLatest
+                  ? normalizeAttempts(delivery.attempts)
+                  : 0,
+                ...(desiredStillLatest
+                  ? {
+                      ...retryState,
+                      lastError: buildErrorState(result, finalizedAtMs),
+                      ...(result?.code === "rate-limited"
+                        ? { safeRejectionAtMs: finalizedAtMs }
+                        : {}),
+                    }
+                  : {}),
+              },
+            };
+          },
+        );
+        if (!finalization.committed) {
+          const current = asObject(await repository.getMessage(messageKey));
+          const currentDeliveryState = asObject(current.delivery);
+          const proofAlreadyApplied =
+            rateLimited &&
+            normalizeRetrySequence(currentDeliveryState.retrySequence) >=
+              retryState.retrySequence &&
+            normalizeString(
+              currentDeliveryState.apiGateProofRequired?.owner,
+            ) !== normalizeString(apiGateOwner);
+          if (!proofAlreadyApplied) {
+            ensureCommitted(finalization, "retryable-finalization-failed");
+          }
         }
-      } catch (_error) {
-        barrierApplied = false;
-      }
-      if (!barrierApplied) {
-        return { ...retryState, barrierProofPending: true };
-      }
-    } else if (!persistBeforeSchedule && normalizeString(apiGateOwner)) {
-      await repository.releaseApiGate(apiGateOwner);
-    }
-    if (!persistBeforeSchedule || rateLimited) {
-      await persistRetryableState();
-    }
-    return retryState;
+      },
+    });
   };
 
   const finishExpiredOwnedRetryWindow = async ({
@@ -2401,29 +2356,54 @@ const createTelegramDeliveryEngine = ({
     preserveApiGateIdentity = false,
     persistBeforeSchedule = false,
   }) => {
-    const finalizedAtMs = now();
-    const retryState = buildSafeRetryState({
+    return retryCoordinator.finish({
       current: pendingDelete,
-      result,
-      nowMs: finalizedAtMs,
-    });
-    const rateLimited = result?.code === "rate-limited";
-    const barrierRetryNotBeforeMs = rateLimited
-      ? buildRateLimitBarrierAtMs({
-          result,
-          retryState,
-          nowMs: finalizedAtMs,
-        })
-      : 0;
-    if (rateLimited) {
-      if (!normalizeString(apiGateOwner)) {
-        const error = new Error("rate-limit-gate-owner-missing");
-        error.code = "rate-limit-gate-owner-missing";
-        error.retryable = true;
-        throw error;
-      }
-      ensureCommitted(
-        await transact(messageKey, (record) => {
+      failure: result,
+      target: { kind: TELEGRAM_PENDING_DELETE_TASK_KIND, pendingDeleteId },
+      messageKey,
+      revision,
+      ownerToken,
+      apiGateOwner,
+      persistBeforeSchedule,
+      persistProof: async ({ retryState, barrierRetryNotBeforeMs }) => {
+        ensureCommitted(
+          await transact(messageKey, (record) => {
+            const delivery = asObject(record.delivery);
+            const latestPendingDelete = asObject(delivery.pendingDelete);
+            if (
+              normalizeString(latestPendingDelete.pendingDeleteId) !==
+                pendingDeleteId ||
+              normalizeString(latestPendingDelete.leaseOwner) !== ownerToken
+            ) {
+              return { commit: false, decision: "pending-delete-lost" };
+            }
+            return {
+              value: {
+                ...record,
+                delivery: {
+                  ...delivery,
+                  pendingDelete: {
+                    ...latestPendingDelete,
+                    apiGateProofRequired: {
+                      owner: apiGateOwner,
+                      retryNotBeforeMs: barrierRetryNotBeforeMs,
+                      revision,
+                      proofTaskKind: TELEGRAM_PENDING_DELETE_TASK_KIND,
+                      pendingDeleteId,
+                      retryProofLeaseOwner: ownerToken,
+                      ...retryState,
+                    },
+                  },
+                },
+              },
+              decision: "pending-rate-limit-proof-required",
+            };
+          }),
+          "pending-rate-limit-proof-marker-failed",
+        );
+      },
+      persistState: async ({ finalizedAtMs, retryState, rateLimited }) => {
+        const finalization = await transact(messageKey, (record) => {
           const delivery = asObject(record.delivery);
           const latestPendingDelete = asObject(delivery.pendingDelete);
           if (
@@ -2439,130 +2419,51 @@ const createTelegramDeliveryEngine = ({
               delivery: {
                 ...delivery,
                 pendingDelete: {
-                  ...latestPendingDelete,
-                  apiGateProofRequired: {
-                    owner: apiGateOwner,
-                    retryNotBeforeMs: barrierRetryNotBeforeMs,
-                    revision,
-                    proofTaskKind: TELEGRAM_PENDING_DELETE_TASK_KIND,
-                    pendingDeleteId,
-                    retryProofLeaseOwner: ownerToken,
-                    ...retryState,
-                  },
+                  ...omitRetryState(
+                    omitKeys(latestPendingDelete, [
+                      "leaseOwner",
+                      "leaseExpiresAtMs",
+                      "lastError",
+                      ...(preserveApiGateIdentity
+                        ? []
+                        : [
+                            "apiGateOwner",
+                            "apiGateGeneration",
+                            "apiGateStartedAtMs",
+                            "apiGateProofRequired",
+                          ]),
+                    ]),
+                  ),
+                  status: "retryable",
+                  ...retryState,
+                  lastError: buildErrorState(result, finalizedAtMs),
                 },
               },
             },
-            decision: "pending-rate-limit-proof-required",
+            decision: "pending-delete-retryable",
           };
-        }),
-        "pending-rate-limit-proof-marker-failed",
-      );
-    }
-    const persistPendingDeleteRetryableState = async () => {
-      const finalization = await transact(messageKey, (record) => {
-        const delivery = asObject(record.delivery);
-        const latestPendingDelete = asObject(delivery.pendingDelete);
-        if (
-          normalizeString(latestPendingDelete.pendingDeleteId) !==
-            pendingDeleteId ||
-          normalizeString(latestPendingDelete.leaseOwner) !== ownerToken
-        ) {
-          return { commit: false, decision: "pending-delete-lost" };
-        }
-        return {
-          value: {
-            ...record,
-            delivery: {
-              ...delivery,
-              pendingDelete: {
-                ...omitRetryState(
-                  omitKeys(latestPendingDelete, [
-                    "leaseOwner",
-                    "leaseExpiresAtMs",
-                    "lastError",
-                    ...(preserveApiGateIdentity
-                      ? []
-                      : [
-                          "apiGateOwner",
-                          "apiGateGeneration",
-                          "apiGateStartedAtMs",
-                          "apiGateProofRequired",
-                        ]),
-                  ]),
-                ),
-                status: "retryable",
-                ...retryState,
-                lastError: buildErrorState(result, finalizedAtMs),
-              },
-            },
-          },
-          decision: "pending-delete-retryable",
-        };
-      });
-      if (!finalization.committed) {
-        const current = asObject(await repository.getMessage(messageKey));
-        const currentPendingDelete = asObject(current.delivery?.pendingDelete);
-        const proofAlreadyApplied =
-          rateLimited &&
-          normalizeRetrySequence(currentPendingDelete.retrySequence) >=
-            retryState.retrySequence &&
-          normalizeString(currentPendingDelete.apiGateProofRequired?.owner) !==
-            normalizeString(apiGateOwner);
-        if (!proofAlreadyApplied) {
-          ensureCommitted(
-            finalization,
-            "pending-delete-retryable-finalization-failed",
+        });
+        if (!finalization.committed) {
+          const current = asObject(await repository.getMessage(messageKey));
+          const currentPendingDelete = asObject(
+            current.delivery?.pendingDelete,
           );
+          const proofAlreadyApplied =
+            rateLimited &&
+            normalizeRetrySequence(currentPendingDelete.retrySequence) >=
+              retryState.retrySequence &&
+            normalizeString(
+              currentPendingDelete.apiGateProofRequired?.owner,
+            ) !== normalizeString(apiGateOwner);
+          if (!proofAlreadyApplied) {
+            ensureCommitted(
+              finalization,
+              "pending-delete-retryable-finalization-failed",
+            );
+          }
         }
-      }
-    };
-    if (persistBeforeSchedule && !rateLimited) {
-      await persistPendingDeleteRetryableState();
-    }
-    await scheduleExactRetry({
-      messageKey,
-      revision,
-      taskKind: rateLimited
-        ? TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND
-        : TELEGRAM_PENDING_DELETE_TASK_KIND,
-      retryState,
-      pendingDeleteId,
-      retryProofLeaseOwner: persistBeforeSchedule ? "" : ownerToken,
-      proofTaskKind: rateLimited ? TELEGRAM_PENDING_DELETE_TASK_KIND : "",
-      barrierProofOwner: rateLimited ? apiGateOwner : "",
-      barrierRetryNotBeforeMs,
-      scheduleTimeMs: rateLimited ? finalizedAtMs : retryState.retryAtMs,
-      apiGateSettleOwner:
-        rateLimited || persistBeforeSchedule ? "" : apiGateOwner,
+      },
     });
-    if (rateLimited) {
-      localRetryBarrier.extendRetryNotBeforeMs(barrierRetryNotBeforeMs);
-      let barrierApplied = false;
-      try {
-        const barrierResult =
-          await repository.extendRetryBarrierAndReleaseApiGate({
-            owner: apiGateOwner,
-            retryNotBeforeMs: barrierRetryNotBeforeMs,
-          });
-        if (barrierResult.applied) {
-          barrierApplied = true;
-          localRetryBarrier.extendRetryNotBeforeMs(
-            barrierResult.retryNotBeforeMs,
-          );
-        }
-      } catch (_error) {
-        barrierApplied = false;
-      }
-      if (!barrierApplied) {
-        return { ...retryState, barrierProofPending: true };
-      }
-    } else if (!persistBeforeSchedule && normalizeString(apiGateOwner)) {
-      await repository.releaseApiGate(apiGateOwner);
-    }
-    if (!persistBeforeSchedule || rateLimited) {
-      await persistPendingDeleteRetryableState();
-    }
-    return retryState;
   };
 
   const applyPendingDeleteRetryWindowProof = async (

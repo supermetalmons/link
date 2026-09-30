@@ -257,8 +257,8 @@ function canonicalProfileAggregateStatements(
   ].map((query) => db.prepare(query).bind(key));
 }
 
-function parseCanonicalProfileAggregateResults(
-  results: readonly D1Result[],
+export function parseCanonicalProfileAggregateResults(
+  results: readonly Pick<D1Result, "results">[],
 ): CanonicalProfileAggregateSnapshot {
   const profileRow = results[0].results[0];
   const mergeRow = results[4].results[0];

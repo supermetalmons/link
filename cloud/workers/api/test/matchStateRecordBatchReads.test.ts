@@ -20,6 +20,7 @@ type LegacyResult = {
   success: boolean;
   results: Array<{ record_json: string }>;
 };
+type SnapshotResult = { success: boolean; results: unknown[] };
 
 function deferred() {
   let resolve!: () => void;
@@ -62,6 +63,7 @@ function fixture({
   legacy = async (input) => ({ ...input, legacy: true }),
   legacyJson,
   mapLegacyResults = (results) => results,
+  mapSnapshotResults = (results) => results,
 }: {
   control?: (index: number) => Control | Promise<Control>;
   findRoute?: (input: Request, controls: number) => Route | null;
@@ -72,10 +74,12 @@ function fixture({
   legacy?: (input: Request) => Promise<unknown | null>;
   legacyJson?: (input: Request) => Promise<string | null>;
   mapLegacyResults?: (results: LegacyResult[]) => LegacyResult[];
+  mapSnapshotResults?: (results: SnapshotResult[]) => SnapshotResult[];
 } = {}) {
   const stats = {
     controls: 0,
     sessions: 0,
+    d1Calls: [] as Array<{ session: number; queries: string[] }>,
     routeBatches: [] as Request[][],
     routeBatchSessions: [] as number[],
     scalarRoutes: [] as Request[],
@@ -117,6 +121,7 @@ function fixture({
                 return statement;
               },
               async first() {
+                stats.d1Calls.push({ session, queries: [sql] });
                 if (sql.includes("FROM match_state_control")) {
                   return {
                     ...(await control(++stats.controls)),
@@ -140,20 +145,29 @@ function fixture({
           batch: async (
             statements: Array<{ sql: string; values: string[] }>,
           ) => {
+            stats.d1Calls.push({
+              session,
+              queries: statements.map(({ sql }) => sql),
+            });
+            const hasControl = statements[0]?.sql.includes(
+              "FROM match_state_control",
+            );
             const isLegacy = statements[0]?.sql.includes(
               "FROM match_state_legacy_records",
             );
-            const inputs = statements.map(({ sql, values }) => {
-              assert.ok(
-                sql.includes(
-                  isLegacy
-                    ? "FROM match_state_legacy_records"
-                    : "FROM match_state_routes",
-                ),
-              );
-              assert.equal(values.length, 2);
-              return { playerId: values[0], matchId: values[1] };
-            });
+            const inputs = statements
+              .slice(hasControl ? 1 : 0)
+              .map(({ sql, values }) => {
+                assert.ok(
+                  sql.includes(
+                    isLegacy
+                      ? "FROM match_state_legacy_records"
+                      : "FROM match_state_routes",
+                  ),
+                );
+                assert.equal(values.length, 2);
+                return { playerId: values[0], matchId: values[1] };
+              });
             if (isLegacy) {
               stats.legacyBatches.push(inputs);
               stats.legacyBatchSessions.push(session);
@@ -171,11 +185,20 @@ function fixture({
             }
             stats.routeBatches.push(inputs);
             stats.routeBatchSessions.push(session);
+            const controlRow = hasControl
+              ? { ...(await control(++stats.controls)), freeze_generation: 0 }
+              : null;
             await beforeRoutes(inputs, stats.routeBatches.length);
-            return inputs.map((input) => {
+            const results = inputs.map((input) => {
               const found = findRoute(input, stats.controls);
               return { success: true, results: found ? [found] : [] };
             });
+            return hasControl
+              ? mapSnapshotResults([
+                  { success: true, results: [controlRow] },
+                  ...results,
+                ])
+              : results;
           },
         };
       },
@@ -220,6 +243,11 @@ test("eight records batch routes once and read four stored invites in input orde
     })),
   );
   assert.equal(stats.controls, 2);
+  assert.equal(stats.d1Calls.length, 2);
+  assert.equal(stats.d1Calls[0].queries.length, 9);
+  assert.match(stats.d1Calls[0].queries[0], /FROM match_state_control/);
+  assert.match(stats.d1Calls[1].queries[0], /FROM match_state_control/);
+  assert.notEqual(stats.d1Calls[0].session, stats.d1Calls[1].session);
   assert.deepEqual(stats.routeBatches, [inputs]);
   assert.equal(stats.roomReads.length, 4);
   assert.ok(stats.roomReads.every((input) => input.requests.length === 2));
@@ -246,9 +274,95 @@ test("eight legacy records use one primary batch in input order", async () => {
   assert.deepEqual(stats.legacyReads, inputs);
   assert.equal(stats.legacyBatchSessions.length, 1);
   assert.equal(stats.controls, 2);
+  assert.equal(stats.d1Calls.length, 3);
   assert.equal(stats.maximumActive, 1);
   assert.deepEqual(stats.roomReads, []);
   assert.deepEqual(stats.scalarRoutes, []);
+});
+
+test("single and absent records combine initial authority and routes before a fresh authority read", async () => {
+  for (const missing of [false, true]) {
+    const { source, stats } = fixture({
+      findRoute: (input) => (missing ? null : route(input)),
+    });
+    const [input] = requests(1);
+    assert.deepEqual(
+      await source.readMatchRecord(input),
+      missing ? null : { ...input, inviteId: "stored-invite-0", epoch: 1 },
+    );
+    assert.equal(stats.controls, 2);
+    assert.equal(stats.sessions, 2);
+    assert.deepEqual(
+      stats.d1Calls.map(({ queries }) => queries.length),
+      [2, 1],
+    );
+    assert.match(stats.d1Calls[0].queries[0], /FROM match_state_control/);
+    assert.match(stats.d1Calls[0].queries[1], /FROM match_state_routes/);
+    assert.match(stats.d1Calls[1].queries[0], /FROM match_state_control/);
+    assert.notEqual(stats.d1Calls[0].session, stats.d1Calls[1].session);
+    assert.equal(stats.roomReads.length, missing ? 0 : 1);
+  }
+});
+
+test("failed or incomplete initial snapshots fail closed without room reads or blind retries", async () => {
+  const cases: Array<{
+    mapSnapshotResults: (results: SnapshotResult[]) => SnapshotResult[];
+    message: string;
+  }> = [
+    {
+      mapSnapshotResults: () => {
+        throw new Error("batch-unavailable");
+      },
+      message: "match-state-control-unavailable",
+    },
+    {
+      mapSnapshotResults: () => [],
+      message: "match-state-control-unavailable",
+    },
+    {
+      mapSnapshotResults: (results) => [
+        { success: false, results: [] },
+        ...results.slice(1),
+      ],
+      message: "match-state-control-unavailable",
+    },
+    {
+      mapSnapshotResults: (results) => [
+        { success: true, results: [] },
+        ...results.slice(1),
+      ],
+      message: "match-state-control-unavailable",
+    },
+    {
+      mapSnapshotResults: (results) => [
+        { success: true, results: [{ backend: "durable", epoch: 0 }] },
+        ...results.slice(1),
+      ],
+      message: "match-state-control-unavailable",
+    },
+    {
+      mapSnapshotResults: (results) => results.slice(0, -1),
+      message: "match-state-routes-unavailable",
+    },
+    {
+      mapSnapshotResults: (results) => [
+        results[0],
+        { success: false, results: [] },
+        ...results.slice(2),
+      ],
+      message: "match-state-routes-unavailable",
+    },
+  ];
+  for (const scenario of cases) {
+    const { source, stats } = fixture(scenario);
+    await assert.rejects(source.readMatchRecords(requests(2)), {
+      message: scenario.message,
+    });
+    assert.equal(stats.controls, 1);
+    assert.equal(stats.d1Calls.length, 1);
+    assert.deepEqual(stats.roomReads, []);
+    assert.deepEqual(stats.legacyReads, []);
+  }
 });
 
 test("interleaved legacy duplicates retain raw JSON values and missing positions", async () => {
@@ -737,7 +851,7 @@ test("frozen authority permits reads and retired authority fails closed", async 
       message: "match-state-durable-authority-required",
     });
     assert.equal(stats.controls, initiallyDurable ? 3 : 1);
-    assert.equal(stats.routeBatches.length, initiallyDurable ? 1 : 0);
+    assert.equal(stats.routeBatches.length, initiallyDurable ? 2 : 1);
     assert.equal(stats.roomReads.length, initiallyDurable ? 1 : 0);
   }
 });

@@ -752,7 +752,11 @@ test("recovery deduplicates urgent and background rows and bounds event concurre
   assert(maximum > 1 && maximum <= 10);
 });
 
-test("a failed or malformed event cannot block later recovery rows or cursor progress", async () => {
+test("a failed or malformed event cannot block later recovery rows or cursor progress", async (context) => {
+  const logs: Array<{ event: string; eventId: string }> = [];
+  context.mock.method(console, "error", (value: string) => {
+    logs.push(JSON.parse(value));
+  });
   const events = Object.fromEntries(
     Array.from({ length: 101 }, (_, index) => [
       `event-${String(index).padStart(4, "0")}`,
@@ -772,7 +776,11 @@ test("a failed or malformed event cannot block later recovery rows or cursor pro
         continue;
       const eventId = String(value.eventId);
       attempted.add(eventId);
-      if (eventId === "event-0000") throw new Error("event-persistence-failed");
+      if (eventId === "event-0000") {
+        throw new Error("event-persistence-failed", {
+          cause: new Error("database-unavailable"),
+        });
+      }
     }
   });
   await assert.rejects(
@@ -785,6 +793,18 @@ test("a failed or malformed event cannot block later recovery rows or cursor pro
     /scheduled-event-reconciliation-failed/,
   );
   assert.equal(attempted.size, 99);
+  assert.deepEqual(
+    logs.find((entry) => entry.event === "scheduled_event_recovery_failed"),
+    {
+      event: "scheduled_event_recovery_failed",
+      eventId: "event-0000",
+      error: {
+        name: "Error",
+        message: "event-persistence-failed",
+        cause: { name: "Error", message: "database-unavailable" },
+      },
+    },
+  );
   assert(attempted.has("event-0099"));
   assert.deepEqual(await recovery.readCursor(), {
     cursor: { eventId: "event-0099", startAtMs: 50_000_000 },

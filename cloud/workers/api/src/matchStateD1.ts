@@ -102,6 +102,12 @@ export async function readMatchStateControl(
   } catch {
     throw new MatchStateD1Failure("control-unavailable");
   }
+  return parseMatchStateControl(row);
+}
+
+function parseMatchStateControl(
+  row: ControlRow | null | undefined,
+): MatchStateControl {
   if (
     !row ||
     (row.backend !== RETIRED_STATE_BACKEND && row.backend !== "durable") ||
@@ -451,6 +457,50 @@ export async function readMatchStateRoutes(
   if (results.length !== inputs.length)
     throw new MatchStateD1Failure("routes-unavailable");
   return results.map((result) => parseMatchStateRoute(result.results[0]));
+}
+
+export async function readMatchStateRouteSnapshot(
+  db: D1Database,
+  inputs: readonly { playerId: string; matchId: string }[],
+): Promise<{
+  control: MatchStateControl;
+  routes: Array<MatchStateRoute | null>;
+}> {
+  const session = db.withSession("first-primary");
+  const statements = [
+    session.prepare("SELECT * FROM match_state_control WHERE singleton = 1"),
+    ...inputs.map((input) =>
+      prepareMatchStateRouteRead(session, input.playerId, input.matchId),
+    ),
+  ];
+  let results: D1Result<ControlRow | MatchStateRouteRow>[];
+  try {
+    results = await session.batch<ControlRow | MatchStateRouteRow>(statements);
+  } catch {
+    throw new MatchStateD1Failure("control-unavailable");
+  }
+  if (!results[0]?.success)
+    throw new MatchStateD1Failure("control-unavailable");
+  const control = parseMatchStateControl(
+    results[0].results?.[0] as ControlRow | undefined,
+  );
+  if (
+    results.length !== inputs.length + 1 ||
+    results
+      .slice(1)
+      .some((result) => !result.success || !Array.isArray(result.results))
+  )
+    throw new MatchStateD1Failure("routes-unavailable");
+  return {
+    control,
+    routes: results
+      .slice(1)
+      .map((result) =>
+        parseMatchStateRoute(
+          result.results[0] as MatchStateRouteRow | undefined,
+        ),
+      ),
+  };
 }
 
 export async function readLegacyMatchState(

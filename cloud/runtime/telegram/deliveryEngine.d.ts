@@ -1,5 +1,10 @@
 import type { TelegramClient } from "./client.js";
-import type { TelegramTaskKind } from "./taskIdentity.js";
+import type {
+  TelegramBarrierProof,
+  TelegramBarrierProofResult,
+  TelegramLocalRetryBarrier,
+} from "./deliveryRetryTypes.js";
+import type { TelegramTaskKind, TelegramTaskPayload } from "./taskIdentity.js";
 
 export type TelegramRepository = {
   getMessage(messageKey: string): Promise<unknown>;
@@ -14,12 +19,12 @@ export type TelegramRepository = {
   ): Promise<Record<string, unknown>>;
   releaseApiGate(owner: string): Promise<boolean>;
   extendRetryBarrierAndReleaseApiGate(
-    input: Record<string, unknown>,
-  ): Promise<Record<string, unknown>>;
+    input: TelegramBarrierProof,
+  ): Promise<TelegramBarrierProofResult>;
 };
 
 export type TelegramRetryScheduler = (
-  input: Record<string, unknown> & { scheduleTimeMs?: number },
+  input: TelegramTaskPayload & { scheduleTimeMs?: number },
 ) => Promise<Record<string, unknown>>;
 
 export type TelegramEngineResult = {
@@ -33,10 +38,7 @@ export type TelegramEngineResult = {
 
 export function createTelegramLocalRetryBarrier(
   initialRetryNotBeforeMs?: number,
-): {
-  getRetryNotBeforeMs(): number;
-  extendRetryNotBeforeMs(candidateMs: number): number;
-};
+): TelegramLocalRetryBarrier;
 
 export function resolveTelegramDestination(
   destination: string,

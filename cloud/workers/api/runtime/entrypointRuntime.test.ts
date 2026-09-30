@@ -579,6 +579,7 @@ describe("Worker entrypoint", () => {
           durationMs: expect.any(Number),
           scheduledTime: controller.scheduledTime,
           code: "event-progress-failed",
+          error: { name: "Error", message: "event-progress-failed" },
         },
         {
           event: "scheduled_task_failed",
@@ -586,6 +587,7 @@ describe("Worker entrypoint", () => {
           durationMs: expect.any(Number),
           scheduledTime: controller.scheduledTime,
           code: "poison-transition",
+          error: { name: "Error", message: "poison-transition" },
         },
       ]);
     }

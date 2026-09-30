@@ -1,8 +1,8 @@
-import { requireDurableMatchState } from "./matchStateAuthority.ts";
+import { assertDurableMatchState } from "./matchStateAuthority.ts";
 import {
   readLegacyMatchStates,
   readMatchStateControl,
-  readMatchStateRoutes,
+  readMatchStateRouteSnapshot,
   type MatchStateControl,
 } from "./matchStateD1.ts";
 import { getMatchStateRpc, unwrapMatchStateRpc } from "./matchStateRpc.ts";
@@ -17,10 +17,34 @@ export type MatchStateReadTiming = {
   authorityMs: number;
 };
 
-export async function readCurrentMatchState<T>(
+type MatchStateReadOptions = {
+  signal?: AbortSignal;
+  timing?: MatchStateReadTiming;
+};
+
+export function readCurrentMatchState<T>(
   env: Env,
   read: (control: MatchStateControl) => Promise<T>,
-  options: { signal?: AbortSignal; timing?: MatchStateReadTiming } = {},
+  options: MatchStateReadOptions = {},
+): Promise<T> {
+  return readCurrentMatchStateSnapshot(
+    env,
+    async () => ({
+      control: await readMatchStateControl(env.PROFILE_GAMES_DB),
+    }),
+    ({ control }) => read(control),
+    options,
+  );
+}
+
+async function readCurrentMatchStateSnapshot<
+  T,
+  Snapshot extends { control: MatchStateControl },
+>(
+  env: Env,
+  loadSnapshot: () => Promise<Snapshot>,
+  read: (snapshot: Snapshot) => Promise<T>,
+  options: MatchStateReadOptions,
 ): Promise<T> {
   let authorityStartedAt: number | null = null;
   const finishAuthorityRead = () => {
@@ -29,29 +53,36 @@ export async function readCurrentMatchState<T>(
       authorityStartedAt = null;
     }
   };
-  const readControl = async (requireDurable = false) => {
+  const measureAuthorityRead = async <Value>(
+    load: () => Promise<Value>,
+  ): Promise<Value> => {
     if (options.timing) {
       authorityStartedAt = Date.now();
       options.timing.authorityReads++;
     }
     try {
-      return await (requireDurable
-        ? requireDurableMatchState(env.PROFILE_GAMES_DB)
-        : readMatchStateControl(env.PROFILE_GAMES_DB));
+      return await load();
     } finally {
       finishAuthorityRead();
     }
   };
+  const readControl = () =>
+    measureAuthorityRead(() => readMatchStateControl(env.PROFILE_GAMES_DB));
   try {
     return await withReadCancellation(async () => {
       for (let attempt = 0; attempt < 3; attempt++) {
         options.signal?.throwIfAborted();
         if (options.timing) options.timing.attempts++;
-        const control = await readControl(true);
+        const snapshot = await measureAuthorityRead(async () => {
+          const snapshot = await loadSnapshot();
+          assertDurableMatchState(snapshot.control);
+          return snapshot;
+        });
+        const { control } = snapshot;
         options.signal?.throwIfAborted();
         let result: T;
         try {
-          result = await read(control);
+          result = await read(snapshot);
         } catch (error) {
           options.signal?.throwIfAborted();
           const latest = await readControl();
@@ -123,11 +154,10 @@ export async function readMatchStateRecords(
       throw new Error("match-state-invalid-read-target");
   }
   if (inputs.length === 0) return [];
-  return readCurrentMatchState(
+  return readCurrentMatchStateSnapshot(
     env,
-    async (control) => {
-      const routes = await readMatchStateRoutes(env.PROFILE_GAMES_DB, inputs);
-      signal?.throwIfAborted();
+    () => readMatchStateRouteSnapshot(env.PROFILE_GAMES_DB, inputs),
+    async ({ control, routes }) => {
       const results: unknown[] = Array(inputs.length).fill(null);
       const rooms = new Map<
         string,

@@ -7,7 +7,6 @@ import {
   isEventPrizeStandard,
 } from "@mons/shared/event-prizes";
 import { createEventLockManagerCore } from "../../../runtime/events/lockManagerCore.js";
-import { MAX_PROFILE_MERGE_TARGET_HOPS } from "../../../runtime/profileMergeTargets.js";
 import {
   createD1AuthRecoveryPrizeStore,
   type AuthRecoveryPrizeStore,
@@ -32,8 +31,6 @@ import {
   CanonicalProfileConflict,
   commitCanonicalPlan,
   readCanonicalAuthRecoveryJob,
-  readCanonicalMergeTarget,
-  readCanonicalProfileAggregates,
   type CanonicalAuthRecoverySnapshot,
   type CanonicalAuthRecoveryValue,
 } from "./profileCanonicalD1.ts";
@@ -43,6 +40,7 @@ import {
   quarantineCanonicalAuthRecoveryJob,
   type AuthRecoveryQuarantineReason,
 } from "./profileCanonical/recovery.ts";
+import { readCanonicalRecoveryFinalizationSnapshot } from "./profileCanonical/recoverySnapshot.ts";
 import { PROFILE_BACKGROUND_SWEEP_LIMIT } from "./profileBackgroundLimits.ts";
 
 export const AUTH_RECOVERY_QUEUE_NAME = "mons-link-auth-recovery";
@@ -652,41 +650,23 @@ function createCanonicalAuthRecoveryService(
       );
       return;
     }
-    const [target, source] = await readCanonicalProfileAggregates(db, [
-      job.profileId,
-      sourceProfileId,
-    ]);
-    if (!target.profile || !target.recovery) return;
+    const { target, source, mergePath } =
+      await readCanonicalRecoveryFinalizationSnapshot(
+        db,
+        job.profileId,
+        sourceProfileId,
+      );
+    if (!target.profile || !target.recovery || !mergePath) return;
     const live = canonicalRecoveryJob(target.recovery);
-    let currentProfileId = sourceProfileId;
-    let firstTargetProfileId = "";
-    let resolvesToTarget = false;
-    const mergeExpectations: Array<{
-      kind: "merge-target";
-      sourceProfileId: string;
-      targetProfileId: string;
-    }> = [];
-    const visited = new Set([sourceProfileId]);
-    for (let depth = 0; depth <= MAX_PROFILE_MERGE_TARGET_HOPS; depth++) {
-      const mapping = await readCanonicalMergeTarget(db, currentProfileId);
-      if (!mapping || visited.has(mapping.targetProfileId)) break;
-      mergeExpectations.push({
-        kind: "merge-target",
-        sourceProfileId: mapping.sourceProfileId,
-        targetProfileId: mapping.targetProfileId,
-      });
-      firstTargetProfileId ||= mapping.targetProfileId;
-      if (mapping.targetProfileId === job.profileId) {
-        resolvesToTarget = true;
-        break;
-      }
-      visited.add(mapping.targetProfileId);
-      currentProfileId = mapping.targetProfileId;
-    }
+    const firstTargetProfileId = mergePath[0].targetProfileId;
+    const mergeExpectations = mergePath.map((mapping) => ({
+      kind: "merge-target" as const,
+      sourceProfileId: mapping.sourceProfileId,
+      targetProfileId: mapping.targetProfileId,
+    }));
     if (
       live.sourceProfileIds[0] !== sourceProfileId ||
       live.sourcePhase !== "finalize" ||
-      !resolvesToTarget ||
       (source.profile &&
         (source.profile.mergedIntoProfileId !== firstTargetProfileId ||
           source.loginOwners.length > 0))

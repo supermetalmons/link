@@ -16,6 +16,7 @@ import { createRatingRepository } from "./ratingRepository.ts";
 import type { RatingEventProgressRepository } from "./ratingContracts.ts";
 import { PROFILE_BACKGROUND_SWEEP_LIMIT } from "./profileBackgroundLimits.ts";
 import { runRecoveryItems } from "./recoveryRunner.ts";
+import { summarizeError } from "./errorSummary.ts";
 import { createWorkerEventRuntime } from "./workerEventRuntime.ts";
 import {
   createEventGameplayRepository,
@@ -204,6 +205,14 @@ async function reconcileScheduledEvents(
         JSON.stringify({
           event: "scheduled_event_recovery_failed",
           eventId,
+          error: summarizeError(
+            eventFailures.length === 1
+              ? eventFailures[0]
+              : new AggregateError(
+                  eventFailures,
+                  "scheduled-event-recovery-failed",
+                ),
+          ),
         }),
       );
     }

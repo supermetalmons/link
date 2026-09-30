@@ -4,17 +4,24 @@ import {
   type MatchStateControl,
 } from "./matchStateD1.ts";
 
-export async function requireDurableMatchState(
-  db: D1Database,
+export function assertDurableMatchState(
+  control: MatchStateControl,
   expectedEpoch?: number,
-): Promise<MatchStateControl> {
-  const control = await readMatchStateControl(db);
+): void {
   if (
     control.backend !== "durable" ||
     (expectedEpoch !== undefined && control.epoch !== expectedEpoch)
   ) {
     throw new MatchStateD1Failure("durable-authority-required");
   }
+}
+
+export async function requireDurableMatchState(
+  db: D1Database,
+  expectedEpoch?: number,
+): Promise<MatchStateControl> {
+  const control = await readMatchStateControl(db);
+  assertDurableMatchState(control, expectedEpoch);
   return control;
 }
 

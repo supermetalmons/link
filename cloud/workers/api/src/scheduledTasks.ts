@@ -1,3 +1,5 @@
+import { summarizeError } from "./errorSummary.ts";
+
 type ScheduledTask = {
   name: string;
   run: () => Promise<unknown>;
@@ -36,6 +38,7 @@ export async function runScheduledTasks(
         scheduledTime,
         code:
           result.reason instanceof Error ? result.reason.message : "unknown",
+        error: summarizeError(result.reason),
       }),
     );
   }

@@ -3,9 +3,13 @@
 const TELEGRAM_SAFE_RETRY_WINDOW_MS = 10 * 60 * 1000;
 const TELEGRAM_SAFE_RETRY_MAX_DELAY_MS = 60_000;
 
+/** @param {unknown} value @returns {Record<string, unknown>} */
 const asObject = (value) =>
-  value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  value && typeof value === "object" && !Array.isArray(value)
+    ? /** @type {Record<string, unknown>} */ (value)
+    : {};
 
+/** @param {unknown} value @param {string[]} keys */
 const omitKeys = (value, keys) => {
   const output = { ...asObject(value) };
   for (const key of keys) {
@@ -14,9 +18,11 @@ const omitKeys = (value, keys) => {
   return output;
 };
 
+/** @param {unknown} value */
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 
+/** @param {number} [initialRetryNotBeforeMs] @returns {import("./deliveryRetryTypes").TelegramLocalRetryBarrier} */
 const createTelegramLocalRetryBarrier = (initialRetryNotBeforeMs = 0) => {
   let retryNotBeforeMs =
     Number.isFinite(initialRetryNotBeforeMs) && initialRetryNotBeforeMs > 0
@@ -40,17 +46,25 @@ const createTelegramLocalRetryBarrier = (initialRetryNotBeforeMs = 0) => {
   };
 };
 
+/** @param {unknown} value */
 const normalizeAttempts = (value) =>
-  Number.isInteger(value) && value >= 0 ? value : 0;
+  typeof value === "number" && Number.isInteger(value) && value >= 0
+    ? value
+    : 0;
 
+/** @param {unknown} value */
 const normalizeTimestamp = (value) => {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
 };
 
+/** @param {unknown} value */
 const normalizeRetrySequence = (value) =>
-  Number.isInteger(value) && value >= 0 ? value : 0;
+  typeof value === "number" && Number.isInteger(value) && value >= 0
+    ? value
+    : 0;
 
+/** @param {unknown} value */
 const resolveRetryDeadlineAtMs = (value) => {
   const state = asObject(value);
   const retryDeadlineAtMs = normalizeTimestamp(state.retryDeadlineAtMs);
@@ -63,6 +77,7 @@ const resolveRetryDeadlineAtMs = (value) => {
     : 0;
 };
 
+/** @param {{current: unknown, result?: import("./deliveryRetryTypes").TelegramRetryFailure | null, nowMs: number}} input @returns {import("./deliveryRetryTypes").TelegramRetryState} */
 const buildSafeRetryState = ({ current, result, nowMs }) => {
   const value = asObject(current);
   const retryStartedAtMs =
@@ -93,6 +108,7 @@ const buildSafeRetryState = ({ current, result, nowMs }) => {
   };
 };
 
+/** @param {{result?: import("./deliveryRetryTypes").TelegramRetryFailure | null, retryState?: Partial<import("./deliveryRetryTypes").TelegramRetryState>, nowMs: number}} input */
 const buildRateLimitBarrierAtMs = ({ result, retryState, nowMs }) => {
   const retryAfterSeconds = Number(result?.retryAfterSeconds);
   const retryAfterMs =
@@ -105,6 +121,7 @@ const buildRateLimitBarrierAtMs = ({ result, retryState, nowMs }) => {
   );
 };
 
+/** @param {unknown} value */
 const omitRetryState = (value) =>
   omitKeys(value, [
     "retryStartedAtMs",
@@ -113,7 +130,9 @@ const omitRetryState = (value) =>
     "retrySequence",
   ]);
 
+/** @param {import("./deliveryRetryTypes").TelegramRetryFailure | null | undefined} result @param {number} nowMs */
 const buildErrorState = (result, nowMs) => {
+  /** @type {import("./deliveryRetryTypes").TelegramDeliveryErrorState} */
   const error = {
     code: normalizeString(result?.code) || "telegram-error",
     atMs: nowMs,
@@ -122,7 +141,10 @@ const buildErrorState = (result, nowMs) => {
   if (description) {
     error.description = description.slice(0, 500);
   }
-  if (Number.isInteger(result?.httpStatus)) {
+  if (
+    typeof result?.httpStatus === "number" &&
+    Number.isInteger(result.httpStatus)
+  ) {
     error.httpStatus = result.httpStatus;
   }
   return error;

@@ -86,14 +86,28 @@ describe("strict match runtime", () => {
       get(target, property, receiver) {
         if (property === "withSession")
           return () => ({
-            prepare: () => ({
-              first: async () => ({
-                backend: "rtdb",
-                state: "active",
-                epoch: 1,
-                freeze_generation: 0,
-              }),
-            }),
+            prepare: (query: string) => {
+              const statement = {
+                bind: () => statement,
+                first: async () =>
+                  query.includes("FROM match_state_control")
+                    ? {
+                        backend: "rtdb",
+                        state: "active",
+                        epoch: 1,
+                        freeze_generation: 0,
+                      }
+                    : null,
+              };
+              return statement;
+            },
+            batch: (statements: Array<{ first: () => Promise<unknown> }>) =>
+              Promise.all(
+                statements.map(async (statement) => {
+                  const row = await statement.first();
+                  return { success: true, results: row ? [row] : [] };
+                }),
+              ),
           });
         return Reflect.get(target, property, receiver);
       },

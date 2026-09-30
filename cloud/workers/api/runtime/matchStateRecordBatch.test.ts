@@ -77,8 +77,59 @@ async function roomFixture() {
 
 function observedSource() {
   const calls: MatchStateRecordsRequest[] = [];
+  const d1Calls: Array<{ session: number; queries: string[] }> = [];
+  let sessionId = 0;
+  const database = new Proxy(env.PROFILE_GAMES_DB, {
+    get(target, property) {
+      if (property === "withSession")
+        return (constraint: string) => {
+          expect(constraint).toBe("first-primary");
+          const session = target.withSession(constraint);
+          const id = ++sessionId;
+          const statements = new Map<
+            D1PreparedStatement,
+            { query: string; statement: D1PreparedStatement }
+          >();
+          const observe = (query: string, statement: D1PreparedStatement) => {
+            const observed = new Proxy(statement, {
+              get(target, property) {
+                if (property === "bind")
+                  return (...values: unknown[]) =>
+                    observe(query, target.bind(...values));
+                if (property === "first")
+                  return () => {
+                    d1Calls.push({ session: id, queries: [query] });
+                    return target.first();
+                  };
+                const value = Reflect.get(target, property, target);
+                return typeof value === "function" ? value.bind(target) : value;
+              },
+            });
+            statements.set(observed, { query, statement });
+            return observed;
+          };
+          return {
+            prepare: (query: string) => observe(query, session.prepare(query)),
+            batch: (batch: D1PreparedStatement[]) => {
+              const originals = batch.map((statement) =>
+                statements.get(statement)!,
+              );
+              d1Calls.push({
+                session: id,
+                queries: originals.map(({ query }) => query),
+              });
+              return session.batch(originals.map(({ statement }) => statement));
+            },
+            getBookmark: () => session.getBookmark(),
+          };
+        };
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
   const workerEnv = new Proxy(env, {
     get(target, property, receiver) {
+      if (property === "PROFILE_GAMES_DB") return database;
       if (property === "INVITE_REACTIONS")
         return {
           getByName: (inviteId: string) => ({
@@ -94,7 +145,7 @@ function observedSource() {
       return Reflect.get(target, property, receiver);
     },
   });
-  return { source: createMatchStateSource(workerEnv), calls };
+  return { source: createMatchStateSource(workerEnv), calls, d1Calls };
 }
 
 function observedStore(storage: DurableObjectStorage) {
@@ -136,6 +187,41 @@ function observedStore(storage: DurableObjectStorage) {
 }
 
 describe("routed match record batches", () => {
+  it("uses two primary D1 calls for canonical and missing records with a separate final authority check", async () => {
+    const fixture = await roomFixture();
+    await fixture.register([0, 1, 2]);
+    const { source, calls, d1Calls } = observedSource();
+    const targets = [
+      fixture.targets[2],
+      { playerId: "missing-login", matchId: fixture.inviteId },
+      fixture.targets[0],
+      fixture.targets[1],
+    ];
+    expect(await source.readMatchRecords(targets)).toEqual([
+      fixture.values[2],
+      null,
+      fixture.values[0],
+      fixture.values[1],
+    ]);
+    expect(calls).toHaveLength(1);
+    expect(d1Calls).toHaveLength(2);
+    expect(d1Calls[0].queries).toHaveLength(targets.length + 1);
+    expect(d1Calls[0].queries[0]).toContain("FROM match_state_control");
+    expect(
+      d1Calls[0].queries
+        .slice(1)
+        .every((query) => query.includes("FROM match_state_routes")),
+    ).toBe(true);
+    expect(d1Calls[1].queries).toHaveLength(1);
+    expect(d1Calls[1].queries[0]).toContain("FROM match_state_control");
+    expect(d1Calls[0].session).not.toBe(d1Calls[1].session);
+    d1Calls.length = 0;
+    expect(await source.readMatchRecord(targets[1])).toBeNull();
+    expect(d1Calls.map(({ queries }) => queries.length)).toEqual([2, 1]);
+    expect(d1Calls[0].session).not.toBe(d1Calls[1].session);
+    expect(calls).toHaveLength(1);
+  });
+
   it("reads only requested records in order despite unrelated corrupt state", async () => {
     const fixture = await roomFixture();
     await runInDurableObject(

@@ -12,6 +12,7 @@ import {
   readLegacyMatchStates,
   readMatchStateControl,
   readMatchStateRoute,
+  readMatchStateRouteSnapshot,
 } from "../src/matchStateD1.ts";
 
 const runtime = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
@@ -42,6 +43,37 @@ describe("match state D1 authority and admissions", () => {
     });
     expect(await readMatchStateRoute(db, "host", "game")).toBeNull();
     expect(await readLegacyMatchState(db, "host", "game")).toBeNull();
+  });
+
+  it("reads authority and mixed routes together while preserving duplicates and missing positions", async () => {
+    const durable = {
+      actorUid: "host",
+      matchId: "game",
+      kind: "durable" as const,
+      inviteId: "game",
+      epoch: 1,
+    };
+    const legacy = {
+      actorUid: "guest",
+      matchId: "old-game",
+      kind: "legacy" as const,
+      inviteId: null,
+      epoch: 1,
+    };
+    await db.batch(buildMatchStateRouteStatements(db, [durable, legacy]));
+    const control = await readMatchStateControl(db);
+    expect(
+      await readMatchStateRouteSnapshot(db, [
+        { playerId: legacy.actorUid, matchId: legacy.matchId },
+        { playerId: "missing", matchId: "game" },
+        { playerId: durable.actorUid, matchId: durable.matchId },
+        { playerId: legacy.actorUid, matchId: legacy.matchId },
+      ]),
+    ).toEqual({ control, routes: [legacy, null, durable, legacy] });
+    expect(await readMatchStateRouteSnapshot(db, [])).toEqual({
+      control,
+      routes: [],
+    });
   });
 
   it("drains existing admissions while refusing new work and allows only named recovery", async () => {

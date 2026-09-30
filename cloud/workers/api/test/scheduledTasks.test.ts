@@ -6,7 +6,9 @@ test("scheduled tasks finish concurrently before logging every failure in task o
   const first = Promise.withResolvers<void>();
   const later = Promise.withResolvers<void>();
   const successful = Promise.withResolvers<void>();
-  const firstFailure = new Error("first-task-failed");
+  const firstFailure = new Error("first-task-failed", {
+    cause: new Error("database-unavailable"),
+  });
   const laterFailure = new Error("later-task-failed");
   const started: string[] = [];
   const logs: unknown[] = [];
@@ -63,6 +65,11 @@ test("scheduled tasks finish concurrently before logging every failure in task o
       durationMs: 40,
       scheduledTime: 50,
       code: "first-task-failed",
+      error: {
+        name: "Error",
+        message: "first-task-failed",
+        cause: { name: "Error", message: "database-unavailable" },
+      },
     },
     {
       event: "scheduled_task_failed",
@@ -70,6 +77,7 @@ test("scheduled tasks finish concurrently before logging every failure in task o
       durationMs: 10,
       scheduledTime: 50,
       code: "later-task-failed",
+      error: { name: "Error", message: "later-task-failed" },
     },
   ]);
 });
@@ -111,6 +119,7 @@ test("scheduled tasks retain synchronous non-Error failures and still run later 
       durationMs: 0,
       scheduledTime: 1_000,
       code: "unknown",
+      error: { type: "object" },
     },
   ]);
 });

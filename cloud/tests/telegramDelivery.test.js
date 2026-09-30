@@ -4505,3 +4505,94 @@ test("A to B to A revisions retain distinct durable task generations", () => {
     buildTelegramDeliveryTaskId("key", desiredA.revision, "event-a-1"),
   );
 });
+
+test("retry coordination preserves scheduled proof payloads and generations", async (t) => {
+  for (const target of ["desired", "pending-delete"]) {
+    for (const rateLimited of [false, true]) {
+      await t.test(`${target} rateLimited=${rateLimited}`, async () => {
+        const desired = sendDesired();
+        const pendingDeleteId = "payload-cleanup";
+        const repository = createRepository({
+          key: {
+            desired,
+            ...(target === "pending-delete"
+              ? {
+                  delivery: {
+                    status: "delivered",
+                    revision: desired.revision,
+                    pendingDelete: {
+                      pendingDeleteId,
+                      chatId: "community-chat",
+                      messageId: 8,
+                      status: "pending",
+                      attempts: 0,
+                    },
+                  },
+                }
+              : {}),
+          },
+        });
+        const scheduled = [];
+        let gateOwner;
+        const reject = async () => {
+          gateOwner = repository.control.apiGate.owner;
+          return {
+            ok: false,
+            classification: "retryable",
+            code: rateLimited ? "rate-limited" : "safe-rejection",
+            retryAfterSeconds: 8,
+          };
+        };
+        await createEngine({
+          repository,
+          scheduleRetry: async (task) => scheduled.push(task),
+          client: createClient({
+            sendTelegramMessage: reject,
+            deleteTelegramMessage: reject,
+          }),
+        }).reconcile({
+          messageKey: "key",
+          taskKind: target,
+          ...(target === "pending-delete" ? { pendingDeleteId } : {}),
+        });
+        const taskKind = rateLimited ? "rate-limit-proof" : target;
+        const retryProofLeaseOwner = target === "desired" ? "" : "owner-1";
+        assert.deepEqual(scheduled, [
+          {
+            messageKey: "key",
+            revision: desired.revision,
+            taskKind,
+            retrySequence: 1,
+            generation: [
+              taskKind,
+              1,
+              18_000,
+              target === "desired" ? "attempt-1" : pendingDeleteId,
+              retryProofLeaseOwner,
+              "",
+              rateLimited ? target : "",
+              rateLimited ? gateOwner : "",
+              rateLimited ? 18_000 : 0,
+              "",
+              rateLimited ? "" : gateOwner,
+            ].join(":"),
+            retryStartedAtMs: 10_000,
+            retryDeadlineAtMs: 610_000,
+            retryAtMs: 18_000,
+            scheduleTimeMs: rateLimited ? 10_000 : 18_000,
+            ...(target === "desired"
+              ? { safeRejectedAttemptId: "attempt-1" }
+              : { pendingDeleteId, retryProofLeaseOwner }),
+            ...(rateLimited
+              ? {
+                  proofTaskKind: target,
+                  barrierProofOwner: gateOwner,
+                  barrierRetryNotBeforeMs: 18_000,
+                }
+              : { apiGateSettleOwner: gateOwner }),
+          },
+        ]);
+      });
+    }
+  }
+});
