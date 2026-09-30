@@ -1,6 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { NavigationGamesCursor } from "@mons/shared/navigation";
 import {
   commitProfileGameProjectionWrites,
   deleteD1NavigationGame,
@@ -70,6 +71,7 @@ function observeHistoricalBatches() {
 
 function observeProjectionReads(failReadAt?: number) {
   const reads: Array<{ query: string; values: unknown[] }> = [];
+  const rowsRead: number[] = [];
   const wrap = (
     statement: D1PreparedStatement,
     query: string,
@@ -86,7 +88,9 @@ function observeProjectionReads(failReadAt?: number) {
             reads.push({ query: query.replace(/\s+/g, " ").trim(), values });
             if (reads.length === failReadAt)
               throw new Error("projection-read-unavailable");
-            return target.all();
+            const result = await target.all();
+            rowsRead.push(result.meta.rows_read);
+            return result;
           };
         }
         throw new Error("unexpected-projection-statement-operation");
@@ -100,7 +104,7 @@ function observeProjectionReads(failReadAt?: number) {
       throw new Error("unexpected-projection-database-operation");
     },
   });
-  return { database, reads };
+  return { database, reads, rowsRead };
 }
 
 function gameData(
@@ -900,6 +904,246 @@ describe("profile game projection D1 repository", () => {
     );
     expect(second.items.map((item) => item.id)).toEqual(["invite-c"]);
     expect(second.hasMore).toBe(false);
+  });
+
+  it("bounds cursor reads across long histories and uses each indexed range", async () => {
+    const inviteId = (index: number) =>
+      `invite-${String(index).padStart(4, "0")}`;
+    for (let offset = 0; offset < 2_500; offset += 100) {
+      await commitProfileGameProjectionWrites(
+        env.PROFILE_GAMES_DB,
+        Array.from({ length: 100 }, (_, entry) => {
+          const index = offset + entry;
+          return {
+            type: "merge" as const,
+            profileId: "profile-1",
+            projectionId: inviteId(index),
+            data: gameData(
+              inviteId(index),
+              index < 1_500 ? 100_000 : 100_000 - index,
+              index < 2_000 ? "waiting" : "active",
+            ),
+          };
+        }),
+      );
+    }
+    await commitProfileGameProjectionWrites(
+      env.PROFILE_GAMES_DB,
+      [inviteId(1_401), inviteId(1_901), inviteId(2_000), "invite-1400z"].map(
+        (projectionId) => ({
+          type: "merge" as const,
+          profileId: "profile-2",
+          projectionId,
+          data: gameData(projectionId, 100_000),
+        }),
+      ),
+    );
+    expect(
+      await deleteD1NavigationGame(
+        env.PROFILE_GAMES_DB,
+        "profile-1",
+        inviteId(1_450),
+      ),
+    ).toBe("deleted");
+    const observed = observeProjectionReads();
+    const limit = 20;
+    const cases = [
+      {
+        cursor: { sortBucket: 30, listSortAtMs: 100_000, id: inviteId(1_400) },
+        first: 1_401,
+        count: limit,
+      },
+      {
+        cursor: { sortBucket: 30, listSortAtMs: 98_100, id: inviteId(1_900) },
+        first: 1_901,
+        count: limit,
+      },
+      {
+        cursor: { sortBucket: 30, listSortAtMs: 98_001, id: inviteId(1_999) },
+        first: 2_000,
+        count: limit,
+      },
+      {
+        cursor: { sortBucket: 30, listSortAtMs: 100_000, id: "invite-1400a" },
+        first: 1_401,
+        count: limit,
+      },
+      {
+        cursor: { sortBucket: 30, listSortAtMs: 100_000, id: inviteId(1_450) },
+        first: 1_451,
+        count: limit,
+      },
+      {
+        cursor: { sortBucket: 40, listSortAtMs: 97_503, id: inviteId(2_497) },
+        first: 2_498,
+        count: 2,
+      },
+      {
+        cursor: { sortBucket: 40, listSortAtMs: 97_501, id: inviteId(2_499) },
+        first: 2_500,
+        count: 0,
+      },
+    ];
+    for (const { cursor, first, count } of cases) {
+      const page = await readProfileGamesPage(
+        observed.database,
+        "profile-1",
+        limit,
+        cursor,
+      );
+      expect(page.items.map((item) => item.id)).toEqual(
+        Array.from({ length: count }, (_, offset) => inviteId(first + offset)),
+      );
+      const previous = await env.PROFILE_GAMES_DB.prepare(
+        `SELECT *
+         FROM profile_game_projections
+         WHERE profile_id = ?1
+           AND (sort_bucket > ?2
+             OR (sort_bucket = ?2 AND list_sort_at_ms < ?3)
+             OR (sort_bucket = ?2 AND list_sort_at_ms = ?3
+               AND projection_id > ?4))
+         ORDER BY sort_bucket ASC, list_sort_at_ms DESC, projection_id ASC
+         LIMIT ?5`,
+      )
+        .bind(
+          "profile-1",
+          cursor.sortBucket,
+          cursor.listSortAtMs,
+          cursor.id,
+          limit + 1,
+        )
+        .all<{
+          projection_id: string;
+          sort_bucket: number;
+          list_sort_at_ms: number;
+        }>();
+      const previousVisible = previous.results.slice(0, limit);
+      const last = previousVisible.at(-1);
+      expect(page.items.map((item) => item.id)).toEqual(
+        previousVisible.map((row) => row.projection_id),
+      );
+      expect(page.hasMore).toBe(previous.results.length > limit);
+      expect(page.nextCursor).toEqual(
+        last
+          ? {
+              sortBucket: last.sort_bucket,
+              listSortAtMs: last.list_sort_at_ms,
+              id: last.projection_id,
+            }
+          : null,
+      );
+      const rowsRead = observed.rowsRead.at(-1)!;
+      if (count > 0) expect(rowsRead).toBeGreaterThan(0);
+      expect(rowsRead).toBeLessThanOrEqual(16 * (limit + 1));
+    }
+    expect(observed.reads).toHaveLength(cases.length);
+    const read = observed.reads[0];
+    const plan = await env.PROFILE_GAMES_DB.prepare(
+      `EXPLAIN QUERY PLAN ${read.query}`,
+    )
+      .bind(...read.values)
+      .all<{ detail: string }>();
+    const details = plan.results.map(({ detail }) => detail);
+    for (const constraint of [
+      "(profile_id=? AND sort_bucket>?)",
+      "(profile_id=? AND sort_bucket=? AND list_sort_at_ms<?)",
+      "(profile_id=? AND sort_bucket=? AND list_sort_at_ms=? AND projection_id>?)",
+    ]) {
+      expect(
+        details.some(
+          (detail) =>
+            detail.includes(
+              "USING COVERING INDEX idx_profile_game_projections_page",
+            ) && detail.includes(constraint),
+        ),
+      ).toBe(true);
+    }
+    expect(details).toContain(
+      "SEARCH projection USING PRIMARY KEY (profile_id=? AND projection_id=?)",
+    );
+  });
+
+  it("pages mixed game and event projections without omitting or repeating rows", async () => {
+    await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
+      {
+        type: "merge",
+        profileId: "profile-1",
+        projectionId: "invite-b",
+        data: gameData("invite-b", 900),
+      },
+      ...["b", "a"].map((eventId) => ({
+        type: "merge" as const,
+        profileId: "profile-1",
+        projectionId: `event_${eventId}`,
+        data: eventData(eventId, 1_000),
+      })),
+      {
+        type: "merge",
+        profileId: "profile-1",
+        projectionId: "invite-c",
+        data: gameData("invite-c", 1_000, "active"),
+      },
+      {
+        type: "merge",
+        profileId: "profile-1",
+        projectionId: "invite-a",
+        data: gameData("invite-a", 1_000),
+      },
+    ]);
+    const ids: string[] = [];
+    let cursor: NavigationGamesCursor | null = null;
+    for (const expectedMore of [true, true, false]) {
+      const page = await readProfileGamesPage(
+        env.PROFILE_GAMES_DB,
+        "profile-1",
+        2,
+        cursor,
+      );
+      expect(page.hasMore).toBe(expectedMore);
+      expect(page.nextCursor?.id).toBe(page.items.at(-1)?.id);
+      ids.push(...page.items.map((item) => item.id));
+      cursor = page.nextCursor;
+    }
+    expect(ids).toEqual([
+      "event_a",
+      "event_b",
+      "invite-a",
+      "invite-b",
+      "invite-c",
+    ]);
+    expect(
+      await readProfileGamesPage(env.PROFILE_GAMES_DB, "profile-1", 2, cursor),
+    ).toEqual({ ok: true, items: [], nextCursor: null, hasMore: false });
+  });
+
+  it("preserves SQLite binary ID ordering across Unicode cursor ties", async () => {
+    const ids = ["invite-z", "invite-\uE000", "invite-\u{10000}"];
+    await commitProfileGameProjectionWrites(
+      env.PROFILE_GAMES_DB,
+      [...ids].reverse().map((projectionId) => ({
+        type: "merge" as const,
+        profileId: "profile-1",
+        projectionId,
+        data: gameData(projectionId, 1_000),
+      })),
+    );
+    let cursor: NavigationGamesCursor | null = null;
+    for (const [index, id] of ids.entries()) {
+      const page = await readProfileGamesPage(
+        env.PROFILE_GAMES_DB,
+        "profile-1",
+        1,
+        cursor,
+      );
+      expect(page.items.map((item) => item.id)).toEqual([id]);
+      expect(page.nextCursor).toEqual({
+        sortBucket: 30,
+        listSortAtMs: 1_000,
+        id,
+      });
+      expect(page.hasMore).toBe(index < ids.length - 1);
+      cursor = page.nextCursor;
+    }
   });
 
   it("does not overwrite a newer projection with a stale update", async () => {

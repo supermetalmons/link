@@ -10,14 +10,17 @@ import { MATCH_SYNC_SOCKET_PROTOCOL } from "@mons/shared/match-sync";
 import { INVITE_METADATA_SOCKET_PROTOCOL } from "@mons/shared/invite-metadata";
 import { INVITE_WAGERS_SOCKET_PROTOCOL } from "@mons/shared/invite-wagers";
 import type { InviteReactions } from "../src/inviteReactions.ts";
-import type { MatchSyncMetadata } from "../src/matchSync.ts";
-import type { MatchStatePair } from "../src/matchStateTypes.ts";
+import type {
+  MatchStateSyncReadRequest,
+  MatchStateSyncReadResult,
+} from "../src/matchStateTypes.ts";
 import { MAX_CACHED_MATCH_SYNC_STATES } from "../src/matchSyncRoom.ts";
 
 type Room = DurableObjectStub<InviteReactions>;
 type Source = {
   invite: Record<string, unknown>;
   reads: number;
+  syncReads: number;
   fen: string;
   revision: number;
 };
@@ -32,10 +35,9 @@ async function install(room: Room, source: Source) {
       inviteReader: () => Promise<unknown>;
       wagerReader: () => Promise<[]>;
       matchSync: {
-        readPair: (
-          metadata: MatchSyncMetadata,
-          matchId: string,
-        ) => Promise<MatchStatePair>;
+        readSyncState: (
+          input: MatchStateSyncReadRequest,
+        ) => Promise<MatchStateSyncReadResult>;
       };
     };
     mutable.inviteReader = async () => structuredClone(source.invite);
@@ -54,20 +56,19 @@ async function install(room: Room, source: Source) {
         timer: "",
       };
     };
-    mutable.matchSync.readPair = async (metadata, matchId) => ({
-      inviteId: metadata.snapshot.inviteId,
-      epoch: 0,
-      matchId,
-      playerId: metadata.snapshot.hostId,
-      opponentId: metadata.snapshot.guestId,
-      revision: source.revision,
-      playerMatch: readMatch(metadata.snapshot.hostId),
-      opponentMatch:
-        metadata.snapshot.guestId === null
-          ? null
-          : readMatch(metadata.snapshot.guestId),
-      claim: null,
-    });
+    mutable.matchSync.readSyncState = async (input) => {
+      source.syncReads++;
+      const current = { epoch: input.epoch, revision: source.revision };
+      return input.knownRevision === current.revision
+        ? { ...current, status: "unchanged" }
+        : {
+            ...current,
+            status: "changed",
+            playerMatch: readMatch(input.playerId),
+            opponentMatch:
+              input.opponentId === null ? null : readMatch(input.opponentId),
+          };
+    };
   });
 }
 
@@ -81,6 +82,7 @@ async function fixture(paired = true) {
       ...(paired ? { guestId: "guest-login" } : {}),
     },
     reads: 0,
+    syncReads: 0,
     fen: "initial",
     revision: 1,
   };
@@ -547,6 +549,7 @@ describe("live match socket admission", () => {
     const { room, inviteId, source } = await fixture();
     await room.readMatches(inviteId, inviteId);
     const reads = source.reads;
+    const syncReads = source.syncReads;
     let invalidated = false;
     await runInDurableObject(room, (instance) => {
       const target = instance as unknown as {
@@ -569,7 +572,8 @@ describe("live match socket admission", () => {
     const socket = accept(await room.fetch(request(inviteId)));
     await baselines.get(socket);
     expect(invalidated).toBe(true);
-    expect(source.reads).toBe(reads + 2);
+    expect(source.reads).toBe(reads);
+    expect(source.syncReads).toBe(syncReads + 1);
     const scheduled = await runInDurableObject(
       room,
       async (_instance, state) => ({

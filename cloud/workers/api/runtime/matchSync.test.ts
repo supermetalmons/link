@@ -18,9 +18,9 @@ import {
   REACTION_HEARTBEAT_RESPONSE,
 } from "@mons/shared/reactions";
 import type { InviteReactions } from "../src/inviteReactions.ts";
-import type { MatchSyncMetadata } from "../src/matchSync.ts";
 import type {
-  MatchStatePair,
+  MatchStateSyncReadRequest,
+  MatchStateSyncReadResult,
   MatchStateRecord,
 } from "../src/matchStateTypes.ts";
 import {
@@ -30,11 +30,15 @@ import {
 import { GameSessionTransitionFailure } from "../src/gameSessionCodec.ts";
 
 type Room = DurableObjectStub<InviteReactions>;
+type SyncReader = (
+  input: MatchStateSyncReadRequest,
+) => MatchStateSyncReadResult | Promise<MatchStateSyncReadResult>;
 type Source = {
   invite: Record<string, unknown>;
   matches: Map<string, MatchStateRecord>;
   revisions: Map<string, number>;
   reads: string[];
+  revisionReads: string[];
   metadataReads: number;
   wagerReads: number;
   epoch: number;
@@ -79,10 +83,7 @@ async function install(room: Room, source: Source) {
       inviteReader: () => Promise<unknown>;
       wagerReader: () => Promise<never>;
       matchSync: {
-        readPair: (
-          metadata: MatchSyncMetadata,
-          matchId: string,
-        ) => Promise<MatchStatePair>;
+        readSyncState: SyncReader;
         dependencies: { sourceEpoch: () => number };
       };
     };
@@ -101,25 +102,23 @@ async function install(room: Room, source: Source) {
         ? source.read(playerId, matchId)
         : structuredClone(source.matches.get(`${playerId}/${matchId}`) ?? null);
     };
-    mutable.matchSync.readPair = async (metadata, matchId) => {
+    mutable.matchSync.readSyncState = async (input) => {
+      const { matchId, playerId, opponentId } = input;
+      source.revisionReads.push(matchId);
       const epoch = source.epoch;
       const revision = source.revisions.get(matchId) ?? 0;
+      if (input.knownRevision === revision)
+        return { status: "unchanged", epoch, revision };
       const [playerMatch, opponentMatch] = await Promise.all([
-        readMatch(metadata.snapshot.hostId, matchId),
-        metadata.snapshot.guestId === null
-          ? null
-          : readMatch(metadata.snapshot.guestId, matchId),
+        readMatch(playerId, matchId),
+        opponentId === null ? null : readMatch(opponentId, matchId),
       ]);
       return {
-        inviteId: metadata.snapshot.inviteId,
-        matchId,
-        playerId: metadata.snapshot.hostId,
-        opponentId: metadata.snapshot.guestId,
+        status: "changed",
         epoch,
         revision,
         playerMatch,
         opponentMatch,
-        claim: null,
       };
     };
   });
@@ -150,6 +149,7 @@ async function fixture(paired = true) {
     ]),
     revisions: new Map(),
     reads: [],
+    revisionReads: [],
     metadataReads: 0,
     wagerReads: 0,
     epoch: 1,
@@ -374,7 +374,7 @@ describe("live match snapshots", () => {
   });
 
   it.each(["forced", "notification", "alarm"] as const)(
-    "reuses an unchanged projection during a %s refresh while reading canonical state",
+    "checks canonical revisions without reading unchanged records during a %s refresh",
     async (refresh) => {
       vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
       const { room, inviteId, source } = await fixture();
@@ -382,6 +382,7 @@ describe("live match snapshots", () => {
       const initial = await channel.snapshot();
       const serializations = trackSnapshotSerialization(inviteId);
       const reads = source.reads.length;
+      const revisionReads = source.revisionReads.length;
       if (refresh === "forced") {
         expect(
           await room.readMatches(inviteId, inviteId, { fresh: true }),
@@ -391,7 +392,8 @@ describe("live match snapshots", () => {
           await room.notifyMatchesChanged(inviteId, [inviteId]);
         await runNextAlarm(room);
       }
-      expect(source.reads).toHaveLength(reads + 2);
+      expect(source.reads).toHaveLength(reads);
+      expect(source.revisionReads).toHaveLength(revisionReads + 1);
       expect(serializations()).toBe(0);
       expect(channel.messages).toHaveLength(0);
       expect(await room.readMatches(inviteId, inviteId)).toMatchObject({
@@ -410,6 +412,7 @@ describe("live match snapshots", () => {
     async (changed) => {
       const { room, inviteId, source } = await fixture();
       const initial = await room.readMatches(inviteId, inviteId);
+      const initialReads = source.reads.length;
       const serializations = trackSnapshotSerialization(inviteId);
       if (changed === "match") {
         setMatch(source, `host-login/${inviteId}`, {
@@ -424,6 +427,7 @@ describe("live match snapshots", () => {
       const refreshed = await room.readMatches(inviteId, inviteId, {
         fresh: true,
       });
+      expect(source.reads).toHaveLength(initialReads + 2);
       expect(refreshed.status).toBe("ok");
       if (refreshed.status !== "ok" || initial.status !== "ok")
         throw new Error("fixture-match-missing");
@@ -432,8 +436,137 @@ describe("live match snapshots", () => {
       const rebuilt = serializations();
       const reads = source.reads.length;
       await room.readMatches(inviteId, inviteId, { fresh: true });
-      expect(source.reads).toHaveLength(reads + 2);
+      expect(source.reads).toHaveLength(reads);
       expect(serializations()).toBe(rebuilt);
+    },
+  );
+
+  it("loads canonical records after eviction before reusing an unchanged projection", async () => {
+    const { room, inviteId, source } = await fixture();
+    const initial = await room.readMatches(inviteId, inviteId);
+    const reads = source.reads.length;
+    await evictDurableObject(room);
+    await install(room, source);
+    expect(await room.readMatches(inviteId, inviteId)).toEqual(initial);
+    expect(source.reads).toHaveLength(reads + 2);
+    expect(await room.readMatches(inviteId, inviteId, { fresh: true })).toEqual(
+      initial,
+    );
+    expect(source.reads).toHaveLength(reads + 2);
+  });
+
+  it.each(["host", "guest"] as const)(
+    "does not reuse a projection for a changed %s with the same metadata revision",
+    async (role) => {
+      const { room, inviteId, source } = await fixture();
+      await room.readMatches(inviteId, inviteId);
+      const reads = source.reads.length;
+      source.matches.set(`replacement-login/${inviteId}`, {
+        ...match,
+        color: role === "host" ? "white" : "black",
+        fen: "replacement",
+      });
+      await runInDurableObject(room, async (instance) => {
+        const metadata = await instance.readMetadata(inviteId);
+        if (metadata.status !== "ok")
+          throw new Error("fixture-metadata-missing");
+        const target = instance as unknown as {
+          matchSync: {
+            dependencies: { readMetadata: () => Promise<typeof metadata> };
+          };
+        };
+        target.matchSync.dependencies.readMetadata = async () => ({
+          ...metadata,
+          snapshot: {
+            ...metadata.snapshot,
+            [`${role}Id`]: "replacement-login",
+          },
+        });
+        await instance.notifyMatchesChanged(inviteId, [inviteId]);
+        expect(await instance.readMatches(inviteId, inviteId)).toMatchObject({
+          snapshot: {
+            [`${role}PlayerId`]: "replacement-login",
+            [`${role}Match`]: { fen: "replacement" },
+          },
+        });
+      });
+      expect(source.reads).toHaveLength(reads + 2);
+    },
+  );
+
+  it.each(["cold", "revision", "epoch", "invalid-revision"] as const)(
+    "rejects an unchanged response with an invalid %s cache proof",
+    async (failure) => {
+      const { room, inviteId } = await fixture();
+      if (failure !== "cold") await room.readMatches(inviteId, inviteId);
+      await runInDurableObject(room, async (instance) => {
+        const target = instance as unknown as {
+          matchSync: { readSyncState: SyncReader };
+        };
+        target.matchSync.readSyncState = (input) => ({
+          status: "unchanged",
+          epoch: input.epoch + (failure === "epoch" ? 1 : 0),
+          revision:
+            failure === "invalid-revision"
+              ? NaN
+              : (input.knownRevision ?? 0) + (failure === "revision" ? 1 : 0),
+        });
+        await instance.notifyMatchesChanged(inviteId, [inviteId]);
+        await expect(instance.readMatches(inviteId, inviteId)).rejects.toThrow(
+          "match-sync-source-invalid",
+        );
+      });
+    },
+  );
+
+  it.each(["success", "failure"] as const)(
+    "discards an in-flight unchanged %s after a match notification",
+    async (completion) => {
+      const { room, inviteId, source } = await fixture();
+      const initial = await room.readMatches(inviteId, inviteId);
+      const reads = source.reads.length;
+      await runInDurableObject(room, async (instance) => {
+        const target = instance as unknown as {
+          matchSync: { readSyncState: SyncReader };
+        };
+        const readSyncState = target.matchSync.readSyncState;
+        const started = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        let paused = false;
+        target.matchSync.readSyncState = async (input) => {
+          const result = await readSyncState(input);
+          if (!paused) {
+            paused = true;
+            expect(result.status).toBe("unchanged");
+            started.resolve();
+            await release.promise;
+            if (completion === "failure") throw new Error("stale-source");
+          }
+          return result;
+        };
+        await instance.notifyMatchesChanged(inviteId, [inviteId]);
+        const first = instance.readMatches(inviteId, inviteId);
+        await started.promise;
+        try {
+          setMatch(source, `host-login/${inviteId}`, {
+            ...match,
+            fen: "newest",
+          });
+          await instance.notifyMatchesChanged(inviteId, [inviteId]);
+          const second = instance.readMatches(inviteId, inviteId);
+          release.resolve();
+          const results = await Promise.all([first, second]);
+          expect(results[0]).toEqual(results[1]);
+          expect(results[0]).not.toEqual(initial);
+          expect(results[0]).toMatchObject({
+            snapshot: { revision: 2, hostMatch: { fen: "newest" } },
+          });
+        } finally {
+          release.resolve();
+          await first;
+        }
+      });
+      expect(source.reads).toHaveLength(reads + 2);
     },
   );
 
@@ -1002,10 +1135,7 @@ describe("live match snapshots", () => {
             dependencies: {
               readMetadata: (inviteId: string) => Promise<unknown>;
             };
-            readPair: (
-              metadata: MatchSyncMetadata,
-              matchId: string,
-            ) => Promise<MatchStatePair>;
+            readSyncState: SyncReader;
           };
         };
         if (failure === "metadata") {
@@ -1015,10 +1145,10 @@ describe("live match snapshots", () => {
             return metadata;
           };
         } else {
-          const readPair = mutable.matchSync.readPair;
-          mutable.matchSync.readPair = async (metadata, matchId) => {
+          const readSyncState = mutable.matchSync.readSyncState;
+          mutable.matchSync.readSyncState = async (input) => {
             if (++attempts === 1) throw new Error("temporary-pair-read");
-            return readPair(metadata, matchId);
+            return readSyncState(input);
           };
         }
         await instance.notifyMatchesChanged(inviteId, [inviteId]);
@@ -1121,13 +1251,20 @@ describe("live match snapshots", () => {
   });
 
   it("preserves valid state on upstream failure and closes the socket for HTTP recovery", async () => {
-    const { room, inviteId, source } = await fixture();
+    const { room, inviteId } = await fixture();
     const channel = await connect(room, inviteId);
     await channel.snapshot();
     const serializations = trackSnapshotSerialization(inviteId);
-    source.read = async () => {
-      throw new Error("source-offline");
-    };
+    let readSyncState!: SyncReader;
+    await runInDurableObject(room, (instance) => {
+      const target = instance as unknown as {
+        matchSync: { readSyncState: SyncReader };
+      };
+      readSyncState = target.matchSync.readSyncState;
+      target.matchSync.readSyncState = () => {
+        throw new Error("source-offline");
+      };
+    });
     const closed = new Promise<CloseEvent>((resolve) =>
       channel.socket.addEventListener("close", resolve, { once: true }),
     );
@@ -1153,7 +1290,12 @@ describe("live match snapshots", () => {
       );
     });
     expect(serializations()).toBe(0);
-    source.read = undefined;
+    await runInDurableObject(room, (instance) => {
+      const target = instance as unknown as {
+        matchSync: { readSyncState: SyncReader };
+      };
+      target.matchSync.readSyncState = readSyncState;
+    });
     expect(await room.readMatches(inviteId, inviteId)).toMatchObject({
       status: "ok",
       snapshot: { revision: 1 },
@@ -1176,12 +1318,15 @@ describe("live match snapshots", () => {
           release = resolve;
         });
         let paused = false;
-        source.read = async (playerId, matchId) => {
-          const value = structuredClone(
-            source.matches.get(`${playerId}/${matchId}`) ?? null,
-          );
-          if (!paused && playerId === "host-login") {
+        const target = instance as unknown as {
+          matchSync: { readSyncState: SyncReader };
+        };
+        const readSyncState = target.matchSync.readSyncState;
+        target.matchSync.readSyncState = async (input) => {
+          const value = await readSyncState(input);
+          if (!paused) {
             paused = true;
+            expect(value.status).toBe("unchanged");
             started();
             await gate;
             if (completion === "failure") throw new Error("retired-source");

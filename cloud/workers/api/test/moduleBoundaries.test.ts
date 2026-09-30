@@ -8,6 +8,18 @@ import { extractIdFromJsonUri } from "../src/helius.ts";
 import { handleRequest } from "../src/router.ts";
 import * as eventProgress from "../src/eventProgress.ts";
 import * as eventProgressDispatch from "../src/eventProgressDispatch.ts";
+import * as authRecovery from "../src/authRecovery.ts";
+import * as authRecoveryJobs from "../src/authRecovery/jobs.ts";
+import * as authRecoveryDispatch from "../src/authRecovery/dispatch.ts";
+import * as authRecoveryProcessing from "../src/authRecovery/processing.ts";
+import * as authRecoveryQueue from "../src/authRecovery/queue.ts";
+import * as authRecoveryRecovery from "../src/authRecovery/recovery.ts";
+import * as telegramProjection from "../src/telegramProjection.ts";
+import * as telegramProjectionPolicy from "../src/telegramProjection/policy.ts";
+import * as telegramProjectionProcessing from "../src/telegramProjection/processing.ts";
+import * as telegramProjectionQueue from "../src/telegramProjection/queue.ts";
+import * as telegramProjectionRecovery from "../src/telegramProjection/recovery.ts";
+import { parseAutomatchTelegramProjectionOutbox } from "../src/telegramProjectionOutbox.ts";
 
 test("the Worker entrypoint remains a thin exact compatibility facade", () => {
   assert.deepEqual(Object.keys(entrypoint).sort(), [
@@ -21,6 +33,77 @@ test("the Worker entrypoint remains a thin exact compatibility facade", () => {
   assert.strictEqual(entrypoint.extractIdFromJsonUri, extractIdFromJsonUri);
   assert.equal(typeof entrypoint.default.queue, "function");
   assert.equal(typeof entrypoint.default.scheduled, "function");
+});
+
+test("auth recovery retains its exact public facade and function identities", () => {
+  const expected = {
+    AUTH_RECOVERY_QUEUE_NAME: authRecoveryJobs.AUTH_RECOVERY_QUEUE_NAME,
+    MERGE_GAME_FINALIZE_DELAY_MS:
+      authRecoveryProcessing.MERGE_GAME_FINALIZE_DELAY_MS,
+    MERGE_PRIZE_RECOVERY_PAGE_SIZE:
+      authRecoveryProcessing.MERGE_PRIZE_RECOVERY_PAGE_SIZE,
+    createAuthRecoveryService: authRecoveryProcessing.createAuthRecoveryService,
+    dispatchProfileLinkCatchupForOwner:
+      authRecoveryDispatch.dispatchProfileLinkCatchupForOwner,
+    enqueueAuthRecovery: authRecoveryDispatch.enqueueAuthRecovery,
+    enqueuePersistedCanonicalAuthRecovery:
+      authRecoveryDispatch.enqueuePersistedCanonicalAuthRecovery,
+    handleAuthRecoveryMessage: authRecoveryQueue.handleAuthRecoveryMessage,
+    handleAuthRecoveryQueue: authRecoveryQueue.handleAuthRecoveryQueue,
+    handleAuthRecoverySweep: authRecoveryRecovery.handleAuthRecoverySweep,
+    newAuthRecoveryJob: authRecoveryJobs.newAuthRecoveryJob,
+    parseAuthRecoveryTask: authRecoveryJobs.parseAuthRecoveryTask,
+    parseTask: authRecoveryJobs.parseAuthRecoveryTask,
+    removeCanonicalAuthRecoveryLoginUid:
+      authRecoveryJobs.removeCanonicalAuthRecoveryLoginUid,
+    sweepAuthRecoveryJobs: authRecoveryRecovery.sweepAuthRecoveryJobs,
+  };
+  assert.deepEqual(
+    Object.keys(authRecovery).sort(),
+    Object.keys(expected).sort(),
+  );
+  for (const name of Object.keys(expected) as (keyof typeof expected)[]) {
+    assert.strictEqual(authRecovery[name], expected[name], name);
+  }
+});
+
+test("Telegram projection retains its exact public facade and function identities", () => {
+  const expected = {
+    MAX_PROJECTION_RETRY_DELAY_SECONDS:
+      telegramProjectionPolicy.MAX_PROJECTION_RETRY_DELAY_SECONDS,
+    PROJECTION_INPUT_RETRIES: telegramProjectionPolicy.PROJECTION_INPUT_RETRIES,
+    PROJECTION_SWEEP_LIMIT: telegramProjectionPolicy.PROJECTION_SWEEP_LIMIT,
+    automatchSweepCandidates:
+      telegramProjectionRecovery.automatchSweepCandidates,
+    automatchSweepTasks: telegramProjectionRecovery.automatchSweepTasks,
+    claimAutomatchSweepCandidate:
+      telegramProjectionRecovery.claimAutomatchSweepCandidate,
+    handleTelegramProjectionMessage:
+      telegramProjectionQueue.handleTelegramProjectionMessage,
+    handleTelegramProjectionQueue:
+      telegramProjectionQueue.handleTelegramProjectionQueue,
+    handleTelegramProjectionSweep:
+      telegramProjectionRecovery.handleTelegramProjectionSweep,
+    parseOutbox: parseAutomatchTelegramProjectionOutbox,
+    processAutomatchTask: telegramProjectionProcessing.processAutomatchTask,
+    processRatingTask: telegramProjectionProcessing.processRatingTask,
+    projectAutomatchSource: telegramProjectionProcessing.projectAutomatchSource,
+    projectionRetryDelaySeconds:
+      telegramProjectionPolicy.projectionRetryDelaySeconds,
+    sendTaskBatches: telegramProjectionRecovery.sendTaskBatches,
+    sweepAutomatchProjections:
+      telegramProjectionRecovery.sweepAutomatchProjections,
+    sweepRatingProjections: telegramProjectionRecovery.sweepRatingProjections,
+    sweepTelegramProjections:
+      telegramProjectionRecovery.sweepTelegramProjections,
+  };
+  assert.deepEqual(
+    Object.keys(telegramProjection).sort(),
+    Object.keys(expected).sort(),
+  );
+  for (const name of Object.keys(expected) as (keyof typeof expected)[]) {
+    assert.strictEqual(telegramProjection[name], expected[name], name);
+  }
 });
 
 test("canonical D1 modules have no direct Firestore runtime dependency", () => {
@@ -121,6 +204,8 @@ for (const module of [
   "eventPrizeWithdrawal",
   "authIdentityCanonical",
   "profileGameProjection",
+  "authRecovery",
+  "telegramProjection",
 ]) {
   test(`${module} internals have no facade dependencies or runtime cycles`, () => {
     const facade = resolve(import.meta.dirname, `../src/${module}.ts`);
@@ -158,15 +243,22 @@ test("withdrawal Workflows do not depend on HTTP or admission orchestration", ()
   }
 });
 
-test("projection processing and recovery have separate dependency boundaries", () => {
-  const root = resolve(import.meta.dirname, "../src/profileGameProjection");
-  const processing = resolve(root, "processing.ts");
-  const recovery = resolve(root, "recovery.ts");
-  const queue = resolve(root, "queue.ts");
-  assert.ok(!reachableRuntimeFiles(processing).includes(recovery));
-  assert.ok(!reachableRuntimeFiles(recovery).includes(processing));
-  assert.ok(!reachableRuntimeFiles(recovery).includes(queue));
-});
+for (const module of [
+  "profileGameProjection",
+  "authRecovery",
+  "telegramProjection",
+]) {
+  test(`${module} processing and recovery have separate dependency boundaries`, () => {
+    const root = resolve(import.meta.dirname, "../src", module);
+    const processing = resolve(root, "processing.ts");
+    const recovery = resolve(root, "recovery.ts");
+    const queue = resolve(root, "queue.ts");
+    assert.ok(!reachableRuntimeFiles(processing).includes(recovery));
+    assert.ok(!reachableRuntimeFiles(processing).includes(queue));
+    assert.ok(!reachableRuntimeFiles(recovery).includes(processing));
+    assert.ok(!reachableRuntimeFiles(recovery).includes(queue));
+  });
+}
 
 test("event announcement scheduling and dispatch do not depend on recovery orchestration", () => {
   const recovery = resolve(import.meta.dirname, "../src/eventProgress.ts");
@@ -565,9 +657,8 @@ test("the final Worker runtime has no Firestore profile transport or retired bin
 });
 
 test("canonical auth and recovery cannot construct Firebase clients or access Firebase configuration", () => {
-  const internalRoot = resolve(
-    import.meta.dirname,
-    "../src/authIdentityCanonical",
+  const internalRoots = ["authIdentityCanonical", "authRecovery"].map(
+    (module) => resolve(import.meta.dirname, "../src", module),
   );
   const sources = new Set<string>();
   for (const file of [
@@ -578,7 +669,9 @@ test("canonical auth and recovery cannot construct Firebase clients or access Fi
     const entry = resolve(import.meta.dirname, "../src", file);
     sources.add(entry);
     for (const path of reachableRuntimeFiles(entry)) {
-      if (path.startsWith(`${internalRoot}/`)) sources.add(path);
+      if (internalRoots.some((root) => path.startsWith(`${root}/`))) {
+        sources.add(path);
+      }
     }
   }
   for (const path of sources) {

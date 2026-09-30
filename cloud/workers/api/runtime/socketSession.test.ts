@@ -15,8 +15,10 @@ import {
   REACTION_SOCKET_PROTOCOL_V2,
 } from "@mons/shared/reactions";
 import type { InviteReactions } from "../src/inviteReactions.ts";
-import type { MatchSyncMetadata } from "../src/matchSync.ts";
-import type { MatchStatePair } from "../src/matchStateTypes.ts";
+import type {
+  MatchStateSyncReadRequest,
+  MatchStateSyncReadResult,
+} from "../src/matchStateTypes.ts";
 import { SOCKET_TEST_SESSION_ID } from "../test/socketTestSession.ts";
 
 type Channel = "reactions" | "presentation" | "metadata" | "wagers" | "matches";
@@ -40,10 +42,9 @@ async function fixture() {
       inviteReader: () => Promise<unknown>;
       wagerReader: () => Promise<[]>;
       matchSync: {
-        readPair: (
-          metadata: MatchSyncMetadata,
-          matchId: string,
-        ) => Promise<MatchStatePair>;
+        readSyncState: (
+          input: MatchStateSyncReadRequest,
+        ) => Promise<MatchStateSyncReadResult>;
       };
     };
     mutable.inviteReader = async () => ({
@@ -63,20 +64,17 @@ async function fixture() {
       flatMovesString: "",
       timer: "",
     });
-    mutable.matchSync.readPair = async (metadata, matchId) => ({
-      inviteId: metadata.snapshot.inviteId,
-      epoch: 0,
-      matchId,
-      playerId: metadata.snapshot.hostId,
-      opponentId: metadata.snapshot.guestId,
-      revision: 1,
-      playerMatch: readMatch(metadata.snapshot.hostId),
-      opponentMatch:
-        metadata.snapshot.guestId === null
-          ? null
-          : readMatch(metadata.snapshot.guestId),
-      claim: null,
-    });
+    mutable.matchSync.readSyncState = async (input) =>
+      input.knownRevision === 1
+        ? { epoch: input.epoch, revision: 1, status: "unchanged" }
+        : {
+            epoch: input.epoch,
+            revision: 1,
+            status: "changed",
+            playerMatch: readMatch(input.playerId),
+            opponentMatch:
+              input.opponentId === null ? null : readMatch(input.opponentId),
+          };
   });
   await room.ensurePresentations(inviteId, {
     "host-login": { emojiId: 1, aura: "" },

@@ -45,6 +45,22 @@ export type MatchStatePair = MatchStatePairRequest & {
   claim: MatchStateRecord | null;
 };
 
+export type MatchStateSyncReadRequest = MatchStatePairRequest & {
+  knownRevision?: number;
+};
+
+export type MatchStateSyncReadResult = {
+  epoch: number;
+  revision: number;
+} & (
+  | { status: "unchanged" }
+  | {
+      status: "changed";
+      playerMatch: MatchStateRecord | null;
+      opponentMatch: MatchStateRecord | null;
+    }
+);
+
 export type MatchStateSource = {
   inviteId: string | null;
   epoch: number;

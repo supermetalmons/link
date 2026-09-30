@@ -62,6 +62,8 @@ import type {
   MatchStateSource,
   MatchStateStartTimerRequest,
   MatchStateSurrenderRequest,
+  MatchStateSyncReadRequest,
+  MatchStateSyncReadResult,
 } from "./matchStateTypes.ts";
 
 type SourceRow = {
@@ -302,8 +304,7 @@ export class MatchStateStore {
     });
   }
 
-  readPair(input: MatchStatePairRequest): MatchStatePair {
-    this.authority(input);
+  private pairTarget(input: MatchStatePairRequest): void {
     this.target(input);
     if (
       input.opponentId !== null &&
@@ -312,6 +313,11 @@ export class MatchStateStore {
     ) {
       throw new TypeError("match-state-invalid-opponent");
     }
+  }
+
+  readPair(input: MatchStatePairRequest): MatchStatePair {
+    this.authority(input);
+    this.pairTarget(input);
     return {
       ...input,
       revision: this.revision(input.matchId),
@@ -321,6 +327,30 @@ export class MatchStateStore {
           ? null
           : this.record(input.matchId, input.opponentId),
       claim: this.claim(input.matchId),
+    };
+  }
+
+  readSyncState(input: MatchStateSyncReadRequest): MatchStateSyncReadResult {
+    if (
+      input.knownRevision !== undefined &&
+      (!Number.isSafeInteger(input.knownRevision) || input.knownRevision < 0)
+    ) {
+      throw new TypeError("match-state-invalid-revision");
+    }
+    this.authority(input);
+    this.pairTarget(input);
+    const revision = this.revision(input.matchId);
+    const version = { epoch: input.epoch, revision };
+    if (input.knownRevision === revision)
+      return { ...version, status: "unchanged" };
+    return {
+      ...version,
+      status: "changed",
+      playerMatch: this.record(input.matchId, input.playerId),
+      opponentMatch:
+        input.opponentId === null
+          ? null
+          : this.record(input.matchId, input.opponentId),
     };
   }
 

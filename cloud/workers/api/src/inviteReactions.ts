@@ -23,7 +23,7 @@ import {
   type WagerStateSnapshot,
 } from "./wagerStateD1.ts";
 import { MatchSyncRoom } from "./matchSyncRoom.ts";
-import type { MatchSyncMetadata, MatchSyncReadResult } from "./matchSync.ts";
+import type { MatchSyncReadResult } from "./matchSync.ts";
 import { MatchStateStore } from "./matchStateStore.ts";
 import { parseNewMatchTimerStorage } from "./localMatchTimerStore.ts";
 import { captureMatchStateRpc, type MatchStateRpc } from "./matchStateRpc.ts";
@@ -33,7 +33,6 @@ import type {
   MatchStateCreateRequest,
   MatchStateEventEffectsRequest,
   MatchStateMoveRequest,
-  MatchStatePair,
   MatchStatePairRequest,
   MatchStateRecordRequest,
   MatchStateRecordsRequest,
@@ -168,7 +167,7 @@ export class InviteReactions
         this.inviteChannels.readMetadata(inviteId, true),
       inviteGeneration: () => this.inviteChannels.invalidationGeneration(),
       sourceEpoch: () => this.matchState.readSource().epoch,
-      readPair: (metadata, matchId) => this.readMatchPair(metadata, matchId),
+      readSyncState: (input) => this.matchState.readSyncState(input),
       scheduleAlarm: (atMs) => this.alarmCoordinator.schedule(atMs),
       capacityFull: (role, ip) => this.matchRoomFull(role, ip),
       canReceive: canReceiveInvite,
@@ -213,20 +212,6 @@ export class InviteReactions
       await this.matchSync.notify(inviteId, [matchId]);
     }
     return this.matchSync.read(inviteId, matchId, options.fresh);
-  }
-
-  private async readMatchPair(
-    metadata: MatchSyncMetadata,
-    matchId: string,
-  ): Promise<MatchStatePair> {
-    const source = this.matchState.readSource();
-    return this.matchState.readPair({
-      inviteId: metadata.snapshot.inviteId,
-      epoch: source.epoch,
-      matchId,
-      playerId: metadata.snapshot.hostId,
-      opponentId: metadata.snapshot.guestId,
-    });
   }
 
   async readCanonicalMatchRecord(input: MatchStateRecordRequest) {

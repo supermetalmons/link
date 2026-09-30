@@ -515,26 +515,45 @@ export async function readProfileGamesPage(
   const statement = cursor
     ? db
         .prepare(
-          `SELECT *
-           FROM profile_game_projections
-           WHERE profile_id = ?
-             AND (
-               sort_bucket > ?
-               OR (sort_bucket = ? AND list_sort_at_ms < ?)
-               OR (
-                 sort_bucket = ?
-                 AND list_sort_at_ms = ?
-                 AND projection_id > ?
-               )
-             )
-           ORDER BY sort_bucket ASC, list_sort_at_ms DESC, projection_id ASC
-           LIMIT ?`,
+          `WITH later_buckets AS (
+             SELECT projection_id, sort_bucket, list_sort_at_ms
+             FROM profile_game_projections
+             WHERE profile_id = ?1 AND sort_bucket > ?2
+             ORDER BY sort_bucket ASC, list_sort_at_ms DESC, projection_id ASC
+             LIMIT ?5
+           ), earlier_times AS (
+             SELECT projection_id, sort_bucket, list_sort_at_ms
+             FROM profile_game_projections
+             WHERE profile_id = ?1
+               AND sort_bucket = ?2 AND list_sort_at_ms < ?3
+             ORDER BY sort_bucket ASC, list_sort_at_ms DESC, projection_id ASC
+             LIMIT ?5
+           ), later_ids AS (
+             SELECT projection_id, sort_bucket, list_sort_at_ms
+             FROM profile_game_projections
+             WHERE profile_id = ?1
+               AND sort_bucket = ?2 AND list_sort_at_ms = ?3
+               AND projection_id > ?4
+             ORDER BY sort_bucket ASC, list_sort_at_ms DESC, projection_id ASC
+             LIMIT ?5
+           ), page AS (
+             SELECT * FROM later_buckets
+             UNION ALL SELECT * FROM earlier_times
+             UNION ALL SELECT * FROM later_ids
+             ORDER BY sort_bucket ASC, list_sort_at_ms DESC, projection_id ASC
+             LIMIT ?5
+           )
+           SELECT projection.*
+           FROM page
+           JOIN profile_game_projections AS projection
+             ON projection.profile_id = ?1
+            AND projection.projection_id = page.projection_id
+           ORDER BY page.sort_bucket ASC,
+                    page.list_sort_at_ms DESC,
+                    page.projection_id ASC`,
         )
         .bind(
           profileId,
-          cursor.sortBucket,
-          cursor.sortBucket,
-          cursor.listSortAtMs,
           cursor.sortBucket,
           cursor.listSortAtMs,
           cursor.id,

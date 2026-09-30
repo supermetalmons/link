@@ -20,7 +20,10 @@ import {
 import { readSocketAdmission } from "./socketAdmission.ts";
 import { acceptRoomSocket, sendSocketSnapshot } from "./socketUpgrade.ts";
 import { GameSessionTransitionFailure } from "./gameSessionCodec.ts";
-import type { MatchStatePair } from "./matchStateTypes.ts";
+import type {
+  MatchStateSyncReadRequest,
+  MatchStateSyncReadResult,
+} from "./matchStateTypes.ts";
 
 export const MATCH_SYNC_REPAIR_MS = 5_000;
 export const MAX_CACHED_MATCH_SYNC_STATES = 64;
@@ -61,10 +64,9 @@ type MatchRoomDependencies = {
   readMetadata: (inviteId: string) => Promise<InviteMetadataReadResult>;
   inviteGeneration: () => number;
   sourceEpoch: () => number;
-  readPair: (
-    metadata: MatchSyncMetadata,
-    matchId: string,
-  ) => Promise<MatchStatePair>;
+  readSyncState: (
+    input: MatchStateSyncReadRequest,
+  ) => MatchStateSyncReadResult | Promise<MatchStateSyncReadResult>;
   scheduleAlarm: (atMs: number) => Promise<void>;
   capacityFull: (role: string, ip: string) => boolean;
   canReceive: (
@@ -77,7 +79,7 @@ type MatchRoomDependencies = {
 export class MatchSyncRoom {
   private readonly states = new Map<string, MatchReadState>();
   private readonly admissions = new Map<string, number>();
-  private readPair: MatchRoomDependencies["readPair"];
+  private readSyncState: MatchRoomDependencies["readSyncState"];
 
   constructor(
     private readonly ctx: DurableObjectState,
@@ -86,7 +88,7 @@ export class MatchSyncRoom {
     ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS match_sync_snapshots (match_id TEXT PRIMARY KEY, snapshot_json TEXT NOT NULL, revision INTEGER NOT NULL, next_at_ms INTEGER)",
     );
-    this.readPair = dependencies.readPair;
+    this.readSyncState = dependencies.readSyncState;
   }
 
   private sockets(matchId?: string): WebSocket[] {
@@ -254,7 +256,25 @@ export class MatchSyncRoom {
           this.close(matchId, 1008, "Match unavailable");
           return { status: "missing" };
         }
-        const pair = await this.readPair(metadata, matchId);
+        const projection = state.projection;
+        const reusable =
+          projection &&
+          projection.sourceEpoch === sourceEpoch &&
+          projection.metadataRevision === metadata.snapshot.revision &&
+          projection.snapshot.inviteId === inviteId &&
+          projection.snapshot.matchId === matchId &&
+          projection.snapshot.hostPlayerId === metadata.snapshot.hostId &&
+          projection.snapshot.guestPlayerId === metadata.snapshot.guestId
+            ? projection
+            : undefined;
+        const pair = await this.readSyncState({
+          inviteId,
+          epoch: sourceEpoch,
+          matchId,
+          playerId: metadata.snapshot.hostId,
+          opponentId: metadata.snapshot.guestId,
+          knownRevision: reusable?.matchRevision,
+        });
         if (!current()) continue;
         readingSource = false;
         if (
@@ -264,15 +284,11 @@ export class MatchSyncRoom {
         ) {
           throw new Error("match-sync-source-invalid");
         }
-        const projection = state.projection;
         let snapshot: MatchSyncSnapshot;
-        if (
-          projection &&
-          projection.sourceEpoch === pair.epoch &&
-          projection.matchRevision === pair.revision &&
-          projection.metadataRevision === metadata.snapshot.revision
-        ) {
-          snapshot = projection.snapshot;
+        if (pair.status === "unchanged") {
+          if (!reusable || reusable.matchRevision !== pair.revision)
+            throw new Error("match-sync-source-invalid");
+          snapshot = reusable.snapshot;
           this.updateSubscribers(matchId, metadata, null);
         } else {
           snapshot = this.apply(
