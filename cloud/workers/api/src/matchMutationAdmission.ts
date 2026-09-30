@@ -3,23 +3,18 @@ import {
   parseRematchIndices,
 } from "@mons/shared/rematches";
 import { AuthApiFailure } from "./authErrors.ts";
-import type { GameplayRepository } from "./gameplayRepository.ts";
+import type { InviteAccessRepository } from "./gameplayContracts.ts";
 import {
-  getLoginProfileId,
-  requireProfileOwnershipSnapshot,
-} from "./profileOwnership.ts";
+  authorizeMatchPlayer,
+  createMatchAdmissionSignal,
+  type MatchAdmissionDependencies,
+} from "./matchAdmission.ts";
 import { isCanonicalLoginUid } from "./recordKeys.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 
-export type MatchMutationRepository = Pick<
-  GameplayRepository,
-  "readInviteMetadata" | "readProfileOwnershipSnapshot"
->;
+export type MatchMutationRepository = InviteAccessRepository;
 
-export type MatchMutationAdmissionDependencies = {
-  assertMutationAllowed?: () => Promise<void>;
-  signal?: AbortSignal;
-};
+export type MatchMutationAdmissionDependencies = MatchAdmissionDependencies;
 
 type MatchMutationTarget = {
   inviteId: string;
@@ -39,10 +34,7 @@ export async function authorizeMatchMutation(
   repository: MatchMutationRepository,
   dependencies: MatchMutationAdmissionDependencies,
 ): Promise<void> {
-  const timeout = AbortSignal.timeout(20_000);
-  const signal = dependencies.signal
-    ? AbortSignal.any([dependencies.signal, timeout])
-    : timeout;
+  const signal = createMatchAdmissionSignal(dependencies.signal);
   signal.throwIfAborted();
   const inviteValue = await repository.readInviteMetadata(
     request.inviteId,
@@ -68,19 +60,7 @@ export async function authorizeMatchMutation(
   ) {
     throw new AuthApiFailure(403, "permission-denied", "permission-denied");
   }
-  if (identity.uid !== request.playerId) {
-    const ownership = await requireProfileOwnershipSnapshot(repository, {
-      loginUids: [identity.uid, request.playerId],
-      profileIds: [],
-    });
-    const profileId = getLoginProfileId(ownership, identity.uid);
-    if (
-      !profileId ||
-      profileId !== getLoginProfileId(ownership, request.playerId)
-    ) {
-      throw new AuthApiFailure(403, "permission-denied", "permission-denied");
-    }
-  }
+  await authorizeMatchPlayer(identity, request.playerId, repository);
   const index = parseInviteMatchIndex(request.inviteId, request.matchId);
   if (
     index === null ||

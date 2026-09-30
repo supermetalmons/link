@@ -831,6 +831,110 @@ test("direct rating authorization does not read ownership", async () => {
   assert.equal(state.getFinalized(), 1);
 });
 
+test("rating request eligibility precedes ownership and state reads", async () => {
+  const state = createRepository();
+  const reads: string[] = [];
+  state.repository.readProfileOwnershipSnapshot = async () => {
+    reads.push("ownership");
+    throw new Error("ownership-unavailable");
+  };
+  state.repository.readInviteMetadata = async () => {
+    reads.push("invite");
+    throw new Error("invite-unavailable");
+  };
+  state.repository.hasCompletedRatingUpdate = async () => {
+    reads.push("completion");
+    throw new Error("completion-unavailable");
+  };
+  const actor = { uid: "alternate-login" };
+  assert.deepEqual(
+    await updateRatings(
+      actor,
+      { ...request, inviteId: "manual-invite" },
+      state.repository,
+    ),
+    { ok: false },
+  );
+  await assert.rejects(
+    updateRatings(
+      actor,
+      { ...request, matchId: "unrelated-match" },
+      state.repository,
+    ),
+    {
+      status: 403,
+      code: "permission-denied",
+      message: "permission-denied",
+    },
+  );
+  assert.deepEqual(reads, []);
+  assert.equal(state.getAttempts(), 0);
+});
+
+test("rating ownership failures precede invite and completion reads", async () => {
+  for (const malformed of [false, true]) {
+    const state = createRepository({ invite: null });
+    const reads: string[] = [];
+    const readOwnership = state.repository.readProfileOwnershipSnapshot;
+    state.repository.readProfileOwnershipSnapshot = async (query) => {
+      reads.push("ownership");
+      const snapshot = await readOwnership(query);
+      if (!malformed) throw new Error("ownership-unavailable");
+      return { ...snapshot, loginOwnerByUid: new Map() };
+    };
+    state.repository.readInviteMetadata = async () => {
+      reads.push("invite");
+      return null;
+    };
+    state.repository.hasCompletedRatingUpdate = async () => {
+      reads.push("completion");
+      return false;
+    };
+    await assert.rejects(
+      updateRatings({ uid: "alternate-login" }, request, state.repository),
+      {
+        status: 503,
+        code: "unavailable",
+        message: "profile-ownership-unavailable",
+      },
+    );
+    assert.deepEqual(reads, ["ownership"]);
+    assert.equal(state.getAttempts(), 0);
+    assert.equal(state.getFinalized(), 0);
+  }
+});
+
+test("completed rating rematches replay without rematch-list membership", async () => {
+  const state = createRepository({ completed: true, failMatchReads: true });
+  const input = { ...request, matchId: `${request.inviteId}3` };
+  const reads: string[] = [];
+  const readOwnership = state.repository.readProfileOwnershipSnapshot;
+  state.repository.readProfileOwnershipSnapshot = async (query) => {
+    reads.push("ownership");
+    return readOwnership(query);
+  };
+  const readInvite = state.repository.readInviteMetadata;
+  state.repository.readInviteMetadata = async (...args) => {
+    reads.push("invite");
+    return readInvite(...args);
+  };
+  state.repository.hasCompletedRatingUpdate = async (inviteId, matchId) => {
+    reads.push("completion");
+    assert.equal(inviteId, input.inviteId);
+    assert.equal(matchId, input.matchId);
+    return true;
+  };
+  state.repository.readRatingUpdate = async () =>
+    completedData({ matchId: input.matchId });
+  assert.deepEqual(
+    await updateRatings({ uid: "alternate-login" }, input, state.repository),
+    { ok: true },
+  );
+  assert.deepEqual(reads, ["ownership", "invite", "completion"]);
+  assert.equal(state.getAttempts(), 0);
+  assert.equal(state.getFinalized(), 0);
+});
+
 test("authorizes direct and canonical same-profile logins only", async () => {
   const sameProfile = createRepository();
   let ownershipReads = 0;

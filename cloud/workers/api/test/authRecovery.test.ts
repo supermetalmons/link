@@ -326,7 +326,7 @@ test("event prize recovery leaves copying pending while the event lease is busy"
     withdrawalStore: { get: async () => null },
   });
 
-  assert.equal(await service.recoverProfile("target-profile"), false);
+  assert.equal(await service.recoverProfile("target-profile"), "deferred");
   assert.deepEqual(readProfileIds, ["source-profile"]);
   assert.deepEqual(transactionPaths, [`eventLocks/${eventId}`]);
 });
@@ -515,7 +515,7 @@ test("event prize recovery rereads the source entitlement under its lease", asyn
   });
   const service = prizeRecoveryService(profile.db, prizeStore.client);
 
-  assert.equal(await service.recoverProfile("target-profile"), false);
+  assert.equal(await service.recoverProfile("target-profile"), "continued");
   assert.deepEqual(prizeStore.value(prizeStore.targetPath), {
     eventId: "NN3eRzoZo80",
     profileId: "target-profile",
@@ -540,7 +540,7 @@ test("event prize recovery does not mutate or advance after lease loss", async (
   });
   const service = prizeRecoveryService(profile.db, prizeStore.client);
 
-  assert.equal(await service.recoverProfile("target-profile"), false);
+  assert.equal(await service.recoverProfile("target-profile"), "deferred");
   assert.equal(prizeStore.value(prizeStore.targetPath), null);
   assert.equal(
     prizeStore.transactionPaths.filter((path) => path === prizeStore.targetPath)
@@ -558,7 +558,7 @@ test("event prize recovery does not recopy the inclusive cursor assignment", asy
   });
   const service = prizeRecoveryService(profile.db, prizeStore.client);
 
-  assert.equal(await service.recoverProfile("target-profile"), false);
+  assert.equal(await service.recoverProfile("target-profile"), "continued");
   assert.deepEqual(prizeStore.listQueries, [
     { startAt: cursor, limit: MERGE_PRIZE_RECOVERY_PAGE_SIZE + 2 },
   ]);
@@ -576,7 +576,7 @@ test("event prize recovery preserves assignments removed from the current catalo
   const prizeStore = recoveryPrizeStore({ liveAssignment: assignment });
   const service = prizeRecoveryService(profile.db, prizeStore.client);
 
-  assert.equal(await service.recoverProfile("target-profile"), false);
+  assert.equal(await service.recoverProfile("target-profile"), "continued");
   assert.deepEqual(prizeStore.value(prizeStore.targetPath), {
     ...assignment,
     profileId: "target-profile",
@@ -607,7 +607,7 @@ test("event prize recovery rescans late assignments before finalizing", async ()
     profileGamesDb,
   );
 
-  assert.equal(await service.recoverProfile("target-profile"), false);
+  assert.equal(await service.recoverProfile("target-profile"), "continued");
   assert.deepEqual(prizeStore.value(prizeStore.targetPath), {
     eventId: "NN3eRzoZo80",
     profileId: "target-profile",
@@ -702,7 +702,7 @@ test("final prize recovery copies at most one page", async () => {
     withdrawalStore: { get: async () => null },
   });
 
-  assert.equal(await service.recoverProfile("target-profile"), false);
+  assert.equal(await service.recoverProfile("target-profile"), "continued");
   assert.deepEqual(listQueries, [
     {
       limit: MERGE_PRIZE_RECOVERY_PAGE_SIZE + 1,
@@ -773,7 +773,7 @@ test("event prize recovery aborts a stalled mutation before lease expiry", async
   });
 
   const startedAt = Date.now();
-  assert.equal(await service.recoverProfile("target-profile"), false);
+  assert.equal(await service.recoverProfile("target-profile"), "deferred");
   assert.equal(targetSignal?.aborted, true);
   assert.ok(Date.now() - startedAt < 1_000);
   assert.equal(profile.mutationBatches(), 0);

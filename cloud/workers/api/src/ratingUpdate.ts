@@ -51,11 +51,7 @@ import {
   type ProfileGameProjectionTask,
   type RatingProfileGameProjectionTask,
 } from "./profileGameProjectionTasks.ts";
-import {
-  getLoginProfileId,
-  requireProfileOwnershipSnapshot,
-  type ProfileOwnershipSnapshot,
-} from "./profileOwnership.ts";
+import { authorizeMatchPlayer } from "./matchAdmission.ts";
 import {
   buildEventProgressPlan,
   type EventProgressPlan,
@@ -509,27 +505,6 @@ function buildRatingPlan({
   };
 }
 
-async function authorizePlayer(
-  identity: RequestIdentity,
-  playerId: string,
-  opponentId: string,
-  repository: RatingRepository,
-): Promise<ProfileOwnershipSnapshot | null> {
-  if (identity.uid === playerId) {
-    return null;
-  }
-  const ownership = await requireProfileOwnershipSnapshot(repository, {
-    loginUids: [identity.uid, playerId, opponentId],
-    profileIds: [],
-  });
-  const identityProfileId = getLoginProfileId(ownership, identity.uid);
-  const playerProfileId = getLoginProfileId(ownership, playerId);
-  if (!identityProfileId || identityProfileId !== playerProfileId) {
-    throw new AuthApiFailure(403, "permission-denied", "permission-denied");
-  }
-  return ownership;
-}
-
 async function repairRatingSideEffects(
   request: RatingUpdateRequest,
   data: RatingRepairData | null,
@@ -604,12 +579,9 @@ export async function updateRatings(
   if (parseInviteMatchIndex(request.inviteId, request.matchId) === null) {
     throw new AuthApiFailure(403, "permission-denied", "permission-denied");
   }
-  await authorizePlayer(
-    identity,
-    request.playerId,
-    request.opponentId,
-    repository,
-  );
+  await authorizeMatchPlayer(identity, request.playerId, repository, {
+    additionalLoginUids: [request.opponentId],
+  });
   const operationId = `${request.inviteId}__${request.matchId}`;
   const [inviteValue, completed] = await Promise.all([
     repository.readInviteMetadata(request.inviteId),

@@ -19,11 +19,16 @@ export async function handleAuthRecoveryMessage(
     return;
   }
   try {
-    if (await recover(task.profileId)) {
+    const status = await recover(task.profileId);
+    if (status === "continued") {
+      await env.AUTH_RECOVERY_QUEUE.send(task, { delaySeconds: 0 });
+    }
+    if (status === "done" || status === "continued") {
       ackQueueMessage(message, {
         entry: {
           event: "auth_recovery_queue_processed",
           profileId: task.profileId,
+          status,
         },
         level: "info",
         logger,
@@ -33,6 +38,7 @@ export async function handleAuthRecoveryMessage(
         entry: {
           event: "auth_recovery_queue_retrying",
           profileId: task.profileId,
+          status,
         },
         level: "info",
         logger,

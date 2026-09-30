@@ -605,7 +605,7 @@ describe("profile recovery finalization snapshot", () => {
     const observed = observeDatabase();
     expect(
       await recoveryService(observed.database).recoverProfile(f.targetId),
-    ).toBe(false);
+    ).toBe("continued");
     expect(
       await readCanonicalProfile(testEnv.PROFILE_DB, f.sourceId),
     ).toBeNull();
@@ -632,7 +632,7 @@ describe("profile recovery finalization snapshot", () => {
     const f = await fixture();
     let nowMs = 100_000;
     const service = recoveryService(testEnv.PROFILE_DB, () => nowMs);
-    expect(await service.recoverProfile(f.targetId)).toBe(false);
+    expect(await service.recoverProfile(f.targetId)).toBe("deferred");
     expect(
       await readCanonicalAuthRecoveryJob(testEnv.PROFILE_DB, f.targetId),
     ).toMatchObject({
@@ -640,9 +640,21 @@ describe("profile recovery finalization snapshot", () => {
       sourceProfileIds: [],
       updatedAtMs: nowMs,
     });
-    expect(await service.recoverProfile(f.targetId)).toBe(false);
-    nowMs += MERGE_GAME_FINALIZE_DELAY_MS;
-    expect(await service.recoverProfile(f.targetId)).toBe(true);
+    const completedSource = await readCanonicalAuthRecoveryJob(
+      testEnv.PROFILE_DB,
+      f.targetId,
+    );
+    expect(await service.recoverProfile(f.targetId)).toBe("deferred");
+    expect(
+      await readCanonicalAuthRecoveryJob(testEnv.PROFILE_DB, f.targetId),
+    ).toEqual(completedSource);
+    nowMs += MERGE_GAME_FINALIZE_DELAY_MS - 1;
+    expect(await service.recoverProfile(f.targetId)).toBe("deferred");
+    expect(
+      await readCanonicalAuthRecoveryJob(testEnv.PROFILE_DB, f.targetId),
+    ).toEqual(completedSource);
+    nowMs++;
+    expect(await service.recoverProfile(f.targetId)).toBe("done");
   });
 
   it("returns to game recovery when a game appears before finalization", async () => {
@@ -674,7 +686,7 @@ describe("profile recovery finalization snapshot", () => {
     const observed = observeDatabase();
     expect(
       await recoveryService(observed.database).recoverProfile(f.targetId),
-    ).toBe(false);
+    ).toBe("continued");
     expect(
       await readCanonicalProfile(testEnv.PROFILE_DB, f.sourceId),
     ).not.toBeNull();
@@ -718,7 +730,7 @@ describe("profile recovery finalization snapshot", () => {
         () => 100_000,
         prizes,
       ).recoverProfile(f.targetId),
-    ).toBe(false);
+    ).toBe("deferred");
     expect(
       await readCanonicalProfile(testEnv.PROFILE_DB, f.sourceId),
     ).not.toBeNull();
@@ -749,7 +761,7 @@ describe("profile recovery finalization snapshot", () => {
       });
       expect(
         await recoveryService(observed.database).recoverProfile(f.targetId),
-      ).toBe(false);
+      ).toBe("deferred");
       expect(
         await readCanonicalProfile(testEnv.PROFILE_DB, f.sourceId),
       ).not.toBeNull();
@@ -777,7 +789,7 @@ describe("profile recovery finalization snapshot", () => {
     });
     expect(
       await recoveryService(observed.database).recoverProfile(f.targetId),
-    ).toBe(false);
+    ).toBe("deferred");
     expect(
       await readCanonicalAuthRecoveryJob(testEnv.PROFILE_DB, f.targetId),
     ).toEqual(before);

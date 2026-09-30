@@ -63,6 +63,7 @@ import { readAutomatchRuntimeControl } from "./automatchD1.ts";
 import { MATCH_SNAPSHOT_PATH } from "@mons/shared/game-sessions";
 import { handleMatchSnapshotRoute } from "./matchSnapshotRoute.ts";
 import { runScheduledTasks } from "./scheduledTasks.ts";
+import { withD1OperationTelemetry } from "./d1Telemetry.ts";
 
 export { extractIdFromJsonUri } from "./helius.ts";
 export type { ProviderFetch } from "./provider.ts";
@@ -108,6 +109,16 @@ export async function handleScheduled(
   controller: ScheduledController,
   env: Env,
   overrides: Partial<ScheduledTasks> = {},
+): Promise<void> {
+  return withD1OperationTelemetry("scheduled.recovery", env, (measuredEnv) =>
+    handleScheduledTasks(controller, measuredEnv, overrides),
+  );
+}
+
+async function handleScheduledTasks(
+  controller: ScheduledController,
+  env: Env,
+  overrides: Partial<ScheduledTasks>,
 ): Promise<void> {
   const profileWritesEnabled = profileBackgroundMutationsEnabled(env);
   const persistenceWritesEnabled = readAutomatchRuntimeControl(

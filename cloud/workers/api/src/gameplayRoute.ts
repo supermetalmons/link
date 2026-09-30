@@ -35,6 +35,7 @@ import {
   measureAutomatchPhase,
   withAutomatchTelemetry,
 } from "./automatchTelemetry.ts";
+import { withD1OperationTelemetry } from "./d1Telemetry.ts";
 
 export type { GameplayRouteDependencies } from "./gameplayRoutes/runtime.ts";
 export { cancelAutomatch } from "./gameplayRoutes/automatch.ts";
@@ -81,6 +82,13 @@ export async function handleGameplayRoute(
     new URL(request.url).pathname === "/automatch/start"
   )
     return withAutomatchTelemetry(env, (measuredEnv) =>
+      handleGameplayRouteInternal(request, measuredEnv, ctx, dependencies),
+    );
+  if (
+    request.method === "POST" &&
+    new URL(request.url).pathname === "/ratings/update"
+  )
+    return withD1OperationTelemetry("ratings.update", env, (measuredEnv) =>
       handleGameplayRouteInternal(request, measuredEnv, ctx, dependencies),
     );
   return handleGameplayRouteInternal(request, env, ctx, dependencies);

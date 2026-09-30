@@ -13,6 +13,7 @@ import {
 import { createAuthIdentityService } from "../src/authIdentity.ts";
 import {
   createAuthRecoveryService,
+  handleAuthRecoveryMessage,
   MERGE_GAME_FINALIZE_DELAY_MS,
   removeCanonicalAuthRecoveryLoginUid,
 } from "../src/authRecovery.ts";
@@ -323,6 +324,7 @@ describe("canonical auth recovery with D1 storage", () => {
       projectionIds[3],
     );
     const targetRead = vi.fn();
+    let nowMs = Date.now() + 1_000;
     const service = createAuthRecoveryService(d1Env, {
       d1: observeTargetReads(
         testEnv.PROFILE_GAMES_DB,
@@ -330,10 +332,11 @@ describe("canonical auth recovery with D1 storage", () => {
         targetRead,
       ),
       logger,
+      now: () => nowMs,
     });
 
     await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(
-      false,
+      "continued",
     );
     expect(targetRead).toHaveBeenCalledTimes(1);
     expect(
@@ -370,7 +373,7 @@ describe("canonical auth recovery with D1 storage", () => {
     expect(await f.readJob()).toMatchObject({ source_phase: "games" });
 
     await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(
-      false,
+      "continued",
     );
     expect(targetRead).toHaveBeenCalledTimes(2);
     expect(
@@ -386,6 +389,227 @@ describe("canonical auth recovery with D1 storage", () => {
         projectionIds[100],
       ),
     ).toMatchObject({ data: gameData(projectionIds[100], f.targetProfileId) });
+    const completedPage = await f.readJob();
+    expect(completedPage).toMatchObject({
+      phase_started_at_ms: nowMs,
+      updated_at_ms: nowMs,
+    });
+    await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(
+      "deferred",
+    );
+    expect(await f.readJob()).toEqual(completedPage);
+    nowMs += MERGE_GAME_FINALIZE_DELAY_MS - 1;
+    await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(
+      "deferred",
+    );
+    expect(await f.readJob()).toEqual(completedPage);
+    nowMs++;
+    await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(
+      "continued",
+    );
+    expect(await f.readJob()).toMatchObject({ source_phase: "finalize" });
+  });
+
+  it("does not enqueue again or move the quiet period when a continued message is redelivered", async () => {
+    const f = await fixture();
+    await f.startGamePhase();
+    const nowMs = Date.now() + 1_000;
+    const projectionId = "recovery-duplicate-game";
+    await commitProfileGameProjectionWrites(testEnv.PROFILE_GAMES_DB, [
+      {
+        type: "create",
+        profileId: sourceProfileId,
+        projectionId,
+        data: gameData(projectionId, sourceProfileId),
+      },
+    ]);
+    const service = createAuthRecoveryService(d1Env, {
+      logger,
+      now: () => nowMs,
+    });
+    const send = vi.spyOn(queueTransport, "send");
+    const message: Message<unknown> = {
+      id: "recovery-duplicate-message",
+      attempts: 100,
+      timestamp: new Date(nowMs),
+      body: { kind: "auth-profile-recovery", profileId: f.targetProfileId },
+      ack: vi.fn(),
+      retry: vi.fn(),
+    };
+    try {
+      await handleAuthRecoveryMessage(
+        message,
+        d1Env,
+        service.recoverProfile,
+        logger,
+      );
+      expect(send).toHaveBeenCalledExactlyOnceWith(message.body, {
+        delaySeconds: 0,
+      });
+      expect(message.ack).toHaveBeenCalledOnce();
+      expect(message.retry).not.toHaveBeenCalled();
+      const job = await f.readJob();
+      const projection = await getProfileGameProjection(
+        testEnv.PROFILE_GAMES_DB,
+        f.targetProfileId,
+        projectionId,
+      );
+
+      await handleAuthRecoveryMessage(
+        message,
+        d1Env,
+        service.recoverProfile,
+        logger,
+      );
+      expect(send).toHaveBeenCalledOnce();
+      expect(message.ack).toHaveBeenCalledOnce();
+      expect(message.retry).toHaveBeenCalledExactlyOnceWith({
+        delaySeconds: 60,
+      });
+      expect(await f.readJob()).toEqual(job);
+      expect(
+        await getProfileGameProjection(
+          testEnv.PROFILE_GAMES_DB,
+          f.targetProfileId,
+          projectionId,
+        ),
+      ).toEqual(projection);
+    } finally {
+      send.mockRestore();
+    }
+  });
+
+  it.each(["before", "after"] as const)(
+    "defers when the recovery checkpoint fails %s committing a copied game page",
+    async (timing) => {
+      const f = await fixture();
+      await f.startGamePhase();
+      const before = await f.readJob();
+      const projectionId = "recovery-uncertain-game";
+      await commitProfileGameProjectionWrites(testEnv.PROFILE_GAMES_DB, [
+        {
+          type: "create",
+          profileId: sourceProfileId,
+          projectionId,
+          data: gameData(projectionId, sourceProfileId),
+        },
+      ]);
+      let batches = 0;
+      const profileDb = new Proxy(testEnv.PROFILE_DB, {
+        get(target, property) {
+          if (property === "batch")
+            return async (statements: D1PreparedStatement[]) => {
+              batches++;
+              if (timing === "after") await target.batch(statements);
+              throw new Error("uncertain-recovery-checkpoint");
+            };
+          const member = Reflect.get(target, property, target);
+          return typeof member === "function" ? member.bind(target) : member;
+        },
+      });
+      const service = createAuthRecoveryService(d1Env, { logger, profileDb });
+      await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(
+        "deferred",
+      );
+      expect(batches).toBe(1);
+      expect(
+        await listProfileGameProjectionPage(
+          testEnv.PROFILE_GAMES_DB,
+          sourceProfileId,
+        ),
+      ).toEqual([]);
+      expect(
+        await getProfileGameProjection(
+          testEnv.PROFILE_GAMES_DB,
+          f.targetProfileId,
+          projectionId,
+        ),
+      ).toMatchObject({ data: gameData(projectionId, f.targetProfileId) });
+      if (timing === "before") expect(await f.readJob()).toEqual(before);
+      else
+        expect(await f.readJob()).toMatchObject({
+          revision: Number(before?.revision) + 1,
+        });
+    },
+  );
+
+  it.each(["revision", "updated_at_ms", "last_enqueued_at_ms"] as const)(
+    "does not treat another writer's %s change as recovery progress",
+    async (column) => {
+      const f = await fixture();
+      await testEnv.PROFILE_DB.prepare(
+        "UPDATE profile_auth_recovery_jobs SET login_uids_json = ? WHERE profile_id = ?",
+      )
+        .bind(JSON.stringify([f.loginUid]), f.targetProfileId)
+        .run();
+      const before = await f.readJob();
+      const catchupStore = createProfileLinkCatchupStore(testEnv.PROFILE_DB);
+      const service = createAuthRecoveryService(d1Env, {
+        logger,
+        catchupStore: {
+          ...catchupStore,
+          async readForOwner() {
+            await testEnv.PROFILE_DB.prepare(
+              `UPDATE profile_auth_recovery_jobs SET ${column} = ${column} + 1 WHERE profile_id = ?`,
+            )
+              .bind(f.targetProfileId)
+              .run();
+            throw new Error("owner-unavailable");
+          },
+        },
+      });
+      await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(
+        "deferred",
+      );
+      expect(await f.readJob()).toEqual({
+        ...before,
+        [column]: Number(before?.[column]) + 1,
+      });
+    },
+  );
+
+  it("continues bounded login removals and preserves the final quiet period", async () => {
+    const f = await fixture();
+    const loginUids = Array.from(
+      { length: 21 },
+      (_, index) => `recovery-login-${index}`,
+    );
+    await testEnv.PROFILE_DB.prepare(
+      "UPDATE profile_auth_recovery_jobs SET login_uids_json = ?, source_profile_ids_json = '[]' WHERE profile_id = ?",
+    )
+      .bind(JSON.stringify(loginUids), f.targetProfileId)
+      .run();
+    let nowMs = Date.now() + 1_000;
+    const catchupStore = createProfileLinkCatchupStore(testEnv.PROFILE_DB);
+    const service = createAuthRecoveryService(d1Env, {
+      logger,
+      now: () => nowMs,
+      catchupStore: { ...catchupStore, readForOwner: async () => null },
+    });
+    await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(
+      "continued",
+    );
+    expect(await f.readJob()).toMatchObject({
+      login_uids_json: JSON.stringify(loginUids.slice(20)),
+    });
+    await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(
+      "deferred",
+    );
+    const completedLogins = await f.readJob();
+    expect(completedLogins).toMatchObject({
+      login_uids_json: "[]",
+      updated_at_ms: nowMs,
+    });
+    nowMs += MERGE_GAME_FINALIZE_DELAY_MS - 1;
+    await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(
+      "deferred",
+    );
+    expect(await f.readJob()).toEqual(completedLogins);
+    nowMs++;
+    await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(
+      "done",
+    );
+    expect(await f.readJob()).toBeNull();
   });
 
   it.each(["target-created", "target-updated", "source-updated"] as const)(
@@ -454,7 +678,7 @@ describe("canonical auth recovery with D1 storage", () => {
         createAuthRecoveryService(d1Env, { d1, logger }).recoverProfile(
           f.targetProfileId,
         ),
-      ).resolves.toBe(false);
+      ).resolves.toBe("deferred");
       expect(races).toBe(1);
       expect(await f.readJob()).toEqual(before);
       expect(
@@ -538,7 +762,7 @@ describe("canonical auth recovery with D1 storage", () => {
           ),
           logger,
         }).recoverProfile(f.targetProfileId),
-      ).resolves.toBe(false);
+      ).resolves.toBe("deferred");
       expect(targetRead).toHaveBeenCalledTimes(1);
       expect(await f.readJob()).toEqual(before);
       expect((await readRows()).results).toEqual(rowsBefore);
@@ -566,7 +790,9 @@ describe("canonical auth recovery with D1 storage", () => {
       catchupStore: { ...catchupStore, readForOwner },
     });
 
-    await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(true);
+    await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(
+      "done",
+    );
     expect(readForOwner).toHaveBeenCalledExactlyOnceWith(
       f.loginUid,
       f.targetProfileId,
@@ -641,7 +867,7 @@ describe("canonical auth recovery with D1 storage", () => {
     const service = createAuthRecoveryService(d1Env, { logger });
     const store = createD1AuthRecoveryPrizeStore(testEnv.EVENT_DB);
     await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(
-      false,
+      "continued",
     );
     expect(
       await store.readProfileEventPrizeAssignment(f.targetProfileId, eventId),
@@ -660,7 +886,7 @@ describe("canonical auth recovery with D1 storage", () => {
       .first<number>("revision");
     await f.resetPrizePhase();
     await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(
-      false,
+      "continued",
     );
     expect(
       await testEnv.EVENT_DB.prepare(
@@ -713,7 +939,7 @@ describe("canonical auth recovery with D1 storage", () => {
         createAuthRecoveryService(d1Env, { logger }).recoverProfile(
           f.targetProfileId,
         ),
-      ).resolves.toBe(false);
+      ).resolves.toBe("deferred");
       expect(await f.readJob()).toEqual(before);
       expect(
         await store.readProfileEventPrizeAssignment(f.targetProfileId, eventId),
@@ -752,7 +978,7 @@ describe("canonical auth recovery with D1 storage", () => {
       },
     });
     await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(
-      false,
+      "deferred",
     );
     expect(await f.readJob()).toEqual(before);
     expect(
@@ -798,7 +1024,7 @@ describe("canonical auth recovery with D1 storage", () => {
           : {}),
       });
       await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(
-        false,
+        "continued",
       );
       expect(
         await createD1AuthRecoveryPrizeStore(

@@ -22,13 +22,12 @@ import {
 import { Game } from "mons-rules";
 import { AuthApiFailure } from "./authErrors.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
-import type { GameplayRepository } from "./gameplayRepository.ts";
+import type { InviteAccessRepository } from "./gameplayContracts.ts";
 import {
-  getLoginProfileId,
-  requireProfileOwnershipSnapshot,
-} from "./profileOwnership.ts";
-
-const MATCH_TIMER_OPERATION_TIMEOUT_MS = 20_000;
+  authorizeMatchPlayer,
+  createMatchAdmissionSignal,
+  type MatchAdmissionDependencies,
+} from "./matchAdmission.ts";
 
 export type MatchTimerRecord = {
   color: "white" | "black";
@@ -45,29 +44,21 @@ export type MatchTimerGameState = {
   winner: "white" | "black" | undefined;
 };
 
-type MatchTimerAdmissionDependencies = {
-  assertMutationAllowed?: () => Promise<void>;
-  signal?: AbortSignal;
-};
-
-export type StartMatchTimerDependencies = MatchTimerAdmissionDependencies & {
+export type StartMatchTimerDependencies = MatchAdmissionDependencies & {
   startCanonical: (
     request: StartMatchTimerRequest,
   ) => Promise<StartMatchTimerResponse>;
 };
 
 export type ClaimMatchVictoryByTimerDependencies =
-  MatchTimerAdmissionDependencies & {
+  MatchAdmissionDependencies & {
     claimCanonical: (
       request: ClaimMatchVictoryByTimerRequest,
       inviteValue: unknown,
     ) => Promise<ClaimMatchVictoryByTimerResponse>;
   };
 
-type MatchTimerRepository = Pick<
-  GameplayRepository,
-  "readInviteMetadata" | "readProfileOwnershipSnapshot"
->;
+type MatchTimerRepository = InviteAccessRepository;
 
 function failedPrecondition(message: string): AuthApiFailure {
   return new AuthApiFailure(409, "failed-precondition", message);
@@ -162,25 +153,29 @@ export function resolveMatchTimerGame(
   };
 }
 
-async function authorizePlayer(
+async function authorizeTimerMatch(
   identity: RequestIdentity,
-  playerId: string,
+  request: StartMatchTimerRequest,
   repository: MatchTimerRepository,
-  signal: AbortSignal,
-): Promise<void> {
-  if (identity.uid === playerId) {
-    return;
-  }
-  signal.throwIfAborted();
-  const ownership = await requireProfileOwnershipSnapshot(repository, {
-    loginUids: [identity.uid, playerId],
-    profileIds: [],
+  dependencies: MatchAdmissionDependencies,
+): Promise<unknown> {
+  const signal = createMatchAdmissionSignal(dependencies.signal);
+  await authorizeMatchPlayer(identity, request.playerId, repository, {
+    signal,
   });
-  const identityProfileId = getLoginProfileId(ownership, identity.uid);
-  const playerProfileId = getLoginProfileId(ownership, playerId);
-  if (!identityProfileId || identityProfileId !== playerProfileId) {
+  const inviteValue = await repository.readInviteMetadata(
+    request.inviteId,
+    signal,
+  );
+  if (
+    !inviteMatchesPlayers(inviteValue, request.playerId, request.opponentId) ||
+    parseInviteMatchIndex(request.inviteId, request.matchId) === null
+  ) {
     throw new AuthApiFailure(403, "permission-denied", "permission-denied");
   }
+  signal.throwIfAborted();
+  await dependencies.assertMutationAllowed?.();
+  return inviteValue;
 }
 
 export async function enforceMatchTimerRateLimit(
@@ -227,23 +222,7 @@ export async function startMatchTimer(
   repository: MatchTimerRepository,
   dependencies: StartMatchTimerDependencies,
 ): Promise<StartMatchTimerResponse> {
-  const timeoutSignal = AbortSignal.timeout(MATCH_TIMER_OPERATION_TIMEOUT_MS);
-  const signal = dependencies.signal
-    ? AbortSignal.any([dependencies.signal, timeoutSignal])
-    : timeoutSignal;
-  await authorizePlayer(identity, request.playerId, repository, signal);
-  const inviteValue = await repository.readInviteMetadata(
-    request.inviteId,
-    signal,
-  );
-  if (
-    !inviteMatchesPlayers(inviteValue, request.playerId, request.opponentId) ||
-    parseInviteMatchIndex(request.inviteId, request.matchId) === null
-  ) {
-    throw new AuthApiFailure(403, "permission-denied", "permission-denied");
-  }
-  signal.throwIfAborted();
-  await dependencies.assertMutationAllowed?.();
+  await authorizeTimerMatch(identity, request, repository, dependencies);
   return dependencies.startCanonical(request);
 }
 
@@ -253,23 +232,12 @@ export async function claimMatchVictoryByTimer(
   repository: MatchTimerRepository,
   dependencies: ClaimMatchVictoryByTimerDependencies,
 ): Promise<ClaimMatchVictoryByTimerResponse> {
-  const timeoutSignal = AbortSignal.timeout(MATCH_TIMER_OPERATION_TIMEOUT_MS);
-  const signal = dependencies.signal
-    ? AbortSignal.any([dependencies.signal, timeoutSignal])
-    : timeoutSignal;
-  await authorizePlayer(identity, request.playerId, repository, signal);
-  const inviteValue = await repository.readInviteMetadata(
-    request.inviteId,
-    signal,
+  const inviteValue = await authorizeTimerMatch(
+    identity,
+    request,
+    repository,
+    dependencies,
   );
-  if (
-    !inviteMatchesPlayers(inviteValue, request.playerId, request.opponentId) ||
-    parseInviteMatchIndex(request.inviteId, request.matchId) === null
-  ) {
-    throw new AuthApiFailure(403, "permission-denied", "permission-denied");
-  }
-  signal.throwIfAborted();
-  await dependencies.assertMutationAllowed?.();
   return dependencies.claimCanonical(request, inviteValue);
 }
 

@@ -16,6 +16,9 @@ export type AuthRecoveryTask = {
 };
 
 export type AuthRecoveryPhase = "prizes" | "games" | "finalize";
+export type AuthRecoveryOutcome = "done" | "continued" | "deferred";
+export type AuthRecoveryMutation =
+  "missing" | "unchanged" | "updated" | "deleted";
 
 export type AuthRecoveryJob = {
   profileId: string;
@@ -100,12 +103,12 @@ export async function mutateCanonicalRecoveryJob(
   db: D1Database,
   profileId: string,
   update: (job: CanonicalRecoveryJob) => AuthRecoveryJob | null | undefined,
-): Promise<boolean> {
+): Promise<AuthRecoveryMutation> {
   const recovery = await readCanonicalAuthRecoveryJob(db, profileId);
-  if (!recovery) return true;
+  if (!recovery) return "missing";
   const job = canonicalRecoveryJob(recovery);
   const next = update(job);
-  if (next === undefined) return false;
+  if (next === undefined) return "unchanged";
   await commitCanonicalPlan(db, {
     expectations: [
       {
@@ -123,7 +126,7 @@ export async function mutateCanonicalRecoveryJob(
           },
     ],
   });
-  return next === null;
+  return next === null ? "deleted" : "updated";
 }
 
 export async function removeCanonicalAuthRecoveryLoginUid(
@@ -131,11 +134,12 @@ export async function removeCanonicalAuthRecoveryLoginUid(
   profileId: string,
   uid: string,
   now: () => number = Date.now,
-): Promise<void> {
-  await mutateCanonicalRecoveryJob(db, profileId, (job) => {
+): Promise<boolean> {
+  const result = await mutateCanonicalRecoveryJob(db, profileId, (job) => {
     const loginUids = job.loginUids.filter((candidate) => candidate !== uid);
     return loginUids.length === job.loginUids.length
       ? undefined
       : { ...job, loginUids, updatedAtMs: now() };
   });
+  return result === "updated";
 }

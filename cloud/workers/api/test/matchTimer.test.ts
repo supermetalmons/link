@@ -83,6 +83,7 @@ function timerHarness(
     },
   };
   return {
+    repository,
     steps,
     calls,
     ownershipQueries,
@@ -192,6 +193,58 @@ for (const operation of ["start", "claim"] as const) {
       h.run({ input: { ...request, matchId: "unrelated-match" } }),
       denied,
     );
+    assert.deepEqual(h.steps, ["invite"]);
+    assert.deepEqual(h.calls, []);
+  });
+
+  test(`${operation} timer delegates unlisted rematches to canonical state`, async () => {
+    const h = timerHarness(operation);
+    const input = { ...request, matchId: `${request.inviteId}3` };
+    await h.run({ input });
+    assert.deepEqual(h.steps, ["invite", "admission", "canonical"]);
+    assert.equal(h.calls[0].request, input);
+    if (operation === "claim") assert.equal(h.calls[0].invite, eventInvite);
+  });
+
+  test(`${operation} timer preserves ownership errors before invite validation`, async () => {
+    for (const malformed of [false, true]) {
+      const h = timerHarness(operation, { invite: null });
+      const readOwnership = h.repository.readProfileOwnershipSnapshot;
+      h.repository.readProfileOwnershipSnapshot = async (query) => {
+        const snapshot = await readOwnership(query);
+        if (!malformed) throw new Error("ownership-unavailable");
+        return { ...snapshot, loginOwnerByUid: new Map() };
+      };
+      await assert.rejects(h.run({ actor: { uid: "login-2" } }), {
+        status: 503,
+        code: "unavailable",
+        message: "profile-ownership-unavailable",
+      });
+      assert.deepEqual(h.steps, ["ownership"]);
+      assert.deepEqual(h.calls, []);
+    }
+  });
+
+  test(`${operation} timer rejects cancellation before linked ownership reads`, async () => {
+    const reason = new Error("request-cancelled");
+    const controller = new AbortController();
+    controller.abort(reason);
+    const h = timerHarness(operation);
+    await assert.rejects(
+      h.run({ actor: { uid: "login-2" }, signal: controller.signal }),
+      (error) => error === reason,
+    );
+    assert.deepEqual(h.steps, []);
+    assert.deepEqual(h.calls, []);
+  });
+
+  test(`${operation} timer validates the invite before checking cancellation after reads`, async () => {
+    const controller = new AbortController();
+    const h = timerHarness(operation, {
+      invite: null,
+      onRead: () => controller.abort(new Error("request-cancelled")),
+    });
+    await assert.rejects(h.run({ signal: controller.signal }), denied);
     assert.deepEqual(h.steps, ["invite"]);
     assert.deepEqual(h.calls, []);
   });

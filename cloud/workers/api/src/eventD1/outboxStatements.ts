@@ -148,7 +148,11 @@ export async function buildOutboxStatements(
              status = 'pending',
              run_at_ms = excluded.run_at_ms,
              last_queued_at_ms = excluded.last_queued_at_ms,
-             record_json = excluded.record_json`,
+             record_json = excluded.record_json
+           WHERE event_progress_outboxes.event_id IS NOT excluded.event_id
+             OR event_progress_outboxes.run_at_ms IS NOT excluded.run_at_ms
+             OR event_progress_outboxes.last_queued_at_ms IS NOT excluded.last_queued_at_ms
+             OR event_progress_outboxes.record_json IS NOT excluded.record_json`,
         )
         .bind(
           outboxId,

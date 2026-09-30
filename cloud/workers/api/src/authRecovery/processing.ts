@@ -38,6 +38,7 @@ import {
   record,
   removeCanonicalAuthRecoveryLoginUid,
   type AuthRecoveryJob,
+  type AuthRecoveryOutcome,
   type CanonicalRecoveryJob,
 } from "./jobs.ts";
 
@@ -269,7 +270,8 @@ function createCanonicalAuthRecoveryService(
     }
   };
 
-  const recoverLogins = async (job: CanonicalRecoveryJob): Promise<void> => {
+  const recoverLogins = async (job: CanonicalRecoveryJob): Promise<boolean> => {
+    let progressed = false;
     for (const uid of job.loginUids
       .filter(isCanonicalLoginUid)
       .slice(0, LOGIN_RECOVERY_PAGE_SIZE)) {
@@ -280,11 +282,18 @@ function createCanonicalAuthRecoveryService(
             env.PROFILE_GAME_PROJECTION_QUEUE.send(task),
           logger,
         });
-        await removeCanonicalAuthRecoveryLoginUid(db, job.profileId, uid, now);
+        const removed = await removeCanonicalAuthRecoveryLoginUid(
+          db,
+          job.profileId,
+          uid,
+          now,
+        );
+        progressed ||= removed;
       } catch {
         logger.error(JSON.stringify({ event: "auth_login_recovery_pending" }));
       }
     }
+    return progressed;
   };
 
   const copyPrizePage = async (
@@ -326,31 +335,35 @@ function createCanonicalAuthRecoveryService(
   const recoverPrizes = async (
     job: CanonicalRecoveryJob,
     sourceProfileId: string,
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const page = await copyPrizePage(
       sourceProfileId,
       job.profileId,
       job.prizeCursor,
     );
-    await mutateCanonicalRecoveryJob(db, job.profileId, (live) =>
-      live.sourceProfileIds[0] === sourceProfileId &&
-      live.sourcePhase === "prizes" &&
-      live.prizeCursor === job.prizeCursor
-        ? {
-            ...live,
-            sourcePhase: page.complete ? "games" : "prizes",
-            prizeCursor: page.nextCursor,
-            phaseStartedAtMs: page.complete ? now() : live.phaseStartedAtMs,
-            updatedAtMs: now(),
-          }
-        : undefined,
+    const mutation = await mutateCanonicalRecoveryJob(
+      db,
+      job.profileId,
+      (live) =>
+        live.sourceProfileIds[0] === sourceProfileId &&
+        live.sourcePhase === "prizes" &&
+        live.prizeCursor === job.prizeCursor
+          ? {
+              ...live,
+              sourcePhase: page.complete ? "games" : "prizes",
+              prizeCursor: page.nextCursor,
+              phaseStartedAtMs: page.complete ? now() : live.phaseStartedAtMs,
+              updatedAtMs: now(),
+            }
+          : undefined,
     );
+    return mutation === "updated";
   };
 
   const recoverGames = async (
     job: CanonicalRecoveryJob,
     sourceProfileId: string,
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const sourcePage = await listProfileGameProjectionPage(
       profileGamesDb,
       sourceProfileId,
@@ -388,49 +401,60 @@ function createCanonicalAuthRecoveryService(
         ];
       });
       await commitProfileGameProjectionWrites(profileGamesDb, writes);
-      await mutateCanonicalRecoveryJob(db, job.profileId, (live) =>
+      const mutation = await mutateCanonicalRecoveryJob(
+        db,
+        job.profileId,
+        (live) =>
+          live.sourceProfileIds[0] === sourceProfileId &&
+          live.sourcePhase === "games"
+            ? { ...live, phaseStartedAtMs: now(), updatedAtMs: now() }
+            : undefined,
+      );
+      return mutation === "updated";
+    }
+    if (now() - job.phaseStartedAtMs < MERGE_GAME_FINALIZE_DELAY_MS)
+      return false;
+    const mutation = await mutateCanonicalRecoveryJob(
+      db,
+      job.profileId,
+      (live) =>
         live.sourceProfileIds[0] === sourceProfileId &&
         live.sourcePhase === "games"
-          ? { ...live, phaseStartedAtMs: now(), updatedAtMs: now() }
+          ? {
+              ...live,
+              sourcePhase: "finalize",
+              prizeCursor: null,
+              phaseStartedAtMs: now(),
+              updatedAtMs: now(),
+            }
           : undefined,
-      );
-      return;
-    }
-    if (now() - job.phaseStartedAtMs < MERGE_GAME_FINALIZE_DELAY_MS) return;
-    await mutateCanonicalRecoveryJob(db, job.profileId, (live) =>
-      live.sourceProfileIds[0] === sourceProfileId &&
-      live.sourcePhase === "games"
-        ? {
-            ...live,
-            sourcePhase: "finalize",
-            prizeCursor: null,
-            phaseStartedAtMs: now(),
-            updatedAtMs: now(),
-          }
-        : undefined,
     );
+    return mutation === "updated";
   };
 
   const finalizeSource = async (
     job: CanonicalRecoveryJob,
     sourceProfileId: string,
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     if (
       (await listProfileGameProjectionPage(profileGamesDb, sourceProfileId, 1))
         .length > 0
     ) {
-      await mutateCanonicalRecoveryJob(db, job.profileId, (live) =>
-        live.sourceProfileIds[0] === sourceProfileId &&
-        live.sourcePhase === "finalize"
-          ? {
-              ...live,
-              sourcePhase: "games",
-              phaseStartedAtMs: now(),
-              updatedAtMs: now(),
-            }
-          : undefined,
+      const mutation = await mutateCanonicalRecoveryJob(
+        db,
+        job.profileId,
+        (live) =>
+          live.sourceProfileIds[0] === sourceProfileId &&
+          live.sourcePhase === "finalize"
+            ? {
+                ...live,
+                sourcePhase: "games",
+                phaseStartedAtMs: now(),
+                updatedAtMs: now(),
+              }
+            : undefined,
       );
-      return;
+      return mutation === "updated";
     }
     const prizePage = await copyPrizePage(
       sourceProfileId,
@@ -438,18 +462,21 @@ function createCanonicalAuthRecoveryService(
       job.prizeCursor,
     );
     if (!prizePage.complete || prizePage.copied > 0) {
-      await mutateCanonicalRecoveryJob(db, job.profileId, (live) =>
-        live.sourceProfileIds[0] === sourceProfileId &&
-        live.sourcePhase === "finalize" &&
-        live.prizeCursor === job.prizeCursor
-          ? {
-              ...live,
-              prizeCursor: prizePage.nextCursor,
-              updatedAtMs: now(),
-            }
-          : undefined,
+      const mutation = await mutateCanonicalRecoveryJob(
+        db,
+        job.profileId,
+        (live) =>
+          live.sourceProfileIds[0] === sourceProfileId &&
+          live.sourcePhase === "finalize" &&
+          live.prizeCursor === job.prizeCursor
+            ? {
+                ...live,
+                prizeCursor: prizePage.nextCursor,
+                updatedAtMs: now(),
+              }
+            : undefined,
       );
-      return;
+      return mutation === "updated";
     }
     const { target, source, mergePath } =
       await readCanonicalRecoveryFinalizationSnapshot(
@@ -457,7 +484,7 @@ function createCanonicalAuthRecoveryService(
         job.profileId,
         sourceProfileId,
       );
-    if (!target.profile || !target.recovery || !mergePath) return;
+    if (!target.profile || !target.recovery || !mergePath) return false;
     const live = canonicalRecoveryJob(target.recovery);
     const firstTargetProfileId = mergePath[0].targetProfileId;
     const mergeExpectations = mergePath.map((mapping) => ({
@@ -472,7 +499,7 @@ function createCanonicalAuthRecoveryService(
         (source.profile.mergedIntoProfileId !== firstTargetProfileId ||
           source.loginOwners.length > 0))
     ) {
-      return;
+      return false;
     }
     const sourceProfileIds = source.profile
       ? live.sourceProfileIds
@@ -528,39 +555,51 @@ function createCanonicalAuthRecoveryService(
         },
       ],
     });
+    return true;
   };
 
-  const recoverProfile = async (profileId: string): Promise<boolean> => {
+  const recoverProfile = async (
+    profileId: string,
+  ): Promise<AuthRecoveryOutcome> => {
     const recovery = await readCanonicalAuthRecoveryJob(db, profileId);
-    if (!recovery) return true;
+    if (!recovery) return "done";
     let job = canonicalRecoveryJob(recovery);
-    await recoverLogins(job);
+    const loginsProgressed = await recoverLogins(job);
     const refreshed = await readCanonicalAuthRecoveryJob(db, profileId);
-    if (!refreshed) return true;
+    if (!refreshed) return "done";
     job = canonicalRecoveryJob(refreshed);
-    if (job.loginUids.some(isCanonicalLoginUid)) return false;
+    if (job.loginUids.some(isCanonicalLoginUid))
+      return loginsProgressed ? "continued" : "deferred";
     if (job.sourceProfileIds.length === 0) {
       if (job.loginUids.length !== 0) {
         logger.error(JSON.stringify({ event: "auth_recovery_uid_invalid" }));
-        return false;
+        return "deferred";
       }
-      if (now() - job.updatedAtMs < MERGE_GAME_FINALIZE_DELAY_MS) return false;
-      return mutateCanonicalRecoveryJob(db, profileId, (live) =>
-        live.loginUids.length === 0 &&
-        live.sourceProfileIds.length === 0 &&
-        now() - live.updatedAtMs >= MERGE_GAME_FINALIZE_DELAY_MS
-          ? null
-          : undefined,
+      if (now() - job.updatedAtMs < MERGE_GAME_FINALIZE_DELAY_MS)
+        return "deferred";
+      const mutation = await mutateCanonicalRecoveryJob(
+        db,
+        profileId,
+        (live) =>
+          live.loginUids.length === 0 &&
+          live.sourceProfileIds.length === 0 &&
+          now() - live.updatedAtMs >= MERGE_GAME_FINALIZE_DELAY_MS
+            ? null
+            : undefined,
       );
+      return mutation === "missing" || mutation === "deleted"
+        ? "done"
+        : "deferred";
     }
     const sourceProfileId = job.sourceProfileIds[0];
+    let progressed = false;
     try {
       if (job.sourcePhase === "prizes") {
-        await recoverPrizes(job, sourceProfileId);
+        progressed = await recoverPrizes(job, sourceProfileId);
       } else if (job.sourcePhase === "games") {
-        await recoverGames(job, sourceProfileId);
+        progressed = await recoverGames(job, sourceProfileId);
       } else {
-        await finalizeSource(job, sourceProfileId);
+        progressed = await finalizeSource(job, sourceProfileId);
       }
     } catch (error) {
       if (!(error instanceof CanonicalProfileConflict)) {
@@ -575,7 +614,15 @@ function createCanonicalAuthRecoveryService(
         );
       }
     }
-    return !(await readCanonicalAuthRecoveryJob(db, profileId));
+    const remaining = await readCanonicalAuthRecoveryJob(db, profileId);
+    if (!remaining) return "done";
+    if (
+      remaining.loginUids.length === 0 &&
+      remaining.sourceProfileIds.length === 0 &&
+      now() - remaining.updatedAtMs < MERGE_GAME_FINALIZE_DELAY_MS
+    )
+      return "deferred";
+    return progressed ? "continued" : "deferred";
   };
 
   return { recoverProfile };

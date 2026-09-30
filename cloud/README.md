@@ -22,6 +22,8 @@ Browser DevTools exposes `auth:restore-start`, `auth:local-ready`, `auth:session
 
 Canonical ownership changes create catch-up work atomically in D1. The scheduled sweep recovers Queue dispatch. Completed jobs stay absent; do not reset request IDs or replay cursors. `mons-link-auth-recovery` owns idempotent profile recovery. Investigate a stuck job without deleting it or purging its Queue.
 
+Auth recovery reports `done`, `continued`, or `deferred`. A confirmed page or phase advance sends one immediate continuation before acknowledging the current message. Waiting, contention, uncertain commits, and failed continuation sends retain the 60-second retry. Continuations do not update the job clocks: the game and final-job quiet periods still require 60 seconds, and initial dispatch, bounded page sizes, single-consumer concurrency, and stale-job recovery remain unchanged.
+
 `AUTH_MUTATIONS_DISABLED` is the tracked auth maintenance switch. Change it through candidate upload and explicit promotion. Auth intents are consume-once and revision-fenced; do not manually edit active rows.
 
 The five-minute auth cleanup sweep processes at most 1,000 rows per deletion or compaction phase, ordered by age and ID. Retention periods and replay dependencies remain enforced; any remaining backlog continues on the next scheduled sweep.
@@ -55,6 +57,14 @@ npm run check:all
 The complete gate uses Node.js 24 or newer and needs no Java or external database emulator. Release commands use the empty `cloud/workers/api/release.env` and preserve encrypted Cloudflare secrets.
 
 Portable runtime code and shared contracts are authored in `cloud/runtime/src/`. After changing source, run `npm run generate:runtime` and commit the emitted CommonJS modules and declarations with it. `npm run watch:runtime` keeps those outputs current during development. `npm run check:runtime` lints and typechecks the source and verifies generated output freshness; it also runs before frontend builds, API upload dry-runs, and API candidate uploads. Existing Worker, admin, browser, and Node import paths continue to consume the generated files.
+
+## Backend telemetry
+
+Automatch retains its `automatch_timing` logs and `Server-Timing` headers. Rating updates, known event mutation POST routes, and scheduled recovery emit `d1_timing` logs without changing response headers. New scopes sample once at 10%; unsampled scopes use the original bindings and log only terminal exceptions or HTTP 5xx responses, with `d1: null`. Cloudflare's configured log sampling still applies independently.
+
+D1 metrics aggregate calls, failures, client latency, and available SQL duration and row counts by database binding and phase. One batch counts as one call, with metadata summed across its statements. `first`, `raw`, and other calls without result metadata remain visible through coverage counts; row totals describe only observed metadata. Concurrent calls can make summed latency exceed the scope's elapsed time. Metrics close when the main operation finishes, so eager background work may be partly included; telemetry does not wait for background completion. Logs contain fixed operation labels and numeric measurements, never SQL, parameters, result data, or exception messages.
+
+Scheduled-task entries include their nested phases' D1 work. Task and nested-phase entries overlap and must not be summed; scope and database totals count each call once.
 
 ## Canonical profile maintenance
 
@@ -105,6 +115,8 @@ Event control supports `d1` and `frozen`. The event-progress Workflow owns sched
 Scheduled-event recovery checks up to 1,000 events within the longest announcement lead plus ten minutes, then advances through 100 scheduled events using `EVENT_DB.event_scheduled_recovery_cursor`. The cursor wraps after the final page. Both lanes share concurrency ten and preserve existing Workflow and outbox identities. Urgent recovery runs independently of cursor and background reads; a failed recovery query preserves the cursor while available work still runs. Individual event failures are reported without blocking cursor progress; canonical events and outboxes remain available for retry. Checkpoint updates use revision comparisons under the event-write admission, so overlapping sweeps cannot overwrite newer progress. Do not manually reset the cursor to replay announcements.
 
 Scheduled-event recovery, persisted progress outboxes, and rating recovery run independently with reserved concurrency of ten, five, and five records respectively. Each sweep serializes work targeting the same Workflow ID and retains its write admission until every recovery task settles.
+
+Progress-outbox upserts skip row updates only when the indexed fields and stored JSON are unchanged. Admission and snapshot guards still execute in the same SQL batch, and Workflow reconciliation and malformed-record repair continue normally.
 
 `PROFILE_DB.invite_wager_states` owns proposals, agreements, settlement state, and resolution markers. Reserved balances, consumed operation tombstones, pending settlements, and replay records are current application data. Current wager incidents use `manage:wager-reservations` and canonical-profile maintenance. Reconcile uncertain effects before settling an expired admission.
 

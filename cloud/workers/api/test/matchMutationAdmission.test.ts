@@ -122,6 +122,7 @@ function harness(
     playerId: body.playerId,
   };
   return {
+    repository,
     steps,
     run: () =>
       command === "move"
@@ -217,6 +218,55 @@ for (const command of ["move", "surrender"] as const) {
       await assert.rejects(h.run(), {
         status: 403,
         message: "permission-denied",
+      });
+      assert.deepEqual(h.steps, ["invite", "ownership"]);
+    }
+  });
+
+  test(`${command} preserves invite and ownership error precedence`, async () => {
+    const malformedInvite = harness(command, {
+      uid: "linked",
+      inviteValue: {},
+      owners: { actor: "profile", linked: "other-profile" },
+    });
+    await assert.rejects(malformedInvite.run(), {
+      status: 409,
+      code: "failed-precondition",
+      message: "invite-invalid",
+    });
+    assert.deepEqual(malformedInvite.steps, ["invite"]);
+
+    const unrelatedOwner = harness(command, {
+      uid: "linked",
+      body: { ...request, matchId: "invite3" },
+      owners: { actor: "profile", linked: "other-profile" },
+    });
+    await assert.rejects(unrelatedOwner.run(), {
+      status: 403,
+      code: "permission-denied",
+      message: "permission-denied",
+    });
+    assert.deepEqual(unrelatedOwner.steps, ["invite", "ownership"]);
+  });
+
+  test(`${command} preserves ownership failures after cancellation during invite reads`, async () => {
+    for (const malformed of [false, true]) {
+      const controller = new AbortController();
+      const h = harness(command, {
+        uid: "linked",
+        signal: controller.signal,
+        onRead: () => controller.abort(new Error("request-cancelled")),
+      });
+      const readOwnership = h.repository.readProfileOwnershipSnapshot;
+      h.repository.readProfileOwnershipSnapshot = async (query) => {
+        const snapshot = await readOwnership(query);
+        if (!malformed) throw new Error("ownership-unavailable");
+        return { ...snapshot, loginOwnerByUid: new Map() };
+      };
+      await assert.rejects(h.run(), {
+        status: 503,
+        code: "unavailable",
+        message: "profile-ownership-unavailable",
       });
       assert.deepEqual(h.steps, ["invite", "ownership"]);
     }

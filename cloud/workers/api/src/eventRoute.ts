@@ -17,6 +17,7 @@ import {
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 import { authenticatedPost } from "./authenticatedPost.ts";
+import { withD1OperationTelemetry } from "./d1Telemetry.ts";
 import {
   isBoundedEventResponse,
   readOptionalEventSnapshotSeed,
@@ -83,6 +84,17 @@ export async function handleEventRoute(
   const pathname = new URL(request.url).pathname;
   if (request.method !== "POST" || !EVENT_PATHS.has(pathname))
     return handleEventRequest(request, env, ctx, dependencies);
+  return withD1OperationTelemetry(pathname, env, (measuredEnv) =>
+    handleEventMutationRequest(request, measuredEnv, ctx, dependencies),
+  );
+}
+
+async function handleEventMutationRequest(
+  request: Request,
+  env: Env,
+  ctx: WorkerExecutionContext,
+  dependencies: EventRouteDependencies,
+): Promise<Response> {
   try {
     await requireActiveDurableMatchState(env.PROFILE_GAMES_DB);
     return await handleEventRequest(request, env, ctx, dependencies);

@@ -1527,8 +1527,12 @@ describe("canonical auth and profile runtime", () => {
       now: () => nowMs,
       profileDb: testBindings.PROFILE_DB,
     });
-    await expect(recovery.recoverProfile(target.profileId)).resolves.toBe(true);
-    await expect(recovery.recoverProfile(source.profileId)).resolves.toBe(true);
+    await expect(recovery.recoverProfile(target.profileId)).resolves.toBe(
+      "done",
+    );
+    await expect(recovery.recoverProfile(source.profileId)).resolves.toBe(
+      "done",
+    );
 
     const targetSnapshot = await readCanonicalProfile(
       testBindings.PROFILE_DB,

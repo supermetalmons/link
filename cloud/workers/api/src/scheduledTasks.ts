@@ -1,4 +1,5 @@
 import { summarizeError } from "./errorSummary.ts";
+import { measureD1Task } from "./d1Telemetry.ts";
 
 type ScheduledTask = {
   name: string;
@@ -22,7 +23,7 @@ export async function runScheduledTasks(
     tasks.map(async (task, index) => {
       const startedAtMs = now();
       try {
-        await task.run();
+        await measureD1Task(task.name, () => task.run());
       } finally {
         durations[index] = Math.max(0, now() - startedAtMs);
       }

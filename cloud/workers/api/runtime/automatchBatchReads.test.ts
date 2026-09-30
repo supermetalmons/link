@@ -102,6 +102,69 @@ describe("batched automatch coordination", () => {
     ).toBe(0);
   });
 
+  it("reports native session batch metadata without counting first as metadata", async () => {
+    const records: Record<string, unknown>[] = [];
+    const nativeResults: D1Result[] = [];
+    const response = await withAutomatchTelemetry(
+      env,
+      async (measured) => {
+        const session = measured.PROFILE_GAMES_DB.withSession("first-primary");
+        const results = await session.batch([
+          session
+            .prepare(
+              "SELECT state FROM automatch_runtime_control WHERE singleton = ?",
+            )
+            .bind(1),
+          session
+            .prepare(
+              "SELECT epoch FROM invite_source_control WHERE singleton = ?",
+            )
+            .bind(1),
+        ]);
+        nativeResults.push(...results);
+        expect(results[0].results).toEqual([{ state: "active" }]);
+        expect(results[1].results).toEqual([{ epoch: 1 }]);
+        expect(
+          await session
+            .prepare(
+              "SELECT epoch FROM invite_source_control WHERE singleton = ?",
+            )
+            .bind(1)
+            .first("epoch"),
+        ).toBe(1);
+        expect(["string", "object"]).toContain(typeof session.getBookmark());
+        return new Response("ok");
+      },
+      { sample: () => true, log: (record) => records.push(record) },
+    );
+    expect(response.headers.get("Server-Timing")).toContain(
+      'd1;desc="2 calls"',
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].d1).toMatchObject({
+      calls: 2,
+      failedCalls: 0,
+      metadataResults: 2,
+      callsWithoutMetadata: 1,
+      rowsRead: nativeResults.reduce(
+        (sum, result) => sum + result.meta.rows_read,
+        0,
+      ),
+      rowsWritten: nativeResults.reduce(
+        (sum, result) => sum + result.meta.rows_written,
+        0,
+      ),
+      sqlDurationMs: nativeResults.reduce(
+        (sum, result) =>
+          sum + (result.meta.timings?.sql_duration_ms ?? result.meta.duration),
+        0,
+      ),
+    });
+    expect(records[0].databases).toMatchObject({
+      PROFILE_GAMES_DB: records[0].d1,
+    });
+  });
+
   it("rolls back the first admission if the other authority is frozen", async () => {
     await db.prepare("UPDATE invite_source_control SET state = 'frozen'").run();
     await expect(

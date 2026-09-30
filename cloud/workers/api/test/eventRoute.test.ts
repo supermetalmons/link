@@ -807,7 +807,13 @@ function syncRouteFixture() {
   return { coordination, repository, request, dependencies };
 }
 
-test("opted-in event sync reads a full seed after operation and lock release", async () => {
+test("opted-in event sync reads a full seed after operation and lock release", async (t) => {
+  t.mock.method(Math, "random", () => 0);
+  const timingLogs: Record<string, unknown>[] = [];
+  t.mock.method(console, "info", (value: string) => {
+    const record = JSON.parse(value) as Record<string, unknown>;
+    if (record.event === "d1_timing") timingLogs.push(record);
+  });
   const h = syncRouteFixture();
   let reads = 0;
   const response = await handleEventRoute(h.request(), TELEGRAM_TEST_ENV, ctx, {
@@ -828,8 +834,13 @@ test("opted-in event sync reads a full seed after operation and lock release", a
   assert.equal(reads, 1);
   assert.match(
     response.headers.get("Server-Timing") || "",
-    /event_snapshot;dur=/,
+    /^event_snapshot;dur=\d+$/,
   );
+  assert.equal(timingLogs.length, 1);
+  assert.equal(timingLogs[0].operation, "/events/state/sync");
+  assert.equal(timingLogs[0].status, 200);
+  assert.ok((timingLogs[0].d1 as { calls: number }).calls > 0);
+  assert.equal(JSON.stringify(timingLogs).includes("event-1"), false);
 });
 
 test("event sync keeps exact legacy responses without opt-in or when skipped", async () => {

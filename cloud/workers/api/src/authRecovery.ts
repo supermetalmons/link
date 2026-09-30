@@ -5,6 +5,7 @@ export {
   parseAuthRecoveryTask as parseTask,
   removeCanonicalAuthRecoveryLoginUid,
   type AuthRecoveryJob,
+  type AuthRecoveryOutcome,
   type AuthRecoveryPhase,
   type AuthRecoveryTask,
 } from "./authRecovery/jobs.ts";

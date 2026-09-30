@@ -596,4 +596,68 @@ describe("Worker entrypoint", () => {
     );
     expect(thrown).toBe(progressFailure);
   });
+
+  it("attributes sampled recovery database work to the existing concurrent task phases", async () => {
+    const migrations = env as Env & {
+      TEST_D1_MIGRATIONS: D1Migration[];
+      TEST_AUTH_STATE_D1_MIGRATIONS: D1Migration[];
+    };
+    await applyD1Migrations(
+      env.PROFILE_GAMES_DB,
+      migrations.TEST_D1_MIGRATIONS,
+    );
+    await applyD1Migrations(
+      env.AUTH_STATE_DB,
+      migrations.TEST_AUTH_STATE_D1_MIGRATIONS,
+    );
+    await env.PROFILE_GAMES_DB.prepare(
+      "UPDATE automatch_runtime_control SET backend = 'd1', state = 'active', epoch = 1, freeze_generation = 0",
+    ).run();
+    const sample = vi.spyOn(Math, "random").mockReturnValue(0);
+    const logger = vi
+      .spyOn(console, "info")
+      .mockImplementation(() => undefined);
+    try {
+      await handleScheduled(
+        { ...controller, scheduledTime: 1_800_000_000_000 },
+        withProfileControl(
+          {
+            ...TELEGRAM_TEST_ENV,
+            AUTH_STATE_DB: env.AUTH_STATE_DB,
+            PROFILE_GAMES_DB: env.PROFILE_GAMES_DB,
+          },
+          "active",
+        ),
+        {
+          authRecovery: async () => undefined,
+          eventProgress: async () => undefined,
+          eventTransitions: async () => undefined,
+          gameSessionReceipts: async () => undefined,
+          gameSessionTransitions: async () => undefined,
+          matchTimerStarts: async () => undefined,
+          profileGameProjection: async () => undefined,
+          telegramProjection: async () => undefined,
+        },
+      );
+      const logs = logger.mock.calls.map(([value]) => JSON.parse(value));
+      const timing = logs.filter((record) => record.event === "d1_timing");
+      expect(timing).toHaveLength(1);
+      expect(timing[0]).toMatchObject({
+        operation: "scheduled.recovery",
+        outcome: "ok",
+      });
+      expect(timing[0].phases.authState.d1.calls).toBe(1);
+      expect(timing[0].phases.authState.d1.metadataResults).toBe(5);
+      expect(timing[0].phases.gameSessionLocks.d1.calls).toBe(1);
+      expect(timing[0].phases.gameSessionLocks.d1.metadataResults).toBe(1);
+      expect(timing[0].databases.AUTH_STATE_DB.metadataResults).toBe(5);
+      expect(timing[0].databases.PROFILE_GAMES_DB.calls).toBeGreaterThanOrEqual(
+        2,
+      );
+      expect(sample).toHaveBeenCalledTimes(1);
+    } finally {
+      sample.mockRestore();
+      logger.mockRestore();
+    }
+  });
 });

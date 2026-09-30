@@ -1652,7 +1652,13 @@ test("pending auto-link joins enqueue Telegram projection immediately", async ()
   ]);
 });
 
-test("routes exact authenticated rating updates without a new rate limit", async () => {
+test("routes exact authenticated rating updates without a new rate limit", async (t) => {
+  t.mock.method(Math, "random", () => 0);
+  const timingLogs: Record<string, unknown>[] = [];
+  t.mock.method(console, "info", (value: string) => {
+    const record = JSON.parse(value) as Record<string, unknown>;
+    if (record.event === "d1_timing") timingLogs.push(record);
+  });
   const ratingRequest = {
     playerId: identity.uid,
     opponentId: "opponent-uid",
@@ -1732,6 +1738,16 @@ test("routes exact authenticated rating updates without a new rate limit", async
   );
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true });
+  assert.equal(response.headers.get("Server-Timing"), null);
+  assert.equal(response.headers.get("Timing-Allow-Origin"), null);
+  assert.equal(timingLogs.length, 1);
+  assert.equal(timingLogs[0].operation, "ratings.update");
+  assert.equal(timingLogs[0].status, 200);
+  assert.ok((timingLogs[0].d1 as { calls: number }).calls > 0);
+  assert.equal(
+    JSON.stringify(timingLogs).includes(ratingRequest.inviteId),
+    false,
+  );
   assert.equal(patches.length, 0);
   await Promise.all(background);
   assert.deepEqual(profileProjectionTasks, [

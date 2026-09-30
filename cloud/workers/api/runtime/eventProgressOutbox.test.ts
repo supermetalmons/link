@@ -4,12 +4,16 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   acquireEventWriteAdmission,
   commitEventMutations,
+  EventD1Conflict,
   EventWritesDisabled,
   listDueEventProgressOutboxes,
+  readEvent,
   releaseEventWriteAdmission,
+  type EventD1Connection,
 } from "../src/eventD1.ts";
 import { buildEventProgressPlan } from "../src/eventProgressCodec.ts";
 import { createEventProgressOutboxWriter } from "../src/eventRepository.ts";
+import { observeD1FailureDatabase } from "./d1FailureTestUtils.ts";
 import {
   applyEventTestMigrations,
   transitionEventStorageMode,
@@ -22,6 +26,42 @@ async function admissionCount(): Promise<number | null> {
   return testEnv.EVENT_DB.prepare(
     "SELECT COUNT(*) AS count FROM event_write_admissions",
   ).first<number>("count");
+}
+
+function observeCommitResults() {
+  const batches: D1Result<unknown>[][] = [];
+  const writes = new WeakMap<D1PreparedStatement, D1PreparedStatement>();
+  const observeWrite = (
+    statement: D1PreparedStatement,
+  ): D1PreparedStatement => {
+    const wrapped = new Proxy(statement, {
+      get(target, property) {
+        if (property === "bind")
+          return (...values: unknown[]) => observeWrite(target.bind(...values));
+        const member = Reflect.get(target, property, target);
+        return typeof member === "function" ? member.bind(target) : member;
+      },
+    });
+    writes.set(wrapped, statement);
+    return wrapped;
+  };
+  const db: EventD1Connection = {
+    prepare: (query) => {
+      const statement = testEnv.EVENT_DB.prepare(query);
+      return /^\s*INSERT INTO event_progress_outboxes\b/.test(query)
+        ? observeWrite(statement)
+        : statement;
+    },
+    async batch<T>(statements: D1PreparedStatement[]) {
+      const results = await testEnv.EVENT_DB.batch<T>(
+        statements.map((statement) => writes.get(statement) ?? statement),
+      );
+      if (statements.some((statement) => writes.has(statement)))
+        batches.push(results);
+      return results;
+    },
+  };
+  return { db, batches };
 }
 
 describe("event progress outbox writer", () => {
@@ -108,6 +148,181 @@ describe("event progress outbox writer", () => {
       expect(await admissionCount()).toBe(0);
     },
   );
+
+  it.each([
+    "event-prize-announcement",
+    "sunday-mons-reminder",
+    "match-rating-updated",
+  ])("does not rewrite identical %s rows", async (reason) => {
+    const { outboxId, outbox } = await buildEventProgressPlan(
+      { eventId, sourceKey: "unchanged", reason },
+      100,
+    );
+    const observed = observeCommitResults();
+    const admission = await acquireEventWriteAdmission(testEnv.EVENT_DB);
+    try {
+      for (const value of [
+        outbox,
+        outbox,
+        { ...outbox, runAtMs: 1_000 },
+        { ...outbox, runAtMs: 1_000 },
+        outbox,
+        { ...outbox, lastQueuedAtMs: 300 },
+        { ...outbox, lastQueuedAtMs: 300, reason: "changed-reason" },
+      ]) {
+        await commitEventMutations(
+          observed.db,
+          [{ kind: "progress-outbox", outboxId, value }],
+          { admission },
+        );
+      }
+      expect(
+        observed.batches.map((batch) => batch.at(-1)!.meta.changes),
+      ).toEqual([1, 0, 1, 0, 1, 1, 1]);
+      for (const index of [1, 3]) {
+        expect(observed.batches[index]).toHaveLength(3);
+        expect(observed.batches[index].at(-1)!.meta.rows_written).toBe(0);
+      }
+      expect(await listDueEventProgressOutboxes(testEnv.EVENT_DB, 400)).toEqual(
+        [
+          {
+            outboxId,
+            record: {
+              ...outbox,
+              lastQueuedAtMs: 300,
+              reason: "changed-reason",
+            },
+          },
+        ],
+      );
+    } finally {
+      await releaseEventWriteAdmission(testEnv.EVENT_DB, admission);
+    }
+  });
+
+  it.each([
+    ["event_id", "other-event"],
+    ["run_at_ms", 500],
+    ["last_queued_at_ms", 500],
+  ] as const)(
+    "repairs %s even when the JSON is unchanged",
+    async (column, value) => {
+      const { outboxId, outbox } = await buildEventProgressPlan(
+        {
+          eventId,
+          sourceKey: "indexed-columns",
+          reason: "sunday-mons-reminder",
+        },
+        100,
+      );
+      const admission = await acquireEventWriteAdmission(testEnv.EVENT_DB);
+      try {
+        await commitEventMutations(
+          testEnv.EVENT_DB,
+          [
+            {
+              kind: "event",
+              eventId: "other-event",
+              value: {
+                ...(await readEvent(testEnv.EVENT_DB, eventId)),
+                eventId: "other-event",
+              },
+            },
+            { kind: "progress-outbox", outboxId, value: outbox },
+          ],
+          { admission },
+        );
+        await testEnv.EVENT_DB.prepare(
+          `UPDATE event_progress_outboxes SET ${column} = ? WHERE outbox_id = ? AND status = 'pending'`,
+        )
+          .bind(value, outboxId)
+          .run();
+        const observed = observeCommitResults();
+        await commitEventMutations(
+          observed.db,
+          [{ kind: "progress-outbox", outboxId, value: outbox }],
+          { admission },
+        );
+        expect(observed.batches[0].at(-1)!.meta.changes).toBe(1);
+        expect(
+          await testEnv.EVENT_DB.prepare(
+            "SELECT event_id, run_at_ms, last_queued_at_ms, record_json FROM event_progress_outboxes WHERE outbox_id = ? AND status = 'pending'",
+          )
+            .bind(outboxId)
+            .first(),
+        ).toEqual({
+          event_id: eventId,
+          run_at_ms: null,
+          last_queued_at_ms: 100,
+          record_json: JSON.stringify(outbox),
+        });
+      } finally {
+        await releaseEventWriteAdmission(testEnv.EVENT_DB, admission);
+      }
+    },
+  );
+
+  it("rejects an identical write using a released admission", async () => {
+    const { outboxId, outbox } = await buildEventProgressPlan(
+      {
+        eventId,
+        sourceKey: "released-admission",
+        reason: "sunday-mons-reminder",
+      },
+      100,
+    );
+    const admission = await acquireEventWriteAdmission(testEnv.EVENT_DB);
+    const changes = [
+      { kind: "progress-outbox" as const, outboxId, value: outbox },
+    ];
+    try {
+      await commitEventMutations(testEnv.EVENT_DB, changes, { admission });
+    } finally {
+      await releaseEventWriteAdmission(testEnv.EVENT_DB, admission);
+    }
+    await expect(
+      commitEventMutations(testEnv.EVENT_DB, changes, { admission }),
+    ).rejects.toThrow("event-write-admission-invalid");
+    expect(await listDueEventProgressOutboxes(testEnv.EVENT_DB, 400)).toEqual([
+      { outboxId, record: outbox },
+    ]);
+  });
+
+  it("rejects an unchanged snapshot after a concurrent replacement", async () => {
+    const { outboxId, outbox } = await buildEventProgressPlan(
+      { eventId, sourceKey: "unchanged-race", reason: "sunday-mons-reminder" },
+      100,
+    );
+    const admission = await acquireEventWriteAdmission(testEnv.EVENT_DB);
+    const changes = [
+      { kind: "progress-outbox" as const, outboxId, value: outbox },
+    ];
+    try {
+      await commitEventMutations(testEnv.EVENT_DB, changes, { admission });
+      const concurrent = { ...outbox, lastQueuedAtMs: 300 };
+      const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
+        beforeWriteBatch: async () => {
+          await testEnv.EVENT_DB.prepare(
+            "UPDATE event_progress_outboxes SET last_queued_at_ms = 300, record_json = ? WHERE outbox_id = ? AND status = 'pending'",
+          )
+            .bind(JSON.stringify(concurrent), outboxId)
+            .run();
+        },
+      });
+      await expect(
+        commitEventMutations(observed.database, changes, {
+          admission,
+          expectedRecords: { progress: { [outboxId]: outbox } },
+        }),
+      ).rejects.toBeInstanceOf(EventD1Conflict);
+      expect(observed.writeBatches).toHaveLength(1);
+      expect(await listDueEventProgressOutboxes(testEnv.EVENT_DB, 400)).toEqual(
+        [{ outboxId, record: concurrent }],
+      );
+    } finally {
+      await releaseEventWriteAdmission(testEnv.EVENT_DB, admission);
+    }
+  });
 
   it("rejects frozen writes without creating an outbox or admission", async () => {
     const writer = createEventProgressOutboxWriter(testEnv.EVENT_DB);
