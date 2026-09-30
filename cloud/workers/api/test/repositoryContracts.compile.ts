@@ -3,10 +3,21 @@ import type { GameSessionChange } from "../../../runtime/gameSessionChanges.js";
 import type { EventStore } from "../src/eventStoreContracts.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import type {
+  PendingRatingEventProgress,
+  PendingRatingProfileGameProjection,
+  PendingRatingTelegramProjection,
   RatingCommitPlan,
   RatingCompletionPatch,
+  RatingEventProgressRepository,
+  RatingProfileGameProjectionRepository,
   RatingProfilePatch,
+  RatingProjectionRepository,
 } from "../src/ratingContracts.ts";
+import type {
+  ProjectionRecord,
+  ProjectionWrite,
+} from "../../../runtime/profileGamesProjectionCore.js";
+import type { ProjectionWrite as D1ProjectionWrite } from "../src/profileGamesD1.ts";
 import type {
   AutomatchRepository,
   GameSessionRepository,
@@ -145,4 +156,43 @@ export type RatingCompletionAllowsNullableMetadata = Assert<
   } extends RatingCompletionPatch
     ? true
     : false
+>;
+
+type RatingRecoveryRecord =
+  | PendingRatingEventProgress
+  | PendingRatingProfileGameProjection
+  | PendingRatingTelegramProjection;
+type RatingClaimRevision =
+  | Parameters<RatingEventProgressRepository["claimRatingEventProgress"]>[1]
+  | Parameters<
+      RatingProfileGameProjectionRepository["claimRatingProfileGameProjection"]
+    >[1]
+  | Parameters<RatingProjectionRepository["claimRatingTelegramProjection"]>[1];
+
+export type RatingRecoveryRevisionsAreNumeric = Assert<
+  RatingRecoveryRecord["revision"] | RatingClaimRevision extends number
+    ? true
+    : false
+>;
+export type RatingRecoveryRejectsStringRevisions = Assert<
+  | Rejects<string, RatingRecoveryRecord["revision"]>
+  | Rejects<string, RatingClaimRevision>
+>;
+export type RatingRecoveryHasNoUpdateTime = Assert<
+  Rejects<
+    "updateTime",
+    | keyof PendingRatingEventProgress
+    | keyof PendingRatingProfileGameProjection
+    | keyof PendingRatingTelegramProjection
+  >
+>;
+export type ProjectionVersionsAreNumeric = Assert<
+  | (ProjectionRecord["version"] extends number ? true : false)
+  | (number extends ProjectionWrite["expectedVersion"] ? true : false)
+  | (number extends D1ProjectionWrite["expectedVersion"] ? true : false)
+>;
+export type ProjectionRecordsRejectStringVersions = Assert<
+  | Rejects<string, ProjectionRecord["version"]>
+  | Rejects<string, ProjectionWrite["expectedVersion"]>
+  | Rejects<string, D1ProjectionWrite["expectedVersion"]>
 >;

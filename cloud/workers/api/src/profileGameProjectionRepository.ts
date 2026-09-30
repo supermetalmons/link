@@ -101,8 +101,9 @@ function toD1ProjectionWrite(
     projectionId:
       "inviteId" in write ? write.inviteId : `event_${write.eventId}`,
     ...(write.data ? { data: write.data } : {}),
-    ...(write.type === "update" && "updateTime" in write
-      ? { updateTime: write.updateTime }
+    ...((write.type === "update" || write.type === "delete") &&
+    "expectedVersion" in write
+      ? { expectedVersion: write.expectedVersion }
       : {}),
     ...(write.type === "create" ? { requireAbsent: true } : {}),
   };

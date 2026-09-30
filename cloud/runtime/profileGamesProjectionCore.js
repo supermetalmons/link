@@ -53,11 +53,11 @@ const readWithRetries = async (
   throw failure;
 };
 
-const readExistingProjectionDocuments = async ({
+const readExistingProjectionRecords = async ({
   attempts = READ_RETRY_ATTEMPTS,
   inviteId,
   profileIds,
-  readDocuments,
+  readRecords,
   reason,
   retryDelayMs = READ_RETRY_DELAY_MS,
   logger = console,
@@ -68,7 +68,7 @@ const readExistingProjectionDocuments = async ({
   let projections;
   try {
     projections = await readWithRetries(
-      () => readDocuments(uniqueProfileIds),
+      () => readRecords(uniqueProfileIds),
       attempts,
       retryDelayMs,
       wait,
@@ -88,11 +88,8 @@ const readExistingProjectionDocuments = async ({
       ? [
           {
             profileId,
-            snapshot: {
-              exists: true,
-              data: () => projection.data,
-              updateTime: projection.updateTime,
-            },
+            data: projection.data,
+            version: projection.version,
           },
         ]
       : [];
@@ -149,18 +146,18 @@ const getStoredProjectionOwnerRole = (profileId, data) => {
 };
 
 const findFreshestSourceProjectionData = ({
-  existingDocs,
+  existingRecords,
   ownerContext,
   ownerProfileId,
   requiresResolvedOpponentEmoji,
 }) => {
   let freshest = null;
   let freshestMs = Number.NEGATIVE_INFINITY;
-  for (const existing of existingDocs) {
+  for (const existing of existingRecords) {
     if (existing.profileId === ownerProfileId) {
       continue;
     }
-    const data = existing.snapshot.data() || {};
+    const data = existing.data;
     const storedOwnerLoginId = normalizeString(data.ownerLoginId);
     const ownerLoginId = normalizeString(ownerContext.ownerLoginId);
     if (
@@ -389,17 +386,17 @@ const createProfileGamesProjectionCore = ({
     const sortBucket = getNavigationSortBucket(status);
     const matchPresentationCache = new Map();
 
-    const existingDocs = await readExistingProjectionDocuments({
+    const existingRecords = await readExistingProjectionRecords({
       inviteId: normalizedInviteId,
       profileIds: cleanupProfileIds,
-      readDocuments: (profileIds) =>
+      readRecords: (profileIds) =>
         repository.getProjections(profileIds, normalizedInviteId),
       reason,
       logger,
       wait,
     });
-    const existingDocsByOwnerProfileId = new Map(
-      existingDocs.map((entry) => [entry.profileId, entry.snapshot]),
+    const existingRecordsByOwnerProfileId = new Map(
+      existingRecords.map((entry) => [entry.profileId, entry]),
     );
     const ownerSet = new Set(ownerProfileIds);
     const hasUnresolvedOwner = Boolean(
@@ -418,7 +415,7 @@ const createProfileGamesProjectionCore = ({
 
     if (!shouldProject || ownerProfileIds.length === 0) {
       if (sourceCleanupSafe) {
-        for (const existing of existingDocs) {
+        for (const existing of existingRecords) {
           writes.push({
             type: "delete",
             profileId: existing.profileId,
@@ -474,15 +471,13 @@ const createProfileGamesProjectionCore = ({
         hostLoginId,
         guestLoginId,
       });
-      const existingDocSnapshot =
-        existingDocsByOwnerProfileId.get(ownerProfileId);
-      const existingDocData = existingDocSnapshot
-        ? existingDocSnapshot.data()
-        : null;
+      const existingRecord =
+        existingRecordsByOwnerProfileId.get(ownerProfileId);
+      const existingData = existingRecord ? existingRecord.data : null;
       const requiresResolvedOpponentEmoji =
         status === "active" || status === "ended";
       const sourceProjectionData = findFreshestSourceProjectionData({
-        existingDocs,
+        existingRecords,
         ownerContext,
         ownerProfileId,
         requiresResolvedOpponentEmoji,
@@ -491,9 +486,8 @@ const createProfileGamesProjectionCore = ({
         ? readProfileSummary(ownership, ownerContext.opponentProfileId)
         : null;
       const existingOpponentName = normalizeString(
-        existingDocData
-          ? (existingDocData.opponentName ??
-              existingDocData.opponentDisplayName)
+        existingData
+          ? (existingData.opponentName ?? existingData.opponentDisplayName)
           : null,
       );
       const sourceOpponentName = normalizeString(
@@ -527,8 +521,8 @@ const createProfileGamesProjectionCore = ({
             : null;
       }
       const existingOpponentEmoji = getEmojiId(
-        existingDocData
-          ? (existingDocData.opponentEmoji ?? existingDocData.opponentEmojiId)
+        existingData
+          ? (existingData.opponentEmoji ?? existingData.opponentEmojiId)
           : null,
       );
       const sourceOpponentEmoji = getEmojiId(
@@ -578,17 +572,16 @@ const createProfileGamesProjectionCore = ({
         projectionFingerprintPayload,
       );
       const previousFingerprint =
-        existingDocData &&
-        typeof existingDocData.lastEventFingerprint === "string"
-          ? existingDocData.lastEventFingerprint
+        existingData && typeof existingData.lastEventFingerprint === "string"
+          ? existingData.lastEventFingerprint
           : null;
       if (previousFingerprint === nextFingerprint) {
         skippedCount += 1;
         continue;
       }
 
-      const canonicalListSortMs = existingDocData
-        ? readTimestampMillis(existingDocData.listSortAt)
+      const canonicalListSortMs = existingData
+        ? readTimestampMillis(existingData.listSortAt)
         : null;
       const sourceListSortMs = readTimestampMillis(
         sourceProjectionData && sourceProjectionData.listSortAt,
@@ -604,16 +597,16 @@ const createProfileGamesProjectionCore = ({
         existingListSortMs,
       });
       const existingCreatedAt =
-        readTimestampMillis(existingDocData && existingDocData.createdAt) ??
+        readTimestampMillis(existingData && existingData.createdAt) ??
         readTimestampMillis(
           sourceProjectionData && sourceProjectionData.createdAt,
         );
       const existingEndedAt =
-        readTimestampMillis(existingDocData && existingDocData.endedAt) ??
+        readTimestampMillis(existingData && existingData.endedAt) ??
         readTimestampMillis(
           sourceProjectionData && sourceProjectionData.endedAt,
         );
-      const projectionDocData = {
+      const projectionData = {
         ...commonProjection,
         ownerProfileId,
         ownerRole: ownerContext.ownerRole,
@@ -641,23 +634,26 @@ const createProfileGamesProjectionCore = ({
         lastEventReason: normalizeString(reason) || null,
         lastEventAt: toTimestampMillis(nowMs),
       };
+      const type =
+        options.preserveListSortAt === true
+          ? existingRecord
+            ? "update"
+            : "create"
+          : "merge";
       writes.push({
-        type:
-          options.preserveListSortAt === true
-            ? existingDocSnapshot
-              ? "update"
-              : "create"
-            : "merge",
+        type,
         profileId: ownerProfileId,
         inviteId: normalizedInviteId,
-        data: projectionDocData,
-        updateTime: existingDocSnapshot ? existingDocSnapshot.updateTime : "",
+        data: projectionData,
+        ...(type === "update"
+          ? { expectedVersion: existingRecord.version }
+          : {}),
       });
       setCount += 1;
     }
 
     if (sourceCleanupSafe) {
-      for (const existing of existingDocs) {
+      for (const existing of existingRecords) {
         if (!ownerSet.has(existing.profileId)) {
           writes.push({
             type: "delete",
@@ -694,5 +690,5 @@ module.exports = {
   buildInviteProjectionOwnerPlan,
   buildResolvedProfile,
   createProfileGamesProjectionCore,
-  readExistingProjectionDocuments,
+  readExistingProjectionRecords,
 };

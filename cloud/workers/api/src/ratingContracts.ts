@@ -50,14 +50,14 @@ export type RatingUpdateData = {
 
 export type PendingRatingTelegramProjection = {
   operationId: string;
-  updateTime: string;
+  revision: number;
 };
 
 export type PendingRatingProfileGameProjection = {
   inviteId: string;
   matchId: string;
   operationId: string;
-  updateTime: string;
+  revision: number;
   version: number;
 };
 
@@ -66,7 +66,7 @@ export type PendingRatingEventProgress = {
   inviteId: string;
   matchId: string;
   operationId: string;
-  updateTime: string;
+  revision: number;
   version: number;
 };
 
@@ -193,7 +193,7 @@ export type RatingRepository = RatingGameplayReader & {
 export type RatingEventProgressRepository = RatingRepository & {
   claimRatingEventProgress: (
     operationId: string,
-    updateTime: string,
+    expectedRevision: number,
     claimedAtMs: number,
   ) => Promise<boolean>;
   listDueRatingEventProgress: (
@@ -211,7 +211,7 @@ export type RatingEventProgressRepository = RatingRepository & {
 export type RatingProjectionRepository = RatingRepository & {
   claimRatingTelegramProjection: (
     operationId: string,
-    updateTime: string,
+    expectedRevision: number,
     claimedAtMs: number,
   ) => Promise<boolean>;
   listDueRatingTelegramProjections: (
@@ -229,7 +229,7 @@ export type RatingProjectionRepository = RatingRepository & {
 export type RatingProfileGameProjectionRepository = RatingRepository & {
   claimRatingProfileGameProjection: (
     operationId: string,
-    updateTime: string,
+    expectedRevision: number,
     claimedAtMs: number,
   ) => Promise<boolean>;
   listDueRatingProfileGameProjections: (

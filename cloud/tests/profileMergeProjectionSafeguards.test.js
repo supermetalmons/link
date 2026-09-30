@@ -9,7 +9,7 @@ const {
   buildInviteProjectionOwnerPlan,
   buildResolvedProfile,
   createProfileGamesProjectionCore,
-  readExistingProjectionDocuments,
+  readExistingProjectionRecords,
 } = require("../runtime/profileGamesProjectionCore");
 const {
   createProfileLinkProjectionCore,
@@ -199,37 +199,44 @@ const runInviteProjection = async ({
   profileLinks,
   profiles,
   projections,
-  projectionUpdateTimes = {},
+  projectionVersions = {},
 }) => {
   const deletes = [];
   const sets = [];
-  const currentUpdateTimes = { ...projectionUpdateTimes };
+  const currentVersions = { ...projectionVersions };
   const core = createProfileGamesProjectionCore({
     repository: {
       hasCompletedRatingUpdate: async () => false,
       async commitProjectionWrites(writes) {
-        beforeCommit?.({ currentUpdateTimes, projections });
+        beforeCommit?.({ currentVersions, projections });
+        for (const write of writes) {
+          if (
+            (write.type === "create" && projections[write.profileId]) ||
+            (write.type === "update" &&
+              (!projections[write.profileId] ||
+                write.expectedVersion !== currentVersions[write.profileId]))
+          ) {
+            throw new Error("projection-precondition-failed");
+          }
+        }
         for (const write of writes) {
           const path = `${write.profileId}/${inviteId}`;
           if (write.type === "delete") {
             deletes.push(path);
+            delete projections[write.profileId];
+            delete currentVersions[write.profileId];
             continue;
           }
-          if (
-            write.type === "update" &&
-            write.updateTime !== currentUpdateTimes[write.profileId]
-          ) {
-            throw new Error("projection-precondition-failed");
-          }
+          projections[write.profileId] = write.data;
+          currentVersions[write.profileId] =
+            (currentVersions[write.profileId] || 0) + 1;
           sets.push({
             data: write.data,
             method: write.type === "merge" ? "set" : write.type,
             ...(write.type === "merge" ? { options: { merge: true } } : {}),
             ...(write.type === "update"
               ? {
-                  precondition: {
-                    lastUpdateTime: write.updateTime,
-                  },
+                  expectedVersion: write.expectedVersion,
                 }
               : {}),
             path,
@@ -241,10 +248,8 @@ const runInviteProjection = async ({
           profileIds.flatMap((profileId) => {
             const data = projections[profileId];
             if (data === null || data === undefined) return [];
-            currentUpdateTimes[profileId] ||= "revision-1";
-            return [
-              [profileId, { data, updateTime: currentUpdateTimes[profileId] }],
-            ];
+            currentVersions[profileId] ||= 1;
+            return [[profileId, { data, version: currentVersions[profileId] }]];
           }),
         );
       },
@@ -301,7 +306,7 @@ const runInviteProjection = async ({
       preserveListSortAt: true,
     },
   );
-  return { deletes, result, sets };
+  return { currentVersions, deletes, result, sets };
 };
 
 test("event projection writes every canonical owner before stale cleanup", async () => {
@@ -982,15 +987,15 @@ test("projection cleanup rejects a failed bulk read without writing", async () =
 test("projection cleanup retries the bulk lookup and preserves cleanup order", async () => {
   const reads = [];
   const waits = [];
-  const documents = await readExistingProjectionDocuments({
+  const records = await readExistingProjectionRecords({
     inviteId: "invite-1",
     profileIds: ["source", "missing", "target", "source"],
-    readDocuments: async (profileIds) => {
+    readRecords: async (profileIds) => {
       reads.push(profileIds);
       if (reads.length === 1) throw new Error("transient-read");
       return new Map([
-        ["target", { data: { owner: "target" }, updateTime: "12" }],
-        ["source", { data: { owner: "source" }, updateTime: "7" }],
+        ["target", { data: { owner: "target" }, version: 12 }],
+        ["source", { data: { owner: "source" }, version: 7 }],
       ]);
     },
     reason: "test",
@@ -1001,27 +1006,20 @@ test("projection cleanup retries the bulk lookup and preserves cleanup order", a
     ["source", "missing", "target"],
   ]);
   assert.deepEqual(waits, [25]);
-  assert.deepEqual(
-    documents.map(({ profileId, snapshot }) => ({
-      profileId,
-      data: snapshot.data(),
-      updateTime: snapshot.updateTime,
-    })),
-    [
-      { profileId: "source", data: { owner: "source" }, updateTime: "7" },
-      { profileId: "target", data: { owner: "target" }, updateTime: "12" },
-    ],
-  );
+  assert.deepEqual(records, [
+    { profileId: "source", data: { owner: "source" }, version: 7 },
+    { profileId: "target", data: { owner: "target" }, version: 12 },
+  ]);
 });
 
 test("projection cleanup skips empty bulk reads", async () => {
-  const documents = await readExistingProjectionDocuments({
+  const records = await readExistingProjectionRecords({
     inviteId: "invite-1",
     profileIds: [],
-    readDocuments: async () => assert.fail("unexpected-projection-read"),
+    readRecords: async () => assert.fail("unexpected-projection-read"),
     reason: "test",
   });
-  assert.deepEqual(documents, []);
+  assert.deepEqual(records, []);
 });
 
 test("profile-link catchup uses the freshest matching source projection", async () => {
@@ -1100,7 +1098,7 @@ test("profile-link catchup uses the freshest matching source projection", async 
 
 test("profile-link catchup preserves an existing canonical list timestamp", async () => {
   const inviteId = "merge-existing-canonical-invite";
-  const { sets } = await runInviteProjection({
+  const { currentVersions, sets } = await runInviteProjection({
     eventTimestampMs: 5000,
     invite: { hostId: "merge-existing-canonical-login" },
     inviteId,
@@ -1136,13 +1134,14 @@ test("profile-link catchup preserves an existing canonical list timestamp", asyn
   );
   assert.equal(targetWrite.data.listSortAt, 1000);
   assert.equal(targetWrite.method, "update");
-  assert.ok(targetWrite.precondition.lastUpdateTime);
+  assert.equal(targetWrite.expectedVersion, 1);
+  assert.equal(currentVersions["merge-existing-canonical-target"], 2);
 });
 
 test("profile-link catchup cannot overwrite a concurrent live sort update", async () => {
   const inviteId = "merge-concurrent-sort-invite";
-  const firstVersion = "revision-1";
-  const liveVersion = "revision-2";
+  const firstVersion = 1;
+  const liveVersion = 2;
   const projections = {
     "merge-concurrent-sort-target": {
       lastEventFingerprint: "stale",
@@ -1154,9 +1153,9 @@ test("profile-link catchup cannot overwrite a concurrent live sort update", asyn
 
   await assert.rejects(
     runInviteProjection({
-      beforeCommit: ({ currentUpdateTimes }) => {
+      beforeCommit: ({ currentVersions }) => {
         projections["merge-concurrent-sort-target"].listSortAt = 9000;
-        currentUpdateTimes["merge-concurrent-sort-target"] = liveVersion;
+        currentVersions["merge-concurrent-sort-target"] = liveVersion;
       },
       eventTimestampMs: 5000,
       invite: { hostId: "merge-concurrent-sort-login" },
@@ -1169,7 +1168,7 @@ test("profile-link catchup cannot overwrite a concurrent live sort update", asyn
         "merge-concurrent-sort-target": { username: "Host" },
       },
       projections,
-      projectionUpdateTimes: {
+      projectionVersions: {
         "merge-concurrent-sort-target": firstVersion,
       },
     }),

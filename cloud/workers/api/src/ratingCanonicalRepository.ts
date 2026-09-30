@@ -293,27 +293,27 @@ function mapFailure(
     : error;
 }
 
-function parseRevision(value: string): number | null {
-  if (!/^[1-9]\d*$/.test(value)) return null;
-  const revision = Number(value);
-  return Number.isSafeInteger(revision) ? revision : null;
-}
-
 async function claimProjection(
   db: D1Database,
   operationId: string,
-  updateTime: string,
+  expectedRevision: number,
   claimedAtMs: number,
   projection: CanonicalRatingProjectionKind,
 ): Promise<boolean> {
-  const revision = parseRevision(updateTime);
-  if (!revision) return false;
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1)
+    return false;
   const snapshot = await readCanonicalRatingUpdate(db, operationId);
-  if (!snapshot || snapshot.revision !== revision) return false;
+  if (!snapshot || snapshot.revision !== expectedRevision) return false;
   const fields = canonicalRatingProjectionFields(projection);
   try {
     await commitCanonicalPlan(db, {
-      expectations: [{ kind: "rating-update-revision", operationId, revision }],
+      expectations: [
+        {
+          kind: "rating-update-revision",
+          operationId,
+          revision: expectedRevision,
+        },
+      ],
       mutations: [
         buildCanonicalRatingProjectionMutation(
           snapshot,
@@ -334,7 +334,7 @@ function parseRatingRecoveryRow(
 ): PendingRatingTelegramProjection {
   return {
     operationId: nonempty(row.operation_id),
-    updateTime: String(safeInteger(row.revision, 1)),
+    revision: safeInteger(row.revision, 1),
   };
 }
 
@@ -832,11 +832,11 @@ export function createCanonicalRatingRepository(
       });
     },
 
-    async claimRatingEventProgress(operationId, updateTime, claimedAtMs) {
+    async claimRatingEventProgress(operationId, expectedRevision, claimedAtMs) {
       return claimProjection(
         db,
         operationId,
-        updateTime,
+        expectedRevision,
         claimedAtMs,
         "event-progress",
       );
@@ -844,23 +844,27 @@ export function createCanonicalRatingRepository(
 
     async claimRatingProfileGameProjection(
       operationId,
-      updateTime,
+      expectedRevision,
       claimedAtMs,
     ) {
       return claimProjection(
         db,
         operationId,
-        updateTime,
+        expectedRevision,
         claimedAtMs,
         "profile-game",
       );
     },
 
-    async claimRatingTelegramProjection(operationId, updateTime, claimedAtMs) {
+    async claimRatingTelegramProjection(
+      operationId,
+      expectedRevision,
+      claimedAtMs,
+    ) {
       return claimProjection(
         db,
         operationId,
-        updateTime,
+        expectedRevision,
         claimedAtMs,
         "telegram",
       );

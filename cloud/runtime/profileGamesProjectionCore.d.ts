@@ -1,8 +1,8 @@
 import type { MatchPresentationSnapshot } from "@mons/shared/match-presentation";
 
-export type ProjectionDocument = {
+export type ProjectionRecord = {
   data: Record<string, unknown>;
-  updateTime: string;
+  version: number;
 };
 
 export type ProjectionWrite = {
@@ -10,7 +10,7 @@ export type ProjectionWrite = {
   profileId: string;
   inviteId: string;
   data?: Record<string, unknown>;
-  updateTime?: string;
+  expectedVersion?: number;
 };
 
 export type ProjectionOwnershipSnapshot = {
@@ -23,7 +23,7 @@ export type ProfileGamesProjectionRepository = {
   getProjections(
     profileIds: readonly string[],
     inviteId: string,
-  ): Promise<Map<string, ProjectionDocument>>;
+  ): Promise<Map<string, ProjectionRecord>>;
   readAutomatchEntry(inviteId: string): Promise<unknown>;
   readInviteMetadata(inviteId: string): Promise<Record<string, unknown> | null>;
   readMatchPresentation?(
@@ -83,25 +83,22 @@ export function buildInviteProjectionOwnerPlan(
   cleanupProfileIds?: string[],
 ): { cleanupProfileIds: string[]; ownerProfileIds: string[] };
 
-export function readExistingProjectionDocuments(input: {
+export function readExistingProjectionRecords(input: {
   attempts?: number;
   inviteId: string;
   logger?: Pick<Console, "error">;
   profileIds: string[];
-  readDocuments(
+  readRecords(
     profileIds: readonly string[],
-  ): Promise<Map<string, ProjectionDocument>>;
+  ): Promise<Map<string, ProjectionRecord>>;
   reason: string;
   retryDelayMs?: number;
   wait?(milliseconds: number): Promise<void>;
 }): Promise<
   Array<{
     profileId: string;
-    snapshot: {
-      exists: true;
-      data(): Record<string, unknown>;
-      updateTime: string;
-    };
+    data: Record<string, unknown>;
+    version: number;
   }>
 >;
 

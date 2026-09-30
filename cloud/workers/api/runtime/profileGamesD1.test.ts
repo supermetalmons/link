@@ -8,6 +8,7 @@ import {
   getInviteProfileGameProjections,
   getProfileGameProjection,
   getProfileGameProjections,
+  listProfileGameProjectionPage,
   readProfileGamesPage,
   reserveEventProfileGameProjectionFence,
 } from "../src/profileGamesD1.ts";
@@ -404,7 +405,7 @@ describe("profile game projection D1 repository", () => {
       "invite-1",
     );
     expect(projection?.data.updatedAt).toBe(2_000);
-    expect(projection?.updateTime).toBe("1");
+    expect(projection?.version).toBe(1);
 
     await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
       {
@@ -412,7 +413,7 @@ describe("profile game projection D1 repository", () => {
         profileId: "profile-1",
         projectionId: "invite-1",
         data: gameData("invite-1", 3_000, "active"),
-        updateTime: projection?.updateTime,
+        expectedVersion: projection?.version,
       },
     ]);
     expect(
@@ -422,8 +423,8 @@ describe("profile game projection D1 repository", () => {
           "profile-1",
           "invite-1",
         )
-      )?.updateTime,
-    ).toBe("2");
+      )?.version,
+    ).toBe(2);
   });
 
   it("rejects projections without a stable list timestamp", () => {
@@ -440,6 +441,145 @@ describe("profile game projection D1 repository", () => {
       }),
     ).toThrow("invalid-profile-game-projection-list-sort");
   });
+
+  it.each([null, "1", 0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects an explicit invalid projection version of %s before writing",
+    async (invalidVersion) => {
+      await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
+        {
+          type: "merge",
+          profileId: "profile-1",
+          projectionId: "invite-1",
+          data: gameData("invite-1", 1_000),
+        },
+      ]);
+      let batchCount = 0;
+      const database = new Proxy(env.PROFILE_GAMES_DB, {
+        get(target, property) {
+          if (property === "batch") {
+            return () => {
+              batchCount++;
+              throw new Error("unexpected-projection-write");
+            };
+          }
+          const member = Reflect.get(target, property, target);
+          return typeof member === "function" ? member.bind(target) : member;
+        },
+      });
+      for (const type of ["update", "delete"] as const) {
+        await expect(
+          commitProfileGameProjectionWrites(database, [
+            {
+              type: "delete",
+              profileId: "profile-1",
+              projectionId: "invite-1",
+            },
+            {
+              type,
+              profileId: "profile-1",
+              projectionId: "invite-1",
+              data: gameData("invite-1", 1_000, "active"),
+              expectedVersion: invalidVersion as number,
+            },
+          ]),
+        ).rejects.toThrow("invalid-profile-game-projection-version");
+      }
+      expect(batchCount).toBe(0);
+      await expect(
+        getProfileGameProjection(env.PROFILE_GAMES_DB, "profile-1", "invite-1"),
+      ).resolves.toEqual({ data: gameData("invite-1", 1_000), version: 1 });
+    },
+  );
+
+  it.each([1.5, Number.MAX_SAFE_INTEGER + 1, "invalid"])(
+    "rejects a stored projection version of %s in every record reader",
+    async (version) => {
+      await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
+        {
+          type: "merge",
+          profileId: "profile-1",
+          projectionId: "invite-1",
+          data: gameData("invite-1", 1_000),
+        },
+      ]);
+      await env.PROFILE_GAMES_DB.prepare(
+        `UPDATE profile_game_projections SET version = ?
+         WHERE profile_id = ? AND projection_id = ?`,
+      )
+        .bind(version, "profile-1", "invite-1")
+        .run();
+      const reads = [
+        () =>
+          getProfileGameProjection(
+            env.PROFILE_GAMES_DB,
+            "profile-1",
+            "invite-1",
+          ),
+        () =>
+          getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
+            "invite-1",
+          ]),
+        () =>
+          getInviteProfileGameProjections(env.PROFILE_GAMES_DB, "invite-1", [
+            "profile-1",
+          ]),
+        () => listProfileGameProjectionPage(env.PROFILE_GAMES_DB, "profile-1"),
+      ];
+      for (const read of reads) {
+        await expect(read()).rejects.toThrow(
+          "invalid-profile-game-projection-version",
+        );
+      }
+    },
+  );
+
+  it.each(["omitted", "undefined"])(
+    "keeps list-sort and freshness guards when the expected version is %s",
+    async (mode) => {
+      const precondition =
+        mode === "undefined" ? { expectedVersion: undefined } : {};
+      await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
+        {
+          type: "merge",
+          profileId: "profile-1",
+          projectionId: "invite-1",
+          data: gameData("invite-1", 1_000),
+        },
+      ]);
+      const updated = {
+        ...gameData("invite-1", 1_000, "active"),
+        updatedAt: 2_000,
+      };
+      await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
+        {
+          type: "update",
+          profileId: "profile-1",
+          projectionId: "invite-1",
+          data: updated,
+          ...precondition,
+        },
+      ]);
+      for (const data of [
+        { ...updated, listSortAt: 2_000, updatedAt: 3_000 },
+        { ...updated, updatedAt: 1_500 },
+      ]) {
+        await expect(
+          commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
+            {
+              type: "update",
+              profileId: "profile-1",
+              projectionId: "invite-1",
+              data,
+              ...precondition,
+            },
+          ]),
+        ).rejects.toThrow();
+      }
+      await expect(
+        getProfileGameProjection(env.PROFILE_GAMES_DB, "profile-1", "invite-1"),
+      ).resolves.toEqual({ data: updated, version: 2 });
+    },
+  );
 
   it("reads 100 projections with one query and two bound values", async () => {
     const projectionIds = Array.from(
@@ -465,7 +605,7 @@ describe("profile game projection D1 repository", () => {
       new Map(
         projectionIds.map((projectionId) => [
           projectionId,
-          { data: gameData(projectionId, 1_000), updateTime: "1" },
+          { data: gameData(projectionId, 1_000), version: 1 },
         ]),
       ),
     );
@@ -522,7 +662,7 @@ describe("profile game projection D1 repository", () => {
       new Map([
         [
           "invite-1",
-          { data: gameData("invite-1", 2_000, "active"), updateTime: "2" },
+          { data: gameData("invite-1", 2_000, "active"), version: 2 },
         ],
       ]),
     );
@@ -592,7 +732,7 @@ describe("profile game projection D1 repository", () => {
         new Map(
           profileIds.map((profileId) => [
             profileId,
-            { data: gameData("invite-1", 1_000), updateTime: "1" },
+            { data: gameData("invite-1", 1_000), version: 1 },
           ]),
         ),
       );
@@ -658,7 +798,7 @@ describe("profile game projection D1 repository", () => {
       new Map([
         [
           "profile-1",
-          { data: gameData("invite-1", 2_000, "active"), updateTime: "2" },
+          { data: gameData("invite-1", 2_000, "active"), version: 2 },
         ],
       ]),
     );
@@ -799,7 +939,7 @@ describe("profile game projection D1 repository", () => {
           profileId: "profile-1",
           projectionId: "invite-1",
           data: gameData("invite-1", 5_000),
-          updateTime: stale?.updateTime,
+          expectedVersion: stale?.version,
         },
       ]),
     ).rejects.toThrow();
@@ -853,7 +993,7 @@ describe("profile game projection D1 repository", () => {
           type: "delete",
           profileId: "profile-1",
           projectionId: "invite-1",
-          updateTime: stale?.updateTime,
+          expectedVersion: stale?.version,
         },
       ]),
     ).rejects.toThrow();

@@ -575,7 +575,7 @@ async function sweepRatingProjections(
       claim: (record) =>
         rating.claimRatingTelegramProjection(
           record.operationId,
-          record.updateTime,
+          record.revision,
           nowMs,
         ),
       toTask: (record): TelegramProjectionTask => ({

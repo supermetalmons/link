@@ -4,6 +4,7 @@ import {
   type NavigationItem,
   type ReadNavigationGamesResponse,
 } from "@mons/shared/navigation";
+import type { ProjectionRecord } from "../../../runtime/profileGamesProjectionCore.js";
 
 type ProjectionWrite = {
   type: "create" | "delete" | "merge" | "update";
@@ -11,7 +12,7 @@ type ProjectionWrite = {
   projectionId: string;
   data?: Record<string, unknown>;
   requireAbsent?: boolean;
-  updateTime?: string;
+  expectedVersion?: number;
 };
 
 type EventProfileGameProjectionFence = {
@@ -277,10 +278,11 @@ function deleteStatements(
   return [db.prepare(DELETE_PROJECTION_SQL).bind(profileId, projectionId)];
 }
 
-function parseProjectionVersion(value: string | undefined): number | null {
-  if (!value || !/^[1-9]\d*$/.test(value)) return null;
-  const version = Number(value);
-  return Number.isSafeInteger(version) ? version : null;
+function parseProjectionVersion(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    throw new TypeError("invalid-profile-game-projection-version");
+  }
+  return value;
 }
 
 export async function reserveEventProfileGameProjectionFence(
@@ -329,7 +331,10 @@ export async function commitProfileGameProjectionWrites(
   }
   if (writes.length === 0 && statements.length === 0) return;
   writes.forEach((write) => {
-    const expectedVersion = parseProjectionVersion(write.updateTime);
+    const expectedVersion =
+      write.expectedVersion === undefined
+        ? null
+        : parseProjectionVersion(write.expectedVersion);
     if (write.type === "delete") {
       statements.push(
         ...deleteStatements(
@@ -375,11 +380,21 @@ function parseProjectionPayload(value: unknown): Record<string, unknown> {
   return record;
 }
 
+function parseProjectionRecord(row: {
+  payload_json: string;
+  version: number;
+}): ProjectionRecord {
+  return {
+    data: parseProjectionPayload(row.payload_json),
+    version: parseProjectionVersion(row.version),
+  };
+}
+
 export async function getProfileGameProjection(
   db: D1Database,
   profileId: string,
   projectionId: string,
-): Promise<{ data: Record<string, unknown>; updateTime: string } | null> {
+): Promise<ProjectionRecord | null> {
   const row = await db
     .prepare(
       `SELECT payload_json, version
@@ -388,19 +403,14 @@ export async function getProfileGameProjection(
     )
     .bind(profileId, projectionId)
     .first<{ payload_json: string; version: number }>();
-  return row
-    ? {
-        data: parseProjectionPayload(row.payload_json),
-        updateTime: String(row.version),
-      }
-    : null;
+  return row ? parseProjectionRecord(row) : null;
 }
 
 export async function getProfileGameProjections(
   db: D1Database,
   profileId: string,
   projectionIds: readonly string[],
-): Promise<Map<string, { data: Record<string, unknown>; updateTime: string }>> {
+): Promise<Map<string, ProjectionRecord>> {
   if (projectionIds.length === 0) return new Map();
   const result = await db
     .prepare(
@@ -418,10 +428,7 @@ export async function getProfileGameProjections(
   return new Map(
     result.results.map((row) => [
       row.projection_id,
-      {
-        data: parseProjectionPayload(row.payload_json),
-        updateTime: String(row.version),
-      },
+      parseProjectionRecord(row),
     ]),
   );
 }
@@ -430,12 +437,9 @@ export async function getInviteProfileGameProjections(
   db: D1Database,
   inviteId: string,
   profileIds: readonly string[],
-): Promise<Map<string, { data: Record<string, unknown>; updateTime: string }>> {
+): Promise<Map<string, ProjectionRecord>> {
   const uniqueProfileIds = [...new Set(profileIds)];
-  const projections = new Map<
-    string,
-    { data: Record<string, unknown>; updateTime: string }
-  >();
+  const projections = new Map<string, ProjectionRecord>();
   for (let offset = 0; offset < uniqueProfileIds.length; offset += 100) {
     const result = await db
       .prepare(
@@ -454,10 +458,7 @@ export async function getInviteProfileGameProjections(
         version: number;
       }>();
     for (const row of result.results) {
-      projections.set(row.profile_id, {
-        data: parseProjectionPayload(row.payload_json),
-        updateTime: String(row.version),
-      });
+      projections.set(row.profile_id, parseProjectionRecord(row));
     }
   }
   return projections;
@@ -467,13 +468,7 @@ export async function listProfileGameProjectionPage(
   db: D1Database,
   profileId: string,
   limit = 100,
-): Promise<
-  Array<{
-    data: Record<string, unknown>;
-    projectionId: string;
-    updateTime: string;
-  }>
-> {
+): Promise<Array<ProjectionRecord & { projectionId: string }>> {
   const result = await db
     .prepare(
       `SELECT projection_id, payload_json, version
@@ -489,9 +484,8 @@ export async function listProfileGameProjectionPage(
       version: number;
     }>();
   return result.results.map((row) => ({
-    data: parseProjectionPayload(row.payload_json),
+    ...parseProjectionRecord(row),
     projectionId: row.projection_id,
-    updateTime: String(row.version),
   }));
 }
 

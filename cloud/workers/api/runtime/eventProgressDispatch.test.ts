@@ -301,7 +301,7 @@ describe("event-progress Workflow dispatch admissions", () => {
                       inviteId: "rating-invite",
                       matchId: "match-1",
                       operationId: "rating-invite__match-1",
-                      updateTime: "1",
+                      revision: 1,
                       version: 1,
                     },
                   ];

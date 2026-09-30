@@ -326,7 +326,7 @@ export async function sweepRatingProfileGameProjections(
       try {
         const claimed = await rating.claimRatingProfileGameProjection(
           record.operationId,
-          record.updateTime,
+          record.revision,
           nowMs,
         );
         if (!claimed) {

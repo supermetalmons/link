@@ -156,7 +156,7 @@ function ratingRecoveryRecords(count = 1) {
     inviteId: `rating-invite-${index}`,
     matchId: "match-1",
     operationId: `rating-invite-${index}__match-1`,
-    updateTime: "2026-08-25T00:00:00Z",
+    revision: 1,
     version: 1,
   }));
 }
@@ -1256,7 +1256,14 @@ test("recovers a finalized event rating when its outbox write was lost", async (
   const repository = sweepRepository({});
   const calls: string[] = [];
   const ratingRepository = {
-    claimRatingEventProgress: async () => {
+    claimRatingEventProgress: async (
+      operationId,
+      expectedRevision,
+      claimedAtMs,
+    ) => {
+      assert.equal(operationId, "invite-1__match-1");
+      assert.equal(expectedRevision, 1);
+      assert.equal(claimedAtMs, 2_000);
       calls.push("claim");
       return true;
     },
@@ -1266,7 +1273,7 @@ test("recovers a finalized event rating when its outbox write was lost", async (
         inviteId: "invite-1",
         matchId: "match-1",
         operationId: "invite-1__match-1",
-        updateTime: "2026-08-25T00:00:00Z",
+        revision: 1,
         version: 1,
       },
     ],

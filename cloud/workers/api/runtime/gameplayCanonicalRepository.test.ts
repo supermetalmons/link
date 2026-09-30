@@ -2101,7 +2101,7 @@ describe("canonical gameplay repositories", () => {
     expect(
       await rating.claimRatingEventProgress(
         operationId,
-        eventDue[0].updateTime,
+        eventDue[0].revision,
         3_000,
       ),
     ).toBe(true);
@@ -2113,7 +2113,7 @@ describe("canonical gameplay repositories", () => {
     expect(
       await rating.claimRatingProfileGameProjection(
         operationId,
-        gamesDue[0].updateTime,
+        gamesDue[0].revision,
         3_000,
       ),
     ).toBe(true);
@@ -2125,7 +2125,7 @@ describe("canonical gameplay repositories", () => {
     expect(
       await rating.claimRatingTelegramProjection(
         operationId,
-        telegramDue[0].updateTime,
+        telegramDue[0].revision,
         3_000,
       ),
     ).toBe(true);
@@ -2338,7 +2338,7 @@ describe("canonical gameplay repositories", () => {
         ["tie-b", 3],
       ].map(([operationId, version]) => ({
         operationId,
-        updateTime: "1",
+        revision: 1,
         ...(field === "telegramProjection"
           ? {}
           : {
@@ -2533,7 +2533,7 @@ describe("canonical gameplay repositories", () => {
       const records = await rating[list](2_000, 10);
       expect(records).toHaveLength(1);
       await expect(
-        rating[claim](operationId, records[0].updateTime, 3_000),
+        rating[claim](operationId, records[0].revision, 3_000),
       ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
       expect(observed.batches).toEqual([]);
       await expect(
@@ -2585,7 +2585,7 @@ describe("canonical gameplay repositories", () => {
         (query) => queries.push(query),
       );
       const rating = projectionRatingRepository(db);
-      await expect(rating[claim](operationId, "1", 3_000)).resolves.toBe(true);
+      await expect(rating[claim](operationId, 1, 3_000)).resolves.toBe(true);
       expect(await readRow()).toEqual({
         ...original,
         payload_json: JSON.stringify({
@@ -2645,18 +2645,55 @@ describe("canonical gameplay repositories", () => {
     },
   );
 
+  it.each(ratingDiscoveryCases)(
+    "rejects invalid $field claim revisions without database access",
+    async ({ claim }) => {
+      const prepare = vi.fn(() => {
+        throw new Error("unexpected-rating-database-access");
+      });
+      const db = new Proxy(testEnv.PROFILE_DB, {
+        get(target, property) {
+          if (property === "prepare") return prepare;
+          const member = Reflect.get(target, property, target);
+          return typeof member === "function" ? member.bind(target) : member;
+        },
+      });
+      const rating = projectionRatingRepository(db);
+      for (const revision of [
+        undefined,
+        null,
+        "",
+        "1",
+        "01",
+        0,
+        -1,
+        1.5,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Number.MAX_SAFE_INTEGER + 1,
+      ]) {
+        await expect(
+          Reflect.apply(rating[claim], rating, [
+            "projection-preflight",
+            revision,
+            3_000,
+          ]),
+        ).resolves.toBe(false);
+      }
+      expect(prepare).not.toHaveBeenCalled();
+    },
+  );
+
   it("keeps projection preflight misses and missing mark errors unchanged", async () => {
     const operationId = "projection-preflight";
     await insertProjectionRating(operationId);
     const observed = observeD1FailureDatabase(testEnv.PROFILE_DB);
     const rating = projectionRatingRepository(observed.database);
-    for (const revision of ["", "0", "01", "1.5", "9007199254740992", "2"]) {
-      await expect(
-        rating.claimRatingEventProgress(operationId, revision, 3_000),
-      ).resolves.toBe(false);
-    }
     await expect(
-      rating.claimRatingEventProgress("missing", "1", 3_000),
+      rating.claimRatingEventProgress(operationId, 2, 3_000),
+    ).resolves.toBe(false);
+    await expect(
+      rating.claimRatingEventProgress("missing", 1, 3_000),
     ).resolves.toBe(false);
     await expect(
       rating.markRatingEventProgress("missing", "done", 3_000),
@@ -2683,7 +2720,7 @@ describe("canonical gameplay repositories", () => {
       const rating = projectionRatingRepository(observed.database);
       if (operation === "claim") {
         await expect(
-          rating.claimRatingEventProgress(operationId, "1", 3_000),
+          rating.claimRatingEventProgress(operationId, 1, 3_000),
         ).resolves.toBe(false);
       } else {
         await rating.markRatingEventProgress(operationId, "done", 3_000);
@@ -2801,7 +2838,7 @@ describe("canonical gameplay repositories", () => {
       try {
         await expect(
           operation === "claim"
-            ? rating.claimRatingEventProgress(operationId, "1", 3_000)
+            ? rating.claimRatingEventProgress(operationId, 1, 3_000)
             : rating.markRatingEventProgress(operationId, "done", 3_000),
         ).rejects.toBeInstanceOf(ProfileWritesDisabledFailure);
         expect(observed.batches).toHaveLength(1);
@@ -2885,7 +2922,7 @@ describe("canonical gameplay repositories", () => {
     expect(
       await rating.claimRatingEventProgress(
         operationId,
-        imported?.updateTime || "",
+        imported?.revision || 0,
         2_000,
       ),
     ).toBe(true);

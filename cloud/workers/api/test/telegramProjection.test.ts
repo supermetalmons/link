@@ -147,7 +147,7 @@ function ratingRepository(
         ? [
             {
               operationId: "auto_example__auto_example",
-              updateTime: "2026-08-21T00:00:00Z",
+              revision: 1,
             },
           ]
         : [],
@@ -948,10 +948,19 @@ test("recovery claims bounded pages sequentially", async () => {
     assert.equal(limit, 10);
     return Array.from({ length: limit }, (_, index) => ({
       operationId: `operation-${index}`,
-      updateTime: `update-${index}`,
+      revision: index + 1,
     }));
   };
-  rating.claimRatingTelegramProjection = async () => {
+  rating.claimRatingTelegramProjection = async (
+    operationId,
+    expectedRevision,
+    claimedAtMs,
+  ) => {
+    assert.equal(
+      expectedRevision,
+      Number(operationId.slice("operation-".length)) + 1,
+    );
+    assert.equal(claimedAtMs, 600_000);
     activeClaims++;
     maxActiveClaims = Math.max(maxActiveClaims, activeClaims);
     await Promise.resolve();

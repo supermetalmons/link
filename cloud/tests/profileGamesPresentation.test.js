@@ -42,10 +42,25 @@ function fixture({
       async commitProjectionWrites(nextWrites) {
         await beforeCommit(nextWrites);
         for (const write of nextWrites) {
+          const current = projections.get(write.profileId);
+          if (
+            (write.type === "create" && current) ||
+            (write.type === "update" &&
+              (!current || write.expectedVersion !== current.version))
+          ) {
+            throw new Error("projection-precondition-failed");
+          }
+        }
+        for (const write of nextWrites) {
           writes.push(write);
+          if (write.type === "delete") {
+            projections.delete(write.profileId);
+            continue;
+          }
+          const current = projections.get(write.profileId);
           projections.set(write.profileId, {
             data: write.data,
-            updateTime: String(writes.length),
+            version: (current?.version || 0) + 1,
           });
         }
       },
@@ -117,6 +132,45 @@ test("recomputation replaces an anonymous opponent's seed emoji with live presen
   ]);
   assert.equal(state.writes[1].data.status, "ended");
   assert.equal(state.reads.includes(guestMatchPath), false);
+  assert.ok(
+    state.writes.every(
+      (write) =>
+        write.type === "merge" && !Object.hasOwn(write, "expectedVersion"),
+    ),
+  );
+});
+
+test("catchup updates use the numeric version from their latest projection read", async () => {
+  let emoji = 1;
+  const state = fixture({
+    readMatchPresentation: async (_inviteId, matchId) =>
+      matchPresentation(matchId, { "guest-login": emoji }),
+  });
+  for (const eventTimestampMs of [100, 200, 300]) {
+    await state.recompute({ eventTimestampMs, preserveListSortAt: true });
+    emoji += 1;
+  }
+
+  assert.equal(state.writes[0].type, "create");
+  assert.equal(Object.hasOwn(state.writes[0], "expectedVersion"), false);
+  assert.deepEqual(
+    state.writes.slice(1).map(({ type, expectedVersion }) => ({
+      type,
+      expectedVersion,
+    })),
+    [
+      { type: "update", expectedVersion: 1 },
+      { type: "update", expectedVersion: 2 },
+    ],
+  );
+  assert.deepEqual(
+    state.writes.map(({ data }) => [data.createdAt, data.listSortAt]),
+    [
+      [100, 100],
+      [100, 100],
+      [100, 100],
+    ],
+  );
 });
 
 test("canonical profile avatars retain precedence without reading match presentation", async () => {

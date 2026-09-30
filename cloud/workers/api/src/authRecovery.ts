@@ -571,7 +571,7 @@ function createCanonicalAuthRecoveryService(
                   projectionId: game.projectionId,
                   data: { ...game.data, ownerProfileId: job.profileId },
                   ...(current
-                    ? { updateTime: current.updateTime }
+                    ? { expectedVersion: current.version }
                     : { requireAbsent: true }),
                 },
               ]
@@ -582,7 +582,7 @@ function createCanonicalAuthRecoveryService(
             type: "delete" as const,
             profileId: sourceProfileId,
             projectionId: game.projectionId,
-            updateTime: game.updateTime,
+            expectedVersion: game.version,
           },
         ];
       });

@@ -276,7 +276,7 @@ async function recoverRatingEventProgress(
     async (record) => {
       const claimed = await ratingRepository.claimRatingEventProgress(
         record.operationId,
-        record.updateTime,
+        record.revision,
         nowMs,
       );
       if (!claimed) {

@@ -2040,20 +2040,26 @@ test("scheduled recovery claims, repairs, and batches valid projection records",
         inviteId: "auto_aaaaaaaaaaa",
         matchId: "auto_aaaaaaaaaaa",
         operationId,
-        updateTime: "2026-08-25T00:00:00Z",
+        revision: 1,
         version: 1,
       },
       {
         inviteId: "bad",
         matchId: "bad",
         operationId: "mismatch",
-        updateTime: "2026-08-25T00:00:01Z",
+        revision: 2,
         version: 1,
       },
     ];
   };
   const claims: string[] = [];
-  rating.claimRatingProfileGameProjection = async (claimedOperationId) => {
+  rating.claimRatingProfileGameProjection = async (
+    claimedOperationId,
+    expectedRevision,
+    claimedAtMs,
+  ) => {
+    assert.equal(expectedRevision, claimedOperationId === operationId ? 1 : 2);
+    assert.equal(claimedAtMs, 600_000);
     claims.push(claimedOperationId);
     return true;
   };
@@ -2086,7 +2092,7 @@ test("scheduled recovery bounds concurrent claims", async () => {
       inviteId: `auto_${String(index).padStart(11, "a")}`,
       matchId: `auto_${String(index).padStart(11, "a")}`,
       operationId: `operation-${index}`,
-      updateTime: `update-${index}`,
+      revision: index + 1,
       version: 1,
     }));
   let active = 0;
