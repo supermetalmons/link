@@ -217,7 +217,7 @@ function harness({
     cleanupInviteMetadataObserver: noop,
     cleanupWagerObserver: noop,
     cleanupInviteReactionObserver: noop,
-    clearEventSyncCaches: noop,
+    eventClient: { reset: noop },
     refreshMoveDeliveries: noop,
     refreshRematchEndDeliveries: noop,
     beginConnectAttempt: noop,

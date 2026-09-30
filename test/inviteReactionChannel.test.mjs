@@ -463,7 +463,7 @@ test("the actual session auth callback tears down participant and spectator reso
         return true;
       },
       unregisterObserverCleanup: (_contextId, key) => observers.delete(key),
-      clearEventSyncCaches: () => undefined,
+      eventClient: { reset: () => undefined },
       refreshMoveDeliveries: () => undefined,
       refreshRematchEndDeliveries: () => undefined,
       getUserBoundAuthTokenProvider(uid) {

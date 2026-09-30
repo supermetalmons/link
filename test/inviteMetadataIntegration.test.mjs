@@ -588,7 +588,7 @@ function harness({
       },
       runMutation: async (action) => action(),
     },
-    clearEventSyncCaches: noop,
+    eventClient: { reset: noop },
     logWagerDebug: noop,
     observeInviteReactions: noop,
     observeMatch: (uid, matchId) => events.observed.push([uid, matchId]),

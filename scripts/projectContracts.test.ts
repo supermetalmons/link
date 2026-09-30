@@ -771,11 +771,12 @@ test("browser customization and prize selection mutations use Worker routes", ()
   const gameplayApi = readText("src/services/gameplayApi.ts");
   const profileApi = readText("src/services/profileApi.ts");
   const connection = readText("src/connection/connection.ts");
+  const eventClient = readText("src/connection/eventClient.ts");
 
   assert.match(gameplayApi, /\/events\/prize-selections\/toggle/);
   assert.match(profileApi, /\/profiles\/custom/);
   assert.match(
-    connection,
+    eventClient,
     /getUserBoundAuthTokenProvider\(\)[\s\S]{0,250}toggleEventPrizeSelectionViaApi/,
   );
   assert.match(connection, /field: "emojiAndAura"/);
@@ -784,13 +785,14 @@ test("browser customization and prize selection mutations use Worker routes", ()
   assert.doesNotMatch(connection, /drainProfileCustomizations/);
   assert.doesNotMatch(connection, /\bupdateDoc\s*\(/);
   assert.doesNotMatch(
-    connection,
+    `${connection}\n${eventClient}`,
     /runTransaction\([\s\S]{0,200}eventPrizeSelections/,
   );
 });
 
 test("browser event subscriptions use Worker polling without Firebase event paths", () => {
   const connection = readText("src/connection/connection.ts");
+  const eventClient = readText("src/connection/eventClient.ts");
   const gameplayApi = readText("src/services/gameplayApi.ts");
   const eventReadApi = readText("src/services/eventReadApi.ts");
 
@@ -799,7 +801,11 @@ test("browser event subscriptions use Worker polling without Firebase event path
     "profileEventPrizes/",
     "`events/${",
   ]) {
-    assert.equal(connection.includes(retiredPath), false, retiredPath);
+    assert.equal(
+      `${connection}\n${eventClient}`.includes(retiredPath),
+      false,
+      retiredPath,
+    );
   }
   assert.match(eventReadApi, /\/events\/snapshot/);
   assert.match(
@@ -823,18 +829,21 @@ test("provider verification and auth mutations use Worker routes", () => {
 });
 
 test("client prize withdrawal uses only the Worker API", () => {
-  const connection = readText("src/connection/connection.ts");
+  const clientSource = [
+    readText("src/connection/connection.ts"),
+    readText("src/connection/eventClient.ts"),
+  ].join("\n");
   const callableNames = Array.from(
-    connection.matchAll(/httpsCallable\(\s*this\.functions\s*,\s*"([^"]+)"/g),
+    clientSource.matchAll(/httpsCallable\(\s*this\.functions\s*,\s*"([^"]+)"/g),
     (match) => match[1],
   ).sort();
 
   assert.equal(
     callableNames.length,
-    Array.from(connection.matchAll(/\bhttpsCallable\s*\(/g)).length,
+    Array.from(clientSource.matchAll(/\bhttpsCallable\s*\(/g)).length,
   );
   assert.deepEqual(callableNames, []);
-  assert.doesNotMatch(connection, /firebase\/functions/);
+  assert.doesNotMatch(clientSource, /firebase\/functions/);
   const eventPrizeApi = readText("src/services/eventPrizeApi.ts");
   assert.match(eventPrizeApi, /\/events\/prizes\/withdrawals/);
   assert.match(eventPrizeApi, /\/events\/prizes\/withdrawals\/status/);

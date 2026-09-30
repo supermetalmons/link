@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import test from "node:test";
-import ts from "typescript";
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -19,51 +17,18 @@ registerHooks({
 const { SessionAuth } = await import("../src/session/sessionAuth.ts");
 const { createInitialEventBootstrap } =
   await import("../src/services/initialEventBootstrap.ts");
-const { EventPollingRegistry, EVENT_POLL_INTERVAL_MS } =
+const { EVENT_POLL_INTERVAL_MS } =
   await import("../src/connection/eventPollingRegistry.ts");
 const { createUserBoundAuthTokenProvider } =
   await import("../src/services/authApi.ts");
-const { GameplayApiError, GAMEPLAY_API_TIMEOUT_MS } =
+const { GAMEPLAY_API_TIMEOUT_MS } =
   await import("../src/services/gameplayApi.ts");
+const { EventClient } = await import("../src/connection/eventClient.ts");
+const { mapDatabaseEventRecord } =
+  await import("../src/connection/eventMappers.ts");
 const { eventSnapshotEtag } = await import("@mons/shared/events");
 const { createEventPrizeSelectionCoordinator } =
   await import("../src/ui/event/prizeSelectionCoordinator.ts");
-
-const source = ts.createSourceFile(
-  "connection.ts",
-  readFileSync(
-    new URL("../src/connection/connection.ts", import.meta.url),
-    "utf8",
-  ),
-  ts.ScriptTarget.Latest,
-  true,
-);
-const declaration = source.statements.find(
-  (node) => ts.isClassDeclaration(node) && node.name?.text === "Connection",
-);
-const methods = [
-  "loadEventSnapshot",
-  "synchronizeEventAuthOwner",
-  "clearEventSyncCaches",
-  "clearEventSyncCacheForId",
-  "applyEventMutationSnapshot",
-  "postponeEventStart",
-  "subscribeToEvent",
-  "subscribeToEventFreshness",
-  "getUserBoundAuthTokenProvider",
-  "commitEventSyncResponse",
-  "readCachedEventSyncResponse",
-].map((name) => {
-  const method = declaration.members.find(
-    (member) => member.name?.getText(source) === name,
-  );
-  assert.ok(method, `missing Connection.${name}`);
-  return method.getText(source);
-});
-const { outputText } = ts.transpileModule(
-  `class Connection { ${methods.join("\n")} }`,
-  { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
-);
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const deferred = () => {
@@ -75,25 +40,30 @@ const deferred = () => {
 };
 const route = () => ({
   mode: "event",
-  path: "event/event-a",
+  path: "event/NN3eRzoZo80",
   inviteId: null,
   snapshotId: null,
-  eventId: "event-a",
+  eventId: "NN3eRzoZo80",
   autojoin: false,
 });
 const seed = (revision = 1) => ({
   snapshot: {
     ok: true,
-    eventId: "event-a",
+    eventId: "NN3eRzoZo80",
     revision,
-    event: {
-      eventId: "event-a",
-      status: "scheduled",
-      startAtMs: revision * 1000,
+    event: mapDatabaseEventRecord(
+      {
+        eventId: "NN3eRzoZo80",
+        status: "scheduled",
+        startAtMs: revision * 1000,
+      },
+      "NN3eRzoZo80",
+    ),
+    prizeSelections: {
+      "profile-a": ["1092", "1111", "1514"][(revision - 1) % 3],
     },
-    prizeSelections: { "profile-a": String(revision) },
   },
-  etag: eventSnapshotEtag("event-a", revision),
+  etag: eventSnapshotEtag("NN3eRzoZo80", revision),
   bookmark: `mons-d1-v1:11111111-1111-4111-8111-111111111111:bookmark-${revision}`,
 });
 const modified = (value = seed()) => ({
@@ -108,6 +78,9 @@ function fixture({
   enrichment = true,
   eventRead,
   postponeEvent,
+  createEvent,
+  syncEvent,
+  authenticate,
 } = {}) {
   const session = {
     sessionId: crypto.randomUUID(),
@@ -173,65 +146,86 @@ function fixture({
     route,
     subscribeRoute: () => () => {},
   });
-  const dependencies = {
-    createUserBoundAuthTokenProvider,
-    GameplayApiError,
-    GAMEPLAY_API_TIMEOUT_MS,
+  let creationSeed = seed();
+  const ensureAuthenticated = async () => {
+    if (authenticate) return authenticate();
+    await auth.authStateReady();
+    if (!auth.currentUser) await auth.signInAnonymously();
+  };
+  const tokenProvider = () =>
+    createUserBoundAuthTokenProvider(auth.currentUser, () => auth.currentUser);
+  const connection = new EventClient({
+    getCurrentUser: () => auth.currentUser,
+    onAuthStateChanged: (listener) => auth.onAuthStateChanged(listener),
+    ensureAuthenticated,
+    getUserBoundAuthTokenProvider: tokenProvider,
+    createPollingAuthTokenProvider: tokenProvider,
+    getLocalProfileId: () => "profile-a",
+    getFallbackLoginUid: () => null,
     takeInitialEventBootstrap: (...args) => {
       takeRequests.push(args);
       return bootstrap.take(...args);
     },
-    readEventSnapshotViaApi: read,
-    postponeEventStartViaApi: postponeEvent,
-  };
-  const Connection = new Function(
-    ...Object.keys(dependencies),
-    `${outputText}\nreturn Connection;`,
-  )(...Object.values(dependencies));
-  const connection = new Connection();
-  const registry = new EventPollingRegistry({
+    api: {
+      readEventSnapshotViaApi: read,
+      readProfileEventPrizesViaApi: async () =>
+        assert.fail("unexpected profile read"),
+      postponeEventStartViaApi: postponeEvent,
+      createEventViaApi: async () =>
+        createEvent
+          ? createEvent()
+          : {
+              ok: true,
+              eventId: "NN3eRzoZo80",
+              event: creationSeed.snapshot.event,
+              eventSnapshot: creationSeed,
+            },
+      syncEventStateViaApi: syncEvent,
+      toggleEventPrizeSelectionViaApi: async ({ eventId, prizeId }) => ({
+        ok: true,
+        eventId,
+        selectedPrizeId: prizeId,
+      }),
+    },
+    now: () => Date.now(),
     addVisibilityListener: () => () => {},
     clearTimer: (id) => timers.delete(id),
     isVisible: () => true,
-    loadEvent: (eventId, options) =>
-      connection.loadEventSnapshot(eventId, options),
-    loadProfilePrizes: async () => assert.fail("unexpected profile read"),
-    onEventIdle: (eventId) => connection.clearEventSyncCacheForId(eventId),
     setTimer(callback, delayMs) {
       const id = ++timerId;
       timers.set(id, { callback, delayMs });
       return id;
     },
-  });
-  Object.assign(connection, {
-    auth,
-    eventAuthUser: auth.currentUser,
-    eventPollingRegistry: registry,
-    inFlightEventSyncById: new Map(),
-    eventSyncCooldownCacheById: new Map(),
-    latestObservedEventById: new Map(),
-    mapDatabaseEventRecord: (value) => value,
-    getEventSyncCooldownMs: () => 10_000,
     notifyNavigationGamesChanged: () => {},
-    async ensureAuthenticated() {
-      await auth.authStateReady();
-      if (!auth.currentUser) await auth.signInAnonymously();
-    },
   });
-  auth.onAuthStateChanged(() => connection.synchronizeEventAuthOwner());
   return {
     auth,
     bootstrap,
     connection,
-    registry,
     timers,
+    async create(value) {
+      creationSeed = value;
+      return connection.createEvent(5);
+    },
+    currentEvent() {
+      let event;
+      connection.subscribeToEvent("NN3eRzoZo80", (value) => (event = value))();
+      return event;
+    },
     authRequests,
     readRequests,
     takeRequests,
     gate,
     dispatched,
-    async runNext() {
-      const [id, timer] = timers.entries().next().value;
+    async runNext(delayMs) {
+      const next =
+        delayMs === undefined
+          ? [...timers.entries()].sort((a, b) => a[1].delayMs - b[1].delayMs)[0]
+          : [...timers.entries()].find(
+              ([, timer]) => timer.delayMs === delayMs,
+            );
+      assert.ok(next, `missing timer ${delayMs ?? "next"}`);
+      const [id, timer] = next;
       timers.delete(id);
       timer.callback();
       await flush();
@@ -246,11 +240,11 @@ for (const restored of [false, true]) {
     const events = [];
     const selections = [];
     h.bootstrap.start(route());
-    const unsubscribe = h.connection.subscribeToEvent("event-a", (event) =>
+    const unsubscribe = h.connection.subscribeToEvent("NN3eRzoZo80", (event) =>
       events.push(event),
     );
-    const unsubscribeSelections = h.registry.subscribeToEventPrizeSelections(
-      "event-a",
+    const unsubscribeSelections = h.connection.subscribeToEventPrizeSelections(
+      "NN3eRzoZo80",
       (value) => selections.push(value),
     );
     assert.equal(await h.runNext(), 0);
@@ -265,7 +259,7 @@ for (const restored of [false, true]) {
       [seed().snapshot.prizeSelections],
     );
     assert.equal(h.readRequests.length, 0);
-    assert.deepEqual(h.authRequests, [{ eventId: "event-a" }]);
+    assert.deepEqual(h.authRequests, [{ eventId: "NN3eRzoZo80" }]);
     assert.equal([...h.timers.values()][0].delayMs, EVENT_POLL_INTERVAL_MS);
     unsubscribe();
     unsubscribeSelections();
@@ -277,11 +271,11 @@ test("a legacy session response yields one shared early event GET for both modal
   const h = fixture({ enrichment: false });
   const events = [];
   h.bootstrap.start(route());
-  const unsubscribe = h.connection.subscribeToEvent("event-a", (value) =>
+  const unsubscribe = h.connection.subscribeToEvent("NN3eRzoZo80", (value) =>
     events.push(value),
   );
-  const unsubscribeSelections = h.registry.subscribeToEventPrizeSelections(
-    "event-a",
+  const unsubscribeSelections = h.connection.subscribeToEventPrizeSelections(
+    "NN3eRzoZo80",
     () => {},
   );
   await h.runNext();
@@ -300,18 +294,14 @@ test("a create response seeded before opening displays immediately without anoth
   const h = fixture();
   h.gate.resolve();
   await h.auth.signInAnonymously();
-  const generation = h.registry.getGeneration();
-  assert.deepEqual(
-    h.connection.applyEventMutationSnapshot("event-a", seed(2), generation),
-    seed(2).snapshot.event,
-  );
+  assert.deepEqual((await h.create(seed(2))).event, seed(2).snapshot.event);
   const events = [];
   const fresh = [];
   const unsubscribeFreshness = h.connection.subscribeToEventFreshness(
-    "event-a",
+    "NN3eRzoZo80",
     (value) => fresh.push(value),
   );
-  const unsubscribe = h.connection.subscribeToEvent("event-a", (value) =>
+  const unsubscribe = h.connection.subscribeToEvent("NN3eRzoZo80", (value) =>
     events.push(value),
   );
   assert.deepEqual(events, [seed(2).snapshot.event]);
@@ -320,9 +310,9 @@ test("a create response seeded before opening displays immediately without anoth
   assert.equal(h.readRequests.length, 0);
   unsubscribe();
   unsubscribeFreshness();
-  h.connection.clearEventSyncCaches(false);
+  h.connection.reset({ preserveSnapshots: true });
   const reopened = [];
-  const close = h.connection.subscribeToEvent("event-a", (value) =>
+  const close = h.connection.subscribeToEvent("NN3eRzoZo80", (value) =>
     reopened.push(value),
   );
   assert.deepEqual(reopened, [seed(2).snapshot.event]);
@@ -345,22 +335,20 @@ test("a delayed postpone snapshot preserves a newer acknowledged prize while res
   await h.auth.signInAnonymously();
   const initial = seed(1);
   initial.snapshot.prizeSelections = {};
-  h.registry.adoptEventSnapshot("event-a", initial);
+  await h.create(initial);
   const selections = [];
   const coordinator = createEventPrizeSelectionCoordinator({
     profileId: "profile-a",
     onPendingChange: () => {},
     onSelectionsChange: (value) => selections.push(value),
-    mutate: async () => {
-      h.registry.invalidateEvent("event-a");
-      return "1092";
-    },
+    mutate: (prizeId) =>
+      h.connection.toggleEventPrizeSelection("NN3eRzoZo80", prizeId),
   });
-  const unsubscribe = h.registry.subscribeToEventPrizeSelections(
-    "event-a",
+  const unsubscribe = h.connection.subscribeToEventPrizeSelections(
+    "NN3eRzoZo80",
     coordinator.receiveAuthoritative,
   );
-  const pendingPostpone = h.connection.postponeEventStart("event-a", 5);
+  const pendingPostpone = h.connection.postponeEventStart("NN3eRzoZo80", 5);
   await flush();
   coordinator.toggle("1092");
   await flush();
@@ -371,7 +359,7 @@ test("a delayed postpone snapshot preserves a newer acknowledged prize while res
   older.snapshot.prizeSelections = {};
   postpone.resolve({
     ok: true,
-    eventId: "event-a",
+    eventId: "NN3eRzoZo80",
     event: older.snapshot.event,
     eventSnapshot: older,
     postponeByMinutes: 5,
@@ -388,10 +376,10 @@ test("a delayed postpone snapshot preserves a newer acknowledged prize while res
   latest.snapshot.prizeSelections = { "profile-a": "1092" };
   replacementRead.resolve(modified(latest));
   await flush();
-  assert.equal(h.registry.getEventSnapshot("event-a").revision, 3);
+  assert.equal(h.currentEvent().startAtMs, 3000);
   primaryRead.resolve(modified(older));
   await flush();
-  assert.equal(h.registry.getEventSnapshot("event-a").revision, 3);
+  assert.equal(h.currentEvent().startAtMs, 3000);
   assert.deepEqual(selections.at(-1), { "profile-a": "1092" });
   unsubscribe();
   coordinator.dispose();
@@ -417,20 +405,20 @@ for (const withSnapshot of [false, true]) {
     });
     h.gate.resolve();
     await h.auth.signInAnonymously();
-    h.registry.adoptEventSnapshot("event-a", seed(1));
+    await h.create(seed(1));
     const events = [];
-    const unsubscribe = h.connection.subscribeToEvent("event-a", (value) =>
+    const unsubscribe = h.connection.subscribeToEvent("NN3eRzoZo80", (value) =>
       events.push(value),
     );
-    const pendingPostpone = h.connection.postponeEventStart("event-a", 5);
+    const pendingPostpone = h.connection.postponeEventStart("NN3eRzoZo80", 5);
     await flush();
-    h.registry.invalidateEvent("event-a");
+    await h.connection.toggleEventPrizeSelection("NN3eRzoZo80", "1092");
     assert.equal(await h.runNext(), 0);
-    assert.equal(h.registry.getEventSnapshot("event-a").revision, 2);
+    assert.equal(h.currentEvent().startAtMs, 1000);
     committed = true;
     postpone.resolve({
       ok: true,
-      eventId: "event-a",
+      eventId: "NN3eRzoZo80",
       event: afterPostpone.snapshot.event,
       ...(withSnapshot ? { eventSnapshot: afterPostpone } : {}),
       postponeByMinutes: 5,
@@ -442,9 +430,13 @@ for (const withSnapshot of [false, true]) {
     assert.equal(h.readRequests.length, 2);
     assert.equal(h.readRequests[1].options.bookmark, null);
     assert.deepEqual(events.at(-1), afterPostpone.snapshot.event);
-    assert.deepEqual(h.registry.getEventSnapshot("event-a").prizeSelections, {
-      "profile-a": "1092",
-    });
+    const selections = [];
+    const closeSelections = h.connection.subscribeToEventPrizeSelections(
+      "NN3eRzoZo80",
+      (value) => selections.push(value),
+    );
+    assert.deepEqual(selections.at(-1), { "profile-a": "1092" });
+    closeSelections();
     unsubscribe();
   });
 }
@@ -457,23 +449,23 @@ test("a postpone completion from an earlier auth generation cannot restart the c
   });
   h.gate.resolve();
   await h.auth.signInAnonymously();
-  h.registry.adoptEventSnapshot("event-a", seed(1));
-  const unsubscribe = h.connection.subscribeToEvent("event-a", () => {});
-  const pendingPostpone = h.connection.postponeEventStart("event-a", 5);
+  await h.create(seed(1));
+  const unsubscribe = h.connection.subscribeToEvent("NN3eRzoZo80", () => {});
+  const pendingPostpone = h.connection.postponeEventStart("NN3eRzoZo80", 5);
   await flush();
-  h.connection.clearEventSyncCaches();
+  h.connection.reset();
   assert.equal(await h.runNext(), 0);
   const timer = [...h.timers.entries()][0];
   postpone.resolve({
     ok: true,
-    eventId: "event-a",
+    eventId: "NN3eRzoZo80",
     event: seed(2).snapshot.event,
     eventSnapshot: seed(2),
     postponeByMinutes: 5,
     startAtMs: 2000,
   });
   await pendingPostpone;
-  assert.equal(h.registry.getEventSnapshot("event-a").revision, 4);
+  assert.equal(h.currentEvent().startAtMs, 4000);
   assert.equal(h.readRequests.length, 1);
   assert.deepEqual([...h.timers.entries()], [timer]);
   assert.equal(timer[1].delayMs, EVENT_POLL_INTERVAL_MS);
@@ -481,92 +473,87 @@ test("a postpone completion from an earlier auth generation cannot restart the c
 });
 
 test("late legacy sync data cannot replace an already-observed newer event", async () => {
-  const h = fixture();
+  const sync = deferred();
+  const h = fixture({ syncEvent: () => sync.promise });
   h.gate.resolve();
   await h.auth.signInAnonymously();
   const events = [];
-  const unsubscribe = h.connection.subscribeToEvent("event-a", (value) =>
+  const unsubscribe = h.connection.subscribeToEvent("NN3eRzoZo80", (value) =>
     events.push(value),
   );
-  const generation = h.registry.getGeneration();
-  h.connection.applyEventMutationSnapshot("event-a", seed(3), generation);
-  h.connection.commitEventSyncResponse(
-    "event-a",
-    { ok: true, didChange: true, event: seed(1).snapshot.event },
-    h.registry.getEventSubscriptionToken("event-a"),
-  );
+  const pending = h.connection.syncEventState("NN3eRzoZo80");
+  await flush();
+  await h.create(seed(3));
+  sync.resolve({ ok: true, didChange: true, event: seed(1).snapshot.event });
+  await pending;
   assert.deepEqual(
-    h.connection.latestObservedEventById.get("event-a"),
+    (await h.connection.syncEventState("NN3eRzoZo80")).event,
     seed(3).snapshot.event,
   );
-  assert.deepEqual(
-    h.connection.readCachedEventSyncResponse("event-a", Date.now()).event,
-    seed(3).snapshot.event,
-  );
-  h.connection.clearEventSyncCaches(false);
-  assert.deepEqual(
-    h.connection.applyEventMutationSnapshot("event-a", seed(2), generation),
-    seed(3).snapshot.event,
-  );
+  h.connection.reset({ preserveSnapshots: true });
+  await h.create(seed(2));
   assert.deepEqual(events, [seed(3).snapshot.event]);
   unsubscribe();
 });
 
 test("auth reset rejects pending mutation seeds even when the same event stays mounted", async () => {
-  const h = fixture();
+  const creation = deferred();
+  const h = fixture({ createEvent: () => creation.promise });
   h.gate.resolve();
   await h.auth.signInAnonymously();
   const events = [];
-  const unsubscribe = h.connection.subscribeToEvent("event-a", (value) =>
+  const unsubscribe = h.connection.subscribeToEvent("NN3eRzoZo80", (value) =>
     events.push(value),
   );
-  const generation = h.registry.getGeneration();
-  h.connection.applyEventMutationSnapshot("event-a", seed(), generation);
-  h.connection.clearEventSyncCaches();
-  assert.equal(
-    h.connection.applyEventMutationSnapshot("event-a", seed(2), generation),
-    undefined,
-  );
+  await h.runNext();
+  const pending = h.connection.createEvent(5);
+  await flush();
+  h.connection.reset();
+  creation.resolve({
+    ok: true,
+    eventId: "NN3eRzoZo80",
+    event: seed(2).snapshot.event,
+    eventSnapshot: seed(2),
+  });
+  await pending;
   assert.deepEqual(events, [seed().snapshot.event, null]);
   unsubscribe();
 });
 
-test(
-  "aborting an event read while shared authentication stalls promptly releases the poller",
-  { timeout: 1000 },
-  async () => {
-    const h = fixture();
-    const authentication = deferred();
-    h.connection.ensureAuthenticated = () => authentication.promise;
-    const controller = new AbortController();
-    const pending = h.connection.loadEventSnapshot("event-a", {
-      signal: controller.signal,
-    });
-    const rejected = assert.rejects(pending, { code: "aborted" });
-    controller.abort();
-    await rejected;
-    assert.equal(h.takeRequests.length, 0);
-    assert.equal(h.readRequests.length, 0);
-    authentication.resolve();
-    await flush();
-    assert.equal(h.takeRequests.length, 0);
-    assert.equal(h.readRequests.length, 0);
-  },
-);
-
-test("event read deadline includes authentication without canceling shared authentication", async (t) => {
-  const h = fixture();
+test("closing an event while shared authentication stalls promptly releases the poller", async () => {
   const authentication = deferred();
-  h.connection.ensureAuthenticated = () => authentication.promise;
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const pending = h.connection.loadEventSnapshot("event-a", {});
-  const rejected = assert.rejects(pending, { code: "unavailable" });
-  t.mock.timers.tick(30_000);
-  await rejected;
+  const h = fixture({ authenticate: () => authentication.promise });
+  const unsubscribe = h.connection.subscribeToEvent("NN3eRzoZo80", () => {});
+  await h.runNext();
+  unsubscribe();
+  await flush();
+  assert.equal(h.timers.size, 0);
   assert.equal(h.takeRequests.length, 0);
   assert.equal(h.readRequests.length, 0);
   authentication.resolve();
   await flush();
   assert.equal(h.takeRequests.length, 0);
   assert.equal(h.readRequests.length, 0);
+});
+
+test("event read deadline includes authentication without canceling shared authentication", async () => {
+  const authentication = deferred();
+  const h = fixture({ authenticate: () => authentication.promise });
+  const errors = [];
+  const unsubscribe = h.connection.subscribeToEvent(
+    "NN3eRzoZo80",
+    () => {},
+    (error) => errors.push(error),
+  );
+  await h.runNext();
+  await h.runNext(GAMEPLAY_API_TIMEOUT_MS);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].code, "unavailable");
+  assert.equal(h.takeRequests.length, 0);
+  assert.equal(h.readRequests.length, 0);
+  authentication.resolve();
+  await flush();
+  assert.equal(h.takeRequests.length, 0);
+  assert.equal(h.readRequests.length, 0);
+  unsubscribe();
 });
