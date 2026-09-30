@@ -1,12 +1,31 @@
-const { isAutoInviteId } = require("./ids");
-const {
-  GAME_BOOTSTRAP_MAX_RESPONSE_BYTES,
-  isReadGameBootstrapResponse,
-} = require("./game-bootstrap");
-
+// Generated from src/shared/navigation.ts. Run npm run generate:runtime.
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.isRemoveNavigationGameResponse =
+  exports.isRemoveNavigationGameRequest =
+  exports.isCancelAutomatchResponse =
+  exports.parseStartAutomatchApiResponse =
+  exports.isStartAutomatchResponse =
+  exports.isStartAutomatchRequest =
+  exports.isReadNavigationGamesResponse =
+  exports.isReadNavigationGamesRequest =
+  exports.isNavigationGamesCursor =
+  exports.isNavigationItem =
+  exports.mapProfileGameProjection =
+  exports.compareNavigationItems =
+  exports.getNavigationSortBucket =
+  exports.getNavigationStatusPriority =
+  exports.inferAutomatchStateHint =
+  exports.normalizeStrictAutomatchStateHint =
+  exports.normalizeAutomatchStateHint =
+  exports.NAVIGATION_SORT_BUCKETS =
+  exports.AUTOMATCH_API_MAX_RESPONSE_BYTES =
+    void 0;
+const ids_js_1 = require("./ids.js");
+const game_bootstrap_js_1 = require("./game-bootstrap.js");
 const AUTOMATCH_API_MAX_RESPONSE_BYTES =
-  GAME_BOOTSTRAP_MAX_RESPONSE_BYTES + 1024;
-
+  game_bootstrap_js_1.GAME_BOOTSTRAP_MAX_RESPONSE_BYTES + 1024;
+exports.AUTOMATCH_API_MAX_RESPONSE_BYTES = AUTOMATCH_API_MAX_RESPONSE_BYTES;
 const NAVIGATION_SORT_BUCKETS = Object.freeze({
   pending: 20,
   waiting: 30,
@@ -14,24 +33,24 @@ const NAVIGATION_SORT_BUCKETS = Object.freeze({
   ended: 50,
   dismissed: 50,
 });
-
+exports.NAVIGATION_SORT_BUCKETS = NAVIGATION_SORT_BUCKETS;
 const normalizeStrictAutomatchStateHint = (value) =>
   value === "pending" || value === "matched" || value === "canceled"
     ? value
     : null;
-
+exports.normalizeStrictAutomatchStateHint = normalizeStrictAutomatchStateHint;
 const normalizeAutomatchStateHint = (value) =>
   typeof value === "string"
     ? normalizeStrictAutomatchStateHint(value.trim())
     : null;
-
+exports.normalizeAutomatchStateHint = normalizeAutomatchStateHint;
 const inferAutomatchStateHint = ({
   inviteId,
   queueValue,
   hasGuest,
   storedStateHint,
 }) => {
-  if (!isAutoInviteId(inviteId)) {
+  if (!(0, ids_js_1.isAutoInviteId)(inviteId)) {
     return null;
   }
   if (queueValue) {
@@ -42,7 +61,7 @@ const inferAutomatchStateHint = ({
   }
   return normalizeAutomatchStateHint(storedStateHint) ?? "canceled";
 };
-
+exports.inferAutomatchStateHint = inferAutomatchStateHint;
 const getNavigationStatusPriority = (status) => {
   if (status === "pending") {
     return 0;
@@ -55,7 +74,7 @@ const getNavigationStatusPriority = (status) => {
   }
   return 3;
 };
-
+exports.getNavigationStatusPriority = getNavigationStatusPriority;
 const getNavigationSortBucket = (status) => {
   if (status === "pending") {
     return NAVIGATION_SORT_BUCKETS.pending;
@@ -68,7 +87,7 @@ const getNavigationSortBucket = (status) => {
   }
   return NAVIGATION_SORT_BUCKETS.waiting;
 };
-
+exports.getNavigationSortBucket = getNavigationSortBucket;
 const compareNavigationItems = (left, right) => {
   const leftPriority = getNavigationStatusPriority(left.status);
   const rightPriority = getNavigationStatusPriority(right.status);
@@ -83,10 +102,9 @@ const compareNavigationItems = (left, right) => {
   }
   return left.id.localeCompare(right.id);
 };
-
+exports.compareNavigationItems = compareNavigationItems;
 const isRecord = (value) =>
   value && typeof value === "object" && !Array.isArray(value);
-
 const exactKeys = (value, expected) => {
   const keys = Object.keys(value);
   return (
@@ -94,17 +112,14 @@ const exactKeys = (value, expected) => {
     keys.every((key) => expected.includes(key))
   );
 };
-
 const readTimestampMillis = (value) => {
   if (typeof value === "number" && Number.isFinite(value)) {
     return Math.floor(value);
   }
   return 0;
 };
-
 const normalizeStringOrNull = (value) =>
   typeof value === "string" && value !== "" ? value : null;
-
 const normalizeFiniteNumber = (value, fallback = 0) => {
   const parsed =
     typeof value === "number"
@@ -114,7 +129,6 @@ const normalizeFiniteNumber = (value, fallback = 0) => {
         : NaN;
   return Number.isFinite(parsed) ? Math.floor(parsed) : fallback;
 };
-
 const normalizeNavigationStatus = (status) =>
   status === "pending" ||
   status === "waiting" ||
@@ -123,7 +137,6 @@ const normalizeNavigationStatus = (status) =>
   status === "dismissed"
     ? status
     : "waiting";
-
 const mapProjectionParticipantPreview = (value) => {
   if (!Array.isArray(value)) return [];
   return value.reduce((participants, candidate) => {
@@ -138,7 +151,6 @@ const mapProjectionParticipantPreview = (value) => {
     return participants;
   }, []);
 };
-
 const mapProfileGameProjection = (rawData, fallbackProjectionId) => {
   if (!isRecord(rawData)) return null;
   const entityType = rawData.entityType === "event" ? "event" : "game";
@@ -171,7 +183,6 @@ const mapProfileGameProjection = (rawData, fallbackProjectionId) => {
       winnerDisplayName: normalizeStringOrNull(rawData.winnerDisplayName),
     };
   }
-
   const inviteId =
     typeof rawData.inviteId === "string" && rawData.inviteId !== ""
       ? rawData.inviteId
@@ -213,11 +224,10 @@ const mapProfileGameProjection = (rawData, fallbackProjectionId) => {
         : status === "pending",
   };
 };
-
+exports.mapProfileGameProjection = mapProfileGameProjection;
 const isNullableString = (value) => value === null || typeof value === "string";
 const isNullableNumber = (value) =>
   value === null || (typeof value === "number" && Number.isFinite(value));
-
 const isNavigationParticipantPreview = (value) =>
   Array.isArray(value) &&
   value.every(
@@ -229,7 +239,6 @@ const isNavigationParticipantPreview = (value) =>
       isNullableNumber(participant.emojiId) &&
       isNullableString(participant.aura),
   );
-
 const isNavigationItem = (value) => {
   if (!isRecord(value)) return false;
   if (value.entityType === "event") {
@@ -304,7 +313,7 @@ const isNavigationItem = (value) => {
     typeof value.isPendingAutomatch === "boolean"
   );
 };
-
+exports.isNavigationItem = isNavigationItem;
 const isNavigationGamesCursor = (value) =>
   isRecord(value) &&
   exactKeys(value, ["sortBucket", "listSortAtMs", "id"]) &&
@@ -316,7 +325,7 @@ const isNavigationGamesCursor = (value) =>
   value.id !== "" &&
   new TextEncoder().encode(value.id).byteLength <= 1500 &&
   !value.id.includes("/");
-
+exports.isNavigationGamesCursor = isNavigationGamesCursor;
 const isReadNavigationGamesRequest = (value) =>
   isRecord(value) &&
   exactKeys(value, ["limit", "cursor"]) &&
@@ -324,7 +333,7 @@ const isReadNavigationGamesRequest = (value) =>
   value.limit >= 1 &&
   value.limit <= 100 &&
   (value.cursor === null || isNavigationGamesCursor(value.cursor));
-
+exports.isReadNavigationGamesRequest = isReadNavigationGamesRequest;
 const isReadNavigationGamesResponse = (value) =>
   isRecord(value) &&
   exactKeys(value, ["ok", "items", "nextCursor", "hasMore"]) &&
@@ -334,14 +343,14 @@ const isReadNavigationGamesResponse = (value) =>
   value.items.every(isNavigationItem) &&
   (value.nextCursor === null || isNavigationGamesCursor(value.nextCursor)) &&
   typeof value.hasMore === "boolean";
-
+exports.isReadNavigationGamesResponse = isReadNavigationGamesResponse;
 const isStartAutomatchRequest = (value) =>
   isRecord(value) &&
   Object.keys(value).length === 2 &&
   Number.isSafeInteger(value.emojiId) &&
   value.emojiId > 0 &&
   typeof value.aura === "string";
-
+exports.isStartAutomatchRequest = isStartAutomatchRequest;
 const isStartAutomatchResponse = (value) => {
   if (!isRecord(value) || typeof value.ok !== "boolean") {
     return false;
@@ -360,7 +369,7 @@ const isStartAutomatchResponse = (value) => {
   }
   return value.matchedImmediately === (value.mode === "matched");
 };
-
+exports.isStartAutomatchResponse = isStartAutomatchResponse;
 const parseStartAutomatchApiResponse = (value) => {
   if (!isRecord(value)) return null;
   const { bootstrap, ...response } = value;
@@ -368,7 +377,7 @@ const parseStartAutomatchApiResponse = (value) => {
   if (
     response.ok &&
     response.mode === "matched" &&
-    isReadGameBootstrapResponse(bootstrap) &&
+    (0, game_bootstrap_js_1.isReadGameBootstrapResponse)(bootstrap) &&
     bootstrap.metadata.inviteId === response.inviteId &&
     bootstrap.metadata.automatchStateHint === "matched" &&
     bootstrap.viewer.role !== "watch" &&
@@ -378,18 +387,18 @@ const parseStartAutomatchApiResponse = (value) => {
     return { ...response, bootstrap };
   return response;
 };
-
+exports.parseStartAutomatchApiResponse = parseStartAutomatchApiResponse;
 const isCancelAutomatchResponse = (value) =>
   isRecord(value) &&
   Object.keys(value).length === 1 &&
   typeof value.ok === "boolean";
-
+exports.isCancelAutomatchResponse = isCancelAutomatchResponse;
 const isRemoveNavigationGameRequest = (value) =>
   isRecord(value) &&
   Object.keys(value).length === 1 &&
   typeof value.inviteId === "string" &&
   value.inviteId.trim() !== "";
-
+exports.isRemoveNavigationGameRequest = isRemoveNavigationGameRequest;
 const isRemoveNavigationGameResponse = (value) => {
   if (
     !isRecord(value) ||
@@ -422,25 +431,4 @@ const isRemoveNavigationGameResponse = (value) => {
   }
   return value.deleted !== true && typeof value.reason === "string";
 };
-
-module.exports = {
-  AUTOMATCH_API_MAX_RESPONSE_BYTES,
-  NAVIGATION_SORT_BUCKETS,
-  normalizeAutomatchStateHint,
-  normalizeStrictAutomatchStateHint,
-  inferAutomatchStateHint,
-  getNavigationStatusPriority,
-  getNavigationSortBucket,
-  compareNavigationItems,
-  mapProfileGameProjection,
-  isNavigationItem,
-  isNavigationGamesCursor,
-  isReadNavigationGamesRequest,
-  isReadNavigationGamesResponse,
-  isStartAutomatchRequest,
-  isStartAutomatchResponse,
-  parseStartAutomatchApiResponse,
-  isCancelAutomatchResponse,
-  isRemoveNavigationGameRequest,
-  isRemoveNavigationGameResponse,
-};
+exports.isRemoveNavigationGameResponse = isRemoveNavigationGameResponse;

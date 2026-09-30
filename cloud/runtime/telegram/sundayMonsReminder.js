@@ -1,19 +1,23 @@
+// Generated from src/telegram/sundayMonsReminder.ts. Run npm run generate:runtime.
 "use strict";
-
-const { normalizeRecordKey } = require("@mons/shared/ids");
-const { renderParticipantLine } = require("./eventParticipants");
-const {
-  AUTOMATCH_WAITING_EMOJI_ID,
-  getTelegramEmojiTag,
-} = require("../telegramDisplay");
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.isSundayMonsReminderEvent =
+  exports.isSundayMonsReminderLeadMs =
+  exports.getSundayMonsReminderLeadMs =
+  exports.buildSundayMonsReminder =
+  exports.SUNDAY_MONS_REMINDER_LEAD_MS =
+    void 0;
+const values_js_1 = require("./values.js");
+const ids_1 = require("@mons/shared/ids");
+const eventParticipants_js_1 = require("./eventParticipants.js");
+const telegramDisplay_js_1 = require("../telegramDisplay.js");
 const SUNDAY_MONS_REMINDER_LEAD_MS = 14_400_000;
-
+exports.SUNDAY_MONS_REMINDER_LEAD_MS = SUNDAY_MONS_REMINDER_LEAD_MS;
 const isSundayMonsReminderLeadMs = (value) =>
   value === 10_800_000 || value === SUNDAY_MONS_REMINDER_LEAD_MS;
-
+exports.isSundayMonsReminderLeadMs = isSundayMonsReminderLeadMs;
 const normalizeEventId = (value) => {
-  const eventId = normalizeRecordKey(value);
+  const eventId = (0, ids_1.normalizeRecordKey)(value);
   if (!eventId) return null;
   try {
     encodeURIComponent(eventId);
@@ -22,21 +26,20 @@ const normalizeEventId = (value) => {
     return null;
   }
 };
-
 const isSundayMonsReminderEvent = (eventId, eventData) =>
   Boolean(
     normalizeEventId(eventId) &&
     eventData &&
-    typeof eventData === "object" &&
-    !Array.isArray(eventData) &&
+    (0, values_js_1.isRecord)(eventData) &&
     eventData.status === "scheduled" &&
     eventData.isSundayMons === true &&
+    typeof eventData.startAtMs === "number" &&
     Number.isSafeInteger(eventData.startAtMs) &&
     eventData.startAtMs > 0,
   );
-
+exports.isSundayMonsReminderEvent = isSundayMonsReminderEvent;
 const buildSundayMonsReminder = (input) => {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
+  if (!(0, values_js_1.isRecord)(input)) {
     throw new TypeError("eventId is required");
   }
   const keys = Object.keys(input);
@@ -60,15 +63,17 @@ const buildSundayMonsReminder = (input) => {
     throw new TypeError("leadMs must be a supported reminder lead time");
   }
   const eventUrl = `https://mons.link/event/${encodeURIComponent(eventId)}`;
-  const participantLine = renderParticipantLine(input.eventData);
+  const participantLine = (0, eventParticipants_js_1.renderParticipantLine)(
+    input.eventData,
+  );
   return {
     eventId,
     eventUrl,
-    text: `sunday mons in ${leadMs / 3_600_000} hours!\n\n${eventUrl} ${getTelegramEmojiTag(AUTOMATCH_WAITING_EMOJI_ID)}${participantLine ? `\n\n${participantLine}` : ""}`,
+    text: `sunday mons in ${leadMs / 3_600_000} hours!\n\n${eventUrl} ${(0, telegramDisplay_js_1.getTelegramEmojiTag)(telegramDisplay_js_1.AUTOMATCH_WAITING_EMOJI_ID)}${participantLine ? `\n\n${participantLine}` : ""}`,
     parseMode: "HTML",
   };
 };
-
+exports.buildSundayMonsReminder = buildSundayMonsReminder;
 const getSundayMonsReminderLeadMs = (eventId, text) => {
   if (!normalizeEventId(eventId) || typeof text !== "string") return null;
   for (const leadMs of [10_800_000, SUNDAY_MONS_REMINDER_LEAD_MS]) {
@@ -77,11 +82,4 @@ const getSundayMonsReminderLeadMs = (eventId, text) => {
   }
   return null;
 };
-
-module.exports = {
-  SUNDAY_MONS_REMINDER_LEAD_MS,
-  buildSundayMonsReminder,
-  getSundayMonsReminderLeadMs,
-  isSundayMonsReminderLeadMs,
-  isSundayMonsReminderEvent,
-};
+exports.getSundayMonsReminderLeadMs = getSundayMonsReminderLeadMs;

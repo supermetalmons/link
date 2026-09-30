@@ -1,30 +1,57 @@
+// Generated from src/events/gameProjectionModel.ts. Run npm run generate:runtime.
 "use strict";
-
-const { rematchSeriesEnded } = require("@mons/shared/rematches");
-const { getNavigationSortBucket } = require("@mons/shared/navigation");
-const { cropAddress } = require("@mons/shared/profiles");
-const { isAutoInviteId } = require("@mons/shared/ids");
-const { isEventOwnedInvite } = require("@mons/shared/events");
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.shouldProjectInvite =
+  exports.readTimestampMillis =
+  exports.readEventTimestampMs =
+  exports.pickListSortMillis =
+  exports.normalizeString =
+  exports.isEventOwnedInvite =
+  exports.getProfileEmoji =
+  exports.getProfileDisplayName =
+  exports.getOwnerProfileIds =
+  exports.getOwnerContext =
+  exports.getNavigationSortBucket =
+  exports.getEmojiId =
+  exports.fingerprintForProjection =
+  exports.deriveProjectionStatus =
+  exports.PROJECTOR_SCHEMA_VERSION =
+    void 0;
+const rematches_1 = require("@mons/shared/rematches");
+const navigation_1 = require("@mons/shared/navigation");
+Object.defineProperty(exports, "getNavigationSortBucket", {
+  enumerable: true,
+  get: function () {
+    return navigation_1.getNavigationSortBucket;
+  },
+});
+const profiles_1 = require("@mons/shared/profiles");
+const ids_1 = require("@mons/shared/ids");
+const events_1 = require("@mons/shared/events");
+Object.defineProperty(exports, "isEventOwnedInvite", {
+  enumerable: true,
+  get: function () {
+    return events_1.isEventOwnedInvite;
+  },
+});
 const PROJECTOR_SCHEMA_VERSION = 2;
-
+exports.PROJECTOR_SCHEMA_VERSION = PROJECTOR_SCHEMA_VERSION;
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : null;
-
+exports.normalizeString = normalizeString;
 const readTimestampMillis = (value) => {
   if (typeof value === "number" && Number.isFinite(value)) {
     return Math.floor(value);
   }
   return null;
 };
-
+exports.readTimestampMillis = readTimestampMillis;
 const truncateAddress = (address) => {
   if (typeof address !== "string" || address.length < 8) {
     return "anon";
   }
-  return cropAddress(address);
+  return (0, profiles_1.cropAddress)(address);
 };
-
 const getProfileDisplayName = (profileData) => {
   if (!profileData || typeof profileData !== "object") {
     return "anon";
@@ -43,7 +70,7 @@ const getProfileDisplayName = (profileData) => {
   }
   return "anon";
 };
-
+exports.getProfileDisplayName = getProfileDisplayName;
 const getProfileEmoji = (profileData) => {
   if (!profileData || typeof profileData !== "object") {
     return null;
@@ -65,7 +92,7 @@ const getProfileEmoji = (profileData) => {
   }
   return null;
 };
-
+exports.getProfileEmoji = getProfileEmoji;
 const getEmojiId = (value) => {
   if (typeof value === "number" && Number.isFinite(value)) {
     return Math.floor(value);
@@ -78,21 +105,24 @@ const getEmojiId = (value) => {
   }
   return null;
 };
-
+exports.getEmojiId = getEmojiId;
 const deriveProjectionStatus = ({
   inviteId,
   inviteData,
   automatchStateHint,
   latestMatchRatingCompleted,
 }) => {
-  if (rematchSeriesEnded(inviteData)) {
+  if ((0, rematches_1.rematchSeriesEnded)(inviteData)) {
     return "ended";
   }
-  if (isEventOwnedInvite(inviteData) && latestMatchRatingCompleted === true) {
+  if (
+    (0, events_1.isEventOwnedInvite)(inviteData) &&
+    latestMatchRatingCompleted === true
+  ) {
     return "ended";
   }
   const hasGuest = !!normalizeString(inviteData ? inviteData.guestId : null);
-  if (isAutoInviteId(inviteId) && automatchStateHint === "pending") {
+  if ((0, ids_1.isAutoInviteId)(inviteId) && automatchStateHint === "pending") {
     return "pending";
   }
   if (hasGuest) {
@@ -100,12 +130,12 @@ const deriveProjectionStatus = ({
   }
   return "waiting";
 };
-
+exports.deriveProjectionStatus = deriveProjectionStatus;
 const shouldProjectInvite = ({ inviteId, inviteData, automatchStateHint }) => {
   if (!inviteData || typeof inviteData !== "object") {
     return false;
   }
-  if (!isAutoInviteId(inviteId)) {
+  if (!(0, ids_1.isAutoInviteId)(inviteId)) {
     return true;
   }
   const hasGuest = !!normalizeString(inviteData.guestId);
@@ -114,9 +144,9 @@ const shouldProjectInvite = ({ inviteId, inviteData, automatchStateHint }) => {
   }
   return automatchStateHint === "pending";
 };
-
+exports.shouldProjectInvite = shouldProjectInvite;
 const fingerprintForProjection = (payload) => JSON.stringify(payload);
-
+exports.fingerprintForProjection = fingerprintForProjection;
 const pickListSortMillis = ({
   options,
   status,
@@ -130,11 +160,9 @@ const pickListSortMillis = ({
   ) {
     return Math.floor(existingListSortMs);
   }
-
   let nextSortMillis = Number.isFinite(options.listSortAtMs)
     ? Math.floor(options.listSortAtMs)
     : nowMs;
-
   if (!Number.isFinite(options.listSortAtMs) && status === "pending") {
     const queueTimestamp =
       automatchData && Number.isFinite(automatchData.timestamp)
@@ -144,17 +172,15 @@ const pickListSortMillis = ({
       nextSortMillis = queueTimestamp;
     }
   }
-
   if (
     options.preserveNewerListSortAt !== false &&
     Number.isFinite(existingListSortMs)
   ) {
     nextSortMillis = Math.max(nextSortMillis, existingListSortMs);
   }
-
   return nextSortMillis;
 };
-
+exports.pickListSortMillis = pickListSortMillis;
 const getOwnerProfileIds = (hostProfileId, guestProfileId) => {
   const owners = [];
   if (hostProfileId) {
@@ -165,7 +191,7 @@ const getOwnerProfileIds = (hostProfileId, guestProfileId) => {
   }
   return owners;
 };
-
+exports.getOwnerProfileIds = getOwnerProfileIds;
 const getOwnerContext = ({
   ownerProfileId,
   hostProfileId,
@@ -188,28 +214,11 @@ const getOwnerContext = ({
     opponentLoginId: hostLoginId || null,
   };
 };
-
+exports.getOwnerContext = getOwnerContext;
 const readEventTimestampMs = (options) => {
   if (options && Number.isFinite(options.eventTimestampMs)) {
     return Math.floor(options.eventTimestampMs);
   }
   return Date.now();
 };
-
-module.exports = {
-  PROJECTOR_SCHEMA_VERSION,
-  deriveProjectionStatus,
-  fingerprintForProjection,
-  getEmojiId,
-  getNavigationSortBucket,
-  getOwnerContext,
-  getOwnerProfileIds,
-  getProfileDisplayName,
-  getProfileEmoji,
-  isEventOwnedInvite,
-  normalizeString,
-  pickListSortMillis,
-  readEventTimestampMs,
-  readTimestampMillis,
-  shouldProjectInvite,
-};
+exports.readEventTimestampMs = readEventTimestampMs;

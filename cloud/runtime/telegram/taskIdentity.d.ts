@@ -1,7 +1,7 @@
+// Generated from src/telegram/taskIdentity.ts. Run npm run generate:runtime.
 export type TelegramTaskKind =
   "desired" | "manual-recovery" | "pending-delete" | "rate-limit-proof";
-
-export type TelegramTaskPayload = {
+type TelegramTaskFields = {
   messageKey: string;
   revision: string;
   taskKind: TelegramTaskKind;
@@ -19,7 +19,26 @@ export type TelegramTaskPayload = {
   apiGateReclaimOwner?: string;
   apiGateSettleOwner?: string;
 };
-
-export function normalizeOptionalTimestamp(value: unknown): number;
-export function normalizeTaskPayload(input: unknown): TelegramTaskPayload;
-export function buildTelegramDeliveryTaskId(input: TelegramTaskPayload): string;
+export type TelegramTaskPayload = TelegramTaskFields &
+  (
+    | {
+        taskKind: Exclude<TelegramTaskKind, "rate-limit-proof">;
+      }
+    | {
+        taskKind: "rate-limit-proof";
+        proofTaskKind: "desired" | "pending-delete";
+        barrierProofOwner: string;
+        barrierRetryNotBeforeMs: number;
+      }
+  );
+declare const normalizeOptionalTimestamp: (value: unknown) => number;
+declare const normalizeTaskPayload: (input: unknown) => TelegramTaskPayload;
+declare const buildTelegramDeliveryTaskId: {
+  (input: TelegramTaskPayload): string;
+  (messageKey: string, revision: string, generation: string): string;
+};
+export {
+  buildTelegramDeliveryTaskId,
+  normalizeOptionalTimestamp,
+  normalizeTaskPayload,
+};

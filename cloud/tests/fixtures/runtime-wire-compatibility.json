@@ -1,0 +1,73 @@
+{
+  "eventPlan": [
+    {
+      "kind": "event-field",
+      "eventId": "event-é",
+      "field": "status",
+      "value": "active"
+    },
+    {
+      "kind": "event-disqualification",
+      "eventId": "event-é",
+      "roundKey": null,
+      "matchKey": "third_place",
+      "value": true
+    },
+    {
+      "kind": "match-creation",
+      "playerId": "player/legacy",
+      "matchId": "auto_123",
+      "value": {
+        "fen": "seed"
+      }
+    },
+    {
+      "kind": "profile-game-outbox-cleanup",
+      "eventId": "event-é",
+      "profileId": "profile-1",
+      "value": true
+    }
+  ],
+  "eventCommandIdentities": [
+    "[\"event-field\",\"event-é\",null,null,null,null,null,\"status\",null,null]",
+    "[\"event-disqualification\",\"event-é\",null,null,null,null,null,null,null,\"third_place\"]",
+    "[\"match-creation\",null,null,null,null,\"player/legacy\",\"auto_123\",null,null,null]",
+    "[\"profile-game-outbox-cleanup\",\"event-é\",\"profile-1\",null,null,null,null,null,null,null]"
+  ],
+  "replacement": {
+    "kind": "event-field",
+    "eventId": "event-é",
+    "field": "status",
+    "value": "ended"
+  },
+  "mergedPlanJson": "[{\"kind\":\"event-field\",\"eventId\":\"event-é\",\"field\":\"status\",\"value\":\"ended\"},{\"kind\":\"event-disqualification\",\"eventId\":\"event-é\",\"roundKey\":null,\"matchKey\":\"third_place\",\"value\":true},{\"kind\":\"match-creation\",\"playerId\":\"player/legacy\",\"matchId\":\"auto_123\",\"value\":{\"fen\":\"seed\"}},{\"kind\":\"profile-game-outbox-cleanup\",\"eventId\":\"event-é\",\"profileId\":\"profile-1\",\"value\":true}]",
+  "telegramTasks": [
+    {
+      "payload": {
+        "messageKey": "event:event-é:upcoming",
+        "revision": "revision-1",
+        "taskKind": "desired",
+        "retrySequence": 0,
+        "generation": "event-a-1"
+      },
+      "taskId": "tg_9bb9d6c56c96ff0ab3333b736c9a5c5c8b0db3dd"
+    },
+    {
+      "payload": {
+        "messageKey": "event:event-é:upcoming",
+        "revision": "revision-1",
+        "taskKind": "rate-limit-proof",
+        "retrySequence": 2,
+        "generation": "event-a-1",
+        "proofTaskKind": "desired",
+        "barrierProofOwner": "proof-1",
+        "barrierRetryNotBeforeMs": 91000,
+        "safeRejectedAttemptId": "attempt-1",
+        "retryProofLeaseOwner": "lease-1",
+        "apiGateReclaimOwner": "gate-1",
+        "apiGateSettleOwner": "gate-2"
+      },
+      "taskId": "tg_4e15483394055a5c64cca61a64ff5ab164910523"
+    }
+  ]
+}

@@ -1,20 +1,24 @@
+// Generated from src/events/scheduling.ts. Run npm run generate:runtime.
 "use strict";
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.resolveScheduledDateTimeStartAtMs =
+  exports.resolveRequestedScheduleTimezone =
+  exports.parseScheduledTimeParts =
+  exports.parseScheduledDateParts =
+  exports.hasDateTimeScheduleRequest =
+  exports.assertScheduledStartWindow =
+  exports.EventSchedulingError =
+    void 0;
+const events_1 = require("@mons/shared/events");
 class EventSchedulingError extends Error {
   constructor(code, message) {
     super(message);
     this.code = code;
   }
 }
-const {
-  MAX_STARTS_IN_DAYS,
-  MAX_STARTS_IN_MINUTES,
-  MIN_STARTS_IN_MINUTES,
-  SCHEDULED_TIMEZONE_LOCAL,
-} = require("@mons/shared/events");
-
-const MIN_START_AHEAD_MS = MIN_STARTS_IN_MINUTES * 60 * 1000;
-const MAX_START_AHEAD_MS = MAX_STARTS_IN_MINUTES * 60 * 1000;
+exports.EventSchedulingError = EventSchedulingError;
+const MIN_START_AHEAD_MS = events_1.MIN_STARTS_IN_MINUTES * 60 * 1000;
+const MAX_START_AHEAD_MS = events_1.MAX_STARTS_IN_MINUTES * 60 * 1000;
 const SCHEDULED_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 const SCHEDULED_TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
 const PRESET_EVENT_TIMEZONE_BY_KEY = {
@@ -25,10 +29,8 @@ const PRESET_EVENT_TIMEZONE_BY_KEY = {
 const ZONED_WALL_TIME_SEARCH_WINDOW_MS = 18 * 60 * 60 * 1000;
 const ZONED_WALL_TIME_SEARCH_STEP_MS = 60 * 1000;
 const zonedDateTimeFormatterByTimezone = new Map();
-
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
 const toFiniteInteger = (value, fallback = 0) => {
   const numeric = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(numeric)) {
@@ -36,7 +38,6 @@ const toFiniteInteger = (value, fallback = 0) => {
   }
   return Math.floor(numeric);
 };
-
 const getZonedDateTimeFormatter = (timeZone) => {
   const normalizedTimeZone = normalizeString(timeZone);
   if (!normalizedTimeZone) {
@@ -57,7 +58,6 @@ const getZonedDateTimeFormatter = (timeZone) => {
   zonedDateTimeFormatterByTimezone.set(normalizedTimeZone, formatter);
   return formatter;
 };
-
 const getZonedDateTimeParts = (timestampMs, timeZone) => {
   const formatter = getZonedDateTimeFormatter(timeZone);
   const parts = formatter.formatToParts(new Date(timestampMs));
@@ -90,7 +90,6 @@ const getZonedDateTimeParts = (timestampMs, timeZone) => {
   }
   return { year, month, day, hour, minute };
 };
-
 const parseScheduledDateParts = (value) => {
   const normalizedValue = normalizeString(value);
   const match = normalizedValue.match(SCHEDULED_DATE_PATTERN);
@@ -121,7 +120,7 @@ const parseScheduledDateParts = (value) => {
   }
   return { year, month, day };
 };
-
+exports.parseScheduledDateParts = parseScheduledDateParts;
 const parseScheduledTimeParts = (value) => {
   const normalizedValue = normalizeString(value);
   const match = normalizedValue.match(SCHEDULED_TIME_PATTERN);
@@ -142,7 +141,7 @@ const parseScheduledTimeParts = (value) => {
   }
   return { hour, minute };
 };
-
+exports.parseScheduledTimeParts = parseScheduledTimeParts;
 const isValidIanaTimezone = (value) => {
   const normalizedValue = normalizeString(value);
   if (!normalizedValue) {
@@ -157,7 +156,6 @@ const isValidIanaTimezone = (value) => {
     return false;
   }
 };
-
 const hasDateTimeScheduleRequest = (data) => {
   if (!data || typeof data !== "object") {
     return false;
@@ -168,7 +166,7 @@ const hasDateTimeScheduleRequest = (data) => {
     normalizeString(data.scheduledTimezone) !== ""
   );
 };
-
+exports.hasDateTimeScheduleRequest = hasDateTimeScheduleRequest;
 const resolveRequestedScheduleTimezone = (data) => {
   const scheduledTimezoneRaw = normalizeString(data && data.scheduledTimezone);
   if (!scheduledTimezoneRaw) {
@@ -177,7 +175,9 @@ const resolveRequestedScheduleTimezone = (data) => {
       "scheduledTimezone is required for date/time scheduling.",
     );
   }
-  if (scheduledTimezoneRaw.toLowerCase() === SCHEDULED_TIMEZONE_LOCAL) {
+  if (
+    scheduledTimezoneRaw.toLowerCase() === events_1.SCHEDULED_TIMEZONE_LOCAL
+  ) {
     const localTimezoneIana = normalizeString(data && data.localTimezoneIana);
     if (!localTimezoneIana) {
       throw new EventSchedulingError(
@@ -203,7 +203,7 @@ const resolveRequestedScheduleTimezone = (data) => {
   }
   return resolvedTimezone;
 };
-
+exports.resolveRequestedScheduleTimezone = resolveRequestedScheduleTimezone;
 const resolveScheduledDateTimeStartAtMs = (data, nowMs = Date.now()) => {
   const scheduledDate = normalizeString(data && data.scheduledDate);
   if (!scheduledDate) {
@@ -219,7 +219,6 @@ const resolveScheduledDateTimeStartAtMs = (data, nowMs = Date.now()) => {
       "scheduledTime is required for date/time scheduling.",
     );
   }
-
   const dateParts = parseScheduledDateParts(scheduledDate);
   if (!dateParts) {
     throw new EventSchedulingError(
@@ -234,7 +233,6 @@ const resolveScheduledDateTimeStartAtMs = (data, nowMs = Date.now()) => {
       "scheduledTime must be in HH:mm 24-hour format.",
     );
   }
-
   const timeZone = resolveRequestedScheduleTimezone(data);
   const targetUtcApproxMs = Date.UTC(
     dateParts.year,
@@ -248,7 +246,6 @@ const resolveScheduledDateTimeStartAtMs = (data, nowMs = Date.now()) => {
   const candidateStartMs = targetUtcApproxMs - ZONED_WALL_TIME_SEARCH_WINDOW_MS;
   const candidateEndMs = targetUtcApproxMs + ZONED_WALL_TIME_SEARCH_WINDOW_MS;
   const matchingInstants = [];
-
   for (
     let candidateMs = candidateStartMs;
     candidateMs <= candidateEndMs;
@@ -268,14 +265,12 @@ const resolveScheduledDateTimeStartAtMs = (data, nowMs = Date.now()) => {
       matchingInstants.push(candidateMs);
     }
   }
-
   if (matchingInstants.length <= 0) {
     throw new EventSchedulingError(
       "invalid-argument",
       "Selected date/time does not exist in the selected timezone.",
     );
   }
-
   const normalizedNowMs = toFiniteInteger(nowMs, NaN);
   if (Number.isFinite(normalizedNowMs)) {
     const nextFutureInstantMs = matchingInstants.find(
@@ -285,32 +280,22 @@ const resolveScheduledDateTimeStartAtMs = (data, nowMs = Date.now()) => {
       return nextFutureInstantMs;
     }
   }
-
   return matchingInstants[0];
 };
-
+exports.resolveScheduledDateTimeStartAtMs = resolveScheduledDateTimeStartAtMs;
 const assertScheduledStartWindow = (startAtMs, nowMs) => {
   const deltaMs = toFiniteInteger(startAtMs, 0) - toFiniteInteger(nowMs, 0);
   if (deltaMs < MIN_START_AHEAD_MS) {
     throw new EventSchedulingError(
       "invalid-argument",
-      `Event must start at least ${MIN_STARTS_IN_MINUTES} minute from now.`,
+      `Event must start at least ${events_1.MIN_STARTS_IN_MINUTES} minute from now.`,
     );
   }
   if (deltaMs > MAX_START_AHEAD_MS) {
     throw new EventSchedulingError(
       "invalid-argument",
-      `Event must start within ${MAX_STARTS_IN_DAYS} days from now.`,
+      `Event must start within ${events_1.MAX_STARTS_IN_DAYS} days from now.`,
     );
   }
 };
-
-module.exports = {
-  EventSchedulingError,
-  assertScheduledStartWindow,
-  hasDateTimeScheduleRequest,
-  parseScheduledDateParts,
-  parseScheduledTimeParts,
-  resolveRequestedScheduleTimezone,
-  resolveScheduledDateTimeStartAtMs,
-};
+exports.assertScheduledStartWindow = assertScheduledStartWindow;

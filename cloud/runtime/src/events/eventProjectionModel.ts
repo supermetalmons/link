@@ -1,0 +1,127 @@
+import type { EventData, EventParticipant } from "./model.js";
+
+import "@mons/shared/navigation";
+
+const NAVIGATION_PARTICIPANT_PREVIEW_LIMIT = 6;
+const MAX_TIMESTAMP_MS = 253402300799999;
+
+const normalizeString = (value: unknown) =>
+  typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+
+const normalizeFiniteNumberOrNull = (value: unknown) => {
+  const numeric =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim() !== ""
+        ? Number(value)
+        : NaN;
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+  const normalized = Math.floor(numeric);
+  return normalized > 0 ? normalized : null;
+};
+
+const mapEventStatusToNavigationStatus = (status: unknown) => {
+  if (status === "active") {
+    return "active";
+  }
+  if (status === "ended") {
+    return "ended";
+  }
+  if (status === "dismissed") {
+    return "dismissed";
+  }
+  return "waiting";
+};
+
+const getListSortAtMs = (eventData: EventData, status: string) => {
+  if (status === "active") {
+    const startedAtMs =
+      typeof eventData.startedAtMs === "number"
+        ? Math.floor(eventData.startedAtMs)
+        : typeof eventData.startAtMs === "number"
+          ? Math.floor(eventData.startAtMs)
+          : typeof eventData.createdAtMs === "number"
+            ? Math.floor(eventData.createdAtMs)
+            : null;
+    if (startedAtMs && Number.isFinite(startedAtMs) && startedAtMs > 0) {
+      return startedAtMs;
+    }
+    return 1;
+  }
+  if (status === "ended") {
+    return typeof eventData.endedAtMs === "number"
+      ? Math.floor(eventData.endedAtMs)
+      : typeof eventData.startAtMs === "number"
+        ? Math.floor(eventData.startAtMs)
+        : typeof eventData.createdAtMs === "number"
+          ? Math.floor(eventData.createdAtMs)
+          : 1;
+  }
+  if (status === "dismissed") {
+    return typeof eventData.endedAtMs === "number"
+      ? Math.floor(eventData.endedAtMs)
+      : typeof eventData.startAtMs === "number"
+        ? Math.floor(eventData.startAtMs)
+        : typeof eventData.createdAtMs === "number"
+          ? Math.floor(eventData.createdAtMs)
+          : 1;
+  }
+  const startAtMs =
+    typeof eventData.startAtMs === "number"
+      ? Math.floor(eventData.startAtMs)
+      : null;
+  if (startAtMs === null || !Number.isFinite(startAtMs) || startAtMs <= 0) {
+    return typeof eventData.createdAtMs === "number"
+      ? Math.floor(eventData.createdAtMs)
+      : 1;
+  }
+  return Math.min(MAX_TIMESTAMP_MS, Math.max(1, MAX_TIMESTAMP_MS - startAtMs));
+};
+
+const buildPreviewParticipants = (
+  participants: Record<string, EventParticipant> | null | undefined,
+) => {
+  return Object.values(participants || {})
+    .filter((participant) => participant && typeof participant === "object")
+    .sort((left, right) => {
+      const leftJoined =
+        typeof left.joinedAtMs === "number" ? left.joinedAtMs : 0;
+      const rightJoined =
+        typeof right.joinedAtMs === "number" ? right.joinedAtMs : 0;
+      return leftJoined - rightJoined;
+    })
+    .map((participant) => ({
+      profileId: normalizeString(participant.profileId),
+      displayName: normalizeString(participant.displayName),
+      emojiId: normalizeFiniteNumberOrNull(participant.emojiId),
+      aura: normalizeString(participant.aura),
+    }));
+};
+
+const getOwnerProfileIds = (
+  participants: Record<string, unknown> | null | undefined,
+) => {
+  return Array.from(
+    new Set(
+      Object.values(participants || {})
+        .map((participant) =>
+          normalizeString(
+            participant && (participant as { profileId?: unknown }).profileId,
+          ),
+        )
+        .filter((value): value is string => !!value),
+    ),
+  );
+};
+
+export {
+  NAVIGATION_PARTICIPANT_PREVIEW_LIMIT,
+  buildPreviewParticipants,
+  getListSortAtMs,
+  getOwnerProfileIds,
+  mapEventStatusToNavigationStatus,
+  normalizeFiniteNumberOrNull,
+  normalizeString,
+};

@@ -1,43 +1,64 @@
+// Generated from src/shared/rematches.ts. Run npm run generate:runtime.
 export interface RematchInviteData {
   hostRematches?: unknown;
   guestRematches?: unknown;
 }
-
-export function parseRematchIndices(rawValue: unknown): number[];
-export function rematchSeriesEnded(inviteData: unknown): boolean;
-export function inviteMatchesPlayers(
+declare const parseRematchIndices: (rawValue: unknown) => number[];
+declare const rematchSeriesEnded: (inviteData: unknown) => boolean;
+declare const inviteMatchesPlayers: (
   inviteData: unknown,
   playerId: string,
   opponentId: string,
-): boolean;
-export function createInviteCandidatesFromMatchId(matchId: string): string[];
-export function parseInviteMatchIndex(
+) => boolean;
+declare const createInviteCandidatesFromMatchId: (matchId: string) => string[];
+declare const parseInviteMatchIndex: (
   inviteId: unknown,
   matchId: unknown,
-): number | null;
-export function getHintMatchIndex(
+) => number | null;
+declare const getHintMatchIndex: (
   inviteId: unknown,
   latestMatchIdHint: unknown,
-): number;
-export function getLatestRematchIndex(
+) => number;
+declare const getLatestRematchIndex: (
   inviteData: RematchInviteData | null | undefined,
   minimumIndex?: number,
-): number;
-export function getLatestApprovedRematchIndex(
+) => number;
+declare const getLatestApprovedRematchIndex: (
   inviteData: RematchInviteData | null | undefined,
-): number;
-export function selectInviteMatch(
+) => number;
+declare const selectInviteMatch: (
   inviteId: string,
-  inviteData: RematchInviteData & { hostId?: unknown; guestId?: unknown },
+  inviteData: RematchInviteData & {
+    hostId?: unknown;
+    guestId?: unknown;
+  },
   actorUid: string | null,
-  options?: { preferApproved?: boolean },
-): { matchId: string; hasPendingProposal: boolean };
-export function deriveLatestMatchId(
+  options?: {
+    preferApproved?: boolean;
+  },
+) => {
+  matchId: string;
+  hasPendingProposal: boolean;
+};
+declare const deriveLatestMatchId: (
   inviteId: string,
   inviteData: RematchInviteData | null | undefined,
   latestMatchIdHint?: unknown,
-): string;
-export function getHistoricalMatchIds(
+) => string;
+declare const getHistoricalMatchIds: (
   inviteId: string,
   inviteData: RematchInviteData | null | undefined,
-): string[];
+) => string[];
+export {
+  parseRematchIndices,
+  rematchSeriesEnded,
+  inviteMatchesPlayers,
+  createInviteCandidatesFromMatchId,
+  parseInviteMatchIndex,
+  getHintMatchIndex,
+  getLatestRematchIndex,
+  getLatestApprovedRematchIndex,
+  selectInviteMatch,
+  deriveLatestMatchId,
+  getHistoricalMatchIds,
+};

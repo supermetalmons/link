@@ -1,25 +1,34 @@
+// Generated from src/telegram/sundayMonsReminder.ts. Run npm run generate:runtime.
 export type SundayMonsReminder = {
   eventId: string;
   eventUrl: string;
   text: string;
   parseMode: "HTML";
 };
-
-export const SUNDAY_MONS_REMINDER_LEAD_MS: 14400000;
-export function isSundayMonsReminderLeadMs(
+declare const SUNDAY_MONS_REMINDER_LEAD_MS = 14400000;
+declare const isSundayMonsReminderLeadMs: (
   value: unknown,
-): value is 10800000 | 14400000;
-export function getSundayMonsReminderLeadMs(
-  eventId: unknown,
-  text: unknown,
-): 10800000 | 14400000 | null;
-export function buildSundayMonsReminder(input: {
-  eventId: unknown;
-  eventData?: unknown;
-  leadMs?: 10800000 | 14400000;
-}): SundayMonsReminder;
-export function buildSundayMonsReminder(input: unknown): SundayMonsReminder;
-export function isSundayMonsReminderEvent(
+) => value is 10800000 | 14400000;
+declare const isSundayMonsReminderEvent: (
   eventId: unknown,
   eventData: unknown,
-): boolean;
+) => boolean;
+declare const buildSundayMonsReminder: {
+  (input: {
+    eventId: unknown;
+    eventData?: unknown;
+    leadMs?: 10800000 | 14400000;
+  }): SundayMonsReminder;
+  (input: unknown): SundayMonsReminder;
+};
+declare const getSundayMonsReminderLeadMs: (
+  eventId: unknown,
+  text: unknown,
+) => 10800000 | 14400000 | null;
+export {
+  SUNDAY_MONS_REMINDER_LEAD_MS,
+  buildSundayMonsReminder,
+  getSundayMonsReminderLeadMs,
+  isSundayMonsReminderLeadMs,
+  isSundayMonsReminderEvent,
+};

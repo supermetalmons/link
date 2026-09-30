@@ -1,4 +1,26 @@
+// Generated from src/telegram/eventProjectionCore.ts. Run npm run generate:runtime.
 import type { TelegramDesired } from "./desiredStateCore.js";
+type ProjectionState = {
+  upcomingText: string;
+  reminderText: string;
+  startedText: string;
+  endedText: string;
+  endedAnnouncementArmed: boolean;
+  startedMatchKeys: string[];
+  startedMatchLinesByKey: Record<string, unknown>;
+  lastProjectedSignature: string;
+};
+type StartedState = {
+  text: string | null;
+  startedMatchKeys: string[];
+  startedMatchLinesByKey: Record<string, string>;
+  appendedCount: number;
+};
+type EndedState = {
+  text: string;
+  matchLines: string[];
+  placementLines: string[];
+};
 export type EventTelegramProjectionOperation = {
   channel: "upcoming" | "reminder" | "started" | "ended";
   generation?: string;
@@ -9,33 +31,21 @@ export type EventTelegramProjectionOperation = {
   sourceRevision: string;
   text: string;
 };
-
 export type EventTelegramProjection =
-  | { action: "skip"; reason: string }
-  | { action: "unchanged"; signature: string }
+  | {
+      action: "skip";
+      reason: string;
+    }
+  | {
+      action: "unchanged";
+      signature: string;
+    }
   | {
       action: "project";
       operations: EventTelegramProjectionOperation[];
       signature: string;
       state: Record<string, unknown>;
     };
-
-export const EVENT_TELEGRAM_DELIVERY_VERSION: 2;
-export const EVENT_TELEGRAM_PROJECTION_GUARD_FIELD: "eventTelegramProjectionGuard";
-export const EVENT_TELEGRAM_PROJECTION_LOCK_ROOT: "eventTelegramProjectionLocks";
-export const EVENT_TELEGRAM_PROJECTION_ROOT: "eventTelegramProjections";
-
-export function isV2TelegramEvent(eventData: unknown): boolean;
-export function buildEventSignature(eventData: unknown, nowMs?: number): string;
-export function buildEventTelegramProjection(input: {
-  eventId: string;
-  eventData: unknown;
-  endedMatchResults?: Record<string, unknown>;
-  state?: unknown;
-  upcomingMessage?: unknown;
-  reminderMessage?: unknown;
-  nowMs?: number;
-}): EventTelegramProjection;
 export type EventTelegramProjectionGuard = {
   eventId: string;
   generation?: number;
@@ -56,48 +66,96 @@ export type EventTelegramProjectionChanges = {
   state: Record<string, unknown>;
   desired: EventTelegramDesiredChange[];
 };
-export function buildEventTelegramProjectionChanges(input: {
-  eventId: string;
-  projection: EventTelegramProjection;
-}): EventTelegramProjectionChanges | null;
-export function addEventTelegramProjectionGuard(input: {
-  changes: EventTelegramProjectionChanges;
-  guard?: EventTelegramProjectionGuard | null;
-}): EventTelegramProjectionChanges;
-export function buildEventTelegramDispatches(input: {
-  eventId: string;
-  desiredChanges: EventTelegramDesiredChange[];
-}): Array<{ generation: string; messageKey: string; revision: string }>;
-export function loadEndedMatchResults(
+declare const EVENT_TELEGRAM_PROJECTION_ROOT = "eventTelegramProjections";
+declare const EVENT_TELEGRAM_PROJECTION_LOCK_ROOT =
+  "eventTelegramProjectionLocks";
+declare const EVENT_TELEGRAM_PROJECTION_GUARD_FIELD =
+  "eventTelegramProjectionGuard";
+declare const EVENT_TELEGRAM_DELIVERY_VERSION = 2;
+declare const formatPtEtUtcLine: (startAtMs: number) => string;
+declare const loadEndedMatchResults: (
   eventData: unknown,
-  dependencies: { readRatingUpdate(operationId: string): Promise<unknown> },
-): Promise<Record<string, unknown>>;
-export function parseProjectionState(value: unknown): Record<string, unknown>;
-export function buildStartedState(
-  eventId: string,
+  dependencies: {
+    readRatingUpdate(operationId: string): Promise<unknown>;
+  },
+) => Promise<Record<string, unknown>>;
+declare const isV2TelegramEvent: (
   eventData: unknown,
-  rawState?: unknown,
-): Record<string, unknown>;
-export function buildEndedState(
-  eventId: string,
+) => eventData is Record<string, unknown>;
+declare const buildEventSignature: (
   eventData: unknown,
-  resultsByKey?: Record<string, unknown>,
-): Record<string, unknown>;
-export function renderUpcomingMessage(
+  nowMs?: number,
+) => string;
+declare const renderUpcomingMessage: (
   eventId: string,
   eventData: unknown,
   nowMs?: number,
   heading?: "sunday mons soon" | "join sunday mons" | "upcoming event",
-): string | null;
-export function renderStartedMessage(
+) => string | null;
+declare const renderStartedMessage: (
   eventId: string,
   matchLines?: string[],
   heading?: "event started" | "sunday mons starting now!",
-): string;
-export function renderEndedMessage(
+) => string;
+declare const renderEndedMessage: (
   eventId: string,
   matchLines?: string[],
   placementLines?: string[],
   heading?: "event complete" | "good games",
-): string;
-export function formatPtEtUtcLine(startAtMs: number): string;
+) => string;
+declare const parseProjectionState: (value: unknown) => ProjectionState;
+declare const buildStartedState: (
+  eventId: string,
+  eventData: unknown,
+  rawState?: unknown,
+) => StartedState;
+declare const buildEndedState: (
+  eventId: string,
+  eventData: unknown,
+  resultsByKey?: Record<string, unknown>,
+) => EndedState;
+declare const buildEventTelegramProjection: (input: {
+  eventId: string;
+  eventData: unknown;
+  endedMatchResults?: Record<string, unknown>;
+  state?: unknown;
+  upcomingMessage?: unknown;
+  reminderMessage?: unknown;
+  nowMs?: number;
+}) => EventTelegramProjection;
+declare const buildEventTelegramProjectionChanges: (input: {
+  eventId: string;
+  projection: EventTelegramProjection;
+}) => EventTelegramProjectionChanges | null;
+declare const addEventTelegramProjectionGuard: (input: {
+  changes: EventTelegramProjectionChanges;
+  guard?: EventTelegramProjectionGuard | null;
+}) => EventTelegramProjectionChanges;
+declare const buildEventTelegramDispatches: (input: {
+  eventId: string;
+  desiredChanges: EventTelegramDesiredChange[];
+}) => Array<{
+  generation: string;
+  messageKey: string;
+  revision: string;
+}>;
+export {
+  EVENT_TELEGRAM_DELIVERY_VERSION,
+  EVENT_TELEGRAM_PROJECTION_GUARD_FIELD,
+  EVENT_TELEGRAM_PROJECTION_LOCK_ROOT,
+  EVENT_TELEGRAM_PROJECTION_ROOT,
+  addEventTelegramProjectionGuard,
+  buildEndedState,
+  buildEventSignature,
+  buildEventTelegramDispatches,
+  buildEventTelegramProjection,
+  buildEventTelegramProjectionChanges,
+  buildStartedState,
+  formatPtEtUtcLine,
+  isV2TelegramEvent,
+  loadEndedMatchResults,
+  parseProjectionState,
+  renderEndedMessage,
+  renderStartedMessage,
+  renderUpcomingMessage,
+};

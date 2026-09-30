@@ -1,27 +1,34 @@
+// Generated from src/eventPrizeProjectionState.ts. Run npm run generate:runtime.
 "use strict";
-
-const {
-  getEventPrizeDefinition,
-  isEventPrizeStandard,
-} = require("@mons/shared/event-prizes");
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.isWithdrawalRecordForPrize =
+  exports.isMatchingProfileEventPrizeAssignment =
+  exports.isCompletedEventPrizeWithdrawal =
+  exports.getEventPrizeAssetStandard =
+  exports.getEventPrizeAssetAddress =
+  exports.getCompletedEventPrizeProjectionCleanupRequest =
+  exports.filterProjectableEventPrizeAssignments =
+    void 0;
+const event_prizes_1 = require("@mons/shared/event-prizes");
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
 const getEventPrizeAssetAddress = (eventId, prizeId) =>
-  normalizeString(getEventPrizeDefinition(eventId, prizeId)?.assetAddress);
-
+  normalizeString(
+    (0, event_prizes_1.getEventPrizeDefinition)(eventId, prizeId)?.assetAddress,
+  );
+exports.getEventPrizeAssetAddress = getEventPrizeAssetAddress;
 const getEventPrizeAssetStandard = (eventId, prizeId) => {
   const standard = normalizeString(
-    getEventPrizeDefinition(eventId, prizeId)?.standard,
+    (0, event_prizes_1.getEventPrizeDefinition)(eventId, prizeId)?.standard,
   );
-  return isEventPrizeStandard(standard) ? standard : "";
+  return (0, event_prizes_1.isEventPrizeStandard)(standard) ? standard : "";
 };
-
+exports.getEventPrizeAssetStandard = getEventPrizeAssetStandard;
 const isMatchingProfileEventPrizeAssignment = (value, eventId, prizeId) =>
   normalizeString(value?.eventId) === normalizeString(eventId) &&
   normalizeString(value?.prizeId) === normalizeString(prizeId);
-
+exports.isMatchingProfileEventPrizeAssignment =
+  isMatchingProfileEventPrizeAssignment;
 const isWithdrawalRecordForPrize = (value, eventId, prizeId, assetAddress) => {
   if (!value || typeof value !== "object") {
     return false;
@@ -29,7 +36,7 @@ const isWithdrawalRecordForPrize = (value, eventId, prizeId, assetAddress) => {
   const expectedAssetStandard = getEventPrizeAssetStandard(eventId, prizeId);
   const recordedAssetStandard = normalizeString(value.assetStandard);
   const assetStandardMatches =
-    (isEventPrizeStandard(recordedAssetStandard) &&
+    ((0, event_prizes_1.isEventPrizeStandard)(recordedAssetStandard) &&
       recordedAssetStandard === expectedAssetStandard) ||
     (!recordedAssetStandard && expectedAssetStandard === "core");
   return (
@@ -39,7 +46,7 @@ const isWithdrawalRecordForPrize = (value, eventId, prizeId, assetAddress) => {
     normalizeString(value.assetAddress) === normalizeString(assetAddress)
   );
 };
-
+exports.isWithdrawalRecordForPrize = isWithdrawalRecordForPrize;
 const isCompletedEventPrizeWithdrawal = (value, eventId, prizeId) => {
   const assetAddress = getEventPrizeAssetAddress(eventId, prizeId);
   return (
@@ -48,7 +55,7 @@ const isCompletedEventPrizeWithdrawal = (value, eventId, prizeId) => {
     isWithdrawalRecordForPrize(value, eventId, prizeId, assetAddress)
   );
 };
-
+exports.isCompletedEventPrizeWithdrawal = isCompletedEventPrizeWithdrawal;
 const filterProjectableEventPrizeAssignments = ({
   eventId,
   assignments,
@@ -66,7 +73,8 @@ const filterProjectableEventPrizeAssignments = ({
   }
   return projectable;
 };
-
+exports.filterProjectableEventPrizeAssignments =
+  filterProjectableEventPrizeAssignments;
 const getCompletedEventPrizeProjectionCleanupRequest = ({
   eventId,
   eventStatus,
@@ -83,13 +91,5 @@ const getCompletedEventPrizeProjectionCleanupRequest = ({
   }
   return { eventId: normalizedEventId, assignments };
 };
-
-module.exports = {
-  filterProjectableEventPrizeAssignments,
-  getCompletedEventPrizeProjectionCleanupRequest,
-  getEventPrizeAssetAddress,
-  getEventPrizeAssetStandard,
-  isCompletedEventPrizeWithdrawal,
-  isMatchingProfileEventPrizeAssignment,
-  isWithdrawalRecordForPrize,
-};
+exports.getCompletedEventPrizeProjectionCleanupRequest =
+  getCompletedEventPrizeProjectionCleanupRequest;

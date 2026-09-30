@@ -1,38 +1,29 @@
-const { PROFILE_GAME_PROJECTION_SOURCE } = require("./stateCompatibility");
-("use strict");
-
-const { orderProfileMergeCleanupIds } = require("./profileMergeTargets");
-const { deriveLatestMatchId } = require("@mons/shared/rematches");
-const { inferAutomatchStateHint } = require("@mons/shared/navigation");
-const { isAutoInviteId } = require("@mons/shared/ids");
-const {
-  PROJECTOR_SCHEMA_VERSION,
-  deriveProjectionStatus,
-  fingerprintForProjection,
-  getEmojiId,
-  getNavigationSortBucket,
-  getOwnerContext,
-  getOwnerProfileIds,
-  getProfileDisplayName,
-  getProfileEmoji,
-  isEventOwnedInvite,
-  normalizeString,
-  pickListSortMillis,
-  readEventTimestampMs,
-  readTimestampMillis,
-  shouldProjectInvite,
-} = require("./events/gameProjectionModel");
-
+// Generated from src/profileGamesProjectionCore.ts. Run npm run generate:runtime.
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.readExistingProjectionRecords =
+  exports.createProfileGamesProjectionCore =
+  exports.buildResolvedProfile =
+  exports.buildInviteProjectionOwnerPlan =
+  exports.READ_RETRY_DELAY_MS =
+  exports.READ_RETRY_ATTEMPTS =
+    void 0;
+const stateCompatibility_js_1 = require("./stateCompatibility.js");
+const profileMergeTargets_js_1 = require("./profileMergeTargets.js");
+const rematches_1 = require("@mons/shared/rematches");
+const navigation_1 = require("@mons/shared/navigation");
+const ids_1 = require("@mons/shared/ids");
+const gameProjectionModel_js_1 = require("./events/gameProjectionModel.js");
 const READ_RETRY_ATTEMPTS = 2;
+exports.READ_RETRY_ATTEMPTS = READ_RETRY_ATTEMPTS;
 const READ_RETRY_DELAY_MS = 25;
-
+exports.READ_RETRY_DELAY_MS = READ_RETRY_DELAY_MS;
 const delay = async (ms) => {
   const safeDelay = Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0;
   if (safeDelay > 0) {
     await new Promise((resolve) => setTimeout(resolve, safeDelay));
   }
 };
-
 const readWithRetries = async (
   read,
   attempts = READ_RETRY_ATTEMPTS,
@@ -52,7 +43,6 @@ const readWithRetries = async (
   }
   throw failure;
 };
-
 const readExistingProjectionRecords = async ({
   attempts = READ_RETRY_ATTEMPTS,
   inviteId,
@@ -95,7 +85,7 @@ const readExistingProjectionRecords = async ({
       : [];
   });
 };
-
+exports.readExistingProjectionRecords = readExistingProjectionRecords;
 const buildResolvedProfile = (profilePath) => {
   const profileId = profilePath[profilePath.length - 1] || null;
   return profileId
@@ -105,18 +95,19 @@ const buildResolvedProfile = (profilePath) => {
       }
     : { cleanupProfileIds: [], profileId: null };
 };
-
+exports.buildResolvedProfile = buildResolvedProfile;
 const buildInviteProjectionOwnerPlan = (
   hostProfile,
   guestProfile,
   cleanupProfileIds = [],
 ) => {
-  const ownerProfileIds = getOwnerProfileIds(
+  const ownerProfileIds = (0, gameProjectionModel_js_1.getOwnerProfileIds)(
     hostProfile.profileId,
     guestProfile.profileId,
   );
   return {
-    cleanupProfileIds: orderProfileMergeCleanupIds(
+    cleanupProfileIds: (0,
+    profileMergeTargets_js_1.orderProfileMergeCleanupIds)(
       [
         ...hostProfile.cleanupProfileIds,
         ...guestProfile.cleanupProfileIds,
@@ -128,23 +119,32 @@ const buildInviteProjectionOwnerPlan = (
     ownerProfileIds,
   };
 };
-
+exports.buildInviteProjectionOwnerPlan = buildInviteProjectionOwnerPlan;
 const getStoredProjectionOwnerRole = (profileId, data) => {
-  const ownerRole = normalizeString(data && data.ownerRole);
+  const ownerRole = (0, gameProjectionModel_js_1.normalizeString)(
+    data && data.ownerRole,
+  );
   if (ownerRole === "host" || ownerRole === "guest") {
     return ownerRole;
   }
   const ownerProfileId =
-    normalizeString(data && data.ownerProfileId) || profileId;
-  if (ownerProfileId === normalizeString(data && data.hostProfileId)) {
+    (0, gameProjectionModel_js_1.normalizeString)(
+      data && data.ownerProfileId,
+    ) || profileId;
+  if (
+    ownerProfileId ===
+    (0, gameProjectionModel_js_1.normalizeString)(data && data.hostProfileId)
+  ) {
     return "host";
   }
-  if (ownerProfileId === normalizeString(data && data.guestProfileId)) {
+  if (
+    ownerProfileId ===
+    (0, gameProjectionModel_js_1.normalizeString)(data && data.guestProfileId)
+  ) {
     return "guest";
   }
   return null;
 };
-
 const findFreshestSourceProjectionData = ({
   existingRecords,
   ownerContext,
@@ -158,8 +158,12 @@ const findFreshestSourceProjectionData = ({
       continue;
     }
     const data = existing.data;
-    const storedOwnerLoginId = normalizeString(data.ownerLoginId);
-    const ownerLoginId = normalizeString(ownerContext.ownerLoginId);
+    const storedOwnerLoginId = (0, gameProjectionModel_js_1.normalizeString)(
+      data.ownerLoginId,
+    );
+    const ownerLoginId = (0, gameProjectionModel_js_1.normalizeString)(
+      ownerContext.ownerLoginId,
+    );
     if (
       storedOwnerLoginId &&
       ownerLoginId &&
@@ -176,7 +180,9 @@ const findFreshestSourceProjectionData = ({
     }
     if (
       requiresResolvedOpponentEmoji &&
-      getEmojiId(data.opponentEmoji ?? data.opponentEmojiId) === null
+      (0, gameProjectionModel_js_1.getEmojiId)(
+        data.opponentEmoji ?? data.opponentEmojiId,
+      ) === null
     ) {
       continue;
     }
@@ -186,7 +192,7 @@ const findFreshestSourceProjectionData = ({
       data.listSortAt,
       data.createdAt,
     ].reduce((current, value) => {
-      const millis = readTimestampMillis(value);
+      const millis = (0, gameProjectionModel_js_1.readTimestampMillis)(value);
       return Number.isFinite(millis) ? Math.max(current, millis) : current;
     }, Number.NEGATIVE_INFINITY);
     if (!freshest || freshnessMs > freshestMs) {
@@ -196,7 +202,6 @@ const findFreshestSourceProjectionData = ({
   }
   return freshest;
 };
-
 const createProfileGamesProjectionCore = ({
   logger = console,
   repository,
@@ -205,19 +210,18 @@ const createProfileGamesProjectionCore = ({
   if (!repository) {
     throw new TypeError("profile games projection dependencies are required");
   }
-
   const toTimestampMillis = (value) => {
-    const millis = readTimestampMillis(value);
+    const millis = (0, gameProjectionModel_js_1.readTimestampMillis)(value);
     if (millis === null) {
       throw new TypeError("invalid projection timestamp");
     }
     return Math.max(1, millis);
   };
-
   const retry = (read) => readWithRetries(read, undefined, undefined, wait);
-
   const resolveProfileForLogin = (ownership, loginUid) => {
-    const normalizedLoginUid = normalizeString(loginUid);
+    const normalizedLoginUid = (0, gameProjectionModel_js_1.normalizeString)(
+      loginUid,
+    );
     if (!normalizedLoginUid) {
       return { cleanupProfileIds: [], profileId: null };
     }
@@ -228,7 +232,7 @@ const createProfileGamesProjectionCore = ({
     ) {
       throw new TypeError("invalid projection ownership snapshot");
     }
-    const profileId = normalizeString(
+    const profileId = (0, gameProjectionModel_js_1.normalizeString)(
       ownership.profileIdByLoginUid.get(normalizedLoginUid),
     );
     if (!profileId) {
@@ -236,9 +240,10 @@ const createProfileGamesProjectionCore = ({
     }
     return buildResolvedProfile([profileId]);
   };
-
   const readProfileSummary = (ownership, profileId) => {
-    const normalizedProfileId = normalizeString(profileId);
+    const normalizedProfileId = (0, gameProjectionModel_js_1.normalizeString)(
+      profileId,
+    );
     if (!normalizedProfileId) {
       return null;
     }
@@ -252,26 +257,36 @@ const createProfileGamesProjectionCore = ({
     const profileData = ownership.profileDataById.get(normalizedProfileId);
     return profileData
       ? {
-          name: getProfileDisplayName(profileData),
-          emoji: getProfileEmoji(profileData),
+          name: (0, gameProjectionModel_js_1.getProfileDisplayName)(
+            profileData,
+          ),
+          emoji: (0, gameProjectionModel_js_1.getProfileEmoji)(profileData),
         }
       : null;
   };
-
   const readLoginSummaryFromMatches = async (
     loginUid,
     latestMatchId,
     inviteId,
     presentationCache,
   ) => {
-    const normalizedLoginUid = normalizeString(loginUid);
+    const normalizedLoginUid = (0, gameProjectionModel_js_1.normalizeString)(
+      loginUid,
+    );
     if (!normalizedLoginUid || !repository.readMatchPresentation) {
       return null;
     }
-    const normalizedLatestMatchId = normalizeString(latestMatchId);
-    const normalizedInviteId = normalizeString(inviteId);
+    const normalizedLatestMatchId = (0,
+    gameProjectionModel_js_1.normalizeString)(latestMatchId);
+    const normalizedInviteId = (0, gameProjectionModel_js_1.normalizeString)(
+      inviteId,
+    );
     const candidateMatchIds = Array.from(
-      new Set([normalizedLatestMatchId, normalizedInviteId].filter(Boolean)),
+      new Set(
+        [normalizedLatestMatchId, normalizedInviteId].filter((value) =>
+          Boolean(value),
+        ),
+      ),
     );
     for (const candidateMatchId of candidateMatchIds) {
       try {
@@ -286,7 +301,9 @@ const createProfileGamesProjectionCore = ({
         }
         const snapshot = presentationCache.get(candidateMatchId);
         const emoji = Object.hasOwn(snapshot.players, normalizedLoginUid)
-          ? getEmojiId(snapshot.players[normalizedLoginUid].emojiId)
+          ? (0, gameProjectionModel_js_1.getEmojiId)(
+              snapshot.players[normalizedLoginUid].emojiId,
+            )
           : null;
         if (emoji !== null) {
           return { name: null, emoji };
@@ -303,9 +320,10 @@ const createProfileGamesProjectionCore = ({
     }
     return null;
   };
-
   const recomputeInviteProjection = async (inviteId, reason, options = {}) => {
-    const normalizedInviteId = normalizeString(inviteId);
+    const normalizedInviteId = (0, gameProjectionModel_js_1.normalizeString)(
+      inviteId,
+    );
     if (!normalizedInviteId) {
       return {
         ok: false,
@@ -317,16 +335,19 @@ const createProfileGamesProjectionCore = ({
         blockedReason: "invalid-invite-id",
       };
     }
-
-    const nowMs = readEventTimestampMs(options);
+    const nowMs = (0, gameProjectionModel_js_1.readEventTimestampMs)(options);
     const [inviteData, automatchData] = await Promise.all([
       retry(() => repository.readInviteMetadata(normalizedInviteId)),
       retry(() => repository.readAutomatchEntry(normalizedInviteId)),
     ]);
-    const hostLoginId = normalizeString(inviteData && inviteData.hostId);
-    const guestLoginId = normalizeString(inviteData && inviteData.guestId);
+    const hostLoginId = (0, gameProjectionModel_js_1.normalizeString)(
+      inviteData && inviteData.hostId,
+    );
+    const guestLoginId = (0, gameProjectionModel_js_1.normalizeString)(
+      inviteData && inviteData.guestId,
+    );
     const loginUids = Array.from(
-      new Set([hostLoginId, guestLoginId].filter(Boolean)),
+      new Set([hostLoginId, guestLoginId].filter((value) => Boolean(value))),
     );
     let ownership;
     try {
@@ -352,19 +373,20 @@ const createProfileGamesProjectionCore = ({
         guestProfile,
         options.cleanupProfileIds,
       );
-    const automatchStateHint = inferAutomatchStateHint({
+    const automatchStateHint = (0, navigation_1.inferAutomatchStateHint)({
       inviteId: normalizedInviteId,
       queueValue: automatchData,
       hasGuest: !!guestLoginId,
       storedStateHint: inviteData ? inviteData.automatchStateHint : null,
     });
-    const latestMatchId = deriveLatestMatchId(
+    const latestMatchId = (0, rematches_1.deriveLatestMatchId)(
       normalizedInviteId,
       inviteData,
       options.latestMatchIdHint || null,
     );
     const latestMatchRatingCompleted =
-      isEventOwnedInvite(inviteData) && latestMatchId
+      (0, gameProjectionModel_js_1.isEventOwnedInvite)(inviteData) &&
+      latestMatchId
         ? await retry(() =>
             repository.hasCompletedRatingUpdate(
               normalizedInviteId,
@@ -372,20 +394,21 @@ const createProfileGamesProjectionCore = ({
             ),
           )
         : false;
-    const status = deriveProjectionStatus({
+    const status = (0, gameProjectionModel_js_1.deriveProjectionStatus)({
       inviteId: normalizedInviteId,
       inviteData,
       automatchStateHint,
       latestMatchRatingCompleted,
     });
-    const shouldProject = shouldProjectInvite({
+    const shouldProject = (0, gameProjectionModel_js_1.shouldProjectInvite)({
       inviteId: normalizedInviteId,
       inviteData,
       automatchStateHint,
     });
-    const sortBucket = getNavigationSortBucket(status);
+    const sortBucket = (0, gameProjectionModel_js_1.getNavigationSortBucket)(
+      status,
+    );
     const matchPresentationCache = new Map();
-
     const existingRecords = await readExistingProjectionRecords({
       inviteId: normalizedInviteId,
       profileIds: cleanupProfileIds,
@@ -412,7 +435,6 @@ const createProfileGamesProjectionCore = ({
     let setCount = 0;
     let deleteCount = 0;
     let skippedCount = 0;
-
     if (!shouldProject || ownerProfileIds.length === 0) {
       if (sourceCleanupSafe) {
         for (const existing of existingRecords) {
@@ -440,14 +462,13 @@ const createProfileGamesProjectionCore = ({
         skipped: 0,
       };
     }
-
     const commonProjection = {
-      schemaVersion: PROJECTOR_SCHEMA_VERSION,
-      projectorVersion: PROJECTOR_SCHEMA_VERSION,
-      source: PROFILE_GAME_PROJECTION_SOURCE,
+      schemaVersion: gameProjectionModel_js_1.PROJECTOR_SCHEMA_VERSION,
+      projectorVersion: gameProjectionModel_js_1.PROJECTOR_SCHEMA_VERSION,
+      source: stateCompatibility_js_1.PROFILE_GAME_PROJECTION_SOURCE,
       entityType: "game",
       inviteId: normalizedInviteId,
-      kind: isAutoInviteId(normalizedInviteId) ? "auto" : "direct",
+      kind: (0, ids_1.isAutoInviteId)(normalizedInviteId) ? "auto" : "direct",
       hostLoginId,
       guestLoginId,
       hostProfileId,
@@ -462,9 +483,8 @@ const createProfileGamesProjectionCore = ({
           : null,
       latestMatchId,
     };
-
     for (const ownerProfileId of ownerProfileIds) {
-      const ownerContext = getOwnerContext({
+      const ownerContext = (0, gameProjectionModel_js_1.getOwnerContext)({
         ownerProfileId,
         hostProfileId,
         guestProfileId,
@@ -485,12 +505,13 @@ const createProfileGamesProjectionCore = ({
       const opponentProfileSummary = ownerContext.opponentProfileId
         ? readProfileSummary(ownership, ownerContext.opponentProfileId)
         : null;
-      const existingOpponentName = normalizeString(
+      const existingOpponentName = (0,
+      gameProjectionModel_js_1.normalizeString)(
         existingData
           ? (existingData.opponentName ?? existingData.opponentDisplayName)
           : null,
       );
-      const sourceOpponentName = normalizeString(
+      const sourceOpponentName = (0, gameProjectionModel_js_1.normalizeString)(
         sourceProjectionData
           ? (sourceProjectionData.opponentName ??
               sourceProjectionData.opponentDisplayName)
@@ -520,12 +541,12 @@ const createProfileGamesProjectionCore = ({
             ? summary.emoji
             : null;
       }
-      const existingOpponentEmoji = getEmojiId(
+      const existingOpponentEmoji = (0, gameProjectionModel_js_1.getEmojiId)(
         existingData
           ? (existingData.opponentEmoji ?? existingData.opponentEmojiId)
           : null,
       );
-      const sourceOpponentEmoji = getEmojiId(
+      const sourceOpponentEmoji = (0, gameProjectionModel_js_1.getEmojiId)(
         sourceProjectionData
           ? (sourceProjectionData.opponentEmoji ??
               sourceProjectionData.opponentEmojiId)
@@ -545,9 +566,8 @@ const createProfileGamesProjectionCore = ({
         skippedCount += 1;
         continue;
       }
-
       const projectionFingerprintPayload = {
-        schemaVersion: PROJECTOR_SCHEMA_VERSION,
+        schemaVersion: gameProjectionModel_js_1.PROJECTOR_SCHEMA_VERSION,
         inviteId: normalizedInviteId,
         ownerProfileId,
         kind: commonProjection.kind,
@@ -568,7 +588,8 @@ const createProfileGamesProjectionCore = ({
         opponentName,
         opponentEmoji,
       };
-      const nextFingerprint = fingerprintForProjection(
+      const nextFingerprint = (0,
+      gameProjectionModel_js_1.fingerprintForProjection)(
         projectionFingerprintPayload,
       );
       const previousFingerprint =
@@ -579,31 +600,37 @@ const createProfileGamesProjectionCore = ({
         skippedCount += 1;
         continue;
       }
-
       const canonicalListSortMs = existingData
-        ? readTimestampMillis(existingData.listSortAt)
+        ? (0, gameProjectionModel_js_1.readTimestampMillis)(
+            existingData.listSortAt,
+          )
         : null;
-      const sourceListSortMs = readTimestampMillis(
+      const sourceListSortMs = (0,
+      gameProjectionModel_js_1.readTimestampMillis)(
         sourceProjectionData && sourceProjectionData.listSortAt,
       );
       const existingListSortMs = Number.isFinite(canonicalListSortMs)
         ? canonicalListSortMs
         : sourceListSortMs;
-      const nextListSortMs = pickListSortMillis({
+      const nextListSortMs = (0, gameProjectionModel_js_1.pickListSortMillis)({
         options,
         status,
-        automatchData,
+        automatchData: automatchData,
         nowMs,
         existingListSortMs,
       });
       const existingCreatedAt =
-        readTimestampMillis(existingData && existingData.createdAt) ??
-        readTimestampMillis(
+        (0, gameProjectionModel_js_1.readTimestampMillis)(
+          existingData && existingData.createdAt,
+        ) ??
+        (0, gameProjectionModel_js_1.readTimestampMillis)(
           sourceProjectionData && sourceProjectionData.createdAt,
         );
       const existingEndedAt =
-        readTimestampMillis(existingData && existingData.endedAt) ??
-        readTimestampMillis(
+        (0, gameProjectionModel_js_1.readTimestampMillis)(
+          existingData && existingData.endedAt,
+        ) ??
+        (0, gameProjectionModel_js_1.readTimestampMillis)(
           sourceProjectionData && sourceProjectionData.endedAt,
         );
       const projectionData = {
@@ -630,8 +657,10 @@ const createProfileGamesProjectionCore = ({
               : toTimestampMillis(existingEndedAt)
             : null,
         lastEventFingerprint: nextFingerprint,
-        lastEventType: normalizeString(reason) || null,
-        lastEventReason: normalizeString(reason) || null,
+        lastEventType:
+          (0, gameProjectionModel_js_1.normalizeString)(reason) || null,
+        lastEventReason:
+          (0, gameProjectionModel_js_1.normalizeString)(reason) || null,
         lastEventAt: toTimestampMillis(nowMs),
       };
       const type =
@@ -651,7 +680,6 @@ const createProfileGamesProjectionCore = ({
       });
       setCount += 1;
     }
-
     if (sourceCleanupSafe) {
       for (const existing of existingRecords) {
         if (!ownerSet.has(existing.profileId)) {
@@ -680,15 +708,6 @@ const createProfileGamesProjectionCore = ({
       skipped: skippedCount,
     };
   };
-
   return { recomputeInviteProjection };
 };
-
-module.exports = {
-  READ_RETRY_ATTEMPTS,
-  READ_RETRY_DELAY_MS,
-  buildInviteProjectionOwnerPlan,
-  buildResolvedProfile,
-  createProfileGamesProjectionCore,
-  readExistingProjectionRecords,
-};
+exports.createProfileGamesProjectionCore = createProfileGamesProjectionCore;

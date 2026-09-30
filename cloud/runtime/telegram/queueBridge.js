@@ -1,18 +1,25 @@
+// Generated from src/telegram/queueBridge.ts. Run npm run generate:runtime.
 "use strict";
-
-const { createHmac } = require("node:crypto");
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.signTelegramBridgeRequest =
+  exports.sendTelegramCommand =
+  exports.TELEGRAM_COMMAND_BRIDGE_URL =
+  exports.TELEGRAM_BRIDGE_TIMEOUT_MS =
+    void 0;
+const values_js_1 = require("./values.js");
+const node_crypto_1 = require("node:crypto");
 const TELEGRAM_COMMAND_BRIDGE_URL =
   "https://api.mons.link/internal/telegram/command";
+exports.TELEGRAM_COMMAND_BRIDGE_URL = TELEGRAM_COMMAND_BRIDGE_URL;
 const TELEGRAM_BRIDGE_TIMEOUT_MS = 5_000;
-
+exports.TELEGRAM_BRIDGE_TIMEOUT_MS = TELEGRAM_BRIDGE_TIMEOUT_MS;
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
 const signTelegramBridgeRequest = ({ body, secret, timestamp }) =>
-  createHmac("sha256", secret)
+  (0, node_crypto_1.createHmac)("sha256", secret)
     .update(`${timestamp}.${body}`)
     .digest("base64url");
-
+exports.signTelegramBridgeRequest = signTelegramBridgeRequest;
 const sendTelegramCommand = async (
   command,
   {
@@ -61,19 +68,20 @@ const sendTelegramCommand = async (
     });
   }
   if (!response.ok) {
-    const failure = new Error(
-      normalizeString(payload?.error) || "telegram-command-bridge-rejected",
+    const failure = Object.assign(
+      new Error(
+        normalizeString((0, values_js_1.readProperty)(payload, "error")) ||
+          "telegram-command-bridge-rejected",
+      ),
+      {
+        code:
+          normalizeString((0, values_js_1.readProperty)(payload, "error")) ||
+          "unavailable",
+        status: response.status,
+      },
     );
-    failure.code = normalizeString(payload?.error) || "unavailable";
-    failure.status = response.status;
     throw failure;
   }
   return payload;
 };
-
-module.exports = {
-  TELEGRAM_BRIDGE_TIMEOUT_MS,
-  TELEGRAM_COMMAND_BRIDGE_URL,
-  sendTelegramCommand,
-  signTelegramBridgeRequest,
-};
+exports.sendTelegramCommand = sendTelegramCommand;

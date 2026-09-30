@@ -1,5 +1,6 @@
 {
   "name": "mons-cloud-runtime",
+  "type": "commonjs",
   "description": "portable cloud runtime modules for mons",
   "scripts": {
     "test": "node --experimental-strip-types --test ../tests/*.test.js"

@@ -8,8 +8,9 @@ mons.link is a browser game backed by Cloudflare sessions, D1, SQLite Durable Ob
 | ----------------------- | ----------------------------------------------------------------- | ------------------------ |
 | `src/`                  | React UI, game orchestration, sessions, assets, and API clients   | Vite / browser           |
 | `test/`                 | Client behavior and contract tests                                | Node                     |
-| `cloud/runtime/`        | Portable event, prize, Telegram, and projection logic             | CommonJS / Worker bundle |
-| `cloud/runtime/shared/` | Deterministic rules and wire contracts consumed as `@mons/shared` | Browser and backend      |
+| `cloud/runtime/src/`    | TypeScript source for portable logic and shared contracts         | Compiled to CommonJS     |
+| `cloud/runtime/`        | Generated portable runtime modules and declarations               | CommonJS / Worker bundle |
+| `cloud/runtime/shared/` | Generated `@mons/shared` package and direct subpath exports       | Browser and backend      |
 | `cloud/workers/api/`    | API Worker, Durable Objects, D1 schemas, Queues, and Workflows    | Cloudflare               |
 | `cloud/tests/`          | Portable runtime behavior tests                                   | Node                     |
 | `cloud/admin/`          | Explicit canonical D1 reads and signed operator commands          | Node                     |
@@ -37,6 +38,8 @@ npm start
 
 Copy `.env.example` to `.env.local` only when local overrides are needed. Developer environment files and credentials are not release inputs.
 
+Edit portable runtime code in `cloud/runtime/src/`, including shared rules in `cloud/runtime/src/shared/`. Run `npm run generate:runtime` after edits and commit the generated JavaScript and declarations alongside the source. For active development, run `npm run watch:runtime` in a second terminal. The existing CommonJS modules and `@mons/shared` import paths remain the consumer interface.
+
 ## Commands
 
 | Command                                    | Purpose                                                                                 |
@@ -47,6 +50,9 @@ Copy `.env.example` to `.env.local` only when local overrides are needed. Develo
 | `npm run check:api`                        | Validate Worker formatting, lint, types, tests, generated bindings, and upload dry-run. |
 | `npm run check:tooling`                    | Validate deployment, maintenance, admin, and architecture tooling.                      |
 | `npm run test:runtime`                     | Run portable runtime tests.                                                             |
+| `npm run generate:runtime`                 | Compile checked runtime source and update generated modules and declarations.           |
+| `npm run check:runtime`                    | Lint runtime source, typecheck it, and reject stale, missing, or orphaned outputs.      |
+| `npm run watch:runtime`                    | Regenerate runtime outputs as source files change.                                      |
 | `npm run check:all`                        | Run the complete repository gate.                                                       |
 | `npm run manage:match-state -- --status`   | Inspect canonical gameplay authority and retained evidence.                             |
 | `npm run manage:invite-source -- --status` | Inspect invite authority and unresolved-work counts.                                    |
@@ -62,4 +68,4 @@ No build or test command implies a release. Preserve public contracts for alread
 
 ## Package boundaries
 
-`@mons/shared` is the only local runtime package dependency at the root. It preserves direct subpath exports and browser-safe CommonJS modules with matching declarations. Portable runtime modules and admin tools remain separately installable; TypeScript and framework declarations are development dependencies. Provider-specific historical values are confined to compatibility codecs, applied migrations, and explicit regression guards.
+`@mons/shared` is the only local runtime package dependency at the root. It preserves direct subpath exports and browser-safe CommonJS modules with matching generated declarations. All portable runtime implementations and types originate in `cloud/runtime/src/`; edit that source instead of generated files. Frontend builds, API upload dry-runs, and API candidate uploads check generation freshness before proceeding. Portable runtime modules and admin tools remain separately installable; TypeScript and framework declarations are development dependencies. Provider-specific historical values are confined to compatibility codecs, applied migrations, and explicit regression guards.

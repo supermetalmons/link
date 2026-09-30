@@ -1,0 +1,363 @@
+import type { EventData, EventParticipant } from "./events/model.js";
+
+import { NAVIGATION_SORT_BUCKETS as SORT_BUCKETS } from "@mons/shared/navigation";
+import {
+  getCanonicalProfileId,
+  profileOwnershipUnavailable,
+  resolveOwnedProfileReferences,
+} from "./events/ownership.js";
+import {
+  NAVIGATION_PARTICIPANT_PREVIEW_LIMIT,
+  buildPreviewParticipants,
+  getListSortAtMs,
+  getOwnerProfileIds,
+  mapEventStatusToNavigationStatus,
+  normalizeString,
+} from "./events/eventProjectionModel.js";
+export type EventProjectionWrite = {
+  type: "delete" | "merge";
+  profileId: string;
+  eventId: string;
+  data?: Record<string, unknown>;
+};
+export type EventProjectionSourceFence = {
+  eventId: string;
+  generation: number;
+};
+export type EventProjectionOwnershipSnapshot = Readonly<{
+  canonicalProfileIdByProfileId: ReadonlyMap<string, string | null>;
+  loginOwnerByUid: ReadonlyMap<
+    string,
+    Readonly<{ profileId: string; revision: number }> | null
+  >;
+}>;
+export type EventProfileGameProjectionRepository = {
+  commitProjectionWrites(
+    writes: EventProjectionWrite[],
+    sourceFence?: EventProjectionSourceFence,
+  ): Promise<void>;
+  getEvent(eventId: string): Promise<EventData | null>;
+  readProfileOwnershipSnapshot(query: {
+    loginUids: string[];
+    profileIds: string[];
+  }): Promise<EventProjectionOwnershipSnapshot>;
+};
+export type EventProjectionResult = {
+  deleted: number;
+  ownerProfileIds: string[];
+  written: number;
+};
+export type EventProjectionCommitOptions = {
+  assertCanCommit?(): Promise<void>;
+  sourceFence?: EventProjectionSourceFence;
+};
+type Signature_createEventProfileGameProjectionCore = (dependencies: {
+  now?: () => number;
+  prepareEventProjection?(eventId: string, event: EventData): Promise<void>;
+  repository: EventProfileGameProjectionRepository;
+  wait?(milliseconds: number): Promise<void>;
+}) => {
+  projectEvent(
+    eventId: string,
+    eventData: EventData | null,
+    cleanupOwnerProfileIds?: string[],
+    options?: EventProjectionCommitOptions,
+  ): Promise<EventProjectionResult>;
+  reconcileEventProjection(
+    eventId: string,
+    cleanupOwnerProfileIds?: string[],
+    options?: EventProjectionCommitOptions,
+  ): Promise<EventProjectionResult & { status: "missing" | "projected" }>;
+};
+
+const READ_RETRY_ATTEMPTS = 2;
+const READ_RETRY_DELAY_MS = 25;
+
+const defaultWait = (milliseconds: number) =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+
+const createEventProfileGameProjectionCore: Signature_createEventProfileGameProjectionCore =
+  ({
+    now = Date.now,
+    prepareEventProjection,
+    repository,
+    wait = defaultWait,
+  }) => {
+    if (!repository) {
+      throw new TypeError(
+        "event profile-game projection dependencies are required",
+      );
+    }
+
+    const toTimestampMillis = (millis: unknown) => {
+      const normalized =
+        typeof millis === "number" && Number.isFinite(millis)
+          ? Math.floor(millis)
+          : now();
+      return Math.max(1, normalized);
+    };
+
+    const readWithRetries = async <T>(read: () => Promise<T>): Promise<T> => {
+      let failure: unknown = null;
+      for (let attempt = 1; attempt <= READ_RETRY_ATTEMPTS; attempt += 1) {
+        try {
+          return await read();
+        } catch (error) {
+          failure = error;
+          if (attempt < READ_RETRY_ATTEMPTS) {
+            await wait(READ_RETRY_DELAY_MS);
+          }
+        }
+      }
+      throw failure;
+    };
+
+    const participantEntries = (
+      participants: Record<string, EventParticipant>,
+    ) =>
+      Object.entries(participants).flatMap(([key, value]) =>
+        value && typeof value === "object" && !Array.isArray(value)
+          ? [
+              {
+                key: normalizeString(key),
+                loginUid: normalizeString(value.loginUid),
+                participant: value,
+                profileId:
+                  normalizeString(value.profileId) || normalizeString(key),
+              },
+            ]
+          : [],
+      );
+
+    const readOwnershipPlan = async (
+      participants: Record<string, EventParticipant>,
+      cleanupOwnerProfileIds: string[],
+    ) => {
+      const entries = participantEntries(participants);
+      const cleanupProfileIds = Array.from(
+        new Set(
+          cleanupOwnerProfileIds
+            .map(normalizeString)
+            .filter((value): value is string => Boolean(value)),
+        ),
+      );
+      const loginUids = Array.from(
+        new Set(
+          entries
+            .map(({ loginUid }) => loginUid)
+            .filter((value): value is string => Boolean(value)),
+        ),
+      );
+      const storedProfileIds = Array.from(
+        new Set(
+          [
+            ...entries.flatMap(({ key, profileId }) => [key, profileId]),
+            ...cleanupProfileIds,
+          ].filter((value): value is string => Boolean(value)),
+        ),
+      );
+      const ownership = await repository.readProfileOwnershipSnapshot({
+        loginUids,
+        profileIds: storedProfileIds,
+      });
+      if (
+        !ownership ||
+        !(ownership.loginOwnerByUid instanceof Map) ||
+        !(ownership.canonicalProfileIdByProfileId instanceof Map) ||
+        loginUids.some(
+          (loginUid) => !ownership.loginOwnerByUid.has(loginUid),
+        ) ||
+        storedProfileIds.some(
+          (profileId) =>
+            !ownership.canonicalProfileIdByProfileId.has(profileId),
+        )
+      ) {
+        throw profileOwnershipUnavailable();
+      }
+      const ownerProfileIds = resolveOwnedProfileReferences(
+        ownership,
+        entries.map(({ loginUid, profileId }) => ({ loginUid, profileId })),
+      );
+      const canonicalParticipants: Record<string, EventParticipant> = {};
+      entries.forEach((entry, index) => {
+        const ownerProfileId = ownerProfileIds[index];
+        canonicalParticipants[ownerProfileId] = {
+          ...entry.participant,
+          profileId: ownerProfileId,
+        };
+      });
+      const allProfileIds = new Set([
+        ...entries.flatMap(({ key, profileId }) => [key, profileId]),
+        ...cleanupProfileIds,
+        ...ownerProfileIds,
+      ]);
+      for (const profileId of storedProfileIds) {
+        const canonicalProfileId = getCanonicalProfileId(ownership, profileId);
+        if (canonicalProfileId) allProfileIds.add(canonicalProfileId);
+      }
+      const currentOwnerIds = new Set(ownerProfileIds);
+      return {
+        allOwnerProfileIds: [
+          ...ownerProfileIds,
+          ...Array.from(allProfileIds).filter(
+            (profileId): profileId is string =>
+              Boolean(profileId && !currentOwnerIds.has(profileId)),
+          ),
+        ],
+        canonicalParticipants,
+        ownerProfileIds,
+      };
+    };
+
+    const projectEvent: ReturnType<Signature_createEventProfileGameProjectionCore>["projectEvent"] =
+      async (eventId, eventData, cleanupOwnerProfileIds = [], options = {}) => {
+        const assertCanCommit = options.assertCanCommit;
+        const sourceFence = options.sourceFence;
+        if (
+          assertCanCommit !== undefined &&
+          typeof assertCanCommit !== "function"
+        ) {
+          throw new TypeError(
+            "event projection commit guard must be a function",
+          );
+        }
+        if (
+          sourceFence !== undefined &&
+          (!sourceFence ||
+            typeof sourceFence !== "object" ||
+            Array.isArray(sourceFence) ||
+            sourceFence.eventId !== eventId ||
+            !Number.isSafeInteger(sourceFence.generation) ||
+            sourceFence.generation < 1)
+        ) {
+          throw new TypeError("event projection source fence is invalid");
+        }
+        const participants =
+          eventData?.participants && typeof eventData.participants === "object"
+            ? eventData.participants
+            : {};
+        const normalizedCleanupOwnerProfileIds = Array.from(
+          new Set(
+            cleanupOwnerProfileIds
+              .map(normalizeString)
+              .filter((value): value is string => Boolean(value)),
+          ),
+        );
+        const {
+          allOwnerProfileIds,
+          canonicalParticipants,
+          ownerProfileIds: afterOwnerProfileIds,
+        } = await readOwnershipPlan(
+          participants,
+          normalizedCleanupOwnerProfileIds,
+        );
+
+        const status = mapEventStatusToNavigationStatus(
+          normalizeString(eventData?.status),
+        );
+        const previewParticipants = buildPreviewParticipants(
+          canonicalParticipants,
+        );
+        const currentOwnerIds = new Set(afterOwnerProfileIds);
+        const writes: EventProjectionWrite[] = [];
+        if (eventData) {
+          for (const ownerProfileId of afterOwnerProfileIds) {
+            writes.push({
+              type: "merge",
+              profileId: ownerProfileId,
+              eventId,
+              data: {
+                schemaVersion: 1,
+                source: "event-projector",
+                entityType: "event",
+                id: `event_${eventId}`,
+                eventId,
+                status,
+                sortBucket: SORT_BUCKETS[status],
+                listSortAt: toTimestampMillis(
+                  getListSortAtMs(eventData, status),
+                ),
+                ownerProfileId,
+                startAt:
+                  typeof eventData.startAtMs === "number"
+                    ? toTimestampMillis(eventData.startAtMs)
+                    : null,
+                updatedAt: toTimestampMillis(
+                  typeof eventData.updatedAtMs === "number"
+                    ? eventData.updatedAtMs
+                    : now(),
+                ),
+                endedAt:
+                  typeof eventData.endedAtMs === "number"
+                    ? toTimestampMillis(eventData.endedAtMs)
+                    : null,
+                participantCount: previewParticipants.length,
+                participantPreview: previewParticipants.slice(
+                  0,
+                  NAVIGATION_PARTICIPANT_PREVIEW_LIMIT,
+                ),
+                winnerDisplayName: normalizeString(eventData.winnerDisplayName),
+              },
+            });
+          }
+        }
+        for (const profileId of allOwnerProfileIds) {
+          if (!eventData || !currentOwnerIds.has(profileId)) {
+            writes.push({ type: "delete", profileId, eventId });
+          }
+        }
+        if (assertCanCommit) {
+          await assertCanCommit();
+        }
+        await repository.commitProjectionWrites(writes, sourceFence);
+        return {
+          deleted: writes.filter((write) => write.type === "delete").length,
+          ownerProfileIds: afterOwnerProfileIds,
+          written: writes.filter((write) => write.type !== "delete").length,
+        };
+      };
+
+    const reconcileEventProjection: ReturnType<Signature_createEventProfileGameProjectionCore>["reconcileEventProjection"] =
+      async (eventId, cleanupOwnerProfileIds = [], options = {}) => {
+        const cleanupIds = new Set(
+          cleanupOwnerProfileIds
+            .map(normalizeString)
+            .filter((value): value is string => Boolean(value)),
+        );
+        const liveData = await readWithRetries(async () => {
+          const event = await repository.getEvent(eventId);
+          if (event && prepareEventProjection) {
+            await prepareEventProjection(eventId, event);
+          }
+          return event;
+        });
+        getOwnerProfileIds(
+          liveData?.participants && typeof liveData.participants === "object"
+            ? liveData.participants
+            : {},
+        ).forEach((profileId) => cleanupIds.add(profileId));
+        const result = await projectEvent(
+          eventId,
+          liveData,
+          Array.from(cleanupIds),
+          options,
+        );
+        return {
+          ...result,
+          status: liveData === null ? "missing" : "projected",
+        };
+      };
+
+    return {
+      projectEvent,
+      reconcileEventProjection,
+    };
+  };
+
+export {
+  READ_RETRY_ATTEMPTS,
+  READ_RETRY_DELAY_MS,
+  createEventProfileGameProjectionCore,
+};

@@ -1,7 +1,11 @@
+// Generated from src/eventLeases.ts. Run npm run generate:runtime.
 import type { TransactionDecision, TransactionResult } from "./transactions.js";
 export type EventLeaseKind =
   "event" | "telegram-projection" | "profile-game-projection" | "transition";
-export type EventLeaseKey = { kind: EventLeaseKind; id: string };
+export type EventLeaseKey = {
+  kind: EventLeaseKind;
+  id: string;
+};
 export type EventLeaseRecord = {
   lockId: string;
   ownerUid: string;

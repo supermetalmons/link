@@ -1,18 +1,15 @@
-import type { ReadGameBootstrapResponse } from "./game-bootstrap";
-
+// Generated from src/shared/navigation.ts. Run npm run generate:runtime.
+import type { ReadGameBootstrapResponse } from "./game-bootstrap.js";
 export type NavigationStatus =
   "pending" | "waiting" | "active" | "ended" | "dismissed";
-
 export interface NavigationOrderingItem {
   id: string;
   status: NavigationStatus;
   sortBucket: number;
   listSortAtMs: number;
 }
-
 export type NavigationGameStatus = Exclude<NavigationStatus, "dismissed">;
 export type NavigationEventStatus = Exclude<NavigationStatus, "pending">;
-
 export interface NavigationGameItem extends NavigationOrderingItem {
   entityType: "game";
   inviteId: string;
@@ -27,14 +24,12 @@ export interface NavigationGameItem extends NavigationOrderingItem {
   isPendingAutomatch: boolean;
   isOptimistic?: boolean;
 }
-
 export interface EventNavigationPreviewParticipant {
   profileId: string | null;
   displayName: string | null;
   emojiId: number | null;
   aura: string | null;
 }
-
 export interface NavigationEventItem extends NavigationOrderingItem {
   entityType: "event";
   eventId: string;
@@ -47,41 +42,33 @@ export interface NavigationEventItem extends NavigationOrderingItem {
   winnerDisplayName: string | null;
   isOptimistic?: boolean;
 }
-
 export type NavigationItem = NavigationGameItem | NavigationEventItem;
-
 export interface NavigationGamesCursor {
   sortBucket: number;
   listSortAtMs: number;
   id: string;
 }
-
 export interface ReadNavigationGamesRequest {
   limit: number;
   cursor: NavigationGamesCursor | null;
 }
-
 export interface ReadNavigationGamesResponse {
   ok: true;
   items: NavigationItem[];
   nextCursor: NavigationGamesCursor | null;
   hasMore: boolean;
 }
-
 export type AutomatchStateHint = "pending" | "matched" | "canceled";
-
 export interface AutomatchStateHintInput {
   inviteId: string;
   queueValue?: unknown;
   hasGuest: boolean;
   storedStateHint?: unknown;
 }
-
 export interface StartAutomatchRequest {
   emojiId: number;
   aura: string;
 }
-
 export type StartAutomatchResponse =
   | {
       ok: true;
@@ -95,30 +82,31 @@ export type StartAutomatchResponse =
       mode: "pending";
       matchedImmediately: false;
     }
-  | { ok: false };
-
+  | {
+      ok: false;
+    };
 export type StartAutomatchApiResponse =
-  | (Extract<StartAutomatchResponse, { mode: "matched" }> & {
+  | (Extract<
+      StartAutomatchResponse,
+      {
+        mode: "matched";
+      }
+    > & {
       bootstrap?: ReadGameBootstrapResponse;
     })
-  | Exclude<StartAutomatchResponse, { mode: "matched" }>;
-
-export const AUTOMATCH_API_MAX_RESPONSE_BYTES: number;
-
-export function parseStartAutomatchApiResponse(
-  value: unknown,
-): StartAutomatchApiResponse | null;
-
+  | Exclude<
+      StartAutomatchResponse,
+      {
+        mode: "matched";
+      }
+    >;
 export type CancelAutomatchRequest = Record<string, never>;
-
 export interface CancelAutomatchResponse {
   ok: boolean;
 }
-
 export interface RemoveNavigationGameRequest {
   inviteId: string;
 }
-
 export interface RemoveNavigationGameResponse {
   ok: true;
   skipped: boolean;
@@ -126,53 +114,80 @@ export interface RemoveNavigationGameResponse {
   reason: string | null;
   inviteId: string;
 }
-
-export const NAVIGATION_SORT_BUCKETS: Readonly<
+declare const AUTOMATCH_API_MAX_RESPONSE_BYTES: number;
+declare const NAVIGATION_SORT_BUCKETS: Readonly<
   Record<NavigationStatus, 20 | 30 | 40 | 50>
 >;
-export function normalizeAutomatchStateHint(
+declare const normalizeStrictAutomatchStateHint: (
   value: unknown,
-): AutomatchStateHint | null;
-export function normalizeStrictAutomatchStateHint(
+) => AutomatchStateHint | null;
+declare const normalizeAutomatchStateHint: (
   value: unknown,
-): AutomatchStateHint | null;
-export function inferAutomatchStateHint(
-  input: AutomatchStateHintInput,
-): AutomatchStateHint | null;
-export function getNavigationStatusPriority(status: NavigationStatus): number;
-export function getNavigationSortBucket(
+) => AutomatchStateHint | null;
+declare const inferAutomatchStateHint: ({
+  inviteId,
+  queueValue,
+  hasGuest,
+  storedStateHint,
+}: AutomatchStateHintInput) => AutomatchStateHint | null;
+declare const getNavigationStatusPriority: (status: NavigationStatus) => number;
+declare const getNavigationSortBucket: (
   status: NavigationStatus,
-): 20 | 30 | 40 | 50;
-export function compareNavigationItems<T extends NavigationOrderingItem>(
+) => 20 | 30 | 40 | 50;
+declare const compareNavigationItems: <T extends NavigationOrderingItem>(
   left: T,
   right: T,
-): number;
-export function mapProfileGameProjection(
-  value: unknown,
+) => number;
+declare const mapProfileGameProjection: (
+  rawData: unknown,
   fallbackProjectionId: string,
-): NavigationItem | null;
-export function isNavigationItem(value: unknown): value is NavigationItem;
-export function isNavigationGamesCursor(
+) => NavigationItem | null;
+declare const isNavigationItem: (value: unknown) => value is NavigationItem;
+declare const isNavigationGamesCursor: (
   value: unknown,
-): value is NavigationGamesCursor;
-export function isReadNavigationGamesRequest(
+) => value is NavigationGamesCursor;
+declare const isReadNavigationGamesRequest: (
   value: unknown,
-): value is ReadNavigationGamesRequest;
-export function isReadNavigationGamesResponse(
+) => value is ReadNavigationGamesRequest;
+declare const isReadNavigationGamesResponse: (
   value: unknown,
-): value is ReadNavigationGamesResponse;
-export function isStartAutomatchRequest(
+) => value is ReadNavigationGamesResponse;
+declare const isStartAutomatchRequest: (
   value: unknown,
-): value is StartAutomatchRequest;
-export function isStartAutomatchResponse(
+) => value is StartAutomatchRequest;
+declare const isStartAutomatchResponse: (
   value: unknown,
-): value is StartAutomatchResponse;
-export function isCancelAutomatchResponse(
+) => value is StartAutomatchResponse;
+declare const parseStartAutomatchApiResponse: (
   value: unknown,
-): value is CancelAutomatchResponse;
-export function isRemoveNavigationGameRequest(
+) => StartAutomatchApiResponse | null;
+declare const isCancelAutomatchResponse: (
   value: unknown,
-): value is RemoveNavigationGameRequest;
-export function isRemoveNavigationGameResponse(
+) => value is CancelAutomatchResponse;
+declare const isRemoveNavigationGameRequest: (
   value: unknown,
-): value is RemoveNavigationGameResponse;
+) => value is RemoveNavigationGameRequest;
+declare const isRemoveNavigationGameResponse: (
+  value: unknown,
+) => value is RemoveNavigationGameResponse;
+export {
+  AUTOMATCH_API_MAX_RESPONSE_BYTES,
+  NAVIGATION_SORT_BUCKETS,
+  normalizeAutomatchStateHint,
+  normalizeStrictAutomatchStateHint,
+  inferAutomatchStateHint,
+  getNavigationStatusPriority,
+  getNavigationSortBucket,
+  compareNavigationItems,
+  mapProfileGameProjection,
+  isNavigationItem,
+  isNavigationGamesCursor,
+  isReadNavigationGamesRequest,
+  isReadNavigationGamesResponse,
+  isStartAutomatchRequest,
+  isStartAutomatchResponse,
+  parseStartAutomatchApiResponse,
+  isCancelAutomatchResponse,
+  isRemoveNavigationGameRequest,
+  isRemoveNavigationGameResponse,
+};

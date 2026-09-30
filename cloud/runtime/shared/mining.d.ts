@@ -1,106 +1,130 @@
-export const MATERIAL_KEYS: readonly ["dust", "slime", "gum", "metal", "ice"];
-
-export const MINING_MATERIAL_NAMES: typeof MATERIAL_KEYS;
-
+// Generated from src/shared/mining.ts. Run npm run generate:runtime.
 export type MiningMaterialName = (typeof MATERIAL_KEYS)[number];
 export type MiningMaterials = Record<MiningMaterialName, number>;
-
-export const MINE_ROCK_FAILURE_REASONS: readonly [
-  "date-out-of-range",
-  "profile-not-found",
-  "date-not-advanced",
-  "materials-mismatch",
-];
-
 export type MineRockFailureReason = (typeof MINE_ROCK_FAILURE_REASONS)[number];
-
 export interface MiningSnapshot {
   lastRockDate: string | null;
   materials: MiningMaterials;
 }
-
 export interface MiningDrops {
   drops: MiningMaterialName[];
   delta: MiningMaterials;
 }
-
 export interface MineRockRequest {
   date: string;
   materials: MiningMaterials;
 }
-
 export type MineRockResponse =
-  | { ok: true; mining: MiningSnapshot }
-  | { ok: false; reason: MineRockFailureReason };
-
+  | {
+      ok: true;
+      mining: MiningSnapshot;
+    }
+  | {
+      ok: false;
+      reason: MineRockFailureReason;
+    };
 export interface WagerProposalLike {
   material?: string | null;
   count?: unknown;
 }
-
 export interface AcceptedMaterialReservation {
   acceptedCount: number;
   appliedDelta: Partial<MiningMaterials> | null;
   materials: (MiningMaterials & Record<string, number>) | null;
 }
-
-export function createEmptyMaterials(): MiningMaterials;
-export function cloneMaterials(source: MiningMaterials): MiningMaterials;
-export function normalizeMaterials(source?: unknown): MiningMaterials;
-export function sumMaterials(
+declare const MATERIAL_KEYS: readonly ["dust", "slime", "gum", "metal", "ice"];
+declare const MINING_MATERIAL_NAMES: typeof MATERIAL_KEYS;
+declare const MINE_ROCK_FAILURE_REASONS: readonly [
+  "date-out-of-range",
+  "profile-not-found",
+  "date-not-advanced",
+  "materials-mismatch",
+];
+declare const createEmptyMaterials: () => MiningMaterials;
+declare const cloneMaterials: (source: MiningMaterials) => MiningMaterials;
+declare const normalizeMaterials: (source?: unknown) => MiningMaterials;
+declare const sumMaterials: (
   left: MiningMaterials,
   right: MiningMaterials,
-): MiningMaterials;
-export function normalizeMiningSnapshot(source?: unknown): MiningSnapshot;
-export function isMiningMaterials(value: unknown): value is MiningMaterials;
-export function isMiningSnapshot(value: unknown): value is MiningSnapshot;
-export function isMineRockResponse(value: unknown): value is MineRockResponse;
-
-export function formatMiningDateLocal(date: Date): string;
-export function formatMiningDateUtc(date: Date): string;
-
-export function createMiningSeededRandom(
+) => MiningMaterials;
+declare const normalizeMiningSnapshot: (source?: unknown) => MiningSnapshot;
+declare const isMiningMaterials: (value: unknown) => value is MiningMaterials;
+declare const isMiningSnapshot: (value: unknown) => value is MiningSnapshot;
+declare const isMineRockResponse: (value: unknown) => value is MineRockResponse;
+declare const formatMiningDateLocal: (date: Date) => string;
+declare const formatMiningDateUtc: (date: Date) => string;
+declare const createMiningSeededRandom: (
   profileId: string,
   date: string,
-): () => number;
-export function pickWeightedMaterial(random: () => number): MiningMaterialName;
-export function isFirstMiningEvent(source?: unknown): boolean;
-export function createFirstRockDrops(): MiningDrops;
-export function createDropsFromRandom(random: () => number): MiningDrops;
-export function createDeterministicDrops(
+) => () => number;
+declare const pickWeightedMaterial: (
+  random: () => number,
+) => MiningMaterialName;
+declare const isFirstMiningEvent: (source?: unknown) => boolean;
+declare const createFirstRockDrops: () => MiningDrops;
+declare const createDropsFromRandom: (random: () => number) => MiningDrops;
+declare const createDeterministicDrops: (
   profileId: string,
   date: string,
-): MiningDrops;
-export function createDropsForMiningEvent(
+) => MiningDrops;
+declare const createDropsForMiningEvent: (
   profileId: string,
   date: string,
   miningSnapshot?: unknown,
-): MiningDrops;
-
-export function isMaterialName(value: unknown): value is MiningMaterialName;
-export function normalizeCount(value: unknown): number;
-export function applyMaterialDeltas(
+) => MiningDrops;
+declare const isMaterialName: (value: unknown) => value is MiningMaterialName;
+declare const normalizeCount: (value: unknown) => number;
+declare const applyMaterialDeltas: (
   source?: unknown,
   deltas?: unknown,
-): MiningMaterials;
-export function applyMaterialDeltasWithCap(
+) => MiningMaterials;
+declare const applyMaterialDeltasWithCap: (
   source: unknown,
   deltas: unknown,
   totalMaterials?: unknown,
-): MiningMaterials;
-export function computeAvailableCount(
+) => MiningMaterials;
+declare const computeAvailableCount: (
   total: Partial<Record<string, number>> | null | undefined,
   frozen: Partial<Record<string, number>> | null | undefined,
   material: string,
-): number;
-export function computeAvailableMaterials(
+) => number;
+declare const computeAvailableMaterials: (
   total: MiningMaterials,
   frozen: MiningMaterials,
-): MiningMaterials;
-export function computeAcceptedReservation(
+) => MiningMaterials;
+declare const computeAcceptedReservation: (
   current: unknown,
   material: string,
   proposedCount: number,
   ownProposal: WagerProposalLike | null | undefined,
   totalMaterials: unknown,
-): AcceptedMaterialReservation;
+) => AcceptedMaterialReservation;
+export {
+  MATERIAL_KEYS,
+  MINING_MATERIAL_NAMES,
+  MINE_ROCK_FAILURE_REASONS,
+  createEmptyMaterials,
+  cloneMaterials,
+  normalizeMaterials,
+  sumMaterials,
+  normalizeMiningSnapshot,
+  isMiningMaterials,
+  isMiningSnapshot,
+  isMineRockResponse,
+  formatMiningDateLocal,
+  formatMiningDateUtc,
+  createMiningSeededRandom,
+  pickWeightedMaterial,
+  isFirstMiningEvent,
+  createFirstRockDrops,
+  createDropsFromRandom,
+  createDeterministicDrops,
+  createDropsForMiningEvent,
+  isMaterialName,
+  normalizeCount,
+  applyMaterialDeltas,
+  applyMaterialDeltasWithCap,
+  computeAvailableCount,
+  computeAvailableMaterials,
+  computeAcceptedReservation,
+};

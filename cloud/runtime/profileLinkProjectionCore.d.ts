@@ -1,8 +1,8 @@
+// Generated from src/profileLinkProjectionCore.ts. Run npm run generate:runtime.
 import type {
   RecomputeInviteProjectionOptions,
   RecomputeInviteProjectionResult,
 } from "./profileGamesProjectionCore.js";
-
 export type ProfileLinkProjectionRepository = {
   listMatchesPage(
     loginUid: string,
@@ -23,7 +23,6 @@ export type ProfileLinkProjectionRepository = {
     profileIdByLoginUid: ReadonlyMap<string, string | null>;
   }>;
 };
-
 export type ProfileLinkProjectionSummary = {
   loginUid: string;
   profileId: string;
@@ -37,8 +36,7 @@ export type ProfileLinkProjectionSummary = {
   elapsedMs: number;
   nextMatchCursor: string | null;
 };
-
-export function createProfileLinkProjectionCore(dependencies: {
+type Signature_createProfileLinkProjectionCore = (dependencies: {
   logger?: Pick<Console, "error" | "info">;
   now?: () => number;
   recomputeInviteProjection(
@@ -51,7 +49,7 @@ export function createProfileLinkProjectionCore(dependencies: {
     inviteId: string,
     work: () => Promise<T>,
   ): Promise<T>;
-}): {
+}) => {
   processProfileLinkCatchup(input: {
     cleanupProfileIds?: string[];
     loginUid: string;
@@ -60,8 +58,22 @@ export function createProfileLinkProjectionCore(dependencies: {
     sourceUpdatedAtMs?: number;
   }): Promise<ProfileLinkProjectionSummary | null>;
 };
-
-export const PROFILE_LINK_CATCHUP_CONCURRENCY: number;
-export const PROFILE_LINK_CATCHUP_MAX_INVITES: number;
-export const PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP: number;
-export const PROFILE_LINK_CATCHUP_TIMEOUT_MS: number;
+declare const PROFILE_LINK_CATCHUP_MAX_INVITES = 20;
+declare const PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP = 1;
+declare const PROFILE_LINK_CATCHUP_CONCURRENCY = 3;
+declare const PROFILE_LINK_CATCHUP_TIMEOUT_MS = 50000;
+declare const processWithConcurrency: <T>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<unknown>,
+  shouldContinue?: () => boolean,
+) => Promise<void>;
+declare const createProfileLinkProjectionCore: Signature_createProfileLinkProjectionCore;
+export {
+  PROFILE_LINK_CATCHUP_CONCURRENCY,
+  PROFILE_LINK_CATCHUP_MAX_INVITES,
+  PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP,
+  PROFILE_LINK_CATCHUP_TIMEOUT_MS,
+  createProfileLinkProjectionCore,
+  processWithConcurrency,
+};

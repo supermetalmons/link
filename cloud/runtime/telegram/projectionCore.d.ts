@@ -1,5 +1,5 @@
+// Generated from src/telegram/projectionCore.ts. Run npm run generate:runtime.
 export type AutomatchLifecycle = "pending" | "matched" | "canceled";
-
 export type AutomatchTelegramProjection = {
   operation: "send" | "edit";
   lifecycle: AutomatchLifecycle;
@@ -14,54 +14,71 @@ export type AutomatchTelegramProjection = {
   resultDigests: Record<string, string>;
   sourceRevision: string;
 };
-
 export type ProjectionDecision = {
   allowed: boolean;
   reason: string;
 };
-
 export type RatingProjectionMerge = {
   changed: boolean;
   source: unknown;
   reason: string;
 };
-
-export function asObject(value: unknown): Record<string, unknown>;
-export function normalizeString(value: unknown): string;
-export function resolveAutomatchTelegramLifecycle(
+declare const AUTOMATCH_PROJECTION_GUARD_VERSION = 1;
+declare const normalizeString: (value: unknown) => string;
+declare const asObject: (value: unknown) => Record<string, unknown>;
+declare const resolveAutomatchTelegramLifecycle: (
   source: Record<string, unknown> | null,
   inviteData: Record<string, unknown> | null,
-): AutomatchLifecycle | null;
-export function getAutomatchResultFragments(
+) => AutomatchLifecycle | null;
+declare const getAutomatchResultFragments: (
   inviteId: string,
   source: Record<string, unknown>,
-): Array<{ matchId: string; text: string; matchIndex: number | null }>;
-export function renderMatchedAutomatchTelegramText(
+) => Array<{
+  matchId: string;
+  text: string;
+  matchIndex: number | null;
+}>;
+declare const evaluateAutomatchProjectionUpdate: (
+  record: unknown,
+  projection: AutomatchTelegramProjection,
+) => ProjectionDecision;
+declare const buildAutomatchProjectionGuard: (
+  projection: AutomatchTelegramProjection,
+) => Record<string, unknown>;
+declare const renderMatchedAutomatchTelegramText: (
   inviteId: string,
   source: Record<string, unknown>,
-): string;
-export function buildAutomatchTelegramProjection(input: {
+) => string;
+declare const buildAutomatchTelegramProjection: (input: {
   inviteId: string;
   source: Record<string, unknown> | null;
   inviteData: Record<string, unknown> | null;
-}): AutomatchTelegramProjection | null;
-export function evaluateAutomatchProjectionUpdate(
-  record: unknown,
-  projection: AutomatchTelegramProjection,
-): ProjectionDecision;
-export function buildAutomatchProjectionGuard(
-  projection: AutomatchTelegramProjection,
-): Record<string, unknown>;
-export function isEventRatingUpdate(
+}) => AutomatchTelegramProjection | null;
+declare const isEventRatingUpdate: (
   ratingUpdate: Record<string, unknown> | null,
-): boolean;
-export function shouldProjectRatingTelegramUpdate(
+) => boolean | null;
+declare const shouldProjectRatingTelegramUpdate: (
   ratingUpdate: Record<string, unknown> | null,
-): boolean;
-export function shouldRequestEventRatingProgress(
+) => boolean;
+declare const shouldRequestEventRatingProgress: (
   ratingUpdate: Record<string, unknown> | null,
-): boolean;
-export function mergeRatingResultFragment(
+) => boolean;
+declare const mergeRatingResultFragment: (
   source: unknown,
   ratingUpdate: Record<string, unknown>,
-): RatingProjectionMerge;
+) => RatingProjectionMerge;
+export {
+  AUTOMATCH_PROJECTION_GUARD_VERSION,
+  asObject,
+  buildAutomatchProjectionGuard,
+  buildAutomatchTelegramProjection,
+  evaluateAutomatchProjectionUpdate,
+  getAutomatchResultFragments,
+  isEventRatingUpdate,
+  mergeRatingResultFragment,
+  normalizeString,
+  renderMatchedAutomatchTelegramText,
+  resolveAutomatchTelegramLifecycle,
+  shouldProjectRatingTelegramUpdate,
+  shouldRequestEventRatingProgress,
+};

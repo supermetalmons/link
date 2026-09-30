@@ -1,19 +1,64 @@
+// Generated from src/shared/event-prizes.ts. Run npm run generate:runtime.
 "use strict";
-
-const { isSafeRecordKey } = require("./ids");
-const { isValidSolanaAddress } = require("./solana");
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.isToggleEventPrizeSelectionResponse =
+  exports.isToggleEventPrizeSelectionRequest =
+  exports.isProfileEventPrizesResponse =
+  exports.isEventPrizeWithdrawalStatusRequest =
+  exports.isEventPrizeWithdrawalResponse =
+  exports.isEventPrizeWithdrawalRequest =
+  exports.isEventPrizeWithdrawalProcessingResponse =
+  exports.isEventPrizeWithdrawalOperationId =
+  exports.isEventPrizeWithdrawalCompletedResponse =
+  exports.isEventPrizeStandard =
+  exports.isEventPrizeRevealOpen =
+  exports.isEventPrizeId =
+  exports.isEventPrizeEvent =
+  exports.isEventPrizeAssignmentWireRecord =
+  exports.isEventPrizeAssignmentRecord =
+  exports.getEventPrizeDefinitions =
+  exports.getEventPrizeDefinition =
+  exports.getEventPrizeConfig =
+  exports.VEHICLE_WAMMIN_PRIZES_EVENT_ID =
+  exports.SWAG_PACK_PRIZES_EVENT_ID =
+  exports.SHELVES_PRIZES_EVENT_ID =
+  exports.REVERIE_BANNERS_PRIZES_EVENT_ID =
+  exports.RARE_WEITSMANS_PRIZES_EVENT_ID =
+  exports.PLANET_PEPPA_PRIZES_EVENT_ID =
+  exports.LEGACY_CORE_PRIZES_EVENT_ID =
+  exports.EVENT_PRIZE_REVEAL_WINDOW_MS =
+  exports.EVENT_PRIZE_IDS =
+  exports.EVENT_PRIZE_CONFIGS =
+  exports.COMPRESSED_PRIZES_EVENT_ID =
+  exports.ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID =
+  exports.ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID =
+    void 0;
+const ids_js_1 = require("./ids.js");
+const solana_js_1 = require("./solana.js");
 const EVENT_PRIZE_REVEAL_WINDOW_MS = 3_600_000;
+exports.EVENT_PRIZE_REVEAL_WINDOW_MS = EVENT_PRIZE_REVEAL_WINDOW_MS;
 const LEGACY_CORE_PRIZES_EVENT_ID = "NN3eRzoZo80";
+exports.LEGACY_CORE_PRIZES_EVENT_ID = LEGACY_CORE_PRIZES_EVENT_ID;
 const COMPRESSED_PRIZES_EVENT_ID = "FRkdorMWaYW";
+exports.COMPRESSED_PRIZES_EVENT_ID = COMPRESSED_PRIZES_EVENT_ID;
 const ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID = "VOxalSrexcA";
+exports.ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID =
+  ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID;
 const ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID = "oXAceF6anag";
+exports.ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID =
+  ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID;
 const RARE_WEITSMANS_PRIZES_EVENT_ID = "RpPjMNyrJJa";
+exports.RARE_WEITSMANS_PRIZES_EVENT_ID = RARE_WEITSMANS_PRIZES_EVENT_ID;
 const PLANET_PEPPA_PRIZES_EVENT_ID = "z3oj52Iiime";
+exports.PLANET_PEPPA_PRIZES_EVENT_ID = PLANET_PEPPA_PRIZES_EVENT_ID;
 const SHELVES_PRIZES_EVENT_ID = "Q7uRdLXyVKF";
+exports.SHELVES_PRIZES_EVENT_ID = SHELVES_PRIZES_EVENT_ID;
 const VEHICLE_WAMMIN_PRIZES_EVENT_ID = "wjFa2d03Ciu";
+exports.VEHICLE_WAMMIN_PRIZES_EVENT_ID = VEHICLE_WAMMIN_PRIZES_EVENT_ID;
 const SWAG_PACK_PRIZES_EVENT_ID = "d9RtIQY8ONs";
+exports.SWAG_PACK_PRIZES_EVENT_ID = SWAG_PACK_PRIZES_EVENT_ID;
 const REVERIE_BANNERS_PRIZES_EVENT_ID = "PCTotuzfUPu";
+exports.REVERIE_BANNERS_PRIZES_EVENT_ID = REVERIE_BANNERS_PRIZES_EVENT_ID;
 const CORE_PRIZE_COLLECTION_ADDRESS =
   "2xF7dq3maFLud8FQUYAyLiWucdF7RePyzHJs7NkurkoD";
 const COMPRESSED_PRIZE_COLLECTION_ADDRESS =
@@ -68,7 +113,6 @@ const REVERIE_BANNERS_IMAGE_SIZE = Object.freeze({
   imageWidth: 1500,
   imageHeight: 500,
 });
-
 const createPrize = ({
   id,
   imageUrl,
@@ -90,7 +134,6 @@ const createPrize = ({
     claimAvailable,
     alt: `Prize collectible ${id}`,
   });
-
 const EVENT_PRIZE_CONFIGS = Object.freeze({
   [LEGACY_CORE_PRIZES_EVENT_ID]: Object.freeze({
     eventId: LEGACY_CORE_PRIZES_EVENT_ID,
@@ -423,16 +466,15 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
     ]),
   }),
 });
-
+exports.EVENT_PRIZE_CONFIGS = EVENT_PRIZE_CONFIGS;
 const EVENT_PRIZE_IDS = Object.freeze(
   Object.values(EVENT_PRIZE_CONFIGS).flatMap((config) =>
     config.prizes.map((prize) => prize.id),
   ),
 );
-
+exports.EVENT_PRIZE_IDS = EVENT_PRIZE_IDS;
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
 const getEventPrizeConfig = (eventId) => {
   const normalizedEventId = normalizeString(eventId);
   return Object.prototype.hasOwnProperty.call(
@@ -442,10 +484,10 @@ const getEventPrizeConfig = (eventId) => {
     ? EVENT_PRIZE_CONFIGS[normalizedEventId]
     : null;
 };
-
+exports.getEventPrizeConfig = getEventPrizeConfig;
 const getEventPrizeDefinitions = (eventId) =>
   getEventPrizeConfig(eventId)?.prizes || [];
-
+exports.getEventPrizeDefinitions = getEventPrizeDefinitions;
 const getEventPrizeDefinition = (eventId, prizeId) => {
   const normalizedPrizeId = normalizeString(prizeId);
   return (
@@ -454,18 +496,18 @@ const getEventPrizeDefinition = (eventId, prizeId) => {
     ) || null
   );
 };
-
+exports.getEventPrizeDefinition = getEventPrizeDefinition;
 const isEventPrizeEvent = (eventId) =>
   typeof eventId === "string" &&
   normalizeString(eventId) === eventId &&
   Boolean(getEventPrizeConfig(eventId));
-
+exports.isEventPrizeEvent = isEventPrizeEvent;
 const isEventPrizeId = (eventId, prizeId) =>
   isEventPrizeEvent(eventId) &&
   typeof prizeId === "string" &&
   normalizeString(prizeId) === prizeId &&
   Boolean(getEventPrizeDefinition(eventId, prizeId));
-
+exports.isEventPrizeId = isEventPrizeId;
 const isEventPrizeRevealOpen = (status, startAtMs, nowMs) =>
   status === "active" ||
   status === "ended" ||
@@ -474,10 +516,10 @@ const isEventPrizeRevealOpen = (status, startAtMs, nowMs) =>
     Number.isFinite(startAtMs) &&
     Number.isFinite(nowMs) &&
     startAtMs - nowMs < EVENT_PRIZE_REVEAL_WINDOW_MS);
-
+exports.isEventPrizeRevealOpen = isEventPrizeRevealOpen;
 const isEventPrizeStandard = (value) =>
   value === "core" || value === "compressed";
-
+exports.isEventPrizeStandard = isEventPrizeStandard;
 const isExactRecord = (value, keys) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return false;
@@ -488,7 +530,6 @@ const isExactRecord = (value, keys) => {
     actualKeys.every((key) => keys.includes(key))
   );
 };
-
 const isJsonValue = (value, depth = 0) => {
   if (depth > 64) return false;
   if (
@@ -505,21 +546,22 @@ const isJsonValue = (value, depth = 0) => {
   if (!value || typeof value !== "object") return false;
   return Object.values(value).every((entry) => isJsonValue(entry, depth + 1));
 };
-
 const isExactSafeRecordKey = (value) =>
-  typeof value === "string" && value.trim() === value && isSafeRecordKey(value);
-
+  typeof value === "string" &&
+  value.trim() === value &&
+  (0, ids_js_1.isSafeRecordKey)(value);
 const isToggleEventPrizeSelectionRequest = (value) =>
   isExactRecord(value, ["eventId", "prizeId"]) &&
   isEventPrizeId(value.eventId, value.prizeId);
-
+exports.isToggleEventPrizeSelectionRequest = isToggleEventPrizeSelectionRequest;
 const isToggleEventPrizeSelectionResponse = (value) =>
   isExactRecord(value, ["ok", "eventId", "selectedPrizeId"]) &&
   value.ok === true &&
   isEventPrizeEvent(value.eventId) &&
   (value.selectedPrizeId === null ||
     isEventPrizeId(value.eventId, value.selectedPrizeId));
-
+exports.isToggleEventPrizeSelectionResponse =
+  isToggleEventPrizeSelectionResponse;
 const isEventPrizeAssignmentWireRecord = (value) =>
   !!value &&
   typeof value === "object" &&
@@ -534,12 +576,12 @@ const isEventPrizeAssignmentWireRecord = (value) =>
   isExactSafeRecordKey(value.prizeId) &&
   Number.isSafeInteger(value.assignedAtMs) &&
   value.assignedAtMs >= 0;
-
+exports.isEventPrizeAssignmentWireRecord = isEventPrizeAssignmentWireRecord;
 const isEventPrizeAssignmentRecord = (value) =>
   isEventPrizeAssignmentWireRecord(value) &&
   isEventPrizeEvent(value.eventId) &&
   isEventPrizeId(value.eventId, value.prizeId);
-
+exports.isEventPrizeAssignmentRecord = isEventPrizeAssignmentRecord;
 const isProfileEventPrizesResponse = (value) => {
   if (
     !isExactRecord(value, ["ok", "profileId", "revision", "prizes"]) ||
@@ -564,28 +606,30 @@ const isProfileEventPrizesResponse = (value) => {
       assignment.profileId === value.profileId,
   );
 };
-
+exports.isProfileEventPrizesResponse = isProfileEventPrizesResponse;
 const isEventPrizeWithdrawalOperationId = (value) =>
   typeof value === "string" && /^epw_[0-9a-f]{64}$/.test(value);
-
+exports.isEventPrizeWithdrawalOperationId = isEventPrizeWithdrawalOperationId;
 const isEventPrizeWithdrawalRequest = (value) =>
   isExactRecord(value, ["eventId", "prizeId", "solanaAddress"]) &&
   isEventPrizeId(value.eventId, value.prizeId) &&
   typeof value.solanaAddress === "string" &&
-  isValidSolanaAddress(value.solanaAddress);
-
+  (0, solana_js_1.isValidSolanaAddress)(value.solanaAddress);
+exports.isEventPrizeWithdrawalRequest = isEventPrizeWithdrawalRequest;
 const isEventPrizeWithdrawalStatusRequest = (value) =>
   isExactRecord(value, ["eventId", "operationId", "prizeId"]) &&
   isEventPrizeId(value.eventId, value.prizeId) &&
   isEventPrizeWithdrawalOperationId(value.operationId);
-
+exports.isEventPrizeWithdrawalStatusRequest =
+  isEventPrizeWithdrawalStatusRequest;
 const isEventPrizeWithdrawalProcessingResponse = (value) =>
   isExactRecord(value, ["eventId", "ok", "operationId", "prizeId", "status"]) &&
   value.ok === true &&
   value.status === "processing" &&
   isEventPrizeId(value.eventId, value.prizeId) &&
   isEventPrizeWithdrawalOperationId(value.operationId);
-
+exports.isEventPrizeWithdrawalProcessingResponse =
+  isEventPrizeWithdrawalProcessingResponse;
 const isEventPrizeWithdrawalCompletedResponse = (value) =>
   isExactRecord(value, [
     "assetAddress",
@@ -602,47 +646,15 @@ const isEventPrizeWithdrawalCompletedResponse = (value) =>
   isEventPrizeId(value.eventId, value.prizeId) &&
   isEventPrizeWithdrawalOperationId(value.operationId) &&
   typeof value.assetAddress === "string" &&
-  isValidSolanaAddress(value.assetAddress) &&
+  (0, solana_js_1.isValidSolanaAddress)(value.assetAddress) &&
   typeof value.recipientAddress === "string" &&
-  isValidSolanaAddress(value.recipientAddress) &&
+  (0, solana_js_1.isValidSolanaAddress)(value.recipientAddress) &&
   typeof value.transactionSignature === "string" &&
   value.transactionSignature.trim() === value.transactionSignature &&
   value.transactionSignature.length > 0;
-
+exports.isEventPrizeWithdrawalCompletedResponse =
+  isEventPrizeWithdrawalCompletedResponse;
 const isEventPrizeWithdrawalResponse = (value) =>
   isEventPrizeWithdrawalProcessingResponse(value) ||
   isEventPrizeWithdrawalCompletedResponse(value);
-
-module.exports = {
-  ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID,
-  ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID,
-  COMPRESSED_PRIZES_EVENT_ID,
-  EVENT_PRIZE_CONFIGS,
-  EVENT_PRIZE_IDS,
-  EVENT_PRIZE_REVEAL_WINDOW_MS,
-  LEGACY_CORE_PRIZES_EVENT_ID,
-  PLANET_PEPPA_PRIZES_EVENT_ID,
-  RARE_WEITSMANS_PRIZES_EVENT_ID,
-  REVERIE_BANNERS_PRIZES_EVENT_ID,
-  SHELVES_PRIZES_EVENT_ID,
-  SWAG_PACK_PRIZES_EVENT_ID,
-  VEHICLE_WAMMIN_PRIZES_EVENT_ID,
-  getEventPrizeConfig,
-  getEventPrizeDefinition,
-  getEventPrizeDefinitions,
-  isEventPrizeAssignmentRecord,
-  isEventPrizeAssignmentWireRecord,
-  isEventPrizeEvent,
-  isEventPrizeId,
-  isEventPrizeRevealOpen,
-  isEventPrizeStandard,
-  isEventPrizeWithdrawalCompletedResponse,
-  isEventPrizeWithdrawalOperationId,
-  isEventPrizeWithdrawalProcessingResponse,
-  isEventPrizeWithdrawalRequest,
-  isEventPrizeWithdrawalResponse,
-  isEventPrizeWithdrawalStatusRequest,
-  isProfileEventPrizesResponse,
-  isToggleEventPrizeSelectionRequest,
-  isToggleEventPrizeSelectionResponse,
-};
+exports.isEventPrizeWithdrawalResponse = isEventPrizeWithdrawalResponse;

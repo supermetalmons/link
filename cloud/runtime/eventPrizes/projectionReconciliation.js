@@ -1,14 +1,14 @@
+// Generated from src/eventPrizes/projectionReconciliation.ts. Run npm run generate:runtime.
 "use strict";
-
-const { EventPrizeWithdrawalError: HttpsError } = require("./errors");
-const {
-  buildWithdrawalCompletion,
-  getWithdrawalProjectionProfileIds,
-} = require("../eventPrizeWithdrawalState");
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.reconcileCompletedWithdrawalProjections =
+  exports.finalizeWithdrawal =
+  exports.attemptCompletedWithdrawalProjectionReconciliation =
+    void 0;
+const errors_js_1 = require("./errors.js");
+const eventPrizeWithdrawalState_js_1 = require("../eventPrizeWithdrawalState.js");
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
 const reconcileCompletedWithdrawalProjections = async (
   { withdrawal, profileIds, eventId, prizeId },
   dependencies,
@@ -17,14 +17,16 @@ const reconcileCompletedWithdrawalProjections = async (
     removeMatchingProfileEventPrizeAssignment,
     resolveCanonicalProfilePath,
   } = dependencies;
-  const knownProfileIds = getWithdrawalProjectionProfileIds({
+  const knownProfileIds = (0,
+  eventPrizeWithdrawalState_js_1.getWithdrawalProjectionProfileIds)({
     withdrawal,
     profileIds,
   });
   const canonicalProfilePaths = await Promise.all(
     knownProfileIds.map(resolveCanonicalProfilePath),
   );
-  const projectionProfileIds = getWithdrawalProjectionProfileIds({
+  const projectionProfileIds = (0,
+  eventPrizeWithdrawalState_js_1.getWithdrawalProjectionProfileIds)({
     withdrawal,
     profileIds: knownProfileIds.concat(canonicalProfilePaths.flat()),
   });
@@ -38,7 +40,8 @@ const reconcileCompletedWithdrawalProjections = async (
     ),
   );
 };
-
+exports.reconcileCompletedWithdrawalProjections =
+  reconcileCompletedWithdrawalProjections;
 const attemptCompletedWithdrawalProjectionReconciliation = async (
   args,
   dependencies,
@@ -56,7 +59,8 @@ const attemptCompletedWithdrawalProjectionReconciliation = async (
     );
   }
 };
-
+exports.attemptCompletedWithdrawalProjectionReconciliation =
+  attemptCompletedWithdrawalProjectionReconciliation;
 const finalizeWithdrawal = async (
   {
     withdrawal,
@@ -72,7 +76,7 @@ const finalizeWithdrawal = async (
   const { withdrawals, readProfileByLoginUid } = dependencies;
   const requesterUid = normalizeString(withdrawal.requesterUid);
   if (!requesterUid) {
-    throw new HttpsError(
+    throw new errors_js_1.EventPrizeWithdrawalError(
       "failed-precondition",
       "The prize profile could not be verified.",
     );
@@ -96,14 +100,19 @@ const finalizeWithdrawal = async (
     );
   }
   if (!canonicalProfileId) {
-    throw new HttpsError("internal", "The prize profile is unavailable.");
+    throw new errors_js_1.EventPrizeWithdrawalError(
+      "internal",
+      "The prize profile is unavailable.",
+    );
   }
-  const projectionProfileIds = getWithdrawalProjectionProfileIds({
+  const projectionProfileIds = (0,
+  eventPrizeWithdrawalState_js_1.getWithdrawalProjectionProfileIds)({
     withdrawal,
     profileIds: [profileId, canonicalProfileId],
   });
   const completedAtMs = (dependencies.now || Date.now)();
-  const completed = buildWithdrawalCompletion({
+  const completed = (0,
+  eventPrizeWithdrawalState_js_1.buildWithdrawalCompletion)({
     withdrawal,
     profileId: canonicalProfileId,
     eventId,
@@ -125,9 +134,4 @@ const finalizeWithdrawal = async (
   );
   return completed;
 };
-
-module.exports = {
-  attemptCompletedWithdrawalProjectionReconciliation,
-  finalizeWithdrawal,
-  reconcileCompletedWithdrawalProjections,
-};
+exports.finalizeWithdrawal = finalizeWithdrawal;

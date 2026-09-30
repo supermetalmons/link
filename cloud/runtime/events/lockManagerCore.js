@@ -1,9 +1,19 @@
+// Generated from src/events/lockManagerCore.ts. Run npm run generate:runtime.
 "use strict";
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.resolveLockKind =
+  exports.getOwnershipDecision =
+  exports.createEventLockManagerCore =
+  exports.EVENT_LOCK_TTL_MS =
+  exports.EVENT_LOCK_REFRESH_INTERVAL_MS =
+  exports.EVENT_LOCK_ROOT =
+    void 0;
 const EVENT_LOCK_ROOT = "eventLocks";
-const EVENT_LOCK_TTL_MS = 30 * 1000;
-const EVENT_LOCK_REFRESH_INTERVAL_MS = 10 * 1000;
-
+exports.EVENT_LOCK_ROOT = EVENT_LOCK_ROOT;
+const EVENT_LOCK_TTL_MS = 30_000;
+exports.EVENT_LOCK_TTL_MS = EVENT_LOCK_TTL_MS;
+const EVENT_LOCK_REFRESH_INTERVAL_MS = 10_000;
+exports.EVENT_LOCK_REFRESH_INTERVAL_MS = EVENT_LOCK_REFRESH_INTERVAL_MS;
 const LOCK_ROOTS = {
   event: "eventLocks",
   "telegram-projection": "eventTelegramProjectionLocks",
@@ -15,14 +25,12 @@ const resolveLockKind = (value = "event") => {
     throw new TypeError("invalid event lease kind");
   return value;
 };
-
+exports.resolveLockKind = resolveLockKind;
 const toFiniteInteger = (value, fallback = 0) => {
   const numeric = typeof value === "number" ? value : Number(value);
   return Number.isFinite(numeric) ? Math.floor(numeric) : fallback;
 };
-
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
 const getOwnershipDecision = (current, lockHandle, nowMs) => {
   if (!current || typeof current !== "object") {
     return "missing";
@@ -38,7 +46,7 @@ const getOwnershipDecision = (current, lockHandle, nowMs) => {
   }
   return "owned";
 };
-
+exports.getOwnershipDecision = getOwnershipDecision;
 const createEventLockManagerCore = (dependencies) => {
   if (!dependencies || typeof dependencies.transactEventLease !== "function") {
     throw new TypeError("transactEventLease is required");
@@ -58,7 +66,6 @@ const createEventLockManagerCore = (dependencies) => {
   const clearIntervalFn = dependencies.clearInterval || clearInterval;
   const logger = dependencies.logger || console;
   const includeLegacyOwnerId = dependencies.includeLegacyOwnerId === true;
-
   const acquireEventLock = async (eventId, ownerUid) => {
     const key = { kind: lockKind, id: eventId };
     const lockId = createLockId();
@@ -96,7 +103,6 @@ const createEventLockManagerCore = (dependencies) => {
     }
     return { eventId, key, lockId, ownerUid, lockRoot };
   };
-
   const getEventLockGuard = (lockHandle) => {
     if (
       !lockHandle ||
@@ -117,7 +123,6 @@ const createEventLockManagerCore = (dependencies) => {
       ownerUid: lockHandle.ownerUid,
     };
   };
-
   const acquireEventLockWithRetry = async (eventId, ownerUid, options = {}) => {
     const attempts = Math.max(1, toFiniteInteger(options.attempts, 1));
     const delayMs = Math.max(25, toFiniteInteger(options.delayMs, 100));
@@ -132,7 +137,6 @@ const createEventLockManagerCore = (dependencies) => {
     }
     return null;
   };
-
   const refreshEventLock = async (lockHandle) => {
     if (!lockHandle) {
       return false;
@@ -162,9 +166,7 @@ const createEventLockManagerCore = (dependencies) => {
       getOwnershipDecision(result.value, lockHandle, now()) === "owned"
     );
   };
-
   const isEventLockStillOwned = (lockHandle) => refreshEventLock(lockHandle);
-
   const startEventLockHeartbeat = (lockHandle) => {
     if (!lockHandle) {
       return () => {};
@@ -191,7 +193,6 @@ const createEventLockManagerCore = (dependencies) => {
       clearIntervalFn(heartbeatInterval);
     };
   };
-
   const releaseEventLock = async (lockHandle) => {
     if (!lockHandle) {
       return false;
@@ -220,7 +221,6 @@ const createEventLockManagerCore = (dependencies) => {
       return false;
     }
   };
-
   return {
     acquireEventLock,
     acquireEventLockWithRetry,
@@ -231,12 +231,4 @@ const createEventLockManagerCore = (dependencies) => {
     startEventLockHeartbeat,
   };
 };
-
-module.exports = {
-  EVENT_LOCK_ROOT,
-  EVENT_LOCK_REFRESH_INTERVAL_MS,
-  EVENT_LOCK_TTL_MS,
-  createEventLockManagerCore,
-  getOwnershipDecision,
-  resolveLockKind,
-};
+exports.createEventLockManagerCore = createEventLockManagerCore;

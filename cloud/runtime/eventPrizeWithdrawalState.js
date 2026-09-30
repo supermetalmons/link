@@ -1,25 +1,78 @@
+// Generated from src/eventPrizeWithdrawalState.ts. Run npm run generate:runtime.
 "use strict";
-
-const {
-  filterProjectableEventPrizeAssignments,
-  getCompletedEventPrizeProjectionCleanupRequest,
-  getEventPrizeAssetAddress,
-  getEventPrizeAssetStandard,
-  isCompletedEventPrizeWithdrawal,
-  isMatchingProfileEventPrizeAssignment,
-  isWithdrawalRecordForPrize,
-} = require("./eventPrizeProjectionState");
-const { isValidSolanaAddress } = require("@mons/shared/solana");
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.normalizeSolanaAddress =
+  exports.isWithdrawalRecordOwnedByRequest =
+  exports.isWithdrawalRecordForPrize =
+  exports.isMatchingProfileEventPrizeAssignment =
+  exports.isCompletedEventPrizeWithdrawal =
+  exports.getWithdrawalProjectionProfileIds =
+  exports.getEventPrizeAssetStandard =
+  exports.getEventPrizeAssetAddress =
+  exports.getCompletedEventPrizeProjectionCleanupRequest =
+  exports.filterProjectableEventPrizeAssignments =
+  exports.decideWithdrawalClaim =
+  exports.decodeAdminSecretKey =
+  exports.buildWithdrawalCompletion =
+  exports.WITHDRAWAL_LEASE_MS =
+  exports.EVENT_PRIZE_ADMIN_WALLET =
+    void 0;
+const eventPrizeProjectionState_js_1 = require("./eventPrizeProjectionState.js");
+Object.defineProperty(exports, "filterProjectableEventPrizeAssignments", {
+  enumerable: true,
+  get: function () {
+    return eventPrizeProjectionState_js_1.filterProjectableEventPrizeAssignments;
+  },
+});
+Object.defineProperty(
+  exports,
+  "getCompletedEventPrizeProjectionCleanupRequest",
+  {
+    enumerable: true,
+    get: function () {
+      return eventPrizeProjectionState_js_1.getCompletedEventPrizeProjectionCleanupRequest;
+    },
+  },
+);
+Object.defineProperty(exports, "getEventPrizeAssetAddress", {
+  enumerable: true,
+  get: function () {
+    return eventPrizeProjectionState_js_1.getEventPrizeAssetAddress;
+  },
+});
+Object.defineProperty(exports, "getEventPrizeAssetStandard", {
+  enumerable: true,
+  get: function () {
+    return eventPrizeProjectionState_js_1.getEventPrizeAssetStandard;
+  },
+});
+Object.defineProperty(exports, "isCompletedEventPrizeWithdrawal", {
+  enumerable: true,
+  get: function () {
+    return eventPrizeProjectionState_js_1.isCompletedEventPrizeWithdrawal;
+  },
+});
+Object.defineProperty(exports, "isMatchingProfileEventPrizeAssignment", {
+  enumerable: true,
+  get: function () {
+    return eventPrizeProjectionState_js_1.isMatchingProfileEventPrizeAssignment;
+  },
+});
+Object.defineProperty(exports, "isWithdrawalRecordForPrize", {
+  enumerable: true,
+  get: function () {
+    return eventPrizeProjectionState_js_1.isWithdrawalRecordForPrize;
+  },
+});
+const solana_1 = require("@mons/shared/solana");
 const EVENT_PRIZE_ADMIN_WALLET = "Ay1mgqJr6WmihsSYdMZ1dkHL5r25N7VhCGk7NpCJcPGi";
+exports.EVENT_PRIZE_ADMIN_WALLET = EVENT_PRIZE_ADMIN_WALLET;
 const WITHDRAWAL_LEASE_MS = 5 * 60 * 1000;
-
+exports.WITHDRAWAL_LEASE_MS = WITHDRAWAL_LEASE_MS;
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
 const BASE58_ALPHABET =
   "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-
 const decodeBase58Bytes = (value) => {
   const encoded = normalizeString(value);
   if (!encoded) return null;
@@ -47,17 +100,16 @@ const decodeBase58Bytes = (value) => {
   }
   return Uint8Array.from(bytes.reverse());
 };
-
 const normalizeSolanaAddress = (value) => {
   const address = normalizeString(value);
-  return isValidSolanaAddress(address) ? address : "";
+  return (0, solana_1.isValidSolanaAddress)(address) ? address : "";
 };
-
+exports.normalizeSolanaAddress = normalizeSolanaAddress;
 const decodeAdminSecretKey = (value) => {
   const bytes = decodeBase58Bytes(value);
   return bytes?.length === 64 ? bytes : null;
 };
-
+exports.decodeAdminSecretKey = decodeAdminSecretKey;
 const isWithdrawalRecordOwnedByRequest = (
   value,
   profileId,
@@ -87,7 +139,7 @@ const isWithdrawalRecordOwnedByRequest = (
       normalizeString(value.requesterUid) === normalizedRequesterUid)
   );
 };
-
+exports.isWithdrawalRecordOwnedByRequest = isWithdrawalRecordOwnedByRequest;
 const getWithdrawalProjectionProfileIds = ({ withdrawal, profileIds }) =>
   Array.from(
     new Set(
@@ -97,7 +149,7 @@ const getWithdrawalProjectionProfileIds = ({ withdrawal, profileIds }) =>
         .filter(Boolean),
     ),
   );
-
+exports.getWithdrawalProjectionProfileIds = getWithdrawalProjectionProfileIds;
 const buildWithdrawalCompletion = ({
   withdrawal,
   profileId,
@@ -116,7 +168,11 @@ const buildWithdrawalCompletion = ({
     eventId,
     prizeId,
     assetAddress,
-    assetStandard: getEventPrizeAssetStandard(eventId, prizeId),
+    assetStandard: (0,
+    eventPrizeProjectionState_js_1.getEventPrizeAssetStandard)(
+      eventId,
+      prizeId,
+    ),
     profileId,
     entitledProfileId,
     place: Number(withdrawal.place),
@@ -131,7 +187,7 @@ const buildWithdrawalCompletion = ({
   };
   return completed;
 };
-
+exports.buildWithdrawalCompletion = buildWithdrawalCompletion;
 const decideWithdrawalClaim = ({
   current,
   eventId,
@@ -151,7 +207,8 @@ const decideWithdrawalClaim = ({
   const existingRecipientAddress = normalizeString(existing.recipientAddress);
   const existingLeaseId = normalizeString(existing.leaseId);
   const leaseExpiresAtMs = Number(existing.leaseExpiresAtMs) || 0;
-  const recordMatchesPrize = isWithdrawalRecordForPrize(
+  const recordMatchesPrize = (0,
+  eventPrizeProjectionState_js_1.isWithdrawalRecordForPrize)(
     existing,
     eventId,
     prizeId,
@@ -164,7 +221,6 @@ const decideWithdrawalClaim = ({
     canonicalRecordProfileId,
     canonicalRecordSourceProfileId,
   );
-
   if (existing.status === "completed") {
     return recordMatchesPrize && recordOwnedByRequest
       ? { kind: "completed", value: existing }
@@ -196,9 +252,9 @@ const decideWithdrawalClaim = ({
       return { kind: "busy", value: existing };
     }
   }
-
   const preserveSubmitted = existing.status === "submitted";
-  const assetStandard = getEventPrizeAssetStandard(eventId, prizeId);
+  const assetStandard = (0,
+  eventPrizeProjectionState_js_1.getEventPrizeAssetStandard)(eventId, prizeId);
   return {
     kind: "acquired",
     value: {
@@ -225,21 +281,4 @@ const decideWithdrawalClaim = ({
     },
   };
 };
-
-module.exports = {
-  EVENT_PRIZE_ADMIN_WALLET,
-  WITHDRAWAL_LEASE_MS,
-  buildWithdrawalCompletion,
-  decodeAdminSecretKey,
-  decideWithdrawalClaim,
-  filterProjectableEventPrizeAssignments,
-  getCompletedEventPrizeProjectionCleanupRequest,
-  getEventPrizeAssetAddress,
-  getEventPrizeAssetStandard,
-  getWithdrawalProjectionProfileIds,
-  isCompletedEventPrizeWithdrawal,
-  isMatchingProfileEventPrizeAssignment,
-  isWithdrawalRecordForPrize,
-  isWithdrawalRecordOwnedByRequest,
-  normalizeSolanaAddress,
-};
+exports.decideWithdrawalClaim = decideWithdrawalClaim;

@@ -1,18 +1,23 @@
+// Generated from src/events/lockManagerCore.ts. Run npm run generate:runtime.
 import type {
   EventLeaseKey,
   EventLeaseKind,
   EventLeaseRecord,
 } from "../eventLeases.js";
 export type EventLockTransactionDecision =
-  | { commit: false; decision?: string }
-  | { value: EventLeaseRecord | null; decision?: string };
-
+  | {
+      commit: false;
+      decision?: string;
+    }
+  | {
+      value: EventLeaseRecord | null;
+      decision?: string;
+    };
 export type EventLockTransactionResult = {
   committed: boolean;
   decision?: string;
   value: EventLeaseRecord | null;
 };
-
 export type EventLockHandle = {
   eventId: string;
   key: EventLeaseKey;
@@ -20,7 +25,6 @@ export type EventLockHandle = {
   ownerUid: string;
   lockRoot: string;
 };
-
 export type EventLockManager = {
   acquireEventLock(
     eventId: string,
@@ -29,7 +33,10 @@ export type EventLockManager = {
   acquireEventLockWithRetry(
     eventId: string,
     ownerUid: string,
-    options?: { attempts?: number; delayMs?: number },
+    options?: {
+      attempts?: number;
+      delayMs?: number;
+    },
   ): Promise<EventLockHandle | null>;
   getEventLockGuard(handle: EventLockHandle): {
     lockRoot: string;
@@ -42,12 +49,7 @@ export type EventLockManager = {
   releaseEventLock(handle: EventLockHandle): Promise<boolean>;
   startEventLockHeartbeat(handle: EventLockHandle): () => void;
 };
-
-export const EVENT_LOCK_ROOT: "eventLocks";
-export const EVENT_LOCK_REFRESH_INTERVAL_MS: 10000;
-export const EVENT_LOCK_TTL_MS: 30000;
-
-export function createEventLockManagerCore(dependencies: {
+type Signature_createEventLockManagerCore = (dependencies: {
   transactEventLease(
     key: EventLeaseKey,
     updater: (current: EventLeaseRecord | null) => EventLockTransactionDecision,
@@ -64,4 +66,22 @@ export function createEventLockManagerCore(dependencies: {
   setInterval?: typeof globalThis.setInterval;
   clearInterval?: typeof globalThis.clearInterval;
   logger?: Pick<Console, "error">;
-}): EventLockManager;
+}) => EventLockManager;
+declare const EVENT_LOCK_ROOT = "eventLocks";
+declare const EVENT_LOCK_TTL_MS = 30000;
+declare const EVENT_LOCK_REFRESH_INTERVAL_MS = 10000;
+declare const resolveLockKind: (value?: EventLeaseKind) => EventLeaseKind;
+declare const getOwnershipDecision: (
+  current: EventLeaseRecord | null,
+  lockHandle: EventLockHandle,
+  nowMs: number,
+) => "missing" | "foreign" | "expired" | "owned";
+declare const createEventLockManagerCore: Signature_createEventLockManagerCore;
+export {
+  EVENT_LOCK_ROOT,
+  EVENT_LOCK_REFRESH_INTERVAL_MS,
+  EVENT_LOCK_TTL_MS,
+  createEventLockManagerCore,
+  getOwnershipDecision,
+  resolveLockKind,
+};

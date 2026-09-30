@@ -76,7 +76,7 @@ export type EventParticipationDependencies = {
     event: EventRecord;
     nowMs: number;
     ownershipSnapshot?: EventOwnershipSnapshot | null;
-    prizeSelections?: unknown;
+    prizeSelections?: EventSnapshot["prizeSelections"];
   }) => Promise<EventDueTransition>;
   lockManager?: EventLockManager;
   now?: () => number;
@@ -552,7 +552,7 @@ export async function joinEvent(
         directParticipantParticipation(event, identity.uid),
       );
       let ownershipSnapshot: EventOwnershipSnapshot | null = null;
-      let prizeSelections: unknown;
+      let prizeSelections: EventSnapshot["prizeSelections"] | undefined;
       let profile: GameplayProfile | null = null;
       let existingParticipantProfileId = directParticipation.profileId || "";
       if (

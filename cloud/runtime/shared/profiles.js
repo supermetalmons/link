@@ -1,5 +1,25 @@
-const { MATERIAL_KEYS, isMiningSnapshot } = require("./mining");
-
+// Generated from src/shared/profiles.ts. Run npm run generate:runtime.
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.cropAddress =
+  exports.isResolveProfileIdResponse =
+  exports.isResolveProfileIdRequest =
+  exports.isProfileLookupResponse =
+  exports.isProfileLookupRequest =
+  exports.isProfileCustomizationUpdateResponse =
+  exports.isProfileCustomizationUpdateRequest =
+  exports.isPlayerProfile =
+  exports.isLeaderboardReadType =
+  exports.isLeaderboardReadResponse =
+  exports.isLeaderboardReadRequest =
+  exports.normalizeProfileEmojiId =
+  exports.getProfileFallbackEmojiId =
+  exports.PROFILE_FALLBACK_EMOJI_COUNT =
+  exports.PROFILE_STICKER_CATALOG =
+  exports.PROFILE_CUSTOMIZATION_FIELDS =
+  exports.LEADERBOARD_READ_TYPES =
+    void 0;
+const mining_js_1 = require("./mining.js");
 const PROFILE_KEYS = Object.freeze([
   "id",
   "nonce",
@@ -34,11 +54,13 @@ const REQUIRED_PROFILE_KEYS = Object.freeze([
   "mining",
 ]);
 const PROFILE_FALLBACK_EMOJI_COUNT = 155;
+exports.PROFILE_FALLBACK_EMOJI_COUNT = PROFILE_FALLBACK_EMOJI_COUNT;
 const LEADERBOARD_READ_TYPES = Object.freeze([
   "rating",
   "mp",
-  ...MATERIAL_KEYS,
+  ...mining_js_1.MATERIAL_KEYS,
 ]);
+exports.LEADERBOARD_READ_TYPES = LEADERBOARD_READ_TYPES;
 const PROFILE_CUSTOMIZATION_FIELDS = Object.freeze([
   "emojiAndAura",
   "cardBackgroundId",
@@ -49,6 +71,7 @@ const PROFILE_CUSTOMIZATION_FIELDS = Object.freeze([
   "completedProblems",
   "tutorialCompleted",
 ]);
+exports.PROFILE_CUSTOMIZATION_FIELDS = PROFILE_CUSTOMIZATION_FIELDS;
 const PROFILE_STICKER_CATALOG = Object.freeze({
   "big-mon-top-right": Object.freeze([
     "applecreme",
@@ -85,10 +108,9 @@ const PROFILE_STICKER_CATALOG = Object.freeze({
   "mini-logo": Object.freeze(["bomb", "mana", "potion", "super-mana"]),
   "type-logo": Object.freeze(["angel", "demon", "drainer", "mystic", "spirit"]),
 });
-
+exports.PROFILE_STICKER_CATALOG = PROFILE_STICKER_CATALOG;
 const isRecord = (value) =>
   typeof value === "object" && value !== null && !Array.isArray(value);
-
 const hasExactKeys = (value, expectedKeys) => {
   const actualKeys = Object.keys(value);
   return (
@@ -96,19 +118,14 @@ const hasExactKeys = (value, expectedKeys) => {
     actualKeys.every((key) => expectedKeys.includes(key))
   );
 };
-
 const hasOnlyKeys = (value, allowedKeys) =>
   Object.keys(value).every((key) => allowedKeys.includes(key));
-
 const isOptionalFiniteNumber = (value) =>
   value === undefined || (typeof value === "number" && Number.isFinite(value));
-
 const isOptionalString = (value) =>
   value === undefined || typeof value === "string";
-
 const isOptionalNullableString = (value) =>
   value === undefined || value === null || typeof value === "string";
-
 const isPlayerProfile = (value) =>
   isRecord(value) &&
   hasOnlyKeys(value, PROFILE_KEYS) &&
@@ -139,49 +156,49 @@ const isPlayerProfile = (value) =>
       value.completedProblemIds.every((item) => typeof item === "string"))) &&
   (value.isTutorialCompleted === undefined ||
     typeof value.isTutorialCompleted === "boolean") &&
-  isMiningSnapshot(value.mining);
-
+  (0, mining_js_1.isMiningSnapshot)(value.mining);
+exports.isPlayerProfile = isPlayerProfile;
 const isProfileLookupRequest = (value) =>
   isRecord(value) &&
   hasExactKeys(value, ["kind", "id"]) &&
   (value.kind === "login" || value.kind === "profile") &&
   typeof value.id === "string" &&
   value.id.trim() !== "";
-
+exports.isProfileLookupRequest = isProfileLookupRequest;
 const isProfileLookupResponse = (value) =>
   isRecord(value) &&
   hasExactKeys(value, ["ok", "profile"]) &&
   value.ok === true &&
   (value.profile === null || isPlayerProfile(value.profile));
-
+exports.isProfileLookupResponse = isProfileLookupResponse;
 const isResolveProfileIdRequest = (value) =>
   isRecord(value) &&
   hasExactKeys(value, ["profileId"]) &&
   typeof value.profileId === "string" &&
   value.profileId.trim() !== "";
-
+exports.isResolveProfileIdRequest = isResolveProfileIdRequest;
 const isResolveProfileIdResponse = (value) =>
   isRecord(value) &&
   hasExactKeys(value, ["ok", "profileId"]) &&
   value.ok === true &&
   (value.profileId === null ||
     (typeof value.profileId === "string" && value.profileId.trim() !== ""));
-
+exports.isResolveProfileIdResponse = isResolveProfileIdResponse;
 const isLeaderboardReadType = (value) =>
   typeof value === "string" && LEADERBOARD_READ_TYPES.includes(value);
-
+exports.isLeaderboardReadType = isLeaderboardReadType;
 const isLeaderboardReadRequest = (value) =>
   isRecord(value) &&
   hasExactKeys(value, ["type"]) &&
   isLeaderboardReadType(value.type);
-
+exports.isLeaderboardReadRequest = isLeaderboardReadRequest;
 const isLeaderboardReadResponse = (value) =>
   isRecord(value) &&
   hasExactKeys(value, ["ok", "profiles"]) &&
   value.ok === true &&
   Array.isArray(value.profiles) &&
   value.profiles.every(isPlayerProfile);
-
+exports.isLeaderboardReadResponse = isLeaderboardReadResponse;
 const isProfileCustomizationUpdateRequest = (value) => {
   if (!isRecord(value) || !hasExactKeys(value, ["field", "value"])) {
     return false;
@@ -259,10 +276,12 @@ const isProfileCustomizationUpdateRequest = (value) => {
       return false;
   }
 };
-
+exports.isProfileCustomizationUpdateRequest =
+  isProfileCustomizationUpdateRequest;
 const isProfileCustomizationUpdateResponse = (value) =>
   isRecord(value) && hasExactKeys(value, ["ok"]) && value.ok === true;
-
+exports.isProfileCustomizationUpdateResponse =
+  isProfileCustomizationUpdateResponse;
 const getProfileFallbackEmojiId = (profileId) => {
   let hash = 0;
   for (let index = 0; index < profileId.length; index += 1) {
@@ -270,7 +289,7 @@ const getProfileFallbackEmojiId = (profileId) => {
   }
   return `${(hash % PROFILE_FALLBACK_EMOJI_COUNT) + 1}`;
 };
-
+exports.getProfileFallbackEmojiId = getProfileFallbackEmojiId;
 const normalizeProfileEmojiId = (value, fallback = 1) => {
   const parsed =
     typeof value === "number" ||
@@ -279,26 +298,7 @@ const normalizeProfileEmojiId = (value, fallback = 1) => {
       : NaN;
   return Number.isFinite(parsed) ? Math.floor(parsed) : fallback;
 };
-
+exports.normalizeProfileEmojiId = normalizeProfileEmojiId;
 const cropAddress = (address) =>
   `${address.slice(0, 4)}...${address.slice(-4)}`;
-
-module.exports = {
-  LEADERBOARD_READ_TYPES,
-  PROFILE_CUSTOMIZATION_FIELDS,
-  PROFILE_STICKER_CATALOG,
-  PROFILE_FALLBACK_EMOJI_COUNT,
-  getProfileFallbackEmojiId,
-  normalizeProfileEmojiId,
-  isLeaderboardReadRequest,
-  isLeaderboardReadResponse,
-  isLeaderboardReadType,
-  isPlayerProfile,
-  isProfileCustomizationUpdateRequest,
-  isProfileCustomizationUpdateResponse,
-  isProfileLookupRequest,
-  isProfileLookupResponse,
-  isResolveProfileIdRequest,
-  isResolveProfileIdResponse,
-  cropAddress,
-};
+exports.cropAddress = cropAddress;

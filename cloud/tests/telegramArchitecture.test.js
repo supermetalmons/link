@@ -8,9 +8,10 @@ const test = require("node:test");
 const cloudRoot = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(cloudRoot, "..");
 const runtimeRoot = path.join(cloudRoot, "runtime");
+const runtimeSourceRoot = path.join(runtimeRoot, "src");
 const adminRoot = path.join(cloudRoot, "admin");
 const telegramClientPaths = new Set([
-  path.join(runtimeRoot, "telegram", "client.js"),
+  path.join(runtimeSourceRoot, "telegram", "client.ts"),
   path.join(
     repositoryRoot,
     "cloud",
@@ -62,16 +63,34 @@ const ignoredDirectories = new Set([
   "node_modules",
 ]);
 
-const listJavaScriptFiles = (directory) =>
+const listDomainSourceFiles = (directory) =>
   fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const entryPath = path.join(directory, entry.name);
     if (entry.isDirectory()) {
       return entry.name === "node_modules"
         ? []
-        : listJavaScriptFiles(entryPath);
+        : listDomainSourceFiles(entryPath);
     }
-    return entry.isFile() && entry.name.endsWith(".js") ? [entryPath] : [];
+    return entry.isFile() && /\.(?:js|ts)$/.test(entry.name) ? [entryPath] : [];
   });
+
+const isRuntimeOutput = (filePath) => {
+  const relativePath = path.relative(runtimeRoot, filePath);
+  if (
+    relativePath.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativePath) ||
+    relativePath.startsWith(`src${path.sep}`) ||
+    !/(?:\.js|\.d\.ts)$/.test(relativePath)
+  ) {
+    return false;
+  }
+  return fs.existsSync(
+    path.join(
+      runtimeSourceRoot,
+      relativePath.replace(/(?:\.js|\.d\.ts)$/, ".ts"),
+    ),
+  );
+};
 
 const listRepositorySourceFiles = (directory) =>
   fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -83,6 +102,7 @@ const listRepositorySourceFiles = (directory) =>
     }
     return entry.isFile() &&
       !entry.name.includes(".test.") &&
+      !isRuntimeOutput(entryPath) &&
       sourceExtensions.has(path.extname(entry.name))
       ? [entryPath]
       : [];
@@ -116,8 +136,8 @@ test("legacy Telegram transport helpers stay removed", () => {
   ];
   const violations = [];
   for (const filePath of [
-    ...listJavaScriptFiles(runtimeRoot),
-    ...listJavaScriptFiles(adminRoot),
+    ...listDomainSourceFiles(runtimeSourceRoot),
+    ...listDomainSourceFiles(adminRoot),
   ]) {
     const source = fs.readFileSync(filePath, "utf8");
     for (const symbol of legacySymbols) {
@@ -136,7 +156,7 @@ test("a blocked Telegram client cannot delay latency-critical domain handlers", 
       path.join(repositoryRoot, "cloud/workers/api/src/automatch"),
     ),
     path.join(repositoryRoot, "cloud/workers/api/src/ratingUpdate.ts"),
-    path.join(runtimeRoot, "events.js"),
+    path.join(runtimeSourceRoot, "events.ts"),
   ];
   for (const filePath of domainFiles) {
     const source = fs.readFileSync(filePath, "utf8");
@@ -168,7 +188,7 @@ test("rating responses do not enqueue event progress tasks", () => {
 
 test("event Telegram projection uses a dedicated lock without changing domain locks", () => {
   const eventsSource = fs.readFileSync(
-    path.join(runtimeRoot, "events.js"),
+    path.join(runtimeSourceRoot, "events.ts"),
     "utf8",
   );
   assert.equal(eventsSource.includes("eventTelegramProjectionLocks"), false);
@@ -187,7 +207,7 @@ test("event Telegram projection uses a dedicated lock without changing domain lo
     true,
   );
   const coreSource = fs.readFileSync(
-    path.join(runtimeRoot, "telegram", "eventProjectionCore.js"),
+    path.join(runtimeSourceRoot, "telegram", "eventProjectionCore.ts"),
     "utf8",
   );
   assert.equal(coreSource.includes("eventTelegramProjectionLocks"), true);

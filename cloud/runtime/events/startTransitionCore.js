@@ -1,48 +1,46 @@
+// Generated from src/events/startTransitionCore.ts. Run npm run generate:runtime.
 "use strict";
-const { eventField } = require("../eventCommands");
-
-const {
-  buildAutoInviteId,
-  pickHostColor,
-  shuffle,
-} = require("@mons/shared/ids");
-const {
-  CONTROLLER_VERSION,
-  buildFreshMatchRecord,
-} = require("@mons/shared/match-protocol");
-const {
-  THIRD_PLACE_MATCH_KEY,
-  buildEventMatchKey,
-  buildEventSeedOrder,
-  getEventBracketSize,
-  parseEventMatchKey,
-} = require("@mons/shared/events");
-const { isEventPrizeEvent } = require("@mons/shared/event-prizes");
-const { getEventParticipantIds } = require("./participants");
-const {
-  canonicalizeEventParticipants,
-  canonicalizeEventPrizeSelections,
-  profileOwnershipUnavailable,
-  resolveOwnedProfileReferences,
-} = require("./ownership");
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.setMatchSlotParticipant =
+  exports.setMatchSlotBlocked =
+  exports.reconcileThirdPlaceMatchReadiness =
+  exports.reconcileBracketMatchReadiness =
+  exports.recomputeRoundStatuses =
+  exports.isMatchWinnerDisqualified =
+  exports.isMatchSlotBlocked =
+  exports.isMatchResolved =
+  exports.hasThirdPlaceMatchField =
+  exports.getSortedRoundIndexes =
+  exports.getSortedMatchKeys =
+  exports.createInviteForMatch =
+  exports.createEmptyEventMatch =
+  exports.buildScheduledEventDueUpdatesCore =
+  exports.buildFixedBracketState =
+  exports.buildSeedToProfileId =
+  exports.assignWinnerToNextRound =
+  exports.applyMatchResolution =
+    void 0;
+const eventCommands_js_1 = require("../eventCommands.js");
+const ids_1 = require("@mons/shared/ids");
+const match_protocol_1 = require("@mons/shared/match-protocol");
+const events_1 = require("@mons/shared/events");
+const event_prizes_1 = require("@mons/shared/event-prizes");
+const participants_js_1 = require("./participants.js");
+const ownership_js_1 = require("./ownership.js");
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 const normalizeStringOrNull = (value) => normalizeString(value) || null;
-
 const toFiniteInteger = (value, fallback = 0) => {
   const numeric = typeof value === "number" ? value : Number(value);
   return Number.isFinite(numeric) ? Math.floor(numeric) : fallback;
 };
-
 const getMatchIndexFromKey = (matchKey) =>
-  parseEventMatchKey(matchKey)?.matchIndex ?? 0;
-
+  (0, events_1.parseEventMatchKey)(matchKey)?.matchIndex ?? 0;
 const getSortedMatchKeys = (matchesByKey) =>
   Object.keys(matchesByKey || {}).sort(
     (left, right) => getMatchIndexFromKey(left) - getMatchIndexFromKey(right),
   );
-
+exports.getSortedMatchKeys = getSortedMatchKeys;
 const getSortedRoundIndexes = (roundsByKey) =>
   Array.from(
     new Set(
@@ -55,13 +53,12 @@ const getSortedRoundIndexes = (roundsByKey) =>
         .map((roundIndex) => Math.floor(roundIndex)),
     ),
   ).sort((left, right) => left - right);
-
+exports.getSortedRoundIndexes = getSortedRoundIndexes;
 const isResolvedMatchStatus = (status) =>
   status === "host" || status === "guest" || status === "bye";
-
 const isMatchWinnerDisqualified = (match) =>
   !!(match && match.winnerDisqualified === true);
-
+exports.isMatchWinnerDisqualified = isMatchWinnerDisqualified;
 const isMatchResolved = (match) => {
   if (isMatchWinnerDisqualified(match)) {
     return true;
@@ -75,7 +72,7 @@ const isMatchResolved = (match) => {
     normalizeString(match && match.winnerProfileId) !== ""
   );
 };
-
+exports.isMatchResolved = isMatchResolved;
 const isMatchSlotBlocked = (match, slot) => {
   if (!match) {
     return false;
@@ -84,9 +81,9 @@ const isMatchSlotBlocked = (match, slot) => {
     ? match.guestSlotBlocked === true
     : match.hostSlotBlocked === true;
 };
-
+exports.isMatchSlotBlocked = isMatchSlotBlocked;
 const buildSeedToProfileId = ({ participantIds, random }) => {
-  const shuffledParticipantIds = shuffle(participantIds, random);
+  const shuffledParticipantIds = (0, ids_1.shuffle)(participantIds, random);
   const seedToProfileId = new Map();
   for (let seed = 1; seed <= shuffledParticipantIds.length; seed += 1) {
     const profileId = shuffledParticipantIds[seed - 1];
@@ -97,7 +94,7 @@ const buildSeedToProfileId = ({ participantIds, random }) => {
   }
   return seedToProfileId;
 };
-
+exports.buildSeedToProfileId = buildSeedToProfileId;
 const createEmptyEventMatch = (matchKey) => ({
   matchKey,
   inviteId: null,
@@ -119,7 +116,7 @@ const createEmptyEventMatch = (matchKey) => ({
   guestEmojiId: null,
   guestAura: null,
 });
-
+exports.createEmptyEventMatch = createEmptyEventMatch;
 const hasThirdPlaceMatchField = (event) =>
   !!(
     event &&
@@ -127,7 +124,7 @@ const hasThirdPlaceMatchField = (event) =>
     (event.supportsThirdPlaceMatch === true ||
       (event.thirdPlaceMatch && typeof event.thirdPlaceMatch === "object"))
   );
-
+exports.hasThirdPlaceMatchField = hasThirdPlaceMatchField;
 const setMatchSlotBlocked = (match, slot, blocked) => {
   const field = slot === "guest" ? "guestSlotBlocked" : "hostSlotBlocked";
   const nextValue = blocked === true;
@@ -137,7 +134,7 @@ const setMatchSlotBlocked = (match, slot, blocked) => {
   match[field] = nextValue;
   return true;
 };
-
+exports.setMatchSlotBlocked = setMatchSlotBlocked;
 const setMatchSlotParticipant = (match, slot, participant) => {
   const prefix = slot === "guest" ? "guest" : "host";
   const values = {
@@ -160,7 +157,7 @@ const setMatchSlotParticipant = (match, slot, participant) => {
   }
   return didChange;
 };
-
+exports.setMatchSlotParticipant = setMatchSlotParticipant;
 const applyMatchResolution = (match, resolved, nowMs) => {
   if (!match || !resolved) {
     return false;
@@ -186,7 +183,7 @@ const applyMatchResolution = (match, resolved, nowMs) => {
   }
   return didChange;
 };
-
+exports.applyMatchResolution = applyMatchResolution;
 const assignWinnerToNextRound = ({
   rounds,
   roundIndex,
@@ -205,7 +202,9 @@ const assignWinnerToNextRound = ({
   }
   const nextMatchIndex = Math.floor(matchIndex / 2);
   const nextMatch =
-    nextRound.matches[buildEventMatchKey(roundIndex + 1, nextMatchIndex)];
+    nextRound.matches[
+      (0, events_1.buildEventMatchKey)(roundIndex + 1, nextMatchIndex)
+    ];
   if (!nextMatch) {
     return false;
   }
@@ -229,7 +228,7 @@ const assignWinnerToNextRound = ({
   const didClearBlocked = setMatchSlotBlocked(nextMatch, slot, false);
   return didSetParticipant || didClearBlocked;
 };
-
+exports.assignWinnerToNextRound = assignWinnerToNextRound;
 const createInviteForMatch = async ({
   eventId,
   roundIndex,
@@ -248,8 +247,9 @@ const createInviteForMatch = async ({
   if (!hostLoginUid || !guestLoginUid || normalizeString(match.inviteId)) {
     return false;
   }
-  if (!ownershipSnapshot) throw profileOwnershipUnavailable();
-  resolveOwnedProfileReferences(ownershipSnapshot, [
+  if (!ownershipSnapshot)
+    throw (0, ownership_js_1.profileOwnershipUnavailable)();
+  (0, ownership_js_1.resolveOwnedProfileReferences)(ownershipSnapshot, [
     {
       loginUid: hostLoginUid,
       profileId: normalizeString(match.hostProfileId),
@@ -259,8 +259,8 @@ const createInviteForMatch = async ({
       profileId: normalizeString(match.guestProfileId),
     },
   ]);
-  const inviteId = buildAutoInviteId(random);
-  const hostColor = pickHostColor(random);
+  const inviteId = (0, ids_1.buildAutoInviteId)(random);
+  const hostColor = (0, ids_1.pickHostColor)(random);
   const guestColor = hostColor === "white" ? "black" : "white";
   const gameSeed = await buildRandomGameSeed(random);
   match.inviteId = inviteId;
@@ -269,7 +269,7 @@ const createInviteForMatch = async ({
     kind: "invite",
     inviteId: inviteId,
     value: {
-      version: CONTROLLER_VERSION,
+      version: match_protocol_1.CONTROLLER_VERSION,
       hostId: hostLoginUid,
       hostColor,
       guestId: guestLoginUid,
@@ -280,7 +280,7 @@ const createInviteForMatch = async ({
     },
   });
   const createMatchRecord = (color, emojiId, aura) =>
-    buildFreshMatchRecord({
+    (0, match_protocol_1.buildFreshMatchRecord)({
       color,
       emojiId: typeof emojiId === "number" ? Math.floor(emojiId) : 0,
       aura: normalizeString(aura) || null,
@@ -300,7 +300,7 @@ const createInviteForMatch = async ({
   });
   return true;
 };
-
+exports.createInviteForMatch = createInviteForMatch;
 const reconcileThirdPlaceMatchReadiness = async ({
   eventId,
   rounds,
@@ -379,7 +379,7 @@ const reconcileThirdPlaceMatchReadiness = async ({
       (await createInviteForMatch({
         eventId,
         roundIndex: null,
-        matchKey: thirdPlaceMatch.matchKey || THIRD_PLACE_MATCH_KEY,
+        matchKey: thirdPlaceMatch.matchKey || events_1.THIRD_PLACE_MATCH_KEY,
         match: thirdPlaceMatch,
         inviteUpdates,
         random,
@@ -422,7 +422,7 @@ const reconcileThirdPlaceMatchReadiness = async ({
   }
   return { didChange, thirdPlaceMatch };
 };
-
+exports.reconcileThirdPlaceMatchReadiness = reconcileThirdPlaceMatchReadiness;
 const reconcileBracketMatchReadiness = async ({
   eventId,
   rounds,
@@ -580,7 +580,7 @@ const reconcileBracketMatchReadiness = async ({
   }
   return didChange;
 };
-
+exports.reconcileBracketMatchReadiness = reconcileBracketMatchReadiness;
 const recomputeRoundStatuses = ({ rounds, nowMs }) => {
   const sortedRoundIndexes = getSortedRoundIndexes(rounds);
   const finalRoundIndex = sortedRoundIndexes.at(-1) ?? null;
@@ -655,7 +655,7 @@ const recomputeRoundStatuses = ({ rounds, nowMs }) => {
     finalRoundWinnerProfileId,
   };
 };
-
+exports.recomputeRoundStatuses = recomputeRoundStatuses;
 const buildFixedBracketState = async ({
   eventId,
   participantIds,
@@ -666,9 +666,9 @@ const buildFixedBracketState = async ({
   buildRandomGameSeed,
   ownershipSnapshot,
 }) => {
-  const bracketSize = getEventBracketSize(participantIds.length);
+  const bracketSize = (0, events_1.getEventBracketSize)(participantIds.length);
   const roundCount = Math.max(1, Math.round(Math.log2(bracketSize)));
-  const seedOrder = buildEventSeedOrder(bracketSize);
+  const seedOrder = (0, events_1.buildEventSeedOrder)(bracketSize);
   const inviteUpdates = [];
   const rounds = {};
   let thirdPlaceMatch = null;
@@ -683,7 +683,7 @@ const buildFixedBracketState = async ({
     };
     const matchCount = bracketSize / Math.pow(2, roundIndex + 1);
     for (let matchIndex = 0; matchIndex < matchCount; matchIndex += 1) {
-      const matchKey = buildEventMatchKey(roundIndex, matchIndex);
+      const matchKey = (0, events_1.buildEventMatchKey)(roundIndex, matchIndex);
       const match = createEmptyEventMatch(matchKey);
       if (roundIndex === 0) {
         const hostProfileId =
@@ -693,12 +693,12 @@ const buildFixedBracketState = async ({
         setMatchSlotParticipant(
           match,
           "host",
-          participantsById[hostProfileId] || null,
+          participantsById[String(hostProfileId)] || null,
         );
         setMatchSlotParticipant(
           match,
           "guest",
-          participantsById[guestProfileId] || null,
+          participantsById[String(guestProfileId)] || null,
         );
         if (hostProfileId && guestProfileId) {
           await createInviteForMatch({
@@ -738,7 +738,7 @@ const buildFixedBracketState = async ({
     ownershipSnapshot,
   });
   if (enableThirdPlace && participantIds.length >= 4 && roundCount >= 2) {
-    thirdPlaceMatch = createEmptyEventMatch(THIRD_PLACE_MATCH_KEY);
+    thirdPlaceMatch = createEmptyEventMatch(events_1.THIRD_PLACE_MATCH_KEY);
     await reconcileThirdPlaceMatchReadiness({
       eventId,
       rounds,
@@ -765,7 +765,7 @@ const buildFixedBracketState = async ({
     inviteUpdates,
   };
 };
-
+exports.buildFixedBracketState = buildFixedBracketState;
 const buildScheduledEventDueUpdatesCore = async ({
   eventId,
   event,
@@ -784,10 +784,12 @@ const buildScheduledEventDueUpdatesCore = async ({
   if (typeof event.startAtMs !== "number" || nowMs < event.startAtMs) {
     return { didChange: false, updates: [] };
   }
-  const storedParticipantIds = getEventParticipantIds(event);
+  const storedParticipantIds = (0, participants_js_1.getEventParticipantIds)(
+    event,
+  );
   if (storedParticipantIds.length < 2) {
     const shouldClearPrizeSelections =
-      isEventPrizeEvent(eventId) &&
+      (0, event_prizes_1.isEventPrizeEvent)(eventId) &&
       prizeSelections !== undefined &&
       prizeSelections !== null &&
       (!prizeSelections ||
@@ -805,22 +807,36 @@ const buildScheduledEventDueUpdatesCore = async ({
       didChange: true,
       updates: [
         ...(shouldClearPrizeSelections
-          ? [{ kind: "prize-selections", eventId: eventId, value: null }]
+          ? [
+              {
+                kind: "prize-selections",
+                eventId: eventId,
+                value: null,
+              },
+            ]
           : []),
-        eventField(eventId, "status", event.status),
-        eventField(eventId, "endedAtMs", event.endedAtMs),
-        eventField(eventId, "updatedAtMs", event.updatedAtMs),
-        eventField(eventId, "winnerProfileId", null),
-        eventField(eventId, "winnerDisplayName", null),
+        (0, eventCommands_js_1.eventField)(eventId, "status", event.status),
+        (0, eventCommands_js_1.eventField)(
+          eventId,
+          "endedAtMs",
+          event.endedAtMs,
+        ),
+        (0, eventCommands_js_1.eventField)(
+          eventId,
+          "updatedAtMs",
+          event.updatedAtMs,
+        ),
+        (0, eventCommands_js_1.eventField)(eventId, "winnerProfileId", null),
+        (0, eventCommands_js_1.eventField)(eventId, "winnerDisplayName", null),
       ],
     };
   }
-  const prizeSelectionResult = isEventPrizeEvent(eventId)
+  const prizeSelectionResult = (0, event_prizes_1.isEventPrizeEvent)(eventId)
     ? (() => {
         if (prizeSelections === undefined) {
-          throw profileOwnershipUnavailable();
+          throw (0, ownership_js_1.profileOwnershipUnavailable)();
         }
-        return canonicalizeEventPrizeSelections(
+        return (0, ownership_js_1.canonicalizeEventPrizeSelections)(
           event,
           prizeSelections,
           ownershipSnapshot,
@@ -839,13 +855,12 @@ const buildScheduledEventDueUpdatesCore = async ({
         },
       ]
     : [];
-  if (!ownershipSnapshot) throw profileOwnershipUnavailable();
-  const canonicalParticipants = canonicalizeEventParticipants(
-    event,
-    ownershipSnapshot,
-  );
+  if (!ownershipSnapshot)
+    throw (0, ownership_js_1.profileOwnershipUnavailable)();
+  const canonicalParticipants = (0,
+  ownership_js_1.canonicalizeEventParticipants)(event, ownershipSnapshot);
   const participantsById = canonicalParticipants.participantsById;
-  const participantIds = getEventParticipantIds({
+  const participantIds = (0, participants_js_1.getEventParticipantIds)({
     participants: participantsById,
   });
   event.participants = participantsById;
@@ -877,42 +892,54 @@ const buildScheduledEventDueUpdatesCore = async ({
       updates: [
         ...bracket.inviteUpdates,
         ...prizeSelectionUpdates,
-        eventField(eventId, "status", event.status),
-        eventField(eventId, "startedAtMs", event.startedAtMs),
-        eventField(eventId, "updatedAtMs", event.updatedAtMs),
-        eventField(eventId, "currentRoundIndex", event.currentRoundIndex),
-        eventField(eventId, "bracketSize", event.bracketSize),
-        eventField(eventId, "roundCount", event.roundCount),
-        eventField(eventId, "rounds", bracket.rounds),
+        (0, eventCommands_js_1.eventField)(eventId, "status", event.status),
+        (0, eventCommands_js_1.eventField)(
+          eventId,
+          "startedAtMs",
+          event.startedAtMs,
+        ),
+        (0, eventCommands_js_1.eventField)(
+          eventId,
+          "updatedAtMs",
+          event.updatedAtMs,
+        ),
+        (0, eventCommands_js_1.eventField)(
+          eventId,
+          "currentRoundIndex",
+          event.currentRoundIndex,
+        ),
+        (0, eventCommands_js_1.eventField)(
+          eventId,
+          "bracketSize",
+          event.bracketSize,
+        ),
+        (0, eventCommands_js_1.eventField)(
+          eventId,
+          "roundCount",
+          event.roundCount,
+        ),
+        (0, eventCommands_js_1.eventField)(eventId, "rounds", bracket.rounds),
         ...(canonicalParticipants.didChange
-          ? [eventField(eventId, "participants", participantsById)]
+          ? [
+              (0, eventCommands_js_1.eventField)(
+                eventId,
+                "participants",
+                participantsById,
+              ),
+            ]
           : []),
         ...(supportsThirdPlaceMatch
-          ? [eventField(eventId, "thirdPlaceMatch", bracket.thirdPlaceMatch)]
+          ? [
+              (0, eventCommands_js_1.eventField)(
+                eventId,
+                "thirdPlaceMatch",
+                bracket.thirdPlaceMatch,
+              ),
+            ]
           : []),
       ],
     };
   }
-  throw profileOwnershipUnavailable();
+  throw (0, ownership_js_1.profileOwnershipUnavailable)();
 };
-
-module.exports = {
-  applyMatchResolution,
-  assignWinnerToNextRound,
-  buildSeedToProfileId,
-  buildFixedBracketState,
-  buildScheduledEventDueUpdatesCore,
-  createEmptyEventMatch,
-  createInviteForMatch,
-  getSortedMatchKeys,
-  getSortedRoundIndexes,
-  hasThirdPlaceMatchField,
-  isMatchResolved,
-  isMatchSlotBlocked,
-  isMatchWinnerDisqualified,
-  recomputeRoundStatuses,
-  reconcileBracketMatchReadiness,
-  reconcileThirdPlaceMatchReadiness,
-  setMatchSlotBlocked,
-  setMatchSlotParticipant,
-};
+exports.buildScheduledEventDueUpdatesCore = buildScheduledEventDueUpdatesCore;

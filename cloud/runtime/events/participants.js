@@ -1,5 +1,7 @@
+// Generated from src/events/participants.ts. Run npm run generate:runtime.
 "use strict";
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.getEventParticipantIds = void 0;
 const getEventParticipantIds = (event) => {
   const participants =
     event && event.participants && typeof event.participants === "object"
@@ -10,7 +12,4 @@ const getEventParticipantIds = (event) => {
       participants[profileId] && typeof participants[profileId] === "object",
   );
 };
-
-module.exports = {
-  getEventParticipantIds,
-};
+exports.getEventParticipantIds = getEventParticipantIds;

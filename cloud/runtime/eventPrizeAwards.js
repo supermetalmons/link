@@ -1,14 +1,23 @@
+// Generated from src/eventPrizeAwards.ts. Run npm run generate:runtime.
 "use strict";
-
-const {
-  getEventPrizeDefinitions,
-  isEventPrizeId,
-} = require("@mons/shared/event-prizes");
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.normalizeEventPrizeAssignments =
+  exports.isEventPrizeId =
+  exports.buildEventPrizeAssignments =
+  exports.buildProfileEventPrizeMergeCopies =
+  exports.EVENT_PRIZE_PLACES =
+    void 0;
+const event_prizes_1 = require("@mons/shared/event-prizes");
+Object.defineProperty(exports, "isEventPrizeId", {
+  enumerable: true,
+  get: function () {
+    return event_prizes_1.isEventPrizeId;
+  },
+});
 const EVENT_PRIZE_PLACES = Object.freeze([1, 2, 3]);
-
+exports.EVENT_PRIZE_PLACES = EVENT_PRIZE_PLACES;
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
 const normalizeEventPrizeAssignments = (value, eventId) => {
   if (!value || typeof value !== "object") {
     return {};
@@ -17,7 +26,6 @@ const normalizeEventPrizeAssignments = (value, eventId) => {
   const assignments = {};
   const assignedProfileIds = new Set();
   const assignedPrizeIds = new Set();
-
   for (const place of EVENT_PRIZE_PLACES) {
     const assignment = value[String(place)];
     if (!assignment || typeof assignment !== "object") {
@@ -31,7 +39,7 @@ const normalizeEventPrizeAssignments = (value, eventId) => {
       assignmentEventId !== normalizedEventId ||
       Number(assignment.place) !== place ||
       !profileId ||
-      !isEventPrizeId(normalizedEventId, prizeId) ||
+      !(0, event_prizes_1.isEventPrizeId)(normalizedEventId, prizeId) ||
       !Number.isFinite(assignedAtMs) ||
       assignedProfileIds.has(profileId) ||
       assignedPrizeIds.has(prizeId)
@@ -48,10 +56,9 @@ const normalizeEventPrizeAssignments = (value, eventId) => {
     assignedProfileIds.add(profileId);
     assignedPrizeIds.add(prizeId);
   }
-
   return assignments;
 };
-
+exports.normalizeEventPrizeAssignments = normalizeEventPrizeAssignments;
 const normalizeProfileEventPrizes = (value, profileId) => {
   if (!value || typeof value !== "object") {
     return {};
@@ -77,7 +84,6 @@ const normalizeProfileEventPrizes = (value, profileId) => {
   }
   return prizes;
 };
-
 const buildProfileEventPrizeMergeCopies = ({
   targetProfileId,
   sourceProfileId,
@@ -113,7 +119,7 @@ const buildProfileEventPrizeMergeCopies = ({
   }
   return copies;
 };
-
+exports.buildProfileEventPrizeMergeCopies = buildProfileEventPrizeMergeCopies;
 const buildEventPrizeAssignments = ({
   eventId,
   placements,
@@ -122,9 +128,9 @@ const buildEventPrizeAssignments = ({
 }) => {
   const normalizedEventId = normalizeString(eventId);
   const normalizedAssignedAtMs = Math.floor(Number(assignedAtMs));
-  const eventPrizeIds = getEventPrizeDefinitions(normalizedEventId).map(
-    (prize) => prize.id,
-  );
+  const eventPrizeIds = (0, event_prizes_1.getEventPrizeDefinitions)(
+    normalizedEventId,
+  ).map((prize) => prize.id);
   if (
     !normalizedEventId ||
     eventPrizeIds.length === 0 ||
@@ -132,7 +138,6 @@ const buildEventPrizeAssignments = ({
   ) {
     return {};
   }
-
   const normalizedPlacements = [];
   const placedProfileIds = new Set();
   for (const place of EVENT_PRIZE_PLACES) {
@@ -146,7 +151,6 @@ const buildEventPrizeAssignments = ({
     normalizedPlacements.push({ place, profileId });
     placedProfileIds.add(profileId);
   }
-
   const assignments = {};
   const assignedPrizeIds = new Set();
   const assignPrize = (placement, prizeId) => {
@@ -159,7 +163,6 @@ const buildEventPrizeAssignments = ({
     };
     assignedPrizeIds.add(prizeId);
   };
-
   for (const placement of normalizedPlacements) {
     const preferredPrizeId = normalizeString(
       selections && typeof selections === "object"
@@ -167,13 +170,12 @@ const buildEventPrizeAssignments = ({
         : "",
     );
     if (
-      isEventPrizeId(normalizedEventId, preferredPrizeId) &&
+      (0, event_prizes_1.isEventPrizeId)(normalizedEventId, preferredPrizeId) &&
       !assignedPrizeIds.has(preferredPrizeId)
     ) {
       assignPrize(placement, preferredPrizeId);
     }
   }
-
   for (const placement of normalizedPlacements) {
     if (assignments[String(placement.place)]) {
       continue;
@@ -186,14 +188,6 @@ const buildEventPrizeAssignments = ({
     }
     assignPrize(placement, fallbackPrizeId);
   }
-
   return assignments;
 };
-
-module.exports = {
-  EVENT_PRIZE_PLACES,
-  buildProfileEventPrizeMergeCopies,
-  buildEventPrizeAssignments,
-  isEventPrizeId,
-  normalizeEventPrizeAssignments,
-};
+exports.buildEventPrizeAssignments = buildEventPrizeAssignments;

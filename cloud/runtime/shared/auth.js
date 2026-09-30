@@ -1,26 +1,54 @@
-const { isMiningSnapshot } = require("./mining");
-const { PROFILE_FALLBACK_EMOJI_COUNT } = require("./profiles");
-
+// Generated from src/shared/auth.ts. Run npm run generate:runtime.
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.resolveAuthCooldownRetryAtMs =
+  exports.isXAuthCompletionRequest =
+  exports.isSolanaAuthVerificationRequest =
+  exports.isLinkedAuthMethodsResponse =
+  exports.isEthereumAuthVerificationRequest =
+  exports.isAuthVerificationResponse =
+  exports.isAuthProfileResponse =
+  exports.isAuthMethodUnlinkRequest =
+  exports.isAppleAuthVerificationRequest =
+  exports.isAuthIntentResponse =
+  exports.getAuthCooldownScope =
+  exports.normalizeAuthCooldownReason =
+  exports.normalizeAuthMethod =
+  exports.normalizeAuthPresentation =
+  exports.getLinkedAuthMethodsFromProfile =
+  exports.AUTH_COOLDOWN_REASONS =
+  exports.AUTH_METHOD_REUSE_COOLDOWN_MS =
+  exports.AUTH_METHOD_LABELS =
+  exports.AUTH_METHOD_FIELD_BY_TYPE =
+  exports.AUTH_METHODS =
+    void 0;
+const mining_js_1 = require("./mining.js");
+const profiles_js_1 = require("./profiles.js");
 const AUTH_METHODS = Object.freeze(["eth", "sol", "apple", "x"]);
+exports.AUTH_METHODS = AUTH_METHODS;
 const AUTH_METHOD_FIELD_BY_TYPE = Object.freeze({
   eth: "eth",
   sol: "sol",
   apple: "appleSub",
   x: "xUserId",
 });
+exports.AUTH_METHOD_FIELD_BY_TYPE = AUTH_METHOD_FIELD_BY_TYPE;
 const AUTH_METHOD_LABELS = Object.freeze({
   eth: "Ethereum",
   sol: "Solana",
   apple: "Apple",
   x: "X",
 });
+exports.AUTH_METHOD_LABELS = AUTH_METHOD_LABELS;
 const AUTH_METHOD_REUSE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+exports.AUTH_METHOD_REUSE_COOLDOWN_MS = AUTH_METHOD_REUSE_COOLDOWN_MS;
 const AUTH_SWAG_EMOJI_MIN = 1000;
 const AUTH_SWAG_EMOJI_MAX = 1466;
 const AUTH_COOLDOWN_REASONS = Object.freeze({
   method: "method-reuse-cooldown",
   profileMethod: "profile-method-cooldown",
 });
+exports.AUTH_COOLDOWN_REASONS = AUTH_COOLDOWN_REASONS;
 const AUTH_INTENT_RESPONSE_KEYS = Object.freeze([
   "ok",
   "intentId",
@@ -63,13 +91,10 @@ const AUTH_PROFILE_RESPONSE_KEYS = Object.freeze([
   "tutorialCompleted",
   "mining",
 ]);
-
 const cleanString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
 const isRecord = (value) =>
   typeof value === "object" && value !== null && !Array.isArray(value);
-
 const hasExactKeys = (value, expectedKeys) => {
   const keys = Object.keys(value);
   return (
@@ -77,28 +102,21 @@ const hasExactKeys = (value, expectedKeys) => {
     keys.every((key) => expectedKeys.includes(key))
   );
 };
-
 const hasOnlyKeys = (value, allowedKeys) =>
   Object.keys(value).every((key) => allowedKeys.includes(key));
-
 const hasRequiredKeys = (value, requiredKeys) =>
   requiredKeys.every((key) => Object.hasOwn(value, key));
-
 const isNullableString = (value) => value === null || typeof value === "string";
-
 const isOptionalNullableString = (value) =>
   value === undefined || isNullableString(value);
-
 const isOptionalNullableFiniteNumber = (value) =>
   value === undefined ||
   value === null ||
   (typeof value === "number" && Number.isFinite(value));
-
 const isAuthEmoji = (value) =>
   Number.isSafeInteger(value) &&
-  ((value >= 1 && value <= PROFILE_FALLBACK_EMOJI_COUNT) ||
+  ((value >= 1 && value <= profiles_js_1.PROFILE_FALLBACK_EMOJI_COUNT) ||
     (value >= AUTH_SWAG_EMOJI_MIN && value <= AUTH_SWAG_EMOJI_MAX));
-
 const normalizeAuthPresentation = (emoji, aura) => {
   const numericEmoji =
     typeof emoji === "number" ||
@@ -110,31 +128,28 @@ const normalizeAuthPresentation = (emoji, aura) => {
     aura: typeof aura === "string" && aura.length <= 32 ? aura : null,
   };
 };
-
+exports.normalizeAuthPresentation = normalizeAuthPresentation;
 const isEmojiAndAura = (value) => {
   const normalized = normalizeAuthPresentation(value.emoji, value.aura);
   return normalized.emoji === value.emoji && normalized.aura === value.aura;
 };
-
 const isAuthToken = (value) =>
   typeof value === "string" &&
   value === value.trim() &&
   /^[A-Za-z0-9_-]{24}$/.test(value);
-
 const isOperationId = (value) =>
   typeof value === "string" &&
   value === value.trim() &&
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     value,
   );
-
 const normalizeAuthMethod = (value) => {
   const method = cleanString(value).toLowerCase();
   return Object.prototype.hasOwnProperty.call(AUTH_METHOD_FIELD_BY_TYPE, method)
     ? method
     : null;
 };
-
+exports.normalizeAuthMethod = normalizeAuthMethod;
 const normalizeAuthCooldownReason = (value) => {
   const reason = cleanString(value);
   if (
@@ -145,15 +160,14 @@ const normalizeAuthCooldownReason = (value) => {
   }
   return null;
 };
-
+exports.normalizeAuthCooldownReason = normalizeAuthCooldownReason;
 const getAuthCooldownScope = (reason) =>
   reason === AUTH_COOLDOWN_REASONS.profileMethod ? "profile-method" : "method";
-
+exports.getAuthCooldownScope = getAuthCooldownScope;
 const parseFiniteNumber = (value, fallback) => {
   const numeric = typeof value === "number" ? value : Number(value);
   return Number.isFinite(numeric) ? Math.floor(numeric) : fallback;
 };
-
 const resolveAuthCooldownRetryAtMs = (
   docData,
   fallbackCooldownMs = AUTH_METHOD_REUSE_COOLDOWN_MS,
@@ -178,7 +192,7 @@ const resolveAuthCooldownRetryAtMs = (
   );
   return startedAtMs > 0 && cooldownMs > 0 ? startedAtMs + cooldownMs : 0;
 };
-
+exports.resolveAuthCooldownRetryAtMs = resolveAuthCooldownRetryAtMs;
 const isAuthIntentResponse = (value) =>
   isRecord(value) &&
   hasExactKeys(value, AUTH_INTENT_RESPONSE_KEYS) &&
@@ -188,12 +202,11 @@ const isAuthIntentResponse = (value) =>
   cleanString(value.state) !== "" &&
   Number.isSafeInteger(value.expiresAtMs) &&
   value.expiresAtMs > 0;
-
+exports.isAuthIntentResponse = isAuthIntentResponse;
 const isLinkedAuthMethods = (value) =>
   isRecord(value) &&
   hasExactKeys(value, LINKED_AUTH_METHOD_KEYS) &&
   LINKED_AUTH_METHOD_KEYS.every((key) => typeof value[key] === "boolean");
-
 const isLinkedAuthMethodsResponse = (value) =>
   isRecord(value) &&
   hasExactKeys(value, LINKED_AUTH_METHODS_RESPONSE_KEYS) &&
@@ -201,7 +214,7 @@ const isLinkedAuthMethodsResponse = (value) =>
   (value.profileId === null || cleanString(value.profileId) !== "") &&
   isLinkedAuthMethods(value.linkedMethods) &&
   value.appleLinked === value.linkedMethods.apple;
-
+exports.isLinkedAuthMethodsResponse = isLinkedAuthMethodsResponse;
 const isAuthProfileResponse = (value) =>
   isRecord(value) &&
   hasOnlyKeys(value, AUTH_PROFILE_RESPONSE_KEYS) &&
@@ -234,12 +247,13 @@ const isAuthProfileResponse = (value) =>
   (value.tutorialCompleted === undefined ||
     value.tutorialCompleted === null ||
     typeof value.tutorialCompleted === "boolean") &&
-  (value.mining === undefined || isMiningSnapshot(value.mining));
-
+  (value.mining === undefined ||
+    (0, mining_js_1.isMiningSnapshot)(value.mining));
+exports.isAuthProfileResponse = isAuthProfileResponse;
 const isAuthVerificationResponse = (value) =>
   (isRecord(value) && hasExactKeys(value, ["ok"]) && value.ok === false) ||
   isAuthProfileResponse(value);
-
+exports.isAuthVerificationResponse = isAuthVerificationResponse;
 const isSolanaAuthVerificationRequest = (value) =>
   isRecord(value) &&
   hasExactKeys(value, ["intentId", "address", "signature", "emoji", "aura"]) &&
@@ -249,7 +263,7 @@ const isSolanaAuthVerificationRequest = (value) =>
   cleanString(value.signature) !== "" &&
   value.signature.length <= 128 &&
   isEmojiAndAura(value);
-
+exports.isSolanaAuthVerificationRequest = isSolanaAuthVerificationRequest;
 const isEthereumAuthVerificationRequest = (value) =>
   isRecord(value) &&
   hasExactKeys(value, ["intentId", "message", "signature", "emoji", "aura"]) &&
@@ -257,7 +271,7 @@ const isEthereumAuthVerificationRequest = (value) =>
   cleanString(value.message) !== "" &&
   cleanString(value.signature) !== "" &&
   isEmojiAndAura(value);
-
+exports.isEthereumAuthVerificationRequest = isEthereumAuthVerificationRequest;
 const isAppleAuthVerificationRequest = (value) =>
   isRecord(value) &&
   hasExactKeys(value, [
@@ -271,19 +285,19 @@ const isAppleAuthVerificationRequest = (value) =>
   cleanString(value.idToken) !== "" &&
   (value.consentSource === "signin" || value.consentSource === "settings") &&
   isEmojiAndAura(value);
-
+exports.isAppleAuthVerificationRequest = isAppleAuthVerificationRequest;
 const isXAuthCompletionRequest = (value) =>
   isRecord(value) &&
   hasExactKeys(value, ["flowId", "emoji", "aura"]) &&
   isAuthToken(value.flowId) &&
   isEmojiAndAura(value);
-
+exports.isXAuthCompletionRequest = isXAuthCompletionRequest;
 const isAuthMethodUnlinkRequest = (value) =>
   isRecord(value) &&
   hasExactKeys(value, ["method", "opId"]) &&
   normalizeAuthMethod(value.method) !== null &&
   isOperationId(value.opId);
-
+exports.isAuthMethodUnlinkRequest = isAuthMethodUnlinkRequest;
 const getLinkedAuthMethodsFromProfile = (value) => {
   const profile = isRecord(value) ? value : {};
   const eth = cleanString(profile.eth).toLowerCase();
@@ -297,26 +311,4 @@ const getLinkedAuthMethodsFromProfile = (value) => {
     x: /^\d+$/.test(x),
   };
 };
-
-module.exports = {
-  AUTH_METHODS,
-  AUTH_METHOD_FIELD_BY_TYPE,
-  AUTH_METHOD_LABELS,
-  AUTH_METHOD_REUSE_COOLDOWN_MS,
-  AUTH_COOLDOWN_REASONS,
-  getLinkedAuthMethodsFromProfile,
-  normalizeAuthPresentation,
-  normalizeAuthMethod,
-  normalizeAuthCooldownReason,
-  getAuthCooldownScope,
-  isAuthIntentResponse,
-  isAppleAuthVerificationRequest,
-  isAuthMethodUnlinkRequest,
-  isAuthProfileResponse,
-  isAuthVerificationResponse,
-  isEthereumAuthVerificationRequest,
-  isLinkedAuthMethodsResponse,
-  isSolanaAuthVerificationRequest,
-  isXAuthCompletionRequest,
-  resolveAuthCooldownRetryAtMs,
-};
+exports.getLinkedAuthMethodsFromProfile = getLinkedAuthMethodsFromProfile;

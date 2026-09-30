@@ -1,50 +1,165 @@
+// Generated from src/telegram/deliveryEngine.ts. Run npm run generate:runtime.
 "use strict";
-
-const crypto = require("crypto");
-const {
-  TELEGRAM_DESTINATIONS,
-  TELEGRAM_MESSAGE_ROOT,
-  TELEGRAM_SCHEMA_VERSION,
-  buildTelegramDeleteDesired,
-  buildTelegramEditDesired,
-  buildTelegramSendDesired,
-  resolveTelegramDestination,
-  validateTelegramMessageKey,
-} = require("./desiredStateCore");
-const {
-  TELEGRAM_SAFE_RETRY_MAX_DELAY_MS,
-  TELEGRAM_SAFE_RETRY_WINDOW_MS,
-  buildErrorState,
-  createTelegramLocalRetryBarrier,
-  normalizeAttempts,
-  normalizeRetrySequence,
-  normalizeTimestamp,
-  omitRetryState,
-  resolveRetryDeadlineAtMs,
-} = require("./deliveryPolicy");
-const {
-  TELEGRAM_DESIRED_TASK_KIND,
-  TELEGRAM_PENDING_DELETE_TASK_KIND,
-  TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND,
-} = require("./taskKinds");
-
-const {
-  createTelegramRetryCoordinator,
-} = require("./deliveryRetryCoordinator");
-
+var __createBinding =
+  (this && this.__createBinding) ||
+  (Object.create
+    ? function (o, m, k, k2) {
+        if (k2 === undefined) k2 = k;
+        var desc = Object.getOwnPropertyDescriptor(m, k);
+        if (
+          !desc ||
+          ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)
+        ) {
+          desc = {
+            enumerable: true,
+            get: function () {
+              return m[k];
+            },
+          };
+        }
+        Object.defineProperty(o, k2, desc);
+      }
+    : function (o, m, k, k2) {
+        if (k2 === undefined) k2 = k;
+        o[k2] = m[k];
+      });
+var __setModuleDefault =
+  (this && this.__setModuleDefault) ||
+  (Object.create
+    ? function (o, v) {
+        Object.defineProperty(o, "default", { enumerable: true, value: v });
+      }
+    : function (o, v) {
+        o["default"] = v;
+      });
+var __importStar =
+  (this && this.__importStar) ||
+  (function () {
+    var ownKeys = function (o) {
+      ownKeys =
+        Object.getOwnPropertyNames ||
+        function (o) {
+          var ar = [];
+          for (var k in o)
+            if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+          return ar;
+        };
+      return ownKeys(o);
+    };
+    return function (mod) {
+      if (mod && mod.__esModule) return mod;
+      var result = {};
+      if (mod != null)
+        for (var k = ownKeys(mod), i = 0; i < k.length; i++)
+          if (k[i] !== "default") __createBinding(result, mod, k[i]);
+      __setModuleDefault(result, mod);
+      return result;
+    };
+  })();
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.validateTelegramMessageKey =
+  exports.resolveTelegramDestination =
+  exports.createTelegramDeliveryEngine =
+  exports.createTelegramLocalRetryBarrier =
+  exports.buildTelegramSendDesired =
+  exports.buildTelegramEditDesired =
+  exports.buildTelegramDeleteDesired =
+  exports.TELEGRAM_SCHEMA_VERSION =
+  exports.TELEGRAM_SAFE_RETRY_WINDOW_MS =
+  exports.TELEGRAM_SAFE_RETRY_MAX_DELAY_MS =
+  exports.TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND =
+  exports.TELEGRAM_MESSAGE_ROOT =
+  exports.TELEGRAM_LEASE_TTL_MS =
+  exports.TELEGRAM_DESTINATIONS =
+    void 0;
+const values_js_1 = require("./values.js");
+const crypto = __importStar(require("node:crypto"));
+const desiredStateCore_js_1 = require("./desiredStateCore.js");
+Object.defineProperty(exports, "TELEGRAM_DESTINATIONS", {
+  enumerable: true,
+  get: function () {
+    return desiredStateCore_js_1.TELEGRAM_DESTINATIONS;
+  },
+});
+Object.defineProperty(exports, "TELEGRAM_MESSAGE_ROOT", {
+  enumerable: true,
+  get: function () {
+    return desiredStateCore_js_1.TELEGRAM_MESSAGE_ROOT;
+  },
+});
+Object.defineProperty(exports, "TELEGRAM_SCHEMA_VERSION", {
+  enumerable: true,
+  get: function () {
+    return desiredStateCore_js_1.TELEGRAM_SCHEMA_VERSION;
+  },
+});
+Object.defineProperty(exports, "buildTelegramDeleteDesired", {
+  enumerable: true,
+  get: function () {
+    return desiredStateCore_js_1.buildTelegramDeleteDesired;
+  },
+});
+Object.defineProperty(exports, "buildTelegramEditDesired", {
+  enumerable: true,
+  get: function () {
+    return desiredStateCore_js_1.buildTelegramEditDesired;
+  },
+});
+Object.defineProperty(exports, "buildTelegramSendDesired", {
+  enumerable: true,
+  get: function () {
+    return desiredStateCore_js_1.buildTelegramSendDesired;
+  },
+});
+Object.defineProperty(exports, "resolveTelegramDestination", {
+  enumerable: true,
+  get: function () {
+    return desiredStateCore_js_1.resolveTelegramDestination;
+  },
+});
+Object.defineProperty(exports, "validateTelegramMessageKey", {
+  enumerable: true,
+  get: function () {
+    return desiredStateCore_js_1.validateTelegramMessageKey;
+  },
+});
+const deliveryPolicy_js_1 = require("./deliveryPolicy.js");
+Object.defineProperty(exports, "TELEGRAM_SAFE_RETRY_MAX_DELAY_MS", {
+  enumerable: true,
+  get: function () {
+    return deliveryPolicy_js_1.TELEGRAM_SAFE_RETRY_MAX_DELAY_MS;
+  },
+});
+Object.defineProperty(exports, "TELEGRAM_SAFE_RETRY_WINDOW_MS", {
+  enumerable: true,
+  get: function () {
+    return deliveryPolicy_js_1.TELEGRAM_SAFE_RETRY_WINDOW_MS;
+  },
+});
+Object.defineProperty(exports, "createTelegramLocalRetryBarrier", {
+  enumerable: true,
+  get: function () {
+    return deliveryPolicy_js_1.createTelegramLocalRetryBarrier;
+  },
+});
+const taskKinds_js_1 = require("./taskKinds.js");
+Object.defineProperty(exports, "TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND", {
+  enumerable: true,
+  get: function () {
+    return taskKinds_js_1.TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND;
+  },
+});
+const deliveryRetryCoordinator_js_1 = require("./deliveryRetryCoordinator.js");
 const TELEGRAM_LEASE_TTL_MS = 60_000;
-
-const moduleRetryBarrier = createTelegramLocalRetryBarrier();
-
+exports.TELEGRAM_LEASE_TTL_MS = TELEGRAM_LEASE_TTL_MS;
+const moduleRetryBarrier = (0,
+deliveryPolicy_js_1.createTelegramLocalRetryBarrier)();
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
 const hashValue = (value) =>
   crypto.createHash("sha256").update(String(value)).digest("hex");
-
 const asObject = (value) =>
   value && typeof value === "object" && !Array.isArray(value) ? value : {};
-
 const omitKeys = (value, keys) => {
   const output = { ...asObject(value) };
   for (const key of keys) {
@@ -52,13 +167,10 @@ const omitKeys = (value, keys) => {
   }
   return output;
 };
-
 const buildPendingDeleteId = ({ chatId, messageId }) =>
   hashValue(`${normalizeString(chatId)}:${Number(messageId)}`).slice(0, 32);
-
 const buildApiGateOwner = (...parts) =>
   `api_${hashValue(parts.map((part) => String(part ?? "")).join(":"))}`;
-
 const resolvePendingDeleteId = (pendingDelete) => {
   const value = asObject(pendingDelete);
   return (
@@ -72,7 +184,6 @@ const resolvePendingDeleteId = (pendingDelete) => {
     ).slice(0, 32)
   );
 };
-
 const promotePendingDeleteQueue = (delivery) => {
   const value = omitKeys(delivery, ["pendingDelete"]);
   const queue = asObject(value.pendingDeleteQueue);
@@ -89,7 +200,6 @@ const promotePendingDeleteQueue = (delivery) => {
       : {}),
   };
 };
-
 const appendPendingDelete = (delivery, pendingDelete) => {
   const value = asObject(delivery);
   const currentPendingDelete = asObject(value.pendingDelete);
@@ -108,24 +218,23 @@ const appendPendingDelete = (delivery, pendingDelete) => {
     },
   };
 };
-
 const ensureCommitted = (result, code) => {
   if (result?.committed) {
     return result;
   }
-  const error = new Error(code);
-  error.code = code;
-  error.retryable = true;
+  const error = Object.assign(new Error(code), { code, retryable: true });
   throw error;
 };
-
 const validateDesiredForDelivery = (desired) => {
   const value = asObject(desired);
   if (
-    value.schemaVersion !== TELEGRAM_SCHEMA_VERSION ||
+    value.schemaVersion !== desiredStateCore_js_1.TELEGRAM_SCHEMA_VERSION ||
     !normalizeString(value.revision) ||
     !normalizeString(value.sourceRevision) ||
-    !Object.hasOwn(TELEGRAM_DESTINATIONS, value.destination) ||
+    !Object.hasOwn(
+      desiredStateCore_js_1.TELEGRAM_DESTINATIONS,
+      value.destination,
+    ) ||
     !["send", "edit", "delete"].includes(value.operation)
   ) {
     return false;
@@ -143,11 +252,10 @@ const validateDesiredForDelivery = (desired) => {
       value.ifMissing === "skip")
   );
 };
-
 const createTelegramDeliveryEngine = ({
   repository,
   client,
-  resolveDestination = resolveTelegramDestination,
+  resolveDestination = desiredStateCore_js_1.resolveTelegramDestination,
   now = Date.now,
   createOwnerToken = () => crypto.randomUUID(),
   createAttemptId = () => crypto.randomUUID(),
@@ -186,7 +294,6 @@ const createTelegramDeliveryEngine = ({
   if (typeof scheduleRetry !== "function") {
     throw new TypeError("scheduleRetry is required");
   }
-
   const logFailure = (messageKey, status, error) => {
     if (typeof logger?.error === "function") {
       logger.error("telegram:delivery:failed", {
@@ -197,13 +304,11 @@ const createTelegramDeliveryEngine = ({
       });
     }
   };
-
   const transact = (messageKey, updater) =>
     repository.transactMessage(messageKey, (current) => {
       const record = asObject(current);
       return updater(record);
     });
-
   const scheduleExactRetry = async ({
     messageKey,
     revision,
@@ -221,18 +326,20 @@ const createTelegramDeliveryEngine = ({
     apiGateSettleOwner = "",
   }) => {
     const normalizedTaskKind =
-      normalizeString(taskKind) || TELEGRAM_DESIRED_TASK_KIND;
-    const retrySequence = normalizeRetrySequence(retryState.retrySequence);
+      normalizeString(taskKind) || taskKinds_js_1.TELEGRAM_DESIRED_TASK_KIND;
+    const retrySequence = (0, deliveryPolicy_js_1.normalizeRetrySequence)(
+      retryState.retrySequence,
+    );
     const generation = [
       normalizedTaskKind,
       retrySequence,
-      normalizeTimestamp(retryState.retryAtMs),
+      (0, deliveryPolicy_js_1.normalizeTimestamp)(retryState.retryAtMs),
       safeRejectedAttemptId || pendingDeleteId || revision,
       normalizeString(retryProofLeaseOwner),
       normalizeString(sourceGeneration),
       normalizeString(proofTaskKind),
       normalizeString(barrierProofOwner),
-      normalizeTimestamp(barrierRetryNotBeforeMs),
+      (0, deliveryPolicy_js_1.normalizeTimestamp)(barrierRetryNotBeforeMs),
       normalizeString(apiGateReclaimOwner),
       normalizeString(apiGateSettleOwner),
     ].join(":");
@@ -242,12 +349,18 @@ const createTelegramDeliveryEngine = ({
       taskKind: normalizedTaskKind,
       retrySequence,
       generation,
-      retryStartedAtMs: normalizeTimestamp(retryState.retryStartedAtMs),
-      retryDeadlineAtMs: normalizeTimestamp(retryState.retryDeadlineAtMs),
-      retryAtMs: normalizeTimestamp(retryState.retryAtMs),
+      retryStartedAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
+        retryState.retryStartedAtMs,
+      ),
+      retryDeadlineAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
+        retryState.retryDeadlineAtMs,
+      ),
+      retryAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
+        retryState.retryAtMs,
+      ),
       scheduleTimeMs:
-        normalizeTimestamp(scheduleTimeMs) ||
-        normalizeTimestamp(retryState.retryAtMs),
+        (0, deliveryPolicy_js_1.normalizeTimestamp)(scheduleTimeMs) ||
+        (0, deliveryPolicy_js_1.normalizeTimestamp)(retryState.retryAtMs),
       ...(safeRejectedAttemptId ? { safeRejectedAttemptId } : {}),
       ...(pendingDeleteId ? { pendingDeleteId } : {}),
       ...(retryProofLeaseOwner ? { retryProofLeaseOwner } : {}),
@@ -258,8 +371,8 @@ const createTelegramDeliveryEngine = ({
       ...(apiGateSettleOwner ? { apiGateSettleOwner } : {}),
     });
   };
-
-  const retryCoordinator = createTelegramRetryCoordinator({
+  const retryCoordinator = (0,
+  deliveryRetryCoordinator_js_1.createTelegramRetryCoordinator)({
     now,
     scheduleExactRetry,
     releaseApiGate: (owner) => repository.releaseApiGate(owner),
@@ -267,13 +380,14 @@ const createTelegramDeliveryEngine = ({
       repository.extendRetryBarrierAndReleaseApiGate(proof),
     localRetryBarrier,
   });
-
   const applyRateLimitBarrierProof = async ({
     barrierProofOwner,
     barrierRetryNotBeforeMs,
   }) => {
     const owner = normalizeString(barrierProofOwner);
-    const retryNotBeforeMs = normalizeTimestamp(barrierRetryNotBeforeMs);
+    const retryNotBeforeMs = (0, deliveryPolicy_js_1.normalizeTimestamp)(
+      barrierRetryNotBeforeMs,
+    );
     if (!owner || !retryNotBeforeMs) {
       return { applied: false };
     }
@@ -286,7 +400,6 @@ const createTelegramDeliveryEngine = ({
     }
     return result;
   };
-
   const clearAppliedRateLimitProofMarker = async (messageKey, ownerInput) => {
     const owner = normalizeString(ownerInput);
     if (!owner) {
@@ -296,9 +409,16 @@ const createTelegramDeliveryEngine = ({
       const delivery = asObject(record.delivery);
       const pendingDelete = asObject(delivery.pendingDelete);
       const clearsDesired =
-        normalizeString(delivery.apiGateProofRequired?.owner) === owner;
+        normalizeString(
+          (0, values_js_1.readProperty)(delivery.apiGateProofRequired, "owner"),
+        ) === owner;
       const clearsPending =
-        normalizeString(pendingDelete.apiGateProofRequired?.owner) === owner;
+        normalizeString(
+          (0, values_js_1.readProperty)(
+            pendingDelete.apiGateProofRequired,
+            "owner",
+          ),
+        ) === owner;
       if (!clearsDesired && !clearsPending) {
         return { commit: false, decision: "rate-limit-proof-marker-stale" };
       }
@@ -322,7 +442,6 @@ const createTelegramDeliveryEngine = ({
       };
     });
   };
-
   const acquireApiGate = ({
     messageKey,
     revision,
@@ -344,7 +463,6 @@ const createTelegramDeliveryEngine = ({
       ...(reclaimOwner ? { reclaimOwner } : {}),
       ...(taskGeneration ? { taskGeneration } : {}),
     });
-
   const buildGateBlockedFailure = (gateResult, checkedAtMs) => ({
     code:
       gateResult.reason === "retry-after"
@@ -355,7 +473,6 @@ const createTelegramDeliveryEngine = ({
         ? (gateResult.retryNotBeforeMs - checkedAtMs) / 1000
         : null,
   });
-
   const applySafeRetryProof = async (
     messageKey,
     {
@@ -382,12 +499,20 @@ const createTelegramDeliveryEngine = ({
       ) {
         return { commit: false, decision: "stale-safe-retry-proof" };
       }
-      const latestRevision = normalizeString(record.desired?.revision);
+      const latestRevision = normalizeString(
+        (0, values_js_1.readProperty)(record.desired, "revision"),
+      );
       const proofRetryState = {
-        retryStartedAtMs: normalizeTimestamp(retryStartedAtMs),
-        retryDeadlineAtMs: normalizeTimestamp(retryDeadlineAtMs),
-        retryAtMs: normalizeTimestamp(retryAtMs),
-        retrySequence: normalizeRetrySequence(retrySequence),
+        retryStartedAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
+          retryStartedAtMs,
+        ),
+        retryDeadlineAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
+          retryDeadlineAtMs,
+        ),
+        retryAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(retryAtMs),
+        retrySequence: (0, deliveryPolicy_js_1.normalizeRetrySequence)(
+          retrySequence,
+        ),
       };
       const proofIsComplete =
         proofRetryState.retryStartedAtMs > 0 &&
@@ -412,7 +537,7 @@ const createTelegramDeliveryEngine = ({
             revision: latestRevision || normalizedRevision,
             attempts:
               latestRevision === normalizedRevision
-                ? normalizeAttempts(delivery.attempts)
+                ? (0, deliveryPolicy_js_1.normalizeAttempts)(delivery.attempts)
                 : 0,
             ...(latestRevision === normalizedRevision && proofIsComplete
               ? proofRetryState
@@ -425,7 +550,6 @@ const createTelegramDeliveryEngine = ({
     });
     return { applied: applied && result.committed };
   };
-
   const applyDesiredRetryWindowProof = async (
     messageKey,
     {
@@ -444,10 +568,16 @@ const createTelegramDeliveryEngine = ({
     }
     const normalizedRevision = normalizeString(requestedRevision);
     const proofRetryState = {
-      retryStartedAtMs: normalizeTimestamp(retryStartedAtMs),
-      retryDeadlineAtMs: normalizeTimestamp(retryDeadlineAtMs),
-      retryAtMs: normalizeTimestamp(retryAtMs),
-      retrySequence: normalizeRetrySequence(retrySequence),
+      retryStartedAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
+        retryStartedAtMs,
+      ),
+      retryDeadlineAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
+        retryDeadlineAtMs,
+      ),
+      retryAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(retryAtMs),
+      retrySequence: (0, deliveryPolicy_js_1.normalizeRetrySequence)(
+        retrySequence,
+      ),
     };
     if (
       !normalizedRevision ||
@@ -461,7 +591,9 @@ const createTelegramDeliveryEngine = ({
     const result = await transact(messageKey, (record) => {
       const delivery = asObject(record.delivery);
       if (
-        normalizeString(record.desired?.revision) !== normalizedRevision ||
+        normalizeString(
+          (0, values_js_1.readProperty)(record.desired, "revision"),
+        ) !== normalizedRevision ||
         normalizeString(delivery.revision) !== normalizedRevision ||
         delivery.status !== "processing" ||
         delivery.sendInFlight ||
@@ -469,7 +601,9 @@ const createTelegramDeliveryEngine = ({
         normalizeString(delivery.leaseOwner) !==
           normalizeString(retryProofLeaseOwner) ||
         proofRetryState.retrySequence <=
-          normalizeRetrySequence(delivery.retrySequence)
+          (0, deliveryPolicy_js_1.normalizeRetrySequence)(
+            delivery.retrySequence,
+          )
       ) {
         return { commit: false, decision: "stale-retry-window-proof" };
       }
@@ -505,7 +639,6 @@ const createTelegramDeliveryEngine = ({
     });
     return { applied: applied && result.committed };
   };
-
   const applyManualRecovery = async (messageKey) => {
     const processedAtMs = now();
     const result = await transact(messageKey, (record) => {
@@ -524,7 +657,9 @@ const createTelegramDeliveryEngine = ({
       const markerApiGateOwner = normalizeString(marker.apiGateOwner);
       const recoverable =
         delivery.status === "uncertain" && markerAttemptId !== "";
-      const latestRevision = normalizeString(record.desired?.revision);
+      const latestRevision = normalizeString(
+        (0, values_js_1.readProperty)(record.desired, "revision"),
+      );
       const recoveryResult = {
         requestId,
         action,
@@ -539,7 +674,7 @@ const createTelegramDeliveryEngine = ({
         nextRecord = {
           ...record,
           delivery: {
-            ...omitRetryState(
+            ...(0, deliveryPolicy_js_1.omitRetryState)(
               omitKeys(baseDelivery, [
                 "leaseOwner",
                 "leaseExpiresAtMs",
@@ -579,7 +714,7 @@ const createTelegramDeliveryEngine = ({
           recoveredAtMs: processedAtMs,
         };
         let recoveredDelivery = {
-          ...omitRetryState(
+          ...(0, deliveryPolicy_js_1.omitRetryState)(
             omitKeys(baseDelivery, [
               "leaseOwner",
               "leaseExpiresAtMs",
@@ -605,6 +740,7 @@ const createTelegramDeliveryEngine = ({
         const previousChatId =
           normalizeString(previousApplied.chatId) || recoveredApplied.chatId;
         if (
+          typeof previousApplied.messageId === "number" &&
           Number.isInteger(previousApplied.messageId) &&
           previousApplied.messageId > 0 &&
           (previousApplied.messageId !== recoveredApplied.messageId ||
@@ -640,7 +776,7 @@ const createTelegramDeliveryEngine = ({
         nextRecord = {
           ...record,
           delivery: {
-            ...omitRetryState(
+            ...(0, deliveryPolicy_js_1.omitRetryState)(
               omitKeys(baseDelivery, [
                 "leaseOwner",
                 "leaseExpiresAtMs",
@@ -696,7 +832,10 @@ const createTelegramDeliveryEngine = ({
       result.committed && normalizeString(recoveryResult.requestId) !== "";
     const action = normalizeString(recoveryResult.action);
     const apiGateReleaseOwner = normalizeString(
-      result.value?.delivery?.apiGateReleaseOwner,
+      (0, values_js_1.readProperty)(
+        result.value?.delivery,
+        "apiGateReleaseOwner",
+      ),
     );
     return {
       processed,
@@ -709,7 +848,6 @@ const createTelegramDeliveryEngine = ({
       ),
     };
   };
-
   const settleManualApiGateRelease = async (messageKey, ownerInput) => {
     const owner = normalizeString(ownerInput);
     if (!owner) {
@@ -733,7 +871,6 @@ const createTelegramDeliveryEngine = ({
       "manual-gate-release-finalization-failed",
     );
   };
-
   const acquire = async (messageKey, ownerToken, nowMs) => {
     let acquireDecision = "missing";
     const result = await transact(messageKey, (record) => {
@@ -759,9 +896,11 @@ const createTelegramDeliveryEngine = ({
       }
       const currentApiGateOwner =
         normalizeString(delivery.apiGateOwner) ||
-        normalizeString(delivery.sendInFlight?.apiGateOwner);
+        normalizeString(
+          (0, values_js_1.readProperty)(delivery.sendInFlight, "apiGateOwner"),
+        );
       const currentProofGateOwner = normalizeString(
-        delivery.apiGateProofRequired?.owner,
+        (0, values_js_1.readProperty)(delivery.apiGateProofRequired, "owner"),
       );
       if (
         currentApiGateOwner &&
@@ -773,7 +912,10 @@ const createTelegramDeliveryEngine = ({
       const pendingDelete = asObject(delivery.pendingDelete);
       const pendingApiGateOwner = normalizeString(pendingDelete.apiGateOwner);
       const pendingProofGateOwner = normalizeString(
-        pendingDelete.apiGateProofRequired?.owner,
+        (0, values_js_1.readProperty)(
+          pendingDelete.apiGateProofRequired,
+          "owner",
+        ),
       );
       if (
         pendingApiGateOwner &&
@@ -785,7 +927,9 @@ const createTelegramDeliveryEngine = ({
       if (
         pendingApiGateOwner &&
         pendingDelete.status === "processing" &&
-        normalizeTimestamp(pendingDelete.leaseExpiresAtMs) <= nowMs
+        (0, deliveryPolicy_js_1.normalizeTimestamp)(
+          pendingDelete.leaseExpiresAtMs,
+        ) <= nowMs
       ) {
         acquireDecision = "pending-api-gate-settle-pending";
         return {
@@ -857,7 +1001,7 @@ const createTelegramDeliveryEngine = ({
         acquireDecision = "invalid";
         const apiGateOwner = normalizeString(delivery.apiGateOwner);
         const proofGateOwner = normalizeString(
-          delivery.apiGateProofRequired?.owner,
+          (0, values_js_1.readProperty)(delivery.apiGateProofRequired, "owner"),
         );
         const shouldSettleApiGate =
           apiGateOwner && apiGateOwner !== proofGateOwner;
@@ -865,7 +1009,7 @@ const createTelegramDeliveryEngine = ({
           value: {
             ...record,
             delivery: {
-              ...omitRetryState(
+              ...(0, deliveryPolicy_js_1.omitRetryState)(
                 omitKeys(delivery, [
                   "leaseOwner",
                   "leaseExpiresAtMs",
@@ -884,7 +1028,9 @@ const createTelegramDeliveryEngine = ({
                 : {}),
               status: "terminal",
               revision: desiredRevision || "invalid",
-              attempts: normalizeAttempts(delivery.attempts),
+              attempts: (0, deliveryPolicy_js_1.normalizeAttempts)(
+                delivery.attempts,
+              ),
               lastError: {
                 code: "invalid-desired-state",
                 atMs: nowMs,
@@ -898,13 +1044,13 @@ const createTelegramDeliveryEngine = ({
       if (
         delivery.revision === revision &&
         ["pending", "processing", "retryable"].includes(delivery.status) &&
-        resolveRetryDeadlineAtMs(delivery) > 0 &&
-        resolveRetryDeadlineAtMs(delivery) <= nowMs
+        (0, deliveryPolicy_js_1.resolveRetryDeadlineAtMs)(delivery) > 0 &&
+        (0, deliveryPolicy_js_1.resolveRetryDeadlineAtMs)(delivery) <= nowMs
       ) {
         acquireDecision = "retry-exhausted";
         const apiGateOwner = normalizeString(delivery.apiGateOwner);
         const proofGateOwner = normalizeString(
-          delivery.apiGateProofRequired?.owner,
+          (0, values_js_1.readProperty)(delivery.apiGateProofRequired, "owner"),
         );
         const shouldSettleApiGate =
           apiGateOwner && apiGateOwner !== proofGateOwner;
@@ -912,7 +1058,7 @@ const createTelegramDeliveryEngine = ({
           value: {
             ...record,
             delivery: {
-              ...omitRetryState(
+              ...(0, deliveryPolicy_js_1.omitRetryState)(
                 omitKeys(delivery, [
                   "leaseOwner",
                   "leaseExpiresAtMs",
@@ -962,7 +1108,10 @@ const createTelegramDeliveryEngine = ({
       acquireDecision = "acquired";
       const sameRevision = deliveryForAcquire.revision === revision;
       const proofRequiredOwner = normalizeString(
-        deliveryForAcquire.apiGateProofRequired?.owner,
+        (0, values_js_1.readProperty)(
+          deliveryForAcquire.apiGateProofRequired,
+          "owner",
+        ),
       );
       const previousApiGateOwner = normalizeString(
         deliveryForAcquire.apiGateOwner,
@@ -974,7 +1123,7 @@ const createTelegramDeliveryEngine = ({
           : previousApiGateOwner);
       const deliveryForRevision = sameRevision
         ? deliveryForAcquire
-        : omitRetryState(
+        : (0, deliveryPolicy_js_1.omitRetryState)(
             omitKeys(deliveryForAcquire, [
               "safeRejectionAtMs",
               "safeRejectionRecoveredAtMs",
@@ -999,7 +1148,9 @@ const createTelegramDeliveryEngine = ({
             status: "processing",
             revision,
             attempts: sameRevision
-              ? normalizeAttempts(deliveryForRevision.attempts) + 1
+              ? (0, deliveryPolicy_js_1.normalizeAttempts)(
+                  deliveryForRevision.attempts,
+                ) + 1
               : 1,
             leaseOwner: ownerToken,
             leaseExpiresAtMs: nowMs + leaseTtlMs,
@@ -1011,7 +1162,6 @@ const createTelegramDeliveryEngine = ({
     });
     return { ...result, decision: acquireDecision };
   };
-
   const updateOwned = async (messageKey, ownerToken, updater) =>
     transact(messageKey, (record) => {
       const delivery = asObject(record.delivery);
@@ -1023,7 +1173,6 @@ const createTelegramDeliveryEngine = ({
         decision: "updated",
       };
     });
-
   const prepareDesiredApiGateIdentity = async ({
     messageKey,
     ownerToken,
@@ -1047,7 +1196,9 @@ const createTelegramDeliveryEngine = ({
             apiGateGeneration:
               normalizeString(delivery.apiGateGeneration) || generation,
             apiGateStartedAtMs:
-              normalizeTimestamp(delivery.apiGateStartedAtMs) || preparedAtMs,
+              (0, deliveryPolicy_js_1.normalizeTimestamp)(
+                delivery.apiGateStartedAtMs,
+              ) || preparedAtMs,
           },
         };
       }),
@@ -1057,7 +1208,7 @@ const createTelegramDeliveryEngine = ({
     const owner = normalizeString(delivery.apiGateOwner);
     const persistedGeneration = normalizeString(delivery.apiGateGeneration);
     const proofRequiredOwner = normalizeString(
-      delivery.apiGateProofRequired?.owner,
+      (0, values_js_1.readProperty)(delivery.apiGateProofRequired, "owner"),
     );
     const mayReclaim = owner !== "" && proofRequiredOwner !== owner;
     return {
@@ -1067,7 +1218,6 @@ const createTelegramDeliveryEngine = ({
       delivery,
     };
   };
-
   const settlePersistedApiGate = async ({
     messageKey,
     field,
@@ -1096,7 +1246,6 @@ const createTelegramDeliveryEngine = ({
     }
     return result;
   };
-
   const finishStatus = async ({
     messageKey,
     ownerToken,
@@ -1112,7 +1261,9 @@ const createTelegramDeliveryEngine = ({
   }) =>
     ensureCommitted(
       await updateOwned(messageKey, ownerToken, (record, delivery) => {
-        const latestRevision = normalizeString(record.desired?.revision);
+        const latestRevision = normalizeString(
+          (0, values_js_1.readProperty)(record.desired, "revision"),
+        );
         const desiredStillLatest = latestRevision === desired.revision;
         const nextDeliveryStatus =
           status === "uncertain"
@@ -1121,7 +1272,7 @@ const createTelegramDeliveryEngine = ({
               ? status
               : "pending";
         const nextDelivery = {
-          ...omitRetryState(
+          ...(0, deliveryPolicy_js_1.omitRetryState)(
             omitKeys(delivery, [
               "leaseOwner",
               "leaseExpiresAtMs",
@@ -1154,7 +1305,10 @@ const createTelegramDeliveryEngine = ({
             status === "uncertain") &&
           result
         ) {
-          nextDelivery.lastError = buildErrorState(result, nowMs);
+          nextDelivery.lastError = (0, deliveryPolicy_js_1.buildErrorState)(
+            result,
+            nowMs,
+          );
         }
         if (status === "uncertain") {
           nextDelivery.uncertainAtMs = nowMs;
@@ -1181,7 +1335,6 @@ const createTelegramDeliveryEngine = ({
       }),
       `${status}-finalization-failed`,
     );
-
   const finishStatusAndSettleApiGate = async (input) => {
     const owner = normalizeString(input.apiGateSettleOwner);
     const finalized = await finishStatus(input);
@@ -1194,7 +1347,6 @@ const createTelegramDeliveryEngine = ({
     }
     return finalized;
   };
-
   const finishRetryable = async ({
     messageKey,
     ownerToken,
@@ -1203,7 +1355,7 @@ const createTelegramDeliveryEngine = ({
     safeRejectedAttemptId = "",
     currentDelivery,
     apiGateOwner = "",
-    proofTaskKind = TELEGRAM_DESIRED_TASK_KIND,
+    proofTaskKind = taskKinds_js_1.TELEGRAM_DESIRED_TASK_KIND,
     pendingDeleteId = "",
     preserveApiGateIdentity = false,
     persistBeforeSchedule = false,
@@ -1245,12 +1397,14 @@ const createTelegramDeliveryEngine = ({
           messageKey,
           ownerToken,
           (record, delivery) => {
-            const latestRevision = normalizeString(record.desired?.revision);
+            const latestRevision = normalizeString(
+              (0, values_js_1.readProperty)(record.desired, "revision"),
+            );
             const desiredStillLatest = latestRevision === desired.revision;
             return {
               ...record,
               delivery: {
-                ...omitRetryState(
+                ...(0, deliveryPolicy_js_1.omitRetryState)(
                   omitKeys(delivery, [
                     "leaseOwner",
                     "leaseExpiresAtMs",
@@ -1272,12 +1426,17 @@ const createTelegramDeliveryEngine = ({
                   ? desired.revision
                   : latestRevision,
                 attempts: desiredStillLatest
-                  ? normalizeAttempts(delivery.attempts)
+                  ? (0, deliveryPolicy_js_1.normalizeAttempts)(
+                      delivery.attempts,
+                    )
                   : 0,
                 ...(desiredStillLatest
                   ? {
                       ...retryState,
-                      lastError: buildErrorState(result, finalizedAtMs),
+                      lastError: (0, deliveryPolicy_js_1.buildErrorState)(
+                        result,
+                        finalizedAtMs,
+                      ),
                       ...(result?.code === "rate-limited"
                         ? { safeRejectionAtMs: finalizedAtMs }
                         : {}),
@@ -1292,10 +1451,14 @@ const createTelegramDeliveryEngine = ({
           const currentDeliveryState = asObject(current.delivery);
           const proofAlreadyApplied =
             rateLimited &&
-            normalizeRetrySequence(currentDeliveryState.retrySequence) >=
-              retryState.retrySequence &&
+            (0, deliveryPolicy_js_1.normalizeRetrySequence)(
+              currentDeliveryState.retrySequence,
+            ) >= retryState.retrySequence &&
             normalizeString(
-              currentDeliveryState.apiGateProofRequired?.owner,
+              (0, values_js_1.readProperty)(
+                currentDeliveryState.apiGateProofRequired,
+                "owner",
+              ),
             ) !== normalizeString(apiGateOwner);
           if (!proofAlreadyApplied) {
             ensureCommitted(finalization, "retryable-finalization-failed");
@@ -1304,14 +1467,15 @@ const createTelegramDeliveryEngine = ({
       },
     });
   };
-
   const finishExpiredOwnedRetryWindow = async ({
     messageKey,
     ownerToken,
     desired,
     currentDelivery,
   }) => {
-    const deadlineAtMs = resolveRetryDeadlineAtMs(currentDelivery);
+    const deadlineAtMs = (0, deliveryPolicy_js_1.resolveRetryDeadlineAtMs)(
+      currentDelivery,
+    );
     const checkedAtMs = now();
     if (!deadlineAtMs || checkedAtMs < deadlineAtMs) {
       return null;
@@ -1319,7 +1483,9 @@ const createTelegramDeliveryEngine = ({
     const result = { code: "safe-retry-window-exhausted" };
     const current = asObject(currentDelivery);
     const apiGateOwner = normalizeString(current.apiGateOwner);
-    const proofGateOwner = normalizeString(current.apiGateProofRequired?.owner);
+    const proofGateOwner = normalizeString(
+      (0, values_js_1.readProperty)(current.apiGateProofRequired, "owner"),
+    );
     await finishStatusAndSettleApiGate({
       messageKey,
       ownerToken,
@@ -1332,7 +1498,6 @@ const createTelegramDeliveryEngine = ({
     });
     return { status: "terminal", reason: result.code };
   };
-
   const markAppliedStateUnknown = async ({
     messageKey,
     ownerToken,
@@ -1357,7 +1522,6 @@ const createTelegramDeliveryEngine = ({
       "applied-state-unknown-not-persisted",
     );
   };
-
   const markDelivered = (
     messageKey,
     ownerToken,
@@ -1373,7 +1537,6 @@ const createTelegramDeliveryEngine = ({
       nowMs,
       ...options,
     });
-
   const runDelete = async ({
     messageKey,
     ownerToken,
@@ -1429,8 +1592,11 @@ const createTelegramDeliveryEngine = ({
     }
     const callAtMs = now();
     if (
-      resolveRetryDeadlineAtMs(gateIdentity.delivery) > 0 &&
-      resolveRetryDeadlineAtMs(gateIdentity.delivery) <= callAtMs
+      (0, deliveryPolicy_js_1.resolveRetryDeadlineAtMs)(gateIdentity.delivery) >
+        0 &&
+      (0, deliveryPolicy_js_1.resolveRetryDeadlineAtMs)(
+        gateIdentity.delivery,
+      ) <= callAtMs
     ) {
       const result = { code: "safe-retry-window-exhausted" };
       await finishStatusAndSettleApiGate({
@@ -1492,7 +1658,6 @@ const createTelegramDeliveryEngine = ({
     logFailure(messageKey, "terminal", result);
     return { status: "terminal", reason: result.code };
   };
-
   const runSend = async ({
     messageKey,
     ownerToken,
@@ -1515,13 +1680,19 @@ const createTelegramDeliveryEngine = ({
       messageKey,
       ownerToken,
       (record, delivery) => {
-        if (normalizeString(record.desired?.revision) !== desired.revision) {
+        if (
+          normalizeString(
+            (0, values_js_1.readProperty)(record.desired, "revision"),
+          ) !== desired.revision
+        ) {
           return {
             ...record,
             delivery: {
               ...omitKeys(delivery, ["leaseOwner", "leaseExpiresAtMs"]),
               status: "pending",
-              revision: normalizeString(record.desired?.revision),
+              revision: normalizeString(
+                (0, values_js_1.readProperty)(record.desired, "revision"),
+              ),
             },
           };
         }
@@ -1536,11 +1707,13 @@ const createTelegramDeliveryEngine = ({
     );
     if (
       !marked.committed ||
-      marked.value?.delivery?.sendInFlight?.revision !== desired.revision
+      (0, values_js_1.readProperty)(
+        (0, values_js_1.readProperty)(marked.value?.delivery, "sendInFlight"),
+        "revision",
+      ) !== desired.revision
     ) {
       return { status: "stale" };
     }
-
     const expired = await finishExpiredOwnedRetryWindow({
       messageKey,
       ownerToken,
@@ -1550,7 +1723,6 @@ const createTelegramDeliveryEngine = ({
     if (expired) {
       return expired;
     }
-
     const gateResult = await acquireApiGate({
       messageKey,
       revision: desired.revision,
@@ -1576,8 +1748,18 @@ const createTelegramDeliveryEngine = ({
     }
     const callAtMs = now();
     if (
-      normalizeTimestamp(marked.value?.delivery?.retryDeadlineAtMs) > 0 &&
-      normalizeTimestamp(marked.value.delivery.retryDeadlineAtMs) <= callAtMs
+      (0, deliveryPolicy_js_1.normalizeTimestamp)(
+        (0, values_js_1.readProperty)(
+          marked.value?.delivery,
+          "retryDeadlineAtMs",
+        ),
+      ) > 0 &&
+      (0, deliveryPolicy_js_1.normalizeTimestamp)(
+        (0, values_js_1.readProperty)(
+          marked.value?.delivery,
+          "retryDeadlineAtMs",
+        ),
+      ) <= callAtMs
     ) {
       const expiredResult = { code: "safe-retry-window-exhausted" };
       await finishStatusAndSettleApiGate({
@@ -1591,7 +1773,6 @@ const createTelegramDeliveryEngine = ({
       });
       return { status: "terminal", reason: expiredResult.code };
     }
-
     const result = await client.sendTelegramMessage({
       chatId,
       text: desired.text,
@@ -1613,9 +1794,11 @@ const createTelegramDeliveryEngine = ({
         messageKey,
         ownerToken,
         (record, delivery) => {
-          const latestRevision = normalizeString(record.desired?.revision);
+          const latestRevision = normalizeString(
+            (0, values_js_1.readProperty)(record.desired, "revision"),
+          );
           const nextDelivery = {
-            ...omitRetryState(
+            ...(0, deliveryPolicy_js_1.omitRetryState)(
               omitKeys(delivery, [
                 "leaseOwner",
                 "leaseExpiresAtMs",
@@ -1641,6 +1824,7 @@ const createTelegramDeliveryEngine = ({
           }
           if (
             previousApplied &&
+            typeof previousApplied.messageId === "number" &&
             Number.isInteger(previousApplied.messageId) &&
             previousApplied.messageId > 0 &&
             (previousApplied.messageId !== result.messageId ||
@@ -1677,7 +1861,6 @@ const createTelegramDeliveryEngine = ({
       });
       return { status: "delivered", messageId: result.messageId };
     }
-
     if (result.classification === "retryable") {
       const retryState = await finishRetryable({
         messageKey,
@@ -1709,22 +1892,24 @@ const createTelegramDeliveryEngine = ({
     logFailure(messageKey, status, result);
     return { status, reason: result.code };
   };
-
-  const reconcileDesired = async ({
-    messageKey,
-    requestedRevision = "",
-    safeRejectedAttemptId = "",
-    retryStartedAtMs = 0,
-    retryDeadlineAtMs = 0,
-    retryAtMs = 0,
-    retrySequence = 0,
-    retryProofLeaseOwner = "",
-    requestedGeneration = "",
-    taskKind = TELEGRAM_DESIRED_TASK_KIND,
-    apiGateReclaimOwner = "",
-    apiGateSettleOwner = "",
-  } = {}) => {
-    const normalizedMessageKey = validateTelegramMessageKey(messageKey);
+  const reconcileDesired = async (
+    {
+      messageKey,
+      requestedRevision = "",
+      safeRejectedAttemptId = "",
+      retryStartedAtMs = 0,
+      retryDeadlineAtMs = 0,
+      retryAtMs = 0,
+      retrySequence = 0,
+      retryProofLeaseOwner = "",
+      requestedGeneration = "",
+      taskKind = taskKinds_js_1.TELEGRAM_DESIRED_TASK_KIND,
+      apiGateReclaimOwner = "",
+      apiGateSettleOwner = "",
+    } = { messageKey: "" },
+  ) => {
+    const normalizedMessageKey = (0,
+    desiredStateCore_js_1.validateTelegramMessageKey)(messageKey);
     const nowMs = now();
     if (normalizeString(apiGateSettleOwner)) {
       await repository.releaseApiGate(apiGateSettleOwner);
@@ -1737,7 +1922,7 @@ const createTelegramDeliveryEngine = ({
       retryAtMs,
       retrySequence,
     });
-    if (taskKind !== TELEGRAM_PENDING_DELETE_TASK_KIND) {
+    if (taskKind !== taskKinds_js_1.TELEGRAM_PENDING_DELETE_TASK_KIND) {
       await applyDesiredRetryWindowProof(normalizedMessageKey, {
         requestedRevision,
         safeRejectedAttemptId,
@@ -1776,19 +1961,30 @@ const createTelegramDeliveryEngine = ({
       await settlePersistedApiGate({
         messageKey: normalizedMessageKey,
         field,
-        owner: acquired.value?.delivery?.[field],
+        owner: (0, values_js_1.readProperty)(
+          (0, values_js_1.readProperty)(acquired.value, "delivery"),
+          field,
+        ),
       });
       acquired = await acquire(normalizedMessageKey, ownerToken, nowMs);
     }
     if (
       (acquired.decision === "invalid" ||
         acquired.decision === "retry-exhausted") &&
-      normalizeString(acquired.value?.delivery?.apiGateSettleOwner)
+      normalizeString(
+        (0, values_js_1.readProperty)(
+          acquired.value?.delivery,
+          "apiGateSettleOwner",
+        ),
+      )
     ) {
       await settlePersistedApiGate({
         messageKey: normalizedMessageKey,
         field: "apiGateSettleOwner",
-        owner: acquired.value.delivery.apiGateSettleOwner,
+        owner: (0, values_js_1.readProperty)(
+          (0, values_js_1.readProperty)(acquired.value, "delivery"),
+          "apiGateSettleOwner",
+        ),
       });
     }
     if (acquired.decision === "invalid") {
@@ -1798,29 +1994,44 @@ const createTelegramDeliveryEngine = ({
       await settlePersistedApiGate({
         messageKey: normalizedMessageKey,
         field: "apiGateSettleOwner",
-        owner: acquired.value?.delivery?.apiGateSettleOwner,
+        owner: (0, values_js_1.readProperty)(
+          acquired.value?.delivery,
+          "apiGateSettleOwner",
+        ),
       });
       return { status: "uncertain", reason: "abandoned-send-in-flight" };
     }
     if (acquired.decision === "pending-rate-limit-proof-pending") {
       const proof = asObject(
-        acquired.value?.delivery?.pendingDelete?.apiGateProofRequired,
+        (0, values_js_1.readProperty)(
+          (0, values_js_1.readProperty)(
+            acquired.value?.delivery,
+            "pendingDelete",
+          ),
+          "apiGateProofRequired",
+        ),
       );
       const proofRetryState = {
-        retryStartedAtMs: normalizeTimestamp(proof.retryStartedAtMs),
-        retryDeadlineAtMs: normalizeTimestamp(proof.retryDeadlineAtMs),
-        retryAtMs: normalizeTimestamp(proof.retryAtMs),
-        retrySequence: normalizeRetrySequence(proof.retrySequence),
+        retryStartedAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
+          proof.retryStartedAtMs,
+        ),
+        retryDeadlineAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
+          proof.retryDeadlineAtMs,
+        ),
+        retryAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(proof.retryAtMs),
+        retrySequence: (0, deliveryPolicy_js_1.normalizeRetrySequence)(
+          proof.retrySequence,
+        ),
       };
       await scheduleExactRetry({
         messageKey: normalizedMessageKey,
         revision:
           normalizeString(proof.revision) || requestedRevision || "latest",
-        taskKind: TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND,
+        taskKind: taskKinds_js_1.TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND,
         retryState: proofRetryState,
         pendingDeleteId: normalizeString(proof.pendingDeleteId),
         retryProofLeaseOwner: normalizeString(proof.retryProofLeaseOwner),
-        proofTaskKind: TELEGRAM_PENDING_DELETE_TASK_KIND,
+        proofTaskKind: taskKinds_js_1.TELEGRAM_PENDING_DELETE_TASK_KIND,
         barrierProofOwner: proof.owner,
         barrierRetryNotBeforeMs: proof.retryNotBeforeMs,
         scheduleTimeMs: nowMs,
@@ -1848,27 +2059,40 @@ const createTelegramDeliveryEngine = ({
       return {
         status: "retryable",
         reason: "pending-rate-limit-proof-pending",
-        retryAtMs: normalizeTimestamp(proof.retryNotBeforeMs),
+        retryAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
+          proof.retryNotBeforeMs,
+        ),
         scheduled: true,
       };
     }
     if (acquired.decision === "rate-limit-proof-pending") {
-      const proof = asObject(acquired.value?.delivery?.apiGateProofRequired);
+      const proof = asObject(
+        (0, values_js_1.readProperty)(
+          acquired.value?.delivery,
+          "apiGateProofRequired",
+        ),
+      );
       const proofRetryState = {
-        retryStartedAtMs: normalizeTimestamp(proof.retryStartedAtMs),
-        retryDeadlineAtMs: normalizeTimestamp(proof.retryDeadlineAtMs),
-        retryAtMs: normalizeTimestamp(proof.retryAtMs),
-        retrySequence: normalizeRetrySequence(proof.retrySequence),
+        retryStartedAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
+          proof.retryStartedAtMs,
+        ),
+        retryDeadlineAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
+          proof.retryDeadlineAtMs,
+        ),
+        retryAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(proof.retryAtMs),
+        retrySequence: (0, deliveryPolicy_js_1.normalizeRetrySequence)(
+          proof.retrySequence,
+        ),
       };
       await scheduleExactRetry({
         messageKey: normalizedMessageKey,
         revision:
           normalizeString(proof.revision) || requestedRevision || "latest",
-        taskKind: TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND,
+        taskKind: taskKinds_js_1.TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND,
         retryState: proofRetryState,
         safeRejectedAttemptId: normalizeString(proof.safeRejectedAttemptId),
         retryProofLeaseOwner: normalizeString(proof.retryProofLeaseOwner),
-        proofTaskKind: TELEGRAM_DESIRED_TASK_KIND,
+        proofTaskKind: taskKinds_js_1.TELEGRAM_DESIRED_TASK_KIND,
         barrierProofOwner: proof.owner,
         barrierRetryNotBeforeMs: proof.retryNotBeforeMs,
         scheduleTimeMs: nowMs,
@@ -1901,16 +2125,21 @@ const createTelegramDeliveryEngine = ({
       return {
         status: "retryable",
         reason: "rate-limit-proof-pending",
-        retryAtMs: normalizeTimestamp(proof.retryNotBeforeMs),
+        retryAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
+          proof.retryNotBeforeMs,
+        ),
         scheduled: true,
       };
     }
     if (acquired.decision === "locked") {
       const lockedGateOwner = normalizeString(
-        acquired.value?.delivery?.apiGateOwner,
+        (0, values_js_1.readProperty)(acquired.value?.delivery, "apiGateOwner"),
       );
       const lockedGateGeneration = normalizeString(
-        acquired.value?.delivery?.apiGateGeneration,
+        (0, values_js_1.readProperty)(
+          acquired.value?.delivery,
+          "apiGateGeneration",
+        ),
       );
       const mayReclaimLockedGate =
         lockedGateOwner &&
@@ -1918,20 +2147,33 @@ const createTelegramDeliveryEngine = ({
           (lockedGateGeneration &&
             lockedGateGeneration === normalizeString(requestedGeneration)));
       const lockedRetryAtMs =
-        normalizeTimestamp(acquired.value?.delivery?.leaseExpiresAtMs) ||
-        nowMs + 1000;
+        (0, deliveryPolicy_js_1.normalizeTimestamp)(
+          (0, values_js_1.readProperty)(
+            acquired.value?.delivery,
+            "leaseExpiresAtMs",
+          ),
+        ) || nowMs + 1000;
       await scheduleExactRetry({
         messageKey: normalizedMessageKey,
         revision: requestedRevision || "latest",
-        taskKind: TELEGRAM_DESIRED_TASK_KIND,
+        taskKind: taskKinds_js_1.TELEGRAM_DESIRED_TASK_KIND,
         retryState: {
           retryStartedAtMs:
-            acquired.value?.delivery?.retryStartedAtMs || retryStartedAtMs,
+            (0, values_js_1.readProperty)(
+              acquired.value?.delivery,
+              "retryStartedAtMs",
+            ) || retryStartedAtMs,
           retryDeadlineAtMs:
-            acquired.value?.delivery?.retryDeadlineAtMs || retryDeadlineAtMs,
+            (0, values_js_1.readProperty)(
+              acquired.value?.delivery,
+              "retryDeadlineAtMs",
+            ) || retryDeadlineAtMs,
           retryAtMs: lockedRetryAtMs,
           retrySequence:
-            acquired.value?.delivery?.retrySequence ?? retrySequence,
+            (0, values_js_1.readProperty)(
+              acquired.value?.delivery,
+              "retrySequence",
+            ) ?? retrySequence,
         },
         sourceGeneration: requestedGeneration,
         apiGateReclaimOwner: mayReclaimLockedGate ? lockedGateOwner : "",
@@ -1945,19 +2187,32 @@ const createTelegramDeliveryEngine = ({
     }
     if (acquired.decision === "deferred") {
       const deferredRetryAtMs =
-        Number(acquired.value?.delivery?.retryAtMs) || null;
+        Number(
+          (0, values_js_1.readProperty)(acquired.value?.delivery, "retryAtMs"),
+        ) || null;
       await scheduleExactRetry({
         messageKey: normalizedMessageKey,
         revision:
-          normalizeString(acquired.value?.desired?.revision) ||
+          normalizeString(
+            (0, values_js_1.readProperty)(acquired.value?.desired, "revision"),
+          ) ||
           requestedRevision ||
           "latest",
-        taskKind: TELEGRAM_DESIRED_TASK_KIND,
+        taskKind: taskKinds_js_1.TELEGRAM_DESIRED_TASK_KIND,
         retryState: {
-          retryStartedAtMs: acquired.value?.delivery?.retryStartedAtMs,
-          retryDeadlineAtMs: acquired.value?.delivery?.retryDeadlineAtMs,
+          retryStartedAtMs: (0, values_js_1.readProperty)(
+            acquired.value?.delivery,
+            "retryStartedAtMs",
+          ),
+          retryDeadlineAtMs: (0, values_js_1.readProperty)(
+            acquired.value?.delivery,
+            "retryDeadlineAtMs",
+          ),
           retryAtMs: deferredRetryAtMs,
-          retrySequence: acquired.value?.delivery?.retrySequence,
+          retrySequence: (0, values_js_1.readProperty)(
+            acquired.value?.delivery,
+            "retrySequence",
+          ),
         },
         sourceGeneration: requestedGeneration,
       });
@@ -1980,12 +2235,14 @@ const createTelegramDeliveryEngine = ({
     if (acquired.decision !== "acquired") {
       return { status: "skipped", reason: "missing" };
     }
-
     let record = asObject(acquired.value);
     const settledSupersededGate = await settlePersistedApiGate({
       messageKey: normalizedMessageKey,
       field: "apiGateSettleOwner",
-      owner: record.delivery?.apiGateSettleOwner,
+      owner: (0, values_js_1.readProperty)(
+        record.delivery,
+        "apiGateSettleOwner",
+      ),
     });
     if (settledSupersededGate) {
       record = asObject(settledSupersededGate.value);
@@ -2001,7 +2258,6 @@ const createTelegramDeliveryEngine = ({
         messageKey: normalizedMessageKey,
       });
     }
-
     const barrierCheckedAtMs = now();
     if (retryNotBeforeMs > barrierCheckedAtMs) {
       const retryState = await finishRetryable({
@@ -2016,7 +2272,9 @@ const createTelegramDeliveryEngine = ({
           ),
         },
         currentDelivery: record.delivery,
-        preserveApiGateIdentity: Boolean(record.delivery?.apiGateOwner),
+        preserveApiGateIdentity: Boolean(
+          (0, values_js_1.readProperty)(record.delivery, "apiGateOwner"),
+        ),
         persistBeforeSchedule: true,
       });
       return {
@@ -2026,7 +2284,6 @@ const createTelegramDeliveryEngine = ({
         scheduled: true,
       };
     }
-
     const chatId = resolveDestination(desired.destination);
     if (!normalizeString(chatId)) {
       const result = {
@@ -2044,9 +2301,12 @@ const createTelegramDeliveryEngine = ({
       logFailure(normalizedMessageKey, "terminal", result);
       return { status: "terminal", reason: result.code };
     }
-
     if (desired.operation === "delete") {
-      if (!Number.isInteger(applied.messageId) || applied.messageId <= 0) {
+      if (
+        typeof applied.messageId !== "number" ||
+        !Number.isInteger(applied.messageId) ||
+        applied.messageId <= 0
+      ) {
         await markDelivered(normalizedMessageKey, ownerToken, desired, nowMs, {
           clearApplied: true,
         });
@@ -2064,8 +2324,11 @@ const createTelegramDeliveryEngine = ({
         apiGateReclaimOwner,
       });
     }
-
-    if (!Number.isInteger(applied.messageId) || applied.messageId <= 0) {
+    if (
+      typeof applied.messageId !== "number" ||
+      !Number.isInteger(applied.messageId) ||
+      applied.messageId <= 0
+    ) {
       if (desired.operation === "edit" && desired.ifMissing === "skip") {
         await markDelivered(normalizedMessageKey, ownerToken, desired, nowMs, {
           clearApplied: true,
@@ -2082,7 +2345,6 @@ const createTelegramDeliveryEngine = ({
         requestedGeneration,
       });
     }
-
     const appliedTargetMismatch =
       normalizeString(applied.instanceKey) !== desired.instanceKey ||
       normalizeString(applied.destination) !== desired.destination ||
@@ -2103,10 +2365,9 @@ const createTelegramDeliveryEngine = ({
         requestedGeneration,
       });
     }
-
     if (
       applied.contentHash === desired.contentHash &&
-      !record.delivery?.appliedStateUnknown
+      !(0, values_js_1.readProperty)(record.delivery, "appliedStateUnknown")
     ) {
       await markDelivered(normalizedMessageKey, ownerToken, desired, nowMs, {
         applied: {
@@ -2117,7 +2378,6 @@ const createTelegramDeliveryEngine = ({
       });
       return { status: "delivered", reason: "already-current" };
     }
-
     const expired = await finishExpiredOwnedRetryWindow({
       messageKey: normalizedMessageKey,
       ownerToken,
@@ -2162,8 +2422,11 @@ const createTelegramDeliveryEngine = ({
     }
     const editCallAtMs = now();
     if (
-      resolveRetryDeadlineAtMs(gateIdentity.delivery) > 0 &&
-      resolveRetryDeadlineAtMs(gateIdentity.delivery) <= editCallAtMs
+      (0, deliveryPolicy_js_1.resolveRetryDeadlineAtMs)(gateIdentity.delivery) >
+        0 &&
+      (0, deliveryPolicy_js_1.resolveRetryDeadlineAtMs)(
+        gateIdentity.delivery,
+      ) <= editCallAtMs
     ) {
       const result = { code: "safe-retry-window-exhausted" };
       await finishStatusAndSettleApiGate({
@@ -2291,7 +2554,6 @@ const createTelegramDeliveryEngine = ({
     logFailure(normalizedMessageKey, "terminal", editResult);
     return { status: "terminal", reason: editResult.code };
   };
-
   const orphanPendingDelete = async ({
     messageKey,
     pendingDeleteId,
@@ -2317,7 +2579,7 @@ const createTelegramDeliveryEngine = ({
           orphanedDeletes: {
             ...orphanedDeletes,
             [pendingDeleteId]: {
-              ...omitRetryState(
+              ...(0, deliveryPolicy_js_1.omitRetryState)(
                 omitKeys(pendingDelete, [
                   "leaseOwner",
                   "leaseExpiresAtMs",
@@ -2325,7 +2587,10 @@ const createTelegramDeliveryEngine = ({
                 ]),
               ),
               terminalAtMs: nowMs,
-              lastError: buildErrorState(result, nowMs),
+              lastError: (0, deliveryPolicy_js_1.buildErrorState)(
+                result,
+                nowMs,
+              ),
             },
           },
         });
@@ -2344,7 +2609,6 @@ const createTelegramDeliveryEngine = ({
       }),
       "pending-delete-orphan-finalization-failed",
     );
-
   const finishPendingDeleteRetryable = async ({
     messageKey,
     revision,
@@ -2359,7 +2623,10 @@ const createTelegramDeliveryEngine = ({
     return retryCoordinator.finish({
       current: pendingDelete,
       failure: result,
-      target: { kind: TELEGRAM_PENDING_DELETE_TASK_KIND, pendingDeleteId },
+      target: {
+        kind: taskKinds_js_1.TELEGRAM_PENDING_DELETE_TASK_KIND,
+        pendingDeleteId,
+      },
       messageKey,
       revision,
       ownerToken,
@@ -2388,7 +2655,8 @@ const createTelegramDeliveryEngine = ({
                       owner: apiGateOwner,
                       retryNotBeforeMs: barrierRetryNotBeforeMs,
                       revision,
-                      proofTaskKind: TELEGRAM_PENDING_DELETE_TASK_KIND,
+                      proofTaskKind:
+                        taskKinds_js_1.TELEGRAM_PENDING_DELETE_TASK_KIND,
                       pendingDeleteId,
                       retryProofLeaseOwner: ownerToken,
                       ...retryState,
@@ -2419,7 +2687,7 @@ const createTelegramDeliveryEngine = ({
               delivery: {
                 ...delivery,
                 pendingDelete: {
-                  ...omitRetryState(
+                  ...(0, deliveryPolicy_js_1.omitRetryState)(
                     omitKeys(latestPendingDelete, [
                       "leaseOwner",
                       "leaseExpiresAtMs",
@@ -2436,7 +2704,10 @@ const createTelegramDeliveryEngine = ({
                   ),
                   status: "retryable",
                   ...retryState,
-                  lastError: buildErrorState(result, finalizedAtMs),
+                  lastError: (0, deliveryPolicy_js_1.buildErrorState)(
+                    result,
+                    finalizedAtMs,
+                  ),
                 },
               },
             },
@@ -2446,14 +2717,18 @@ const createTelegramDeliveryEngine = ({
         if (!finalization.committed) {
           const current = asObject(await repository.getMessage(messageKey));
           const currentPendingDelete = asObject(
-            current.delivery?.pendingDelete,
+            (0, values_js_1.readProperty)(current.delivery, "pendingDelete"),
           );
           const proofAlreadyApplied =
             rateLimited &&
-            normalizeRetrySequence(currentPendingDelete.retrySequence) >=
-              retryState.retrySequence &&
+            (0, deliveryPolicy_js_1.normalizeRetrySequence)(
+              currentPendingDelete.retrySequence,
+            ) >= retryState.retrySequence &&
             normalizeString(
-              currentPendingDelete.apiGateProofRequired?.owner,
+              (0, values_js_1.readProperty)(
+                currentPendingDelete.apiGateProofRequired,
+                "owner",
+              ),
             ) !== normalizeString(apiGateOwner);
           if (!proofAlreadyApplied) {
             ensureCommitted(
@@ -2465,7 +2740,6 @@ const createTelegramDeliveryEngine = ({
       },
     });
   };
-
   const applyPendingDeleteRetryWindowProof = async (
     messageKey,
     {
@@ -2480,10 +2754,16 @@ const createTelegramDeliveryEngine = ({
   ) => {
     const normalizedPendingDeleteId = normalizeString(pendingDeleteId);
     const proofRetryState = {
-      retryStartedAtMs: normalizeTimestamp(retryStartedAtMs),
-      retryDeadlineAtMs: normalizeTimestamp(retryDeadlineAtMs),
-      retryAtMs: normalizeTimestamp(retryAtMs),
-      retrySequence: normalizeRetrySequence(retrySequence),
+      retryStartedAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
+        retryStartedAtMs,
+      ),
+      retryDeadlineAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
+        retryDeadlineAtMs,
+      ),
+      retryAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(retryAtMs),
+      retrySequence: (0, deliveryPolicy_js_1.normalizeRetrySequence)(
+        retrySequence,
+      ),
     };
     if (
       !normalizedPendingDeleteId ||
@@ -2504,7 +2784,9 @@ const createTelegramDeliveryEngine = ({
         normalizeString(pendingDelete.leaseOwner) !==
           normalizeString(retryProofLeaseOwner) ||
         proofRetryState.retrySequence <=
-          normalizeRetrySequence(pendingDelete.retrySequence)
+          (0, deliveryPolicy_js_1.normalizeRetrySequence)(
+            pendingDelete.retrySequence,
+          )
       ) {
         return {
           commit: false,
@@ -2547,7 +2829,6 @@ const createTelegramDeliveryEngine = ({
     });
     return { applied: applied && result.committed };
   };
-
   const reconcilePendingDelete = async ({
     messageKey,
     requestedRevision = "",
@@ -2560,7 +2841,8 @@ const createTelegramDeliveryEngine = ({
     retryProofLeaseOwner = "",
     apiGateReclaimOwner = "",
   }) => {
-    const normalizedMessageKey = validateTelegramMessageKey(messageKey);
+    const normalizedMessageKey = (0,
+    desiredStateCore_js_1.validateTelegramMessageKey)(messageKey);
     await applyPendingDeleteRetryWindowProof(normalizedMessageKey, {
       pendingDeleteId: requestedPendingDeleteId,
       retryStartedAtMs,
@@ -2596,7 +2878,10 @@ const createTelegramDeliveryEngine = ({
       }
       const currentApiGateOwner = normalizeString(pendingDelete.apiGateOwner);
       const currentProofGateOwner = normalizeString(
-        pendingDelete.apiGateProofRequired?.owner,
+        (0, values_js_1.readProperty)(
+          pendingDelete.apiGateProofRequired,
+          "owner",
+        ),
       );
       if (
         currentApiGateOwner &&
@@ -2609,7 +2894,10 @@ const createTelegramDeliveryEngine = ({
         decision = "invalid";
         const apiGateOwner = normalizeString(pendingDelete.apiGateOwner);
         const proofGateOwner = normalizeString(
-          pendingDelete.apiGateProofRequired?.owner,
+          (0, values_js_1.readProperty)(
+            pendingDelete.apiGateProofRequired,
+            "owner",
+          ),
         );
         const shouldSettleApiGate =
           apiGateOwner && apiGateOwner !== proofGateOwner;
@@ -2641,8 +2929,9 @@ const createTelegramDeliveryEngine = ({
           decision,
         };
       }
-      const retryDeadlineAtMs = resolveRetryDeadlineAtMs(pendingDelete);
-      const leaseExpiresAtMs = normalizeTimestamp(
+      const retryDeadlineAtMs = (0,
+      deliveryPolicy_js_1.resolveRetryDeadlineAtMs)(pendingDelete);
+      const leaseExpiresAtMs = (0, deliveryPolicy_js_1.normalizeTimestamp)(
         pendingDelete.leaseExpiresAtMs,
       );
       if (
@@ -2661,7 +2950,10 @@ const createTelegramDeliveryEngine = ({
         decision = "exhausted";
         const apiGateOwner = normalizeString(pendingDelete.apiGateOwner);
         const proofGateOwner = normalizeString(
-          pendingDelete.apiGateProofRequired?.owner,
+          (0, values_js_1.readProperty)(
+            pendingDelete.apiGateProofRequired,
+            "owner",
+          ),
         );
         const shouldSettleApiGate =
           apiGateOwner && apiGateOwner !== proofGateOwner;
@@ -2670,7 +2962,7 @@ const createTelegramDeliveryEngine = ({
           orphanedDeletes: {
             ...asObject(delivery.orphanedDeletes),
             [pendingDeleteId]: {
-              ...omitRetryState(pendingDelete),
+              ...(0, deliveryPolicy_js_1.omitRetryState)(pendingDelete),
               pendingDeleteId,
               terminalAtMs: nowMs,
               lastError: {
@@ -2695,7 +2987,8 @@ const createTelegramDeliveryEngine = ({
       }
       if (
         pendingDelete.status === "retryable" &&
-        normalizeTimestamp(pendingDelete.retryAtMs) > nowMs
+        (0, deliveryPolicy_js_1.normalizeTimestamp)(pendingDelete.retryAtMs) >
+          nowMs
       ) {
         decision = "deferred";
         return { commit: false, decision };
@@ -2714,7 +3007,10 @@ const createTelegramDeliveryEngine = ({
               ...pendingDelete,
               pendingDeleteId,
               status: "processing",
-              attempts: normalizeAttempts(pendingDelete.attempts) + 1,
+              attempts:
+                (0, deliveryPolicy_js_1.normalizeAttempts)(
+                  pendingDelete.attempts,
+                ) + 1,
               leaseOwner: ownerToken,
               leaseExpiresAtMs: nowMs + leaseTtlMs,
               startedAtMs: nowMs,
@@ -2728,7 +3024,9 @@ const createTelegramDeliveryEngine = ({
                 ),
               apiGateGeneration,
               apiGateStartedAtMs:
-                normalizeTimestamp(pendingDelete.apiGateStartedAtMs) || nowMs,
+                (0, deliveryPolicy_js_1.normalizeTimestamp)(
+                  pendingDelete.apiGateStartedAtMs,
+                ) || nowMs,
             },
           },
         },
@@ -2743,24 +3041,36 @@ const createTelegramDeliveryEngine = ({
     }
     if (decision === "rate-limit-proof-pending") {
       const proof = asObject(
-        acquired.value?.delivery?.pendingDelete?.apiGateProofRequired,
+        (0, values_js_1.readProperty)(
+          (0, values_js_1.readProperty)(
+            acquired.value?.delivery,
+            "pendingDelete",
+          ),
+          "apiGateProofRequired",
+        ),
       );
       const proofRetryState = {
-        retryStartedAtMs: normalizeTimestamp(proof.retryStartedAtMs),
-        retryDeadlineAtMs: normalizeTimestamp(proof.retryDeadlineAtMs),
-        retryAtMs: normalizeTimestamp(proof.retryAtMs),
-        retrySequence: normalizeRetrySequence(proof.retrySequence),
+        retryStartedAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
+          proof.retryStartedAtMs,
+        ),
+        retryDeadlineAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
+          proof.retryDeadlineAtMs,
+        ),
+        retryAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(proof.retryAtMs),
+        retrySequence: (0, deliveryPolicy_js_1.normalizeRetrySequence)(
+          proof.retrySequence,
+        ),
       };
       await scheduleExactRetry({
         messageKey: normalizedMessageKey,
         revision:
           normalizeString(proof.revision) || requestedRevision || "latest",
-        taskKind: TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND,
+        taskKind: taskKinds_js_1.TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND,
         retryState: proofRetryState,
         pendingDeleteId:
           normalizeString(proof.pendingDeleteId) || requestedPendingDeleteId,
         retryProofLeaseOwner: normalizeString(proof.retryProofLeaseOwner),
-        proofTaskKind: TELEGRAM_PENDING_DELETE_TASK_KIND,
+        proofTaskKind: taskKinds_js_1.TELEGRAM_PENDING_DELETE_TASK_KIND,
         barrierProofOwner: proof.owner,
         barrierRetryNotBeforeMs: proof.retryNotBeforeMs,
         scheduleTimeMs: nowMs,
@@ -2789,7 +3099,9 @@ const createTelegramDeliveryEngine = ({
       return {
         status: "retryable",
         cleanup: decision,
-        retryAtMs: normalizeTimestamp(proof.retryNotBeforeMs),
+        retryAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
+          proof.retryNotBeforeMs,
+        ),
         scheduled: true,
       };
     }
@@ -2797,12 +3109,20 @@ const createTelegramDeliveryEngine = ({
       await settlePersistedApiGate({
         messageKey: normalizedMessageKey,
         field: "pendingDeleteApiGateSettleOwner",
-        owner: acquired.value?.delivery?.pendingDeleteApiGateSettleOwner,
+        owner: (0, values_js_1.readProperty)(
+          acquired.value?.delivery,
+          "pendingDeleteApiGateSettleOwner",
+        ),
       });
       return { status: "settled", cleanup: decision };
     }
     if (decision === "deferred" || decision === "locked") {
-      const pendingDelete = asObject(acquired.value?.delivery?.pendingDelete);
+      const pendingDelete = asObject(
+        (0, values_js_1.readProperty)(
+          acquired.value?.delivery,
+          "pendingDelete",
+        ),
+      );
       const lockedGateOwner = normalizeString(pendingDelete.apiGateOwner);
       const lockedGateGeneration = normalizeString(
         pendingDelete.apiGateGeneration,
@@ -2814,15 +3134,19 @@ const createTelegramDeliveryEngine = ({
             lockedGateGeneration === normalizeString(requestedGeneration)));
       const retryAtMs =
         decision === "deferred"
-          ? normalizeTimestamp(pendingDelete.retryAtMs)
-          : normalizeTimestamp(pendingDelete.leaseExpiresAtMs) || nowMs + 1000;
+          ? (0, deliveryPolicy_js_1.normalizeTimestamp)(pendingDelete.retryAtMs)
+          : (0, deliveryPolicy_js_1.normalizeTimestamp)(
+              pendingDelete.leaseExpiresAtMs,
+            ) || nowMs + 1000;
       await scheduleExactRetry({
         messageKey: normalizedMessageKey,
         revision:
-          normalizeString(acquired.value?.desired?.revision) ||
+          normalizeString(
+            (0, values_js_1.readProperty)(acquired.value?.desired, "revision"),
+          ) ||
           requestedRevision ||
           "latest",
-        taskKind: TELEGRAM_PENDING_DELETE_TASK_KIND,
+        taskKind: taskKinds_js_1.TELEGRAM_PENDING_DELETE_TASK_KIND,
         retryState: {
           retryStartedAtMs: pendingDelete.retryStartedAtMs || retryStartedAtMs,
           retryDeadlineAtMs:
@@ -2839,12 +3163,15 @@ const createTelegramDeliveryEngine = ({
     if (decision !== "acquired") {
       return { status: "settled", cleanup: "missing" };
     }
-    const pendingDelete = asObject(acquired.value?.delivery?.pendingDelete);
+    const pendingDelete = asObject(
+      (0, values_js_1.readProperty)(acquired.value?.delivery, "pendingDelete"),
+    );
     const pendingDeleteId = normalizeString(pendingDelete.pendingDeleteId);
     const callAtMs = now();
     if (
-      resolveRetryDeadlineAtMs(pendingDelete) > 0 &&
-      resolveRetryDeadlineAtMs(pendingDelete) <= callAtMs
+      (0, deliveryPolicy_js_1.resolveRetryDeadlineAtMs)(pendingDelete) > 0 &&
+      (0, deliveryPolicy_js_1.resolveRetryDeadlineAtMs)(pendingDelete) <=
+        callAtMs
     ) {
       await orphanPendingDelete({
         messageKey: normalizedMessageKey,
@@ -2867,8 +3194,9 @@ const createTelegramDeliveryEngine = ({
     );
     const barrierCheckedAtMs = now();
     if (
-      resolveRetryDeadlineAtMs(pendingDelete) > 0 &&
-      resolveRetryDeadlineAtMs(pendingDelete) <= barrierCheckedAtMs
+      (0, deliveryPolicy_js_1.resolveRetryDeadlineAtMs)(pendingDelete) > 0 &&
+      (0, deliveryPolicy_js_1.resolveRetryDeadlineAtMs)(pendingDelete) <=
+        barrierCheckedAtMs
     ) {
       await orphanPendingDelete({
         messageKey: normalizedMessageKey,
@@ -2889,7 +3217,9 @@ const createTelegramDeliveryEngine = ({
       const retryState = await finishPendingDeleteRetryable({
         messageKey: normalizedMessageKey,
         revision:
-          normalizeString(acquired.value?.desired?.revision) ||
+          normalizeString(
+            (0, values_js_1.readProperty)(acquired.value?.desired, "revision"),
+          ) ||
           requestedRevision ||
           "latest",
         pendingDelete,
@@ -2916,14 +3246,19 @@ const createTelegramDeliveryEngine = ({
       pendingDelete.apiGateGeneration,
     );
     const proofRequiredOwner = normalizeString(
-      pendingDelete.apiGateProofRequired?.owner,
+      (0, values_js_1.readProperty)(
+        pendingDelete.apiGateProofRequired,
+        "owner",
+      ),
     );
     const mayReclaimApiGate =
       apiGateOwner !== "" && proofRequiredOwner !== apiGateOwner;
     const gateResult = await acquireApiGate({
       messageKey: normalizedMessageKey,
       revision:
-        normalizeString(acquired.value?.desired?.revision) ||
+        normalizeString(
+          (0, values_js_1.readProperty)(acquired.value?.desired, "revision"),
+        ) ||
         requestedRevision ||
         "latest",
       operation: "pending-delete",
@@ -2937,7 +3272,9 @@ const createTelegramDeliveryEngine = ({
       const retryState = await finishPendingDeleteRetryable({
         messageKey: normalizedMessageKey,
         revision:
-          normalizeString(acquired.value?.desired?.revision) ||
+          normalizeString(
+            (0, values_js_1.readProperty)(acquired.value?.desired, "revision"),
+          ) ||
           requestedRevision ||
           "latest",
         pendingDelete,
@@ -2955,8 +3292,9 @@ const createTelegramDeliveryEngine = ({
     }
     const deleteCallAtMs = now();
     if (
-      resolveRetryDeadlineAtMs(pendingDelete) > 0 &&
-      resolveRetryDeadlineAtMs(pendingDelete) <= deleteCallAtMs
+      (0, deliveryPolicy_js_1.resolveRetryDeadlineAtMs)(pendingDelete) > 0 &&
+      (0, deliveryPolicy_js_1.resolveRetryDeadlineAtMs)(pendingDelete) <=
+        deleteCallAtMs
     ) {
       await orphanPendingDelete({
         messageKey: normalizedMessageKey,
@@ -3013,7 +3351,9 @@ const createTelegramDeliveryEngine = ({
       const retryState = await finishPendingDeleteRetryable({
         messageKey: normalizedMessageKey,
         revision:
-          normalizeString(acquired.value?.desired?.revision) ||
+          normalizeString(
+            (0, values_js_1.readProperty)(acquired.value?.desired, "revision"),
+          ) ||
           requestedRevision ||
           "latest",
         pendingDelete,
@@ -3043,14 +3383,13 @@ const createTelegramDeliveryEngine = ({
     });
     return { status: "settled", cleanup: "orphaned" };
   };
-
-  const reconcile = async (input = {}) => {
+  const reconcile = async (input = { messageKey: "" }) => {
     let effectiveInput = input;
-    if (input.taskKind === TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND) {
+    if (input.taskKind === taskKinds_js_1.TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND) {
       const proofTaskKind = normalizeString(input.proofTaskKind);
       if (
-        proofTaskKind !== TELEGRAM_DESIRED_TASK_KIND &&
-        proofTaskKind !== TELEGRAM_PENDING_DELETE_TASK_KIND
+        proofTaskKind !== taskKinds_js_1.TELEGRAM_DESIRED_TASK_KIND &&
+        proofTaskKind !== taskKinds_js_1.TELEGRAM_PENDING_DELETE_TASK_KIND
       ) {
         return { status: "skipped", reason: "invalid-rate-limit-proof" };
       }
@@ -3062,9 +3401,10 @@ const createTelegramDeliveryEngine = ({
         if (normalizeString(barrierProof.gate?.owner)) {
           return { status: "settled", reason: "stale-rate-limit-proof" };
         }
-        const error = new Error("rate-limit-proof-not-applied");
-        error.code = "rate-limit-proof-not-applied";
-        error.retryable = true;
+        const error = Object.assign(new Error("rate-limit-proof-not-applied"), {
+          code: "rate-limit-proof-not-applied",
+          retryable: true,
+        });
         throw error;
       }
       await clearAppliedRateLimitProofMarker(
@@ -3084,22 +3424,31 @@ const createTelegramDeliveryEngine = ({
     const record = asObject(
       await repository.getMessage(effectiveInput.messageKey),
     );
-    const pendingDelete = asObject(record.delivery?.pendingDelete);
+    const pendingDelete = asObject(
+      (0, values_js_1.readProperty)(record.delivery, "pendingDelete"),
+    );
     if (Object.keys(pendingDelete).length === 0) {
       return desiredResult;
     }
     const pendingDeleteId = resolvePendingDeleteId(pendingDelete);
-    if (effectiveInput.taskKind !== TELEGRAM_PENDING_DELETE_TASK_KIND) {
+    if (
+      effectiveInput.taskKind !==
+      taskKinds_js_1.TELEGRAM_PENDING_DELETE_TASK_KIND
+    ) {
       await scheduleExactRetry({
         messageKey: effectiveInput.messageKey,
         revision:
-          normalizeString(record.desired?.revision) ||
+          normalizeString(
+            (0, values_js_1.readProperty)(record.desired, "revision"),
+          ) ||
           normalizeString(effectiveInput.requestedRevision) ||
           "latest",
-        taskKind: TELEGRAM_PENDING_DELETE_TASK_KIND,
+        taskKind: taskKinds_js_1.TELEGRAM_PENDING_DELETE_TASK_KIND,
         retryState: {
           retryAtMs: now(),
-          retrySequence: normalizeRetrySequence(pendingDelete.retrySequence),
+          retrySequence: (0, deliveryPolicy_js_1.normalizeRetrySequence)(
+            pendingDelete.retrySequence,
+          ),
         },
         pendingDeleteId,
         sourceGeneration: effectiveInput.requestedGeneration,
@@ -3123,19 +3472,23 @@ const createTelegramDeliveryEngine = ({
       const refreshed = asObject(
         await repository.getMessage(effectiveInput.messageKey),
       );
-      const nextPendingDelete = asObject(refreshed.delivery?.pendingDelete);
+      const nextPendingDelete = asObject(
+        (0, values_js_1.readProperty)(refreshed.delivery, "pendingDelete"),
+      );
       if (Object.keys(nextPendingDelete).length > 0) {
         const nextPendingDeleteId = resolvePendingDeleteId(nextPendingDelete);
         await scheduleExactRetry({
           messageKey: effectiveInput.messageKey,
           revision:
-            normalizeString(refreshed.desired?.revision) ||
+            normalizeString(
+              (0, values_js_1.readProperty)(refreshed.desired, "revision"),
+            ) ||
             normalizeString(effectiveInput.requestedRevision) ||
             "latest",
-          taskKind: TELEGRAM_PENDING_DELETE_TASK_KIND,
+          taskKind: taskKinds_js_1.TELEGRAM_PENDING_DELETE_TASK_KIND,
           retryState: {
             retryAtMs: now(),
-            retrySequence: normalizeRetrySequence(
+            retrySequence: (0, deliveryPolicy_js_1.normalizeRetrySequence)(
               nextPendingDelete.retrySequence,
             ),
           },
@@ -3151,23 +3504,6 @@ const createTelegramDeliveryEngine = ({
       ...(cleanupScheduled ? { cleanupScheduled: true } : {}),
     };
   };
-
   return { reconcile };
 };
-
-module.exports = {
-  TELEGRAM_DESTINATIONS,
-  TELEGRAM_LEASE_TTL_MS,
-  TELEGRAM_MESSAGE_ROOT,
-  TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND,
-  TELEGRAM_SAFE_RETRY_MAX_DELAY_MS,
-  TELEGRAM_SAFE_RETRY_WINDOW_MS,
-  TELEGRAM_SCHEMA_VERSION,
-  buildTelegramDeleteDesired,
-  buildTelegramEditDesired,
-  buildTelegramSendDesired,
-  createTelegramLocalRetryBarrier,
-  createTelegramDeliveryEngine,
-  resolveTelegramDestination,
-  validateTelegramMessageKey,
-};
+exports.createTelegramDeliveryEngine = createTelegramDeliveryEngine;

@@ -1,5 +1,16 @@
-export type SessionTimestamp = number | { readonly ".sv": "timestamp" };
-export type SessionCounter = number | { readonly ".sv": { increment: number } };
+// Generated from src/gameSessionChanges.ts. Run npm run generate:runtime.
+export type SessionTimestamp =
+  | number
+  | {
+      readonly ".sv": "timestamp";
+    };
+export type SessionCounter =
+  | number
+  | {
+      readonly ".sv": {
+        increment: number;
+      };
+    };
 export type InviteFieldChanges = {
   guestId?: string | null;
   hostId?: string;
@@ -32,8 +43,16 @@ export type ProfileProjectionRequest = {
 };
 export type SessionRecord = Record<string, unknown>;
 export type GameSessionChange =
-  | { kind: "invite-merge"; inviteId: string; value: SessionRecord }
-  | { kind: "invite-fields"; inviteId: string; value: InviteFieldChanges }
+  | {
+      kind: "invite-merge";
+      inviteId: string;
+      value: SessionRecord;
+    }
+  | {
+      kind: "invite-fields";
+      inviteId: string;
+      value: InviteFieldChanges;
+    }
   | {
       kind: "invite-operation";
       inviteId: string;
@@ -52,8 +71,16 @@ export type GameSessionChange =
       matchId: string;
       value: SessionRecord;
     }
-  | { kind: "automatch-entry"; inviteId: string; value: SessionRecord | null }
-  | { kind: "telegram-source"; inviteId: string; value: SessionRecord }
+  | {
+      kind: "automatch-entry";
+      inviteId: string;
+      value: SessionRecord | null;
+    }
+  | {
+      kind: "telegram-source";
+      inviteId: string;
+      value: SessionRecord;
+    }
   | {
       kind: "telegram-source-merge";
       inviteId: string;

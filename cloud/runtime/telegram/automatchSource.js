@@ -1,10 +1,22 @@
+// Generated from src/telegram/automatchSource.ts. Run npm run generate:runtime.
 "use strict";
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.buildPendingAutomatchTelegramSource =
+  exports.buildMatchedAutomatchTelegramChanges =
+  exports.buildAutomatchTelegramLifecycleChanges =
+  exports.buildAutomatchTelegramProjectionChanges =
+  exports.TELEGRAM_AUTOMATCH_VERSION =
+  exports.TELEGRAM_AUTOMATCH_PROJECTION_OUTBOX_ROOT =
+  exports.TELEGRAM_AUTOMATCH_ROOT =
+    void 0;
 const TELEGRAM_AUTOMATCH_VERSION = 2;
+exports.TELEGRAM_AUTOMATCH_VERSION = TELEGRAM_AUTOMATCH_VERSION;
 const TELEGRAM_AUTOMATCH_ROOT = "telegramAutomatches";
+exports.TELEGRAM_AUTOMATCH_ROOT = TELEGRAM_AUTOMATCH_ROOT;
 const TELEGRAM_AUTOMATCH_PROJECTION_OUTBOX_ROOT =
   "telegramProjectionOutbox/automatch";
-
+exports.TELEGRAM_AUTOMATCH_PROJECTION_OUTBOX_ROOT =
+  TELEGRAM_AUTOMATCH_PROJECTION_OUTBOX_ROOT;
 const buildAutomatchTelegramProjectionChanges = ({
   inviteId,
   requestId,
@@ -21,7 +33,8 @@ const buildAutomatchTelegramProjectionChanges = ({
     },
   },
 ];
-
+exports.buildAutomatchTelegramProjectionChanges =
+  buildAutomatchTelegramProjectionChanges;
 const buildPendingAutomatchTelegramSource = ({
   inviteId,
   waitingText,
@@ -37,7 +50,8 @@ const buildPendingAutomatchTelegramSource = ({
   createdAtMs: timestamp,
   updatedAtMs: timestamp,
 });
-
+exports.buildPendingAutomatchTelegramSource =
+  buildPendingAutomatchTelegramSource;
 const buildMatchedAutomatchTelegramChanges = ({
   inviteId,
   matchedText,
@@ -58,7 +72,8 @@ const buildMatchedAutomatchTelegramChanges = ({
     },
   ];
 };
-
+exports.buildMatchedAutomatchTelegramChanges =
+  buildMatchedAutomatchTelegramChanges;
 const buildAutomatchTelegramLifecycleChanges = ({
   inviteId,
   lifecycle,
@@ -77,13 +92,5 @@ const buildAutomatchTelegramLifecycleChanges = ({
     },
   ];
 };
-
-module.exports = {
-  TELEGRAM_AUTOMATCH_ROOT,
-  TELEGRAM_AUTOMATCH_PROJECTION_OUTBOX_ROOT,
-  TELEGRAM_AUTOMATCH_VERSION,
-  buildAutomatchTelegramProjectionChanges,
-  buildAutomatchTelegramLifecycleChanges,
-  buildMatchedAutomatchTelegramChanges,
-  buildPendingAutomatchTelegramSource,
-};
+exports.buildAutomatchTelegramLifecycleChanges =
+  buildAutomatchTelegramLifecycleChanges;

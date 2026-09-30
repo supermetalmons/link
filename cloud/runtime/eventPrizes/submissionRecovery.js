@@ -1,53 +1,52 @@
+// Generated from src/eventPrizes/submissionRecovery.ts. Run npm run generate:runtime.
 "use strict";
-
-const { EventPrizeWithdrawalError: HttpsError } = require("./errors");
-const {
-  EVENT_PRIZE_ADMIN_WALLET,
-  normalizeSolanaAddress,
-} = require("../eventPrizeWithdrawalState");
-const { createPrizeAssetVerificationError } = require("./assets");
-const {
-  CONFIRMATION_COMMITMENT,
-  TRANSACTION_STATUS_RETRY_DELAYS_MS,
-} = require("./solana");
-const {
-  deserializePersistedSubmittedTransaction,
-  waitForSubmittedTransactionStatus,
-} = require("./submittedTransactions");
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.recoverSubmittedWithdrawal =
+  exports.reconcileSubmittedAssetState =
+  exports.inspectSubmittedWithdrawal =
+    void 0;
+const errors_js_1 = require("./errors.js");
+const eventPrizeWithdrawalState_js_1 = require("../eventPrizeWithdrawalState.js");
+const assets_js_1 = require("./assets.js");
+const solana_js_1 = require("./solana.js");
+const submittedTransactions_js_1 = require("./submittedTransactions.js");
 const getCurrentBlockHeight = async (umi) => {
   const blockHeight = await umi.rpc.call("getBlockHeight", [
-    { commitment: CONFIRMATION_COMMITMENT },
+    { commitment: solana_js_1.CONFIRMATION_COMMITMENT },
   ]);
   if (!Number.isSafeInteger(blockHeight) || blockHeight < 0) {
     throw new Error("Solana RPC returned an invalid block height.");
   }
   return blockHeight;
 };
-
 const inspectSubmittedWithdrawal = async ({ umi, withdrawal }) => {
-  const submitted = deserializePersistedSubmittedTransaction(umi, withdrawal);
+  const submitted = (0,
+  submittedTransactions_js_1.deserializePersistedSubmittedTransaction)(
+    umi,
+    withdrawal,
+  );
   if (!submitted) {
-    throw new HttpsError(
+    throw new errors_js_1.EventPrizeWithdrawalError(
       "internal",
       "The submitted prize transaction is unavailable.",
     );
   }
-  const status = await waitForSubmittedTransactionStatus({
+  const status = await (0,
+  submittedTransactions_js_1.waitForSubmittedTransactionStatus)({
     umi,
     submitted,
     retryDelaysMs: [0],
   });
   return { submitted, status };
 };
-
+exports.inspectSubmittedWithdrawal = inspectSubmittedWithdrawal;
 const recoverSubmittedWithdrawal = async ({
   umi,
   withdrawal,
   assetOwner,
   recipientAddress,
   inspection,
-  statusRetryDelaysMs = TRANSACTION_STATUS_RETRY_DELAYS_MS,
+  statusRetryDelaysMs = solana_js_1.TRANSACTION_STATUS_RETRY_DELAYS_MS,
 }) => {
   const submittedInspection =
     inspection || (await inspectSubmittedWithdrawal({ umi, withdrawal }));
@@ -57,14 +56,15 @@ const recoverSubmittedWithdrawal = async ({
     return { kind: "completed", submitted };
   }
   if (status.kind === "failed") {
-    return assetOwner === EVENT_PRIZE_ADMIN_WALLET
+    return assetOwner ===
+      eventPrizeWithdrawalState_js_1.EVENT_PRIZE_ADMIN_WALLET
       ? { kind: "retry", discardPersistedSubmission: true, submitted }
       : { kind: "blocked", submitted };
   }
   if (assetOwner === recipientAddress) {
     return { kind: "completed", submitted };
   }
-  if (assetOwner === EVENT_PRIZE_ADMIN_WALLET) {
+  if (assetOwner === eventPrizeWithdrawalState_js_1.EVENT_PRIZE_ADMIN_WALLET) {
     if (status.kind === "unknown") {
       throw (
         status.error || new Error("Prize transaction status is unavailable.")
@@ -77,7 +77,8 @@ const recoverSubmittedWithdrawal = async ({
       ? statusRetryDelaysMs.slice(1)
       : statusRetryDelaysMs;
   if (remainingRetryDelaysMs.length > 0) {
-    status = await waitForSubmittedTransactionStatus({
+    status = await (0,
+    submittedTransactions_js_1.waitForSubmittedTransactionStatus)({
       umi,
       submitted,
       retryDelaysMs: remainingRetryDelaysMs,
@@ -91,7 +92,7 @@ const recoverSubmittedWithdrawal = async ({
   }
   throw status.error || new Error("Prize transaction confirmation is pending.");
 };
-
+exports.recoverSubmittedWithdrawal = recoverSubmittedWithdrawal;
 const reconcileSubmittedAssetState = async ({
   umi,
   withdrawal,
@@ -100,9 +101,11 @@ const reconcileSubmittedAssetState = async ({
   inspection,
   statusRetryDelaysMs,
 }) => {
-  const assetOwner = normalizeSolanaAddress(assetState.assetOwner);
+  const assetOwner = (0, eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(
+    assetState.assetOwner,
+  );
   if (!assetOwner) {
-    throw createPrizeAssetVerificationError(
+    throw (0, assets_js_1.createPrizeAssetVerificationError)(
       "The prize ownership could not be verified.",
     );
   }
@@ -130,7 +133,8 @@ const reconcileSubmittedAssetState = async ({
       submitted: recovery.submitted,
     };
   }
-  const finalStatus = await waitForSubmittedTransactionStatus({
+  const finalStatus = await (0,
+  submittedTransactions_js_1.waitForSubmittedTransactionStatus)({
     umi,
     submitted: recovery.submitted,
     retryDelaysMs: [0],
@@ -156,9 +160,4 @@ const reconcileSubmittedAssetState = async ({
     submitted: recovery.submitted,
   };
 };
-
-module.exports = {
-  inspectSubmittedWithdrawal,
-  reconcileSubmittedAssetState,
-  recoverSubmittedWithdrawal,
-};
+exports.reconcileSubmittedAssetState = reconcileSubmittedAssetState;

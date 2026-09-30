@@ -394,6 +394,7 @@ test("package manifests preserve public scripts and deployment command vectors",
     "test:nft-client",
     "test:client",
     "check",
+    "prebuild",
     "build",
     "preview",
     "types:api",
@@ -402,12 +403,18 @@ test("package manifests preserve public scripts and deployment command vectors",
     "lint:api",
     "typecheck:api",
     "typecheck:runtime",
+    "generate:runtime",
+    "check:runtime",
+    "watch:runtime",
+    "lint:runtime",
     "test:api",
     "test:api:runtime",
     "dry-run:api",
+    "predry-run:api",
     "check:api:core",
     "check:api",
     "upload:api",
+    "preupload:api",
     "promote:api",
     "deploy:api:triggers",
     "smoke:api",
@@ -436,6 +443,37 @@ test("package manifests preserve public scripts and deployment command vectors",
       scriptName,
     );
   }
+  const runtimeGenerationCommand =
+    "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/runtime-generation.ts";
+  assert.equal(
+    rootPackage.scripts?.["generate:runtime"],
+    `${runtimeGenerationCommand} --write`,
+  );
+  assert.equal(
+    rootPackage.scripts?.["watch:runtime"],
+    `${runtimeGenerationCommand} --watch`,
+  );
+  assert.equal(
+    rootPackage.scripts?.["check:runtime"],
+    `npm run lint:runtime && ${runtimeGenerationCommand} --check`,
+  );
+  assert.equal(
+    rootPackage.scripts?.["lint:runtime"],
+    'eslint "cloud/runtime/src/**/*.ts"',
+  );
+  for (const hook of ["prebuild", "predry-run:api", "preupload:api"]) {
+    assert.equal(rootPackage.scripts?.[hook], "npm run check:runtime", hook);
+  }
+  assert.equal(
+    rootPackage.scripts?.["check:all"]
+      .split(" && ")
+      .includes("npm run check:runtime"),
+    true,
+  );
+  assert.doesNotMatch(
+    rootPackage.scripts?.["check:all"] || "",
+    /npm run typecheck:runtime/,
+  );
   assert.equal(rootPackage.scripts?.["migrate:profile-reads"], undefined);
   assert.equal(rootPackage.scripts?.["migrate:profile-canonical"], undefined);
   assert.equal(rootPackage.scripts?.["backfill:historical-matches"], undefined);

@@ -1,8 +1,9 @@
+// Generated from src/shared/solana.ts. Run npm run generate:runtime.
 "use strict";
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.isValidSolanaAddress = void 0;
 const BASE58_ALPHABET =
   "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-
 const getBase58DecodedLength = (value) => {
   const bytes = [0];
   for (const character of value) {
@@ -28,14 +29,10 @@ const getBase58DecodedLength = (value) => {
   }
   return bytes.length;
 };
-
 const isValidSolanaAddress = (value) => {
   if (typeof value !== "string" || value.length === 0 || value.length > 64) {
     return false;
   }
   return getBase58DecodedLength(value) === 32;
 };
-
-module.exports = {
-  isValidSolanaAddress,
-};
+exports.isValidSolanaAddress = isValidSolanaAddress;

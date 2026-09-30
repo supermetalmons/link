@@ -1,25 +1,80 @@
+// Generated from src/telegram/taskIdentity.ts. Run npm run generate:runtime.
 "use strict";
-
-const crypto = require("crypto");
-const { validateTelegramMessageKey } = require("./desiredStateCore");
-const {
-  TELEGRAM_DESIRED_TASK_KIND,
-  TELEGRAM_PENDING_DELETE_TASK_KIND,
-  TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND,
-  TELEGRAM_TASK_KINDS,
-} = require("./taskKinds");
-
+var __createBinding =
+  (this && this.__createBinding) ||
+  (Object.create
+    ? function (o, m, k, k2) {
+        if (k2 === undefined) k2 = k;
+        var desc = Object.getOwnPropertyDescriptor(m, k);
+        if (
+          !desc ||
+          ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)
+        ) {
+          desc = {
+            enumerable: true,
+            get: function () {
+              return m[k];
+            },
+          };
+        }
+        Object.defineProperty(o, k2, desc);
+      }
+    : function (o, m, k, k2) {
+        if (k2 === undefined) k2 = k;
+        o[k2] = m[k];
+      });
+var __setModuleDefault =
+  (this && this.__setModuleDefault) ||
+  (Object.create
+    ? function (o, v) {
+        Object.defineProperty(o, "default", { enumerable: true, value: v });
+      }
+    : function (o, v) {
+        o["default"] = v;
+      });
+var __importStar =
+  (this && this.__importStar) ||
+  (function () {
+    var ownKeys = function (o) {
+      ownKeys =
+        Object.getOwnPropertyNames ||
+        function (o) {
+          var ar = [];
+          for (var k in o)
+            if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+          return ar;
+        };
+      return ownKeys(o);
+    };
+    return function (mod) {
+      if (mod && mod.__esModule) return mod;
+      var result = {};
+      if (mod != null)
+        for (var k = ownKeys(mod), i = 0; i < k.length; i++)
+          if (k[i] !== "default") __createBinding(result, mod, k[i]);
+      __setModuleDefault(result, mod);
+      return result;
+    };
+  })();
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.normalizeTaskPayload =
+  exports.normalizeOptionalTimestamp =
+  exports.buildTelegramDeliveryTaskId =
+    void 0;
+const values_js_1 = require("./values.js");
+const crypto = __importStar(require("node:crypto"));
+const desiredStateCore_js_1 = require("./desiredStateCore.js");
+const taskKinds_js_1 = require("./taskKinds.js");
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
 const normalizeTaskKind = (value) => {
-  const taskKind = normalizeString(value) || TELEGRAM_DESIRED_TASK_KIND;
-  if (!TELEGRAM_TASK_KINDS.has(taskKind)) {
+  const taskKind =
+    normalizeString(value) || taskKinds_js_1.TELEGRAM_DESIRED_TASK_KIND;
+  if (!taskKinds_js_1.TELEGRAM_TASK_KINDS.has(taskKind)) {
     throw new TypeError("invalid Telegram task kind");
   }
   return taskKind;
 };
-
 const normalizeRetrySequence = (value) => {
   const number = Number(value);
   if (!Number.isInteger(number) || number < 0) {
@@ -27,21 +82,30 @@ const normalizeRetrySequence = (value) => {
   }
   return number;
 };
-
 const normalizeOptionalTimestamp = (value) => {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
 };
-
+exports.normalizeOptionalTimestamp = normalizeOptionalTimestamp;
 const normalizeTaskPayload = (input) => {
-  const messageKey = validateTelegramMessageKey(input?.messageKey);
-  const revision = normalizeString(input?.revision);
-  const generation = normalizeString(input?.generation);
+  const messageKey = (0, desiredStateCore_js_1.validateTelegramMessageKey)(
+    (0, values_js_1.readProperty)(input, "messageKey"),
+  );
+  const revision = normalizeString(
+    (0, values_js_1.readProperty)(input, "revision"),
+  );
+  const generation = normalizeString(
+    (0, values_js_1.readProperty)(input, "generation"),
+  );
   if (!revision || !generation) {
     throw new TypeError("revision and generation are required");
   }
-  const taskKind = normalizeTaskKind(input?.taskKind);
-  const retrySequence = normalizeRetrySequence(input?.retrySequence ?? 0);
+  const taskKind = normalizeTaskKind(
+    (0, values_js_1.readProperty)(input, "taskKind"),
+  );
+  const retrySequence = normalizeRetrySequence(
+    (0, values_js_1.readProperty)(input, "retrySequence") ?? 0,
+  );
   const payload = {
     messageKey,
     revision,
@@ -55,7 +119,9 @@ const normalizeTaskPayload = (input) => {
     "retryAtMs",
     "barrierRetryNotBeforeMs",
   ]) {
-    const value = normalizeOptionalTimestamp(input?.[field]);
+    const value = normalizeOptionalTimestamp(
+      (0, values_js_1.readProperty)(input, field),
+    );
     if (value > 0) {
       payload[field] = value;
     }
@@ -68,23 +134,25 @@ const normalizeTaskPayload = (input) => {
     "apiGateReclaimOwner",
     "apiGateSettleOwner",
   ]) {
-    const value = normalizeString(input?.[field]);
+    const value = normalizeString((0, values_js_1.readProperty)(input, field));
     if (value) {
       payload[field] = value;
     }
   }
-  const proofTaskKind = normalizeString(input?.proofTaskKind);
+  const proofTaskKind = normalizeString(
+    (0, values_js_1.readProperty)(input, "proofTaskKind"),
+  );
   if (proofTaskKind) {
     if (
-      proofTaskKind !== TELEGRAM_DESIRED_TASK_KIND &&
-      proofTaskKind !== TELEGRAM_PENDING_DELETE_TASK_KIND
+      proofTaskKind !== taskKinds_js_1.TELEGRAM_DESIRED_TASK_KIND &&
+      proofTaskKind !== taskKinds_js_1.TELEGRAM_PENDING_DELETE_TASK_KIND
     ) {
       throw new TypeError("invalid Telegram proof task kind");
     }
     payload.proofTaskKind = proofTaskKind;
   }
   if (
-    taskKind === TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND &&
+    taskKind === taskKinds_js_1.TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND &&
     (!payload.proofTaskKind ||
       !payload.barrierProofOwner ||
       !payload.barrierRetryNotBeforeMs)
@@ -93,7 +161,7 @@ const normalizeTaskPayload = (input) => {
   }
   return payload;
 };
-
+exports.normalizeTaskPayload = normalizeTaskPayload;
 const buildTelegramDeliveryTaskId = (
   inputOrMessageKey,
   revision,
@@ -105,7 +173,7 @@ const buildTelegramDeliveryTaskId = (
       : {
           messageKey: inputOrMessageKey,
           revision,
-          taskKind: TELEGRAM_DESIRED_TASK_KIND,
+          taskKind: taskKinds_js_1.TELEGRAM_DESIRED_TASK_KIND,
           retrySequence: 0,
           generation,
         },
@@ -133,9 +201,4 @@ const buildTelegramDeliveryTaskId = (
     .digest("hex")
     .slice(0, 40)}`;
 };
-
-module.exports = {
-  buildTelegramDeliveryTaskId,
-  normalizeOptionalTimestamp,
-  normalizeTaskPayload,
-};
+exports.buildTelegramDeliveryTaskId = buildTelegramDeliveryTaskId;

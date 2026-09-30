@@ -1,3 +1,7 @@
+// Generated from src/batchRead.ts. Run npm run generate:runtime.
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.batchReadWithRetry = void 0;
 const batchReadWithRetry = async (readers) => {
   const initial = await Promise.allSettled(readers.map((read) => read()));
   return Promise.all(
@@ -10,7 +14,4 @@ const batchReadWithRetry = async (readers) => {
     }),
   );
 };
-
-module.exports = {
-  batchReadWithRetry,
-};
+exports.batchReadWithRetry = batchReadWithRetry;

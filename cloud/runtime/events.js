@@ -1,47 +1,24 @@
-const { eventField, mergeEventPlans } = require("./eventCommands");
-const { getDisplayNameFromAddress } = require("./telegramDisplay");
-const { isEventPrizeEvent } = require("@mons/shared/event-prizes");
-const {
-  getCompletedEventPrizeProjectionCleanupRequest,
-} = require("./eventPrizeProjectionState");
-const {
-  INVITE_ID_RANDOM_LENGTH,
-  randomAlphanumeric,
-} = require("@mons/shared/ids");
-const {
-  EVENT_POSTPONE_OPTIONS_MINUTES,
-  EVENT_SCHEMA_VERSION,
-  MAX_STARTS_IN_MINUTES,
-  MIN_STARTS_IN_MINUTES,
-  THIRD_PLACE_MATCH_KEY,
-  isMonsLinkAdmin,
-  parseEventMatchKey: parseMatchKey,
-  resolveEventTelegramAnnouncements,
-} = require("@mons/shared/events");
-const { createEventBracketRuntime } = require("./events/bracket");
-const { getEventParticipantIds } = require("./events/participants");
-const {
-  assertScheduledStartWindow,
-  hasDateTimeScheduleRequest,
-  resolveScheduledDateTimeStartAtMs,
-} = require("./events/scheduling");
-const {
-  buildEventOwnershipQuery,
-  directRequesterParticipation,
-  getLoginProfileId,
-  getOwnershipProfile,
-  profileOwnershipUnavailable,
-  requesterOwnsProfileReference,
-  resolveRequesterParticipation,
-} = require("./events/ownership");
-
+// Generated from src/events.ts. Run npm run generate:runtime.
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.EventRuntimeError = exports.createEventRuntime = void 0;
+const eventCommands_js_1 = require("./eventCommands.js");
+const telegramDisplay_js_1 = require("./telegramDisplay.js");
+const event_prizes_1 = require("@mons/shared/event-prizes");
+const eventPrizeProjectionState_js_1 = require("./eventPrizeProjectionState.js");
+const ids_1 = require("@mons/shared/ids");
+const events_1 = require("@mons/shared/events");
+const bracket_js_1 = require("./events/bracket.js");
+const participants_js_1 = require("./events/participants.js");
+const scheduling_js_1 = require("./events/scheduling.js");
+const ownership_js_1 = require("./events/ownership.js");
 class EventRuntimeError extends Error {
   constructor(code, message) {
     super(message);
     this.code = code;
   }
 }
-
+exports.EventRuntimeError = EventRuntimeError;
 const createEventRuntime = (dependencies) => {
   const state = dependencies.state;
   const readProfileOwnershipSnapshot =
@@ -71,7 +48,7 @@ const createEventRuntime = (dependencies) => {
     resolveEventPrizeAssignments,
     resolveRoundMatchState,
     resolveRoundMatchesWithConcurrency,
-  } = createEventBracketRuntime({
+  } = (0, bracket_js_1.createEventBracketRuntime)({
     state,
     readEventPrizeWithdrawals,
     readMatchPair: dependencies.readMatchPair,
@@ -79,14 +56,12 @@ const createEventRuntime = (dependencies) => {
   });
   const HttpsError = EventRuntimeError;
   const EVENT_SYNC_THROTTLE_WINDOW_MS = 500;
-
   const normalizeString = (value) =>
     typeof value === "string" && value.trim() !== "" ? value.trim() : "";
   const normalizeStringOrNull = (value) => normalizeString(value) || null;
   const normalizeUsername = (value) => normalizeString(value).toLowerCase();
   const getNowMs = dependencies.now || Date.now;
   const sleep = dependencies.sleep;
-
   const toFiniteInteger = (value, fallback = 0) => {
     const numeric = typeof value === "number" ? value : Number(value);
     if (!Number.isFinite(numeric)) {
@@ -94,16 +69,13 @@ const createEventRuntime = (dependencies) => {
     }
     return Math.floor(numeric);
   };
-
   const cloneValue = (value) => JSON.parse(JSON.stringify(value));
-
   const getPrizeSelectionProfileIds = (value) =>
     value && typeof value === "object" && !Array.isArray(value)
       ? Object.keys(value)
       : [];
-
   const buildEventDisplayName = (profile) => {
-    return getDisplayNameFromAddress(
+    return (0, telegramDisplay_js_1.getDisplayNameFromAddress)(
       profile.username ?? "",
       profile.eth ?? "",
       profile.sol ?? "",
@@ -112,17 +84,18 @@ const createEventRuntime = (dependencies) => {
       false,
     );
   };
-
   const generateEventId = () =>
-    randomAlphanumeric(INVITE_ID_RANDOM_LENGTH, dependencies.random);
-
+    (0, ids_1.randomAlphanumeric)(
+      ids_1.INVITE_ID_RANDOM_LENGTH,
+      dependencies.random,
+    );
   const loadOwnershipSnapshot = async (event, extras = {}) => {
     if (typeof readProfileOwnershipSnapshot !== "function") {
-      throw profileOwnershipUnavailable();
+      throw (0, ownership_js_1.profileOwnershipUnavailable)();
     }
     try {
       return await readProfileOwnershipSnapshot(
-        buildEventOwnershipQuery(event, extras),
+        (0, ownership_js_1.buildEventOwnershipQuery)(event, extras),
       );
     } catch (error) {
       if (
@@ -133,10 +106,9 @@ const createEventRuntime = (dependencies) => {
       ) {
         throw error;
       }
-      throw profileOwnershipUnavailable();
+      throw (0, ownership_js_1.profileOwnershipUnavailable)();
     }
   };
-
   const buildParticipantSnapshot = (profile, loginUid, joinedAtMs) => {
     const username = normalizeString(profile.username);
     const profileId = normalizeString(profile.profileId);
@@ -156,11 +128,13 @@ const createEventRuntime = (dependencies) => {
       eliminatedByProfileId: null,
     };
   };
-
   const ensurePilotEventCreator = (uid, ownershipSnapshot) => {
-    const profileId = getLoginProfileId(ownershipSnapshot, uid);
+    const profileId = (0, ownership_js_1.getLoginProfileId)(
+      ownershipSnapshot,
+      uid,
+    );
     const profile = profileId
-      ? getOwnershipProfile(ownershipSnapshot, profileId)
+      ? (0, ownership_js_1.getOwnershipProfile)(ownershipSnapshot, profileId)
       : null;
     if (!profileId || !profile) {
       throw new HttpsError(
@@ -169,7 +143,7 @@ const createEventRuntime = (dependencies) => {
       );
     }
     const username = normalizeUsername(profile.username);
-    if (!isMonsLinkAdmin(username)) {
+    if (!(0, events_1.isMonsLinkAdmin)(username)) {
       throw new HttpsError(
         "permission-denied",
         "Only approved pilot users can create pilot events.",
@@ -177,7 +151,6 @@ const createEventRuntime = (dependencies) => {
     }
     return profile;
   };
-
   const createBaseEventRecord = ({
     eventId,
     creatorProfile,
@@ -193,7 +166,7 @@ const createEventRuntime = (dependencies) => {
       createdAtMs,
     );
     return {
-      schemaVersion: EVENT_SCHEMA_VERSION,
+      schemaVersion: events_1.EVENT_SCHEMA_VERSION,
       eventId,
       status: "scheduled",
       createdAtMs,
@@ -220,7 +193,6 @@ const createEventRuntime = (dependencies) => {
       rounds: {},
     };
   };
-
   const tryAcquireEventSyncThrottle = async (eventId, ownerUid) => {
     const nowMs = getNowMs();
     const token = crypto.randomUUID();
@@ -246,7 +218,6 @@ const createEventRuntime = (dependencies) => {
       token,
     };
   };
-
   const logSyncEventStateResult = (payload) => {
     try {
       console.log(JSON.stringify({ event: "event_sync_result", ...payload }));
@@ -259,7 +230,6 @@ const createEventRuntime = (dependencies) => {
       );
     }
   };
-
   const createSyncLog = ({ eventId, requesterUid, mode }) => ({
     mode,
     eventId,
@@ -270,7 +240,6 @@ const createEventRuntime = (dependencies) => {
     didChange: false,
     durationMs: 0,
   });
-
   const createEvent = async (request) => {
     if (!request.auth) {
       throw new HttpsError(
@@ -278,7 +247,6 @@ const createEventRuntime = (dependencies) => {
         "The function must be called while authenticated.",
       );
     }
-
     const ownershipSnapshot = await loadOwnershipSnapshot(
       {},
       { loginUids: [request.auth.uid] },
@@ -299,31 +267,32 @@ const createEventRuntime = (dependencies) => {
         "Sunday Mons must be a boolean.",
       );
     }
-    const telegramAnnouncements =
-      resolveEventTelegramAnnouncements(requestData);
+    const telegramAnnouncements = (0,
+    events_1.resolveEventTelegramAnnouncements)(requestData);
     let startAtMs = 0;
-
-    if (hasDateTimeScheduleRequest(requestData)) {
-      startAtMs = resolveScheduledDateTimeStartAtMs(requestData, createdAtMs);
-      assertScheduledStartWindow(startAtMs, createdAtMs);
+    if ((0, scheduling_js_1.hasDateTimeScheduleRequest)(requestData)) {
+      startAtMs = (0, scheduling_js_1.resolveScheduledDateTimeStartAtMs)(
+        requestData,
+        createdAtMs,
+      );
+      (0, scheduling_js_1.assertScheduledStartWindow)(startAtMs, createdAtMs);
     } else {
       const rawStartsInMinutes = toFiniteInteger(
         requestData.startsInMinutes,
         0,
       );
-      if (rawStartsInMinutes < MIN_STARTS_IN_MINUTES) {
+      if (rawStartsInMinutes < events_1.MIN_STARTS_IN_MINUTES) {
         throw new HttpsError(
           "invalid-argument",
-          `Event must start at least ${MIN_STARTS_IN_MINUTES} minute from now.`,
+          `Event must start at least ${events_1.MIN_STARTS_IN_MINUTES} minute from now.`,
         );
       }
       const startsInMinutes = Math.min(
-        MAX_STARTS_IN_MINUTES,
+        events_1.MAX_STARTS_IN_MINUTES,
         rawStartsInMinutes,
       );
       startAtMs = createdAtMs + startsInMinutes * 60 * 1000;
     }
-
     const eventId = generateEventId();
     const event = createBaseEventRecord({
       eventId,
@@ -334,7 +303,6 @@ const createEventRuntime = (dependencies) => {
       isSundayMons: requestData.isSundayMons === true,
       telegramAnnouncements,
     });
-
     const sourceKey = `start:${eventId}:${startAtMs}`;
     let progress;
     try {
@@ -359,7 +327,6 @@ const createEventRuntime = (dependencies) => {
         "Could not schedule event start. Please try again.",
       );
     }
-
     await state.commitEventPlan([
       { kind: "event", eventId: eventId, value: event },
       {
@@ -368,14 +335,12 @@ const createEventRuntime = (dependencies) => {
         value: progress.outbox,
       },
     ]);
-
     return {
       ok: true,
       eventId,
       event,
     };
   };
-
   const postponeEventStart = async (request) => {
     if (!request.auth) {
       throw new HttpsError(
@@ -383,7 +348,6 @@ const createEventRuntime = (dependencies) => {
         "The function must be called while authenticated.",
       );
     }
-
     const eventId = normalizeString(request.data && request.data.eventId);
     if (!eventId) {
       throw new HttpsError("invalid-argument", "eventId is required.");
@@ -392,13 +356,12 @@ const createEventRuntime = (dependencies) => {
       request.data && request.data.postponeByMinutes,
       0,
     );
-    if (!EVENT_POSTPONE_OPTIONS_MINUTES.includes(postponeByMinutes)) {
+    if (!events_1.EVENT_POSTPONE_OPTIONS_MINUTES.includes(postponeByMinutes)) {
       throw new HttpsError(
         "invalid-argument",
         "postponeByMinutes must be one of: 5, 10, 15.",
       );
     }
-
     const initialEventValue = await state.readEvent(eventId);
     if (!(initialEventValue !== null && initialEventValue !== undefined)) {
       throw new HttpsError("not-found", "Event not found.");
@@ -418,9 +381,8 @@ const createEventRuntime = (dependencies) => {
       );
     }
     const stopLockHeartbeat = startEventLockHeartbeat(lockHandle);
-
     try {
-      const snapshot = isEventPrizeEvent(eventId)
+      const snapshot = (0, event_prizes_1.isEventPrizeEvent)(eventId)
         ? await state.readEventSnapshot(eventId)
         : null;
       const eventValue = snapshot
@@ -434,14 +396,16 @@ const createEventRuntime = (dependencies) => {
       const creatorProfileId = normalizeString(event.createdByProfileId);
       const nowMs = getNowMs();
       const prizeSelections =
-        isEventPrizeEvent(eventId) &&
+        (0, event_prizes_1.isEventPrizeEvent)(eventId) &&
         normalizeString(event.status) === "scheduled" &&
         typeof event.startAtMs === "number" &&
         nowMs >= event.startAtMs
           ? cloneValue(snapshot.prizeSelections)
           : undefined;
       const directCreator = request.auth.uid === creatorLoginUid;
-      const dueParticipantCount = getEventParticipantIds(event).length;
+      const dueParticipantCount = (0, participants_js_1.getEventParticipantIds)(
+        event,
+      ).length;
       const ownershipSnapshot =
         directCreator && (nowMs < event.startAtMs || dueParticipantCount < 2)
           ? null
@@ -450,7 +414,7 @@ const createEventRuntime = (dependencies) => {
               profileIds: getPrizeSelectionProfileIds(prizeSelections),
             });
       if (
-        !requesterOwnsProfileReference({
+        !(0, ownership_js_1.requesterOwnsProfileReference)({
           requesterUid: request.auth.uid,
           snapshot: ownershipSnapshot,
           storedLoginUid: creatorLoginUid,
@@ -500,10 +464,9 @@ const createEventRuntime = (dependencies) => {
           "This event can no longer be postponed.",
         );
       }
-
       const nextStartAtMs =
         Math.floor(event.startAtMs) + postponeByMinutes * 60 * 1000;
-      assertScheduledStartWindow(nextStartAtMs, nowMs);
+      (0, scheduling_js_1.assertScheduledStartWindow)(nextStartAtMs, nowMs);
       const sourceKey = `start:${eventId}:${nextStartAtMs}`;
       let progress;
       try {
@@ -528,7 +491,6 @@ const createEventRuntime = (dependencies) => {
           "Could not schedule postponed event start. Please try again.",
         );
       }
-
       const lockOwned = await isEventLockStillOwned(lockHandle);
       if (!lockOwned) {
         throw new HttpsError(
@@ -536,19 +498,17 @@ const createEventRuntime = (dependencies) => {
           "Event is busy. Please try postponing again.",
         );
       }
-
       event.startAtMs = nextStartAtMs;
       event.updatedAtMs = nowMs;
       await state.commitEventPlan([
-        eventField(eventId, "startAtMs", nextStartAtMs),
-        eventField(eventId, "updatedAtMs", nowMs),
+        (0, eventCommands_js_1.eventField)(eventId, "startAtMs", nextStartAtMs),
+        (0, eventCommands_js_1.eventField)(eventId, "updatedAtMs", nowMs),
         {
           kind: "progress-outbox",
           outboxId: progress.outboxId,
           value: progress.outbox,
         },
       ]);
-
       return {
         ok: true,
         eventId,
@@ -561,7 +521,6 @@ const createEventRuntime = (dependencies) => {
       await releaseEventLock(lockHandle);
     }
   };
-
   const disqualifyEventMatchWinners = async (request) => {
     const startedAtMs = getNowMs();
     const eventId = normalizeString(request.data && request.data.eventId);
@@ -576,7 +535,6 @@ const createEventRuntime = (dependencies) => {
     syncLog.targetMatchKey = matchKeyInput || null;
     let lockHandle = null;
     let stopLockHeartbeat = () => {};
-
     try {
       if (!request.auth) {
         throw new HttpsError(
@@ -587,14 +545,14 @@ const createEventRuntime = (dependencies) => {
       if (!eventId) {
         throw new HttpsError("invalid-argument", "eventId is required.");
       }
-      const isThirdPlaceTarget = matchKeyInput === THIRD_PLACE_MATCH_KEY;
+      const isThirdPlaceTarget =
+        matchKeyInput === events_1.THIRD_PLACE_MATCH_KEY;
       const parsedMatchKey = isThirdPlaceTarget
         ? null
-        : parseMatchKey(matchKeyInput);
+        : (0, events_1.parseEventMatchKey)(matchKeyInput);
       if (!isThirdPlaceTarget && !parsedMatchKey) {
         throw new HttpsError("invalid-argument", "matchKey is invalid.");
       }
-
       lockHandle = await acquireEventLockWithRetry(eventId, request.auth.uid, {
         attempts: 40,
         delayMs: 100,
@@ -606,7 +564,6 @@ const createEventRuntime = (dependencies) => {
         );
       }
       stopLockHeartbeat = startEventLockHeartbeat(lockHandle);
-
       let didDisqualify = false;
       let resolvedMatchKey = matchKeyInput;
       try {
@@ -625,7 +582,6 @@ const createEventRuntime = (dependencies) => {
             "Only active events can be updated.",
           );
         }
-
         let targetMatch = null;
         let targetMatchUpdate = null;
         if (isThirdPlaceTarget) {
@@ -635,7 +591,7 @@ const createEventRuntime = (dependencies) => {
             typeof thirdPlaceMatchCandidate === "object"
           ) {
             targetMatch = thirdPlaceMatchCandidate;
-            resolvedMatchKey = THIRD_PLACE_MATCH_KEY;
+            resolvedMatchKey = events_1.THIRD_PLACE_MATCH_KEY;
             targetMatchUpdate = {
               kind: "event-disqualification",
               eventId,
@@ -654,12 +610,13 @@ const createEventRuntime = (dependencies) => {
               "Selected match not found.",
             );
           }
-
           targetMatch = round.matches[resolvedMatchKey];
           if (!targetMatch || typeof targetMatch !== "object") {
             const fallbackEntry =
               Object.entries(round.matches).find(([candidateMatchKey]) => {
-                const parsedCandidate = parseMatchKey(candidateMatchKey);
+                const parsedCandidate = (0, events_1.parseEventMatchKey)(
+                  candidateMatchKey,
+                );
                 return (
                   parsedCandidate?.matchIndex === parsedMatchKey.matchIndex
                 );
@@ -675,14 +632,12 @@ const createEventRuntime = (dependencies) => {
             matchKey: resolvedMatchKey,
           };
         }
-
         if (!targetMatch || typeof targetMatch !== "object") {
           throw new HttpsError(
             "failed-precondition",
             "Selected match not found.",
           );
         }
-
         if (
           normalizeString(targetMatch.status) !== "pending" ||
           !normalizeString(targetMatch.inviteId)
@@ -701,7 +656,6 @@ const createEventRuntime = (dependencies) => {
             "Selected match must have two participants.",
           );
         }
-
         didDisqualify = !isMatchWinnerDisqualified(targetMatch);
         if (didDisqualify) {
           const lockOwned = await isEventLockStillOwned(lockHandle);
@@ -713,7 +667,11 @@ const createEventRuntime = (dependencies) => {
           }
           await state.commitEventPlan([
             { ...targetMatchUpdate, value: true },
-            eventField(eventId, "updatedAtMs", getNowMs()),
+            (0, eventCommands_js_1.eventField)(
+              eventId,
+              "updatedAtMs",
+              getNowMs(),
+            ),
           ]);
         }
       } finally {
@@ -722,7 +680,6 @@ const createEventRuntime = (dependencies) => {
         await releaseEventLock(lockHandle);
         lockHandle = null;
       }
-
       let syncResult = null;
       for (let attempt = 0; attempt < 4; attempt += 1) {
         syncLog.skipped = false;
@@ -743,7 +700,6 @@ const createEventRuntime = (dependencies) => {
         }
         await sleep(80);
       }
-
       return {
         ...syncResult,
         didDisqualify,
@@ -758,7 +714,6 @@ const createEventRuntime = (dependencies) => {
       logSyncEventStateResult(syncLog);
     }
   };
-
   const buildSkippedSyncResponse = ({ eventId, reason, event }) => ({
     ok: true,
     eventId,
@@ -766,7 +721,6 @@ const createEventRuntime = (dependencies) => {
     reason,
     ...(event !== undefined ? { event } : {}),
   });
-
   const runEventSyncState = async ({
     eventId,
     requesterUid,
@@ -776,7 +730,6 @@ const createEventRuntime = (dependencies) => {
   }) => {
     let lockHandle = null;
     let stopLockHeartbeat = () => {};
-
     try {
       const eventValue = await state.readEvent(eventId);
       if (!(eventValue !== null && eventValue !== undefined)) {
@@ -795,8 +748,7 @@ const createEventRuntime = (dependencies) => {
         });
       }
       stopLockHeartbeat = startEventLockHeartbeat(lockHandle);
-
-      const snapshot = isEventPrizeEvent(eventId)
+      const snapshot = (0, event_prizes_1.isEventPrizeEvent)(eventId)
         ? await state.readEventSnapshot(eventId)
         : null;
       const lockedEventValue = snapshot
@@ -809,7 +761,7 @@ const createEventRuntime = (dependencies) => {
       const nowMs = getNowMs();
       let prizeSelections;
       if (
-        isEventPrizeEvent(eventId) &&
+        (0, event_prizes_1.isEventPrizeEvent)(eventId) &&
         (event.status === "active" ||
           event.status === "ended" ||
           (event.status === "scheduled" &&
@@ -819,7 +771,7 @@ const createEventRuntime = (dependencies) => {
         prizeSelections = cloneValue(snapshot.prizeSelections);
       }
       const directParticipation = enforceParticipantGate
-        ? directRequesterParticipation(event, requesterUid)
+        ? (0, ownership_js_1.directRequesterParticipation)(event, requesterUid)
         : null;
       const scheduledEventIsDue =
         event.status === "scheduled" &&
@@ -827,8 +779,10 @@ const createEventRuntime = (dependencies) => {
         nowMs >= event.startAtMs;
       const needsOwnershipSnapshot =
         event.status === "active" ||
-        (scheduledEventIsDue && getEventParticipantIds(event).length >= 2) ||
-        (event.status === "ended" && isEventPrizeEvent(eventId)) ||
+        (scheduledEventIsDue &&
+          (0, participants_js_1.getEventParticipantIds)(event).length >= 2) ||
+        (event.status === "ended" &&
+          (0, event_prizes_1.isEventPrizeEvent)(eventId)) ||
         (enforceParticipantGate && !directParticipation?.isParticipant);
       const ownershipSnapshot = needsOwnershipSnapshot
         ? await loadOwnershipSnapshot(event, {
@@ -837,7 +791,8 @@ const createEventRuntime = (dependencies) => {
           })
         : null;
       if (enforceParticipantGate) {
-        const lockedRequesterParticipation = resolveRequesterParticipation(
+        const lockedRequesterParticipation = (0,
+        ownership_js_1.resolveRequesterParticipation)(
           event,
           requesterUid,
           ownershipSnapshot,
@@ -869,7 +824,6 @@ const createEventRuntime = (dependencies) => {
       const updates = [];
       let didChange = false;
       let eventPrizeAssignmentsForProjectionCleanup = null;
-
       if (event.status === "scheduled") {
         const dueTransition = await buildScheduledEventDueUpdates({
           eventId,
@@ -939,7 +893,6 @@ const createEventRuntime = (dependencies) => {
             }
           }
         }
-
         if (thirdPlaceMatch) {
           const resolvedThirdPlace =
             await resolveRoundMatchState(thirdPlaceMatch);
@@ -950,7 +903,6 @@ const createEventRuntime = (dependencies) => {
             thirdPlaceMatchChanged = true;
           }
         }
-
         if (
           await reconcileBracketMatchReadiness({
             eventId,
@@ -963,7 +915,6 @@ const createEventRuntime = (dependencies) => {
         ) {
           roundsChanged = true;
         }
-
         if (supportsThirdPlaceMatch) {
           const thirdPlaceResult = await reconcileThirdPlaceMatchReadiness({
             eventId,
@@ -979,7 +930,6 @@ const createEventRuntime = (dependencies) => {
             thirdPlaceMatchChanged = true;
           }
         }
-
         const {
           didChange: roundStatusChanged,
           finalRoundIndex,
@@ -992,7 +942,6 @@ const createEventRuntime = (dependencies) => {
         if (roundStatusChanged) {
           roundsChanged = true;
         }
-
         const finalRoundCompleted =
           finalRoundIndex !== null && earliestUnresolvedRoundIndex === null;
         const thirdPlaceResolved =
@@ -1007,7 +956,6 @@ const createEventRuntime = (dependencies) => {
             ? earliestUnresolvedRoundIndex
             : finalRoundIndex;
         event.currentRoundIndex = nextCurrentRoundIndex;
-
         const participantStateResult = rebuildParticipantStatesFromRounds({
           participantsById: participants,
           rounds,
@@ -1018,7 +966,6 @@ const createEventRuntime = (dependencies) => {
           participants = participantStateResult.participantsById;
           participantsChanged = true;
         }
-
         if (eventShouldEnd) {
           const winnerParticipant =
             (winnerProfileId && participants[winnerProfileId]) || null;
@@ -1030,11 +977,15 @@ const createEventRuntime = (dependencies) => {
           event.winnerDisplayName = winnerParticipant
             ? winnerParticipant.displayName
             : null;
-          if (isEventPrizeEvent(eventId)) {
+          if ((0, event_prizes_1.isEventPrizeEvent)(eventId)) {
             if (typeof event.prizeSelectionsLockedAtMs !== "number") {
               event.prizeSelectionsLockedAtMs = nowMs;
               updates.push(
-                eventField(eventId, "prizeSelectionsLockedAtMs", nowMs),
+                (0, eventCommands_js_1.eventField)(
+                  eventId,
+                  "prizeSelectionsLockedAtMs",
+                  nowMs,
+                ),
               );
             }
             const prizeAssignmentResult = await resolveEventPrizeAssignments({
@@ -1065,7 +1016,6 @@ const createEventRuntime = (dependencies) => {
           event.winnerProfileId = null;
           event.winnerDisplayName = null;
         }
-
         let eventChanged = false;
         const normalizedCurrentRoundIndex =
           typeof event.currentRoundIndex === "number"
@@ -1073,7 +1023,7 @@ const createEventRuntime = (dependencies) => {
             : null;
         if (normalizedCurrentRoundIndex !== originalCurrentRoundIndex) {
           updates.push(
-            eventField(
+            (0, eventCommands_js_1.eventField)(
               eventId,
               "currentRoundIndex",
               normalizedCurrentRoundIndex,
@@ -1081,38 +1031,50 @@ const createEventRuntime = (dependencies) => {
           );
           eventChanged = true;
         }
-
         const normalizedStatus = normalizeString(event.status) || "active";
         if (normalizedStatus !== originalStatus) {
-          updates.push(eventField(eventId, "status", normalizedStatus));
+          updates.push(
+            (0, eventCommands_js_1.eventField)(
+              eventId,
+              "status",
+              normalizedStatus,
+            ),
+          );
           eventChanged = true;
         }
-
         const normalizedEndedAtMs =
           typeof event.endedAtMs === "number"
             ? Math.floor(event.endedAtMs)
             : null;
         if (normalizedEndedAtMs !== originalEndedAtMs) {
-          updates.push(eventField(eventId, "endedAtMs", normalizedEndedAtMs));
+          updates.push(
+            (0, eventCommands_js_1.eventField)(
+              eventId,
+              "endedAtMs",
+              normalizedEndedAtMs,
+            ),
+          );
           eventChanged = true;
         }
-
         const normalizedWinnerProfileId = normalizeStringOrNull(
           event.winnerProfileId,
         );
         if (normalizedWinnerProfileId !== originalWinnerProfileId) {
           updates.push(
-            eventField(eventId, "winnerProfileId", normalizedWinnerProfileId),
+            (0, eventCommands_js_1.eventField)(
+              eventId,
+              "winnerProfileId",
+              normalizedWinnerProfileId,
+            ),
           );
           eventChanged = true;
         }
-
         const normalizedWinnerDisplayName = normalizeStringOrNull(
           event.winnerDisplayName,
         );
         if (normalizedWinnerDisplayName !== originalWinnerDisplayName) {
           updates.push(
-            eventField(
+            (0, eventCommands_js_1.eventField)(
               eventId,
               "winnerDisplayName",
               normalizedWinnerDisplayName,
@@ -1121,15 +1083,28 @@ const createEventRuntime = (dependencies) => {
           eventChanged = true;
         }
         if (supportsThirdPlaceMatch && thirdPlaceMatchChanged) {
-          updates.push(eventField(eventId, "thirdPlaceMatch", thirdPlaceMatch));
+          updates.push(
+            (0, eventCommands_js_1.eventField)(
+              eventId,
+              "thirdPlaceMatch",
+              thirdPlaceMatch,
+            ),
+          );
           eventChanged = true;
         }
-
         if (roundsChanged) {
-          updates.push(eventField(eventId, "rounds", rounds));
+          updates.push(
+            (0, eventCommands_js_1.eventField)(eventId, "rounds", rounds),
+          );
         }
         if (participantsChanged) {
-          updates.push(eventField(eventId, "participants", participants));
+          updates.push(
+            (0, eventCommands_js_1.eventField)(
+              eventId,
+              "participants",
+              participants,
+            ),
+          );
         }
         if (inviteUpdates.length > 0) {
           updates.push(...inviteUpdates);
@@ -1140,7 +1115,9 @@ const createEventRuntime = (dependencies) => {
           inviteUpdates.length > 0 ||
           eventChanged
         ) {
-          updates.push(eventField(eventId, "updatedAtMs", nowMs));
+          updates.push(
+            (0, eventCommands_js_1.eventField)(eventId, "updatedAtMs", nowMs),
+          );
           didChange = true;
         }
       } else if (event.status === "ended") {
@@ -1176,7 +1153,6 @@ const createEventRuntime = (dependencies) => {
             }
           }
         }
-
         if (thirdPlaceMatch) {
           const resolvedThirdPlace =
             await resolveRoundMatchState(thirdPlaceMatch);
@@ -1187,7 +1163,6 @@ const createEventRuntime = (dependencies) => {
             thirdPlaceMatchChanged = true;
           }
         }
-
         if (supportsThirdPlaceMatch) {
           const thirdPlaceResult = await reconcileThirdPlaceMatchReadiness({
             eventId,
@@ -1206,11 +1181,10 @@ const createEventRuntime = (dependencies) => {
             thirdPlaceMatchChanged = true;
           }
         }
-
-        if (isEventPrizeEvent(eventId)) {
+        if ((0, event_prizes_1.isEventPrizeEvent)(eventId)) {
           if (typeof event.prizeSelectionsLockedAtMs !== "number") {
             updates.push(
-              eventField(
+              (0, eventCommands_js_1.eventField)(
                 eventId,
                 "prizeSelectionsLockedAtMs",
                 typeof event.endedAtMs === "number" ? event.endedAtMs : nowMs,
@@ -1246,21 +1220,27 @@ const createEventRuntime = (dependencies) => {
             }
           }
         }
-
         if (roundsChanged || thirdPlaceMatchChanged) {
-          updates.push(eventField(eventId, "rounds", rounds));
+          updates.push(
+            (0, eventCommands_js_1.eventField)(eventId, "rounds", rounds),
+          );
           if (supportsThirdPlaceMatch) {
             updates.push(
-              eventField(eventId, "thirdPlaceMatch", thirdPlaceMatch),
+              (0, eventCommands_js_1.eventField)(
+                eventId,
+                "thirdPlaceMatch",
+                thirdPlaceMatch,
+              ),
             );
           }
         }
         if (roundsChanged || thirdPlaceMatchChanged || prizeStateChanged) {
-          updates.push(eventField(eventId, "updatedAtMs", nowMs));
+          updates.push(
+            (0, eventCommands_js_1.eventField)(eventId, "updatedAtMs", nowMs),
+          );
           didChange = true;
         }
       }
-
       if (didChange) {
         const lockOwned = await isEventLockStillOwned(lockHandle);
         if (!lockOwned) {
@@ -1273,7 +1253,9 @@ const createEventRuntime = (dependencies) => {
             event: latestValue,
           });
         }
-        await state.commitEventPlan(mergeEventPlans(updates));
+        await state.commitEventPlan(
+          (0, eventCommands_js_1.mergeEventPlans)(updates),
+        );
       }
       if (eventPrizeAssignmentsForProjectionCleanup) {
         if (!(await isEventLockStillOwned(lockHandle))) {
@@ -1290,12 +1272,14 @@ const createEventRuntime = (dependencies) => {
         });
         if (projectionResult.didChange) didChange = true;
       }
-      const projectionCleanupRequest =
-        getCompletedEventPrizeProjectionCleanupRequest({
+      const projectionCleanupRequest = (0,
+      eventPrizeProjectionState_js_1.getCompletedEventPrizeProjectionCleanupRequest)(
+        {
           eventId,
           eventStatus: event.status,
           assignments: eventPrizeAssignmentsForProjectionCleanup,
-        });
+        },
+      );
       if (projectionCleanupRequest) {
         if (!(await isEventLockStillOwned(lockHandle))) {
           throw new HttpsError(
@@ -1309,7 +1293,6 @@ const createEventRuntime = (dependencies) => {
           ownershipSnapshot,
         });
       }
-
       const refreshedValue = await state.readEvent(eventId);
       syncLog.didChange = didChange;
       return {
@@ -1333,7 +1316,6 @@ const createEventRuntime = (dependencies) => {
       }
     }
   };
-
   const syncEventState = async (request) => {
     const startedAtMs = getNowMs();
     const eventId = normalizeString(request.data && request.data.eventId);
@@ -1364,7 +1346,6 @@ const createEventRuntime = (dependencies) => {
       logSyncEventStateResult(syncLog);
     }
   };
-
   return {
     createEvent,
     disqualifyEventMatchWinners,
@@ -1373,8 +1354,4 @@ const createEventRuntime = (dependencies) => {
     syncEventState,
   };
 };
-
-module.exports = {
-  createEventRuntime,
-  EventRuntimeError,
-};
+exports.createEventRuntime = createEventRuntime;

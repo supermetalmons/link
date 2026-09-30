@@ -1,3 +1,4 @@
+import type { EventPrizeAssignmentRecord } from "../../../runtime/eventReads.js";
 import type { EventCommitPlan } from "../../../runtime/eventCommands.js";
 import { encodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
 import { attachEventTestPorts } from "./eventTestPorts.ts";
@@ -87,7 +88,7 @@ test("reconciles canonical prize projections without changing event history", as
     state: createState(values),
     readEventPrizeWithdrawals: async () => ({}),
   });
-  const assignment = {
+  const assignment: EventPrizeAssignmentRecord = {
     eventId: "NN3eRzoZo80",
     profileId: "source-profile",
     place: 1,

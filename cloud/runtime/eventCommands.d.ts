@@ -1,3 +1,4 @@
+// Generated from src/eventCommands.ts. Run npm run generate:runtime.
 import type {
   EventJsonRecord,
   EventPrizeAssignmentRecord,
@@ -53,7 +54,11 @@ export type EventProfileGameOutboxFieldMutation = {
   };
 }[keyof EventProfileGameOutboxFieldValues];
 export type EventMutation =
-  | { kind: "event"; eventId: string; value: EventJsonRecord }
+  | {
+      kind: "event";
+      eventId: string;
+      value: EventJsonRecord;
+    }
   | EventFieldMutation
   | {
       kind: "event-round";
@@ -108,7 +113,11 @@ export type EventMutation =
       outboxId: string;
       value: EventJsonRecord | null;
     }
-  | { kind: "progress-dispatched"; outboxId: string; value: number }
+  | {
+      kind: "progress-dispatched";
+      outboxId: string;
+      value: number;
+    }
   | {
       kind: "profile-game-outbox" | "telegram-outbox";
       eventId: string;
@@ -121,7 +130,11 @@ export type EventMutation =
       profileId: string;
       value: true | null;
     }
-  | { kind: "telegram-state"; eventId: string; value: EventJsonRecord | null }
+  | {
+      kind: "telegram-state";
+      eventId: string;
+      value: EventJsonRecord | null;
+    }
   | {
       kind: "telegram-generation";
       eventId: string;
@@ -129,7 +142,11 @@ export type EventMutation =
       increment?: boolean;
     };
 export type EventEffect =
-  | { kind: "invite"; inviteId: string; value: EventJsonRecord }
+  | {
+      kind: "invite";
+      inviteId: string;
+      value: EventJsonRecord;
+    }
   | {
       kind: "match-creation";
       playerId: string;
@@ -142,28 +159,18 @@ export type EventEffect =
       matchId: string;
       value: string;
     }
-  | { kind: "match-timer-start-cleanup"; playerId: string; matchId: string }
-  | { kind: "match-timer-claim"; matchId: string; value: EventJsonRecord };
+  | {
+      kind: "match-timer-start-cleanup";
+      playerId: string;
+      matchId: string;
+    }
+  | {
+      kind: "match-timer-claim";
+      matchId: string;
+      value: EventJsonRecord;
+    };
 export type EventCommand = EventMutation | EventEffect;
 export type EventCommitPlan = EventCommand[];
-export function isEventMutation(
-  command: EventCommand,
-): command is EventMutation;
-export function eventField<K extends EventField>(
-  eventId: string,
-  field: K,
-  value: EventFieldValues[K],
-): EventFieldMutation;
-export function mergeEventPlans(
-  ...plans: readonly EventCommand[][]
-): EventCommitPlan;
-export function eventCommandIdentity(command: EventCommand): string;
-
-export function getEventField<K extends EventField>(
-  plan: readonly EventCommand[],
-  eventId: string,
-  field: K,
-): EventFieldValues[K] | undefined;
 export type EventRuntimeStore = import("./eventReads.js").EventReads & {
   commitEventPlan(
     plan: readonly EventCommand[],
@@ -172,7 +179,11 @@ export type EventRuntimeStore = import("./eventReads.js").EventReads & {
   transactEventSyncThrottle(
     eventId: string,
     updater: (
-      current: { ownerUid: string; token: string; startedAtMs: number } | null,
+      current: {
+        ownerUid: string;
+        token: string;
+        startedAtMs: number;
+      } | null,
     ) => import("./transactions.js").TransactionDecision<{
       ownerUid: string;
       token: string;
@@ -196,4 +207,33 @@ export type EventRuntimeStore = import("./eventReads.js").EventReads & {
   ): Promise<
     import("./transactions.js").TransactionResult<EventPrizeAssignmentRecord>
   >;
+};
+declare const isEventMutation: (
+  command: EventCommand,
+) => command is EventMutation;
+declare const eventField: <K extends EventField>(
+  eventId: string,
+  field: K,
+  value: EventFieldValues[K],
+) => Extract<
+  EventFieldMutation,
+  {
+    field: K;
+  }
+>;
+declare const eventCommandIdentity: (command: EventCommand) => string;
+declare const mergeEventPlans: (
+  ...plans: readonly EventCommand[][]
+) => EventCommitPlan;
+declare function getEventField<K extends EventField>(
+  plan: readonly EventCommand[],
+  eventId: string,
+  field: K,
+): EventFieldValues[K] | undefined;
+export {
+  getEventField,
+  isEventMutation,
+  eventField,
+  mergeEventPlans,
+  eventCommandIdentity,
 };

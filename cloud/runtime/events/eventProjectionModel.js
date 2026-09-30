@@ -1,15 +1,22 @@
+// Generated from src/events/eventProjectionModel.ts. Run npm run generate:runtime.
 "use strict";
-
-const {
-  NAVIGATION_SORT_BUCKETS: SORT_BUCKETS,
-} = require("@mons/shared/navigation");
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.normalizeString =
+  exports.normalizeFiniteNumberOrNull =
+  exports.mapEventStatusToNavigationStatus =
+  exports.getOwnerProfileIds =
+  exports.getListSortAtMs =
+  exports.buildPreviewParticipants =
+  exports.NAVIGATION_PARTICIPANT_PREVIEW_LIMIT =
+    void 0;
+require("@mons/shared/navigation");
 const NAVIGATION_PARTICIPANT_PREVIEW_LIMIT = 6;
+exports.NAVIGATION_PARTICIPANT_PREVIEW_LIMIT =
+  NAVIGATION_PARTICIPANT_PREVIEW_LIMIT;
 const MAX_TIMESTAMP_MS = 253402300799999;
-
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : null;
-
+exports.normalizeString = normalizeString;
 const normalizeFiniteNumberOrNull = (value) => {
   const numeric =
     typeof value === "number"
@@ -23,7 +30,7 @@ const normalizeFiniteNumberOrNull = (value) => {
   const normalized = Math.floor(numeric);
   return normalized > 0 ? normalized : null;
 };
-
+exports.normalizeFiniteNumberOrNull = normalizeFiniteNumberOrNull;
 const mapEventStatusToNavigationStatus = (status) => {
   if (status === "active") {
     return "active";
@@ -36,7 +43,7 @@ const mapEventStatusToNavigationStatus = (status) => {
   }
   return "waiting";
 };
-
+exports.mapEventStatusToNavigationStatus = mapEventStatusToNavigationStatus;
 const getListSortAtMs = (eventData, status) => {
   if (status === "active") {
     const startedAtMs =
@@ -81,7 +88,7 @@ const getListSortAtMs = (eventData, status) => {
   }
   return Math.min(MAX_TIMESTAMP_MS, Math.max(1, MAX_TIMESTAMP_MS - startAtMs));
 };
-
+exports.getListSortAtMs = getListSortAtMs;
 const buildPreviewParticipants = (participants) => {
   return Object.values(participants || {})
     .filter((participant) => participant && typeof participant === "object")
@@ -99,7 +106,7 @@ const buildPreviewParticipants = (participants) => {
       aura: normalizeString(participant.aura),
     }));
 };
-
+exports.buildPreviewParticipants = buildPreviewParticipants;
 const getOwnerProfileIds = (participants) => {
   return Array.from(
     new Set(
@@ -111,13 +118,4 @@ const getOwnerProfileIds = (participants) => {
     ),
   );
 };
-
-module.exports = {
-  NAVIGATION_PARTICIPANT_PREVIEW_LIMIT,
-  buildPreviewParticipants,
-  getListSortAtMs,
-  getOwnerProfileIds,
-  mapEventStatusToNavigationStatus,
-  normalizeFiniteNumberOrNull,
-  normalizeString,
-};
+exports.getOwnerProfileIds = getOwnerProfileIds;

@@ -1,15 +1,9 @@
-export const SESSION_ACCESS_TOKEN_TTL_SECONDS: 300;
-export const SESSION_ANONYMOUS_PATH: "/auth/session/anonymous";
-export const SESSION_REFRESH_PATH: "/auth/session/refresh";
-export const SESSION_LOGOUT_PATH: "/auth/session/logout";
-export const SESSION_PATHS: readonly string[];
-
+// Generated from src/shared/session-auth.ts. Run npm run generate:runtime.
 export type SessionCreateRequest = {
   sessionId: string;
   refreshSecret: string;
   revokeSecret: string;
 };
-
 export type SessionTokenResponse = {
   ok: true;
   uid: string;
@@ -17,26 +11,46 @@ export type SessionTokenResponse = {
   accessToken: string;
   accessExpiresAtMs: number;
 };
-
-export type SessionCapability = { sessionId: string; secret: string };
-
-export function isSessionId(value: unknown): value is string;
-export function isSessionSecret(value: unknown): value is string;
-export function isSessionCreateRequest(
+export type SessionCapability = {
+  sessionId: string;
+  secret: string;
+};
+declare const SESSION_ACCESS_TOKEN_TTL_SECONDS = 300;
+declare const SESSION_ANONYMOUS_PATH = "/auth/session/anonymous";
+declare const SESSION_REFRESH_PATH = "/auth/session/refresh";
+declare const SESSION_LOGOUT_PATH = "/auth/session/logout";
+declare const SESSION_PATHS: readonly string[];
+declare const isSessionId: (value: unknown) => value is string;
+declare const isSessionSecret: (value: unknown) => value is string;
+declare function isSessionCreateRequest(
   value: unknown,
 ): value is SessionCreateRequest;
-export function isSessionTokenResponse(
+declare function isSessionTokenResponse(
   value: unknown,
 ): value is SessionTokenResponse;
-export function buildSessionRefreshToken(
+declare const buildSessionRefreshToken: (
   sessionId: string,
   secret: string,
-): string;
-export function buildSessionRevokeToken(
+) => string;
+declare const buildSessionRevokeToken: (
   sessionId: string,
   secret: string,
-): string;
-export function parseSessionCapability(
+) => string;
+declare function parseSessionCapability(
   value: unknown,
   kind: "refresh" | "revoke",
 ): SessionCapability | null;
+export {
+  SESSION_ACCESS_TOKEN_TTL_SECONDS,
+  SESSION_ANONYMOUS_PATH,
+  SESSION_REFRESH_PATH,
+  SESSION_LOGOUT_PATH,
+  SESSION_PATHS,
+  isSessionId,
+  isSessionSecret,
+  isSessionCreateRequest,
+  isSessionTokenResponse,
+  buildSessionRefreshToken,
+  buildSessionRevokeToken,
+  parseSessionCapability,
+};

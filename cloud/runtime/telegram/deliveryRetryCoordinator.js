@@ -1,12 +1,9 @@
+// Generated from src/telegram/deliveryRetryCoordinator.ts. Run npm run generate:runtime.
 "use strict";
-
-const {
-  buildRateLimitBarrierAtMs,
-  buildSafeRetryState,
-} = require("./deliveryPolicy");
-const { TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND } = require("./taskKinds");
-
-/** @param {import("./deliveryRetryTypes").TelegramRetryDependencies} dependencies */
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.createTelegramRetryCoordinator = void 0;
+const deliveryPolicy_js_1 = require("./deliveryPolicy.js");
+const taskKinds_js_1 = require("./taskKinds.js");
 const createTelegramRetryCoordinator = ({
   now,
   scheduleExactRetry,
@@ -14,10 +11,6 @@ const createTelegramRetryCoordinator = ({
   extendRetryBarrierAndReleaseApiGate,
   localRetryBarrier,
 }) => {
-  /**
-   * @param {import("./deliveryRetryTypes").TelegramRetryInput} input
-   * @returns {Promise<import("./deliveryRetryTypes").TelegramRetryResult>}
-   */
   const finish = async ({
     current,
     failure,
@@ -31,14 +24,14 @@ const createTelegramRetryCoordinator = ({
     persistState,
   }) => {
     const finalizedAtMs = now();
-    const retryState = buildSafeRetryState({
+    const retryState = (0, deliveryPolicy_js_1.buildSafeRetryState)({
       current,
       result: failure,
       nowMs: finalizedAtMs,
     });
     const rateLimited = failure?.code === "rate-limited";
     const barrierRetryNotBeforeMs = rateLimited
-      ? buildRateLimitBarrierAtMs({
+      ? (0, deliveryPolicy_js_1.buildRateLimitBarrierAtMs)({
           result: failure,
           retryState,
           nowMs: finalizedAtMs,
@@ -69,7 +62,9 @@ const createTelegramRetryCoordinator = ({
     await scheduleExactRetry({
       messageKey,
       revision,
-      taskKind: rateLimited ? TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND : target.kind,
+      taskKind: rateLimited
+        ? taskKinds_js_1.TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND
+        : target.kind,
       retryState,
       ...(target.kind === "desired" ? { safeRejectedAttemptId } : {}),
       pendingDeleteId: target.pendingDeleteId || "",
@@ -110,8 +105,6 @@ const createTelegramRetryCoordinator = ({
     }
     return retryState;
   };
-
   return { finish };
 };
-
-module.exports = { createTelegramRetryCoordinator };
+exports.createTelegramRetryCoordinator = createTelegramRetryCoordinator;

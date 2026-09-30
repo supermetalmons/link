@@ -12,6 +12,7 @@ export default [
     files: [
       "src/**/*.{ts,tsx}",
       "cloud/workers/api/**/*.ts",
+      "cloud/runtime/src/**/*.ts",
       "scripts/**/*.ts",
       "cloud/admin/**/*.js",
     ],
@@ -118,6 +119,36 @@ export default [
       "jsx-a11y/role-has-required-aria-props": "warn",
       "jsx-a11y/role-supports-aria-props": "warn",
       "jsx-a11y/scope": "warn",
+    },
+  },
+  {
+    files: ["cloud/runtime/src/**/*.ts"],
+    rules: {
+      "@typescript-eslint/no-explicit-any": "error",
+      "@typescript-eslint/ban-ts-comment": [
+        "error",
+        {
+          "ts-check": false,
+          "ts-expect-error": true,
+          "ts-ignore": true,
+          "ts-nocheck": true,
+        },
+      ],
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector:
+            "TSAsExpression[expression.type='TSAsExpression'][expression.typeAnnotation.type='TSUnknownKeyword']",
+          message:
+            "Narrow the input or correct the contract instead of casting through unknown.",
+        },
+      ],
+    },
+  },
+  {
+    files: ["cloud/runtime/src/telegram/desiredStateCore.ts"],
+    rules: {
+      "no-control-regex": "off",
     },
   },
 ];

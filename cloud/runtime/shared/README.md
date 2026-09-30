@@ -5,13 +5,20 @@ used by the React browser app, the Cloudflare API Worker, and portable backend
 modules.
 
 The package lives inside `cloud/runtime` alongside portable backend modules.
-The root app and backend modules consume it through local `file:` dependencies,
-while Worker source is compiled
-through the root toolchain. No generated copy or publish step is required.
+Its TypeScript source lives in `cloud/runtime/src/shared/`. The root app and
+backend modules consume generated CommonJS and declarations through local
+`file:` dependencies, while Worker source is compiled through the root
+toolchain. Existing direct subpath imports remain unchanged.
+
+Edit the TypeScript source, run `npm run generate:runtime` from the repository
+root, and commit the generated `.js` and `.d.ts` files with the source. Do not
+edit generated files directly. `npm run watch:runtime` regenerates them during
+development. `npm run check:runtime` lints and typechecks the source and fails
+when generated output is stale, missing, or orphaned.
 
 Keep shared modules:
 
-- browser-safe CommonJS JavaScript with a matching `.d.ts` file;
+- checked TypeScript compiled to browser-safe CommonJS and declarations;
 - free of DOM, storage, network, and process-specific behavior;
 - split into direct subpath imports such as `@mons/shared/mining`;
 - explicit about policy differences, such as local versus UTC mining dates or

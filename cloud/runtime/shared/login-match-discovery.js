@@ -1,10 +1,12 @@
+// Generated from src/shared/login-match-discovery.ts. Run npm run generate:runtime.
 "use strict";
-
-const { isSafeRecordKey } = require("./ids");
-const { createInviteCandidatesFromMatchId } = require("./rematches");
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.matchDiscoverySortKey = matchDiscoverySortKey;
+exports.resolveMatchDiscoveryInvite = resolveMatchDiscoveryInvite;
+const ids_js_1 = require("./ids.js");
+const rematches_js_1 = require("./rematches.js");
 function matchDiscoverySortKey(matchId) {
-  if (typeof matchId !== "string" || !isSafeRecordKey(matchId)) {
+  if (typeof matchId !== "string" || !(0, ids_js_1.isSafeRecordKey)(matchId)) {
     throw new TypeError("invalid-discovery-match-id");
   }
   let key = "";
@@ -13,7 +15,6 @@ function matchDiscoverySortKey(matchId) {
   }
   return key;
 }
-
 async function resolveMatchDiscoveryInvite(matchId, hasInvite) {
   matchDiscoverySortKey(matchId);
   const normalizedMatchId = matchId.trim();
@@ -21,7 +22,7 @@ async function resolveMatchDiscoveryInvite(matchId, hasInvite) {
     return { inviteId: normalizedMatchId, resolution: "resolved" };
   }
   const existing = [];
-  for (const candidate of createInviteCandidatesFromMatchId(
+  for (const candidate of (0, rematches_js_1.createInviteCandidatesFromMatchId)(
     normalizedMatchId,
   )) {
     if (await hasInvite(candidate)) existing.push(candidate);
@@ -33,5 +34,3 @@ async function resolveMatchDiscoveryInvite(matchId, hasInvite) {
     ? { inviteId: existing[0], resolution: "resolved" }
     : { inviteId: null, resolution: "missing" };
 }
-
-module.exports = { matchDiscoverySortKey, resolveMatchDiscoveryInvite };

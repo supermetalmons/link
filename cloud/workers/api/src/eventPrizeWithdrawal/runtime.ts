@@ -11,6 +11,7 @@ import {
 import { EventPrizeWithdrawalError } from "../../../../runtime/eventPrizes/errors.js";
 import { createEventPrizeUmi as createConfiguredEventPrizeUmi } from "../../../../runtime/eventPrizes/solana.js";
 import { handleWithdrawEventPrize } from "../../../../runtime/eventPrizes/withdrawalOrchestrator.js";
+import type { WithdrawalRuntimeDependencies } from "../../../../runtime/eventPrizes/solanaTypes.js";
 import {
   createEventGameplayRepository,
   type EventGameplayRepository,
@@ -38,7 +39,7 @@ import {
 export type EventPrizeRuntimeDependencies = {
   withdrawals: EventPrizeWithdrawalStore;
   readProfileEventPrizeAssignment: EventGameplayRepository["readProfileEventPrizeAssignment"];
-  createEventPrizeUmi(standard: "compressed" | "core"): unknown;
+  createEventPrizeUmi: WithdrawalRuntimeDependencies["createEventPrizeUmi"];
   now(): number;
   readWithdrawal(
     eventId: string,

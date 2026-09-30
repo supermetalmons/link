@@ -1,10 +1,15 @@
+// Generated from src/profileMergeTargets.ts. Run npm run generate:runtime.
 "use strict";
-
-const MAX_PROFILE_MERGE_TARGET_HOPS = 32;
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.orderProfileMergeCleanupIds =
+  exports.resolveProfileMergeTargetId =
+  exports.resolveProfileMergeTargetPath =
+  exports.getProfileMergeTargetId =
+  exports.MAX_PROFILE_MERGE_TARGET_HOPS =
+    void 0;
+exports.MAX_PROFILE_MERGE_TARGET_HOPS = 32;
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
 const getProfileMergeTargetId = (value) => {
   if (typeof value === "string") {
     return normalizeString(value);
@@ -14,11 +19,11 @@ const getProfileMergeTargetId = (value) => {
   }
   return normalizeString(value.targetProfileId);
 };
-
+exports.getProfileMergeTargetId = getProfileMergeTargetId;
 const resolveProfileMergeTargetPath = async ({
   profileId,
   readMergeTarget,
-  maxHops = MAX_PROFILE_MERGE_TARGET_HOPS,
+  maxHops = exports.MAX_PROFILE_MERGE_TARGET_HOPS,
 }) => {
   let currentProfileId = normalizeString(profileId);
   if (!currentProfileId) {
@@ -27,7 +32,6 @@ const resolveProfileMergeTargetPath = async ({
   if (typeof readMergeTarget !== "function") {
     throw new Error("profile-merge-target-reader-required");
   }
-
   const profileIds = [];
   const visitedProfileIds = new Set();
   const normalizedMaxHops = Math.max(1, Math.floor(Number(maxHops)) || 1);
@@ -38,7 +42,7 @@ const resolveProfileMergeTargetPath = async ({
     }
     visitedProfileIds.add(currentProfileId);
     profileIds.push(currentProfileId);
-    const nextProfileId = getProfileMergeTargetId(
+    const nextProfileId = (0, exports.getProfileMergeTargetId)(
       await readMergeTarget(currentProfileId),
     );
     if (!nextProfileId) {
@@ -51,12 +55,12 @@ const resolveProfileMergeTargetPath = async ({
     currentProfileId = nextProfileId;
   }
 };
-
+exports.resolveProfileMergeTargetPath = resolveProfileMergeTargetPath;
 const resolveProfileMergeTargetId = async (options) => {
-  const profileIds = await resolveProfileMergeTargetPath(options);
+  const profileIds = await (0, exports.resolveProfileMergeTargetPath)(options);
   return profileIds[profileIds.length - 1] || "";
 };
-
+exports.resolveProfileMergeTargetId = resolveProfileMergeTargetId;
 const orderProfileMergeCleanupIds = (profileIds, canonicalProfileIds) => {
   const normalizedProfileIds = Array.from(
     new Set((profileIds || []).map(normalizeString).filter(Boolean)),
@@ -69,11 +73,4 @@ const orderProfileMergeCleanupIds = (profileIds, canonicalProfileIds) => {
     ...normalizedProfileIds.filter((profileId) => canonicalIds.has(profileId)),
   ];
 };
-
-module.exports = {
-  MAX_PROFILE_MERGE_TARGET_HOPS,
-  getProfileMergeTargetId,
-  orderProfileMergeCleanupIds,
-  resolveProfileMergeTargetId,
-  resolveProfileMergeTargetPath,
-};
+exports.orderProfileMergeCleanupIds = orderProfileMergeCleanupIds;

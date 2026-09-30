@@ -1,30 +1,21 @@
+// Generated from src/eventProfileGameProjectionCore.ts. Run npm run generate:runtime.
 "use strict";
-
-const {
-  NAVIGATION_SORT_BUCKETS: SORT_BUCKETS,
-} = require("@mons/shared/navigation");
-const {
-  getCanonicalProfileId,
-  profileOwnershipUnavailable,
-  resolveOwnedProfileReferences,
-} = require("./events/ownership");
-const {
-  NAVIGATION_PARTICIPANT_PREVIEW_LIMIT,
-  buildPreviewParticipants,
-  getListSortAtMs,
-  getOwnerProfileIds,
-  mapEventStatusToNavigationStatus,
-  normalizeString,
-} = require("./events/eventProjectionModel");
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.createEventProfileGameProjectionCore =
+  exports.READ_RETRY_DELAY_MS =
+  exports.READ_RETRY_ATTEMPTS =
+    void 0;
+const navigation_1 = require("@mons/shared/navigation");
+const ownership_js_1 = require("./events/ownership.js");
+const eventProjectionModel_js_1 = require("./events/eventProjectionModel.js");
 const READ_RETRY_ATTEMPTS = 2;
+exports.READ_RETRY_ATTEMPTS = READ_RETRY_ATTEMPTS;
 const READ_RETRY_DELAY_MS = 25;
-
+exports.READ_RETRY_DELAY_MS = READ_RETRY_DELAY_MS;
 const defaultWait = (milliseconds) =>
   new Promise((resolve) => {
     setTimeout(resolve, milliseconds);
   });
-
 const createEventProfileGameProjectionCore = ({
   now = Date.now,
   prepareEventProjection,
@@ -36,7 +27,6 @@ const createEventProfileGameProjectionCore = ({
       "event profile-game projection dependencies are required",
     );
   }
-
   const toTimestampMillis = (millis) => {
     const normalized =
       typeof millis === "number" && Number.isFinite(millis)
@@ -44,7 +34,6 @@ const createEventProfileGameProjectionCore = ({
         : now();
     return Math.max(1, normalized);
   };
-
   const readWithRetries = async (read) => {
     let failure = null;
     for (let attempt = 1; attempt <= READ_RETRY_ATTEMPTS; attempt += 1) {
@@ -59,36 +48,46 @@ const createEventProfileGameProjectionCore = ({
     }
     throw failure;
   };
-
   const participantEntries = (participants) =>
     Object.entries(participants).flatMap(([key, value]) =>
       value && typeof value === "object" && !Array.isArray(value)
         ? [
             {
-              key: normalizeString(key),
-              loginUid: normalizeString(value.loginUid),
+              key: (0, eventProjectionModel_js_1.normalizeString)(key),
+              loginUid: (0, eventProjectionModel_js_1.normalizeString)(
+                value.loginUid,
+              ),
               participant: value,
               profileId:
-                normalizeString(value.profileId) || normalizeString(key),
+                (0, eventProjectionModel_js_1.normalizeString)(
+                  value.profileId,
+                ) || (0, eventProjectionModel_js_1.normalizeString)(key),
             },
           ]
         : [],
     );
-
   const readOwnershipPlan = async (participants, cleanupOwnerProfileIds) => {
     const entries = participantEntries(participants);
     const cleanupProfileIds = Array.from(
-      new Set(cleanupOwnerProfileIds.map(normalizeString).filter(Boolean)),
+      new Set(
+        cleanupOwnerProfileIds
+          .map(eventProjectionModel_js_1.normalizeString)
+          .filter((value) => Boolean(value)),
+      ),
     );
     const loginUids = Array.from(
-      new Set(entries.map(({ loginUid }) => loginUid).filter(Boolean)),
+      new Set(
+        entries
+          .map(({ loginUid }) => loginUid)
+          .filter((value) => Boolean(value)),
+      ),
     );
     const storedProfileIds = Array.from(
       new Set(
         [
           ...entries.flatMap(({ key, profileId }) => [key, profileId]),
           ...cleanupProfileIds,
-        ].filter(Boolean),
+        ].filter((value) => Boolean(value)),
       ),
     );
     const ownership = await repository.readProfileOwnershipSnapshot({
@@ -104,9 +103,9 @@ const createEventProfileGameProjectionCore = ({
         (profileId) => !ownership.canonicalProfileIdByProfileId.has(profileId),
       )
     ) {
-      throw profileOwnershipUnavailable();
+      throw (0, ownership_js_1.profileOwnershipUnavailable)();
     }
-    const ownerProfileIds = resolveOwnedProfileReferences(
+    const ownerProfileIds = (0, ownership_js_1.resolveOwnedProfileReferences)(
       ownership,
       entries.map(({ loginUid, profileId }) => ({ loginUid, profileId })),
     );
@@ -124,22 +123,24 @@ const createEventProfileGameProjectionCore = ({
       ...ownerProfileIds,
     ]);
     for (const profileId of storedProfileIds) {
-      const canonicalProfileId = getCanonicalProfileId(ownership, profileId);
+      const canonicalProfileId = (0, ownership_js_1.getCanonicalProfileId)(
+        ownership,
+        profileId,
+      );
       if (canonicalProfileId) allProfileIds.add(canonicalProfileId);
     }
     const currentOwnerIds = new Set(ownerProfileIds);
     return {
       allOwnerProfileIds: [
         ...ownerProfileIds,
-        ...Array.from(allProfileIds).filter(
-          (profileId) => profileId && !currentOwnerIds.has(profileId),
+        ...Array.from(allProfileIds).filter((profileId) =>
+          Boolean(profileId && !currentOwnerIds.has(profileId)),
         ),
       ],
       canonicalParticipants,
       ownerProfileIds,
     };
   };
-
   const projectEvent = async (
     eventId,
     eventData,
@@ -170,18 +171,23 @@ const createEventProfileGameProjectionCore = ({
         ? eventData.participants
         : {};
     const normalizedCleanupOwnerProfileIds = Array.from(
-      new Set(cleanupOwnerProfileIds.map(normalizeString).filter(Boolean)),
+      new Set(
+        cleanupOwnerProfileIds
+          .map(eventProjectionModel_js_1.normalizeString)
+          .filter((value) => Boolean(value)),
+      ),
     );
     const {
       allOwnerProfileIds,
       canonicalParticipants,
       ownerProfileIds: afterOwnerProfileIds,
     } = await readOwnershipPlan(participants, normalizedCleanupOwnerProfileIds);
-
-    const status = mapEventStatusToNavigationStatus(
-      normalizeString(eventData?.status),
+    const status = (0,
+    eventProjectionModel_js_1.mapEventStatusToNavigationStatus)(
+      (0, eventProjectionModel_js_1.normalizeString)(eventData?.status),
     );
-    const previewParticipants = buildPreviewParticipants(canonicalParticipants);
+    const previewParticipants = (0,
+    eventProjectionModel_js_1.buildPreviewParticipants)(canonicalParticipants);
     const currentOwnerIds = new Set(afterOwnerProfileIds);
     const writes = [];
     if (eventData) {
@@ -197,8 +203,10 @@ const createEventProfileGameProjectionCore = ({
             id: `event_${eventId}`,
             eventId,
             status,
-            sortBucket: SORT_BUCKETS[status],
-            listSortAt: toTimestampMillis(getListSortAtMs(eventData, status)),
+            sortBucket: navigation_1.NAVIGATION_SORT_BUCKETS[status],
+            listSortAt: toTimestampMillis(
+              (0, eventProjectionModel_js_1.getListSortAtMs)(eventData, status),
+            ),
             ownerProfileId,
             startAt:
               typeof eventData.startAtMs === "number"
@@ -216,9 +224,11 @@ const createEventProfileGameProjectionCore = ({
             participantCount: previewParticipants.length,
             participantPreview: previewParticipants.slice(
               0,
-              NAVIGATION_PARTICIPANT_PREVIEW_LIMIT,
+              eventProjectionModel_js_1.NAVIGATION_PARTICIPANT_PREVIEW_LIMIT,
             ),
-            winnerDisplayName: normalizeString(eventData.winnerDisplayName),
+            winnerDisplayName: (0, eventProjectionModel_js_1.normalizeString)(
+              eventData.winnerDisplayName,
+            ),
           },
         });
       }
@@ -238,14 +248,15 @@ const createEventProfileGameProjectionCore = ({
       written: writes.filter((write) => write.type !== "delete").length,
     };
   };
-
   const reconcileEventProjection = async (
     eventId,
     cleanupOwnerProfileIds = [],
     options = {},
   ) => {
     const cleanupIds = new Set(
-      cleanupOwnerProfileIds.map(normalizeString).filter(Boolean),
+      cleanupOwnerProfileIds
+        .map(eventProjectionModel_js_1.normalizeString)
+        .filter((value) => Boolean(value)),
     );
     const liveData = await readWithRetries(async () => {
       const event = await repository.getEvent(eventId);
@@ -254,7 +265,7 @@ const createEventProfileGameProjectionCore = ({
       }
       return event;
     });
-    getOwnerProfileIds(
+    (0, eventProjectionModel_js_1.getOwnerProfileIds)(
       liveData?.participants && typeof liveData.participants === "object"
         ? liveData.participants
         : {},
@@ -270,15 +281,10 @@ const createEventProfileGameProjectionCore = ({
       status: liveData === null ? "missing" : "projected",
     };
   };
-
   return {
     projectEvent,
     reconcileEventProjection,
   };
 };
-
-module.exports = {
-  READ_RETRY_ATTEMPTS,
-  READ_RETRY_DELAY_MS,
-  createEventProfileGameProjectionCore,
-};
+exports.createEventProfileGameProjectionCore =
+  createEventProfileGameProjectionCore;

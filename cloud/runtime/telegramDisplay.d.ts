@@ -1,6 +1,8 @@
-export const AUTOMATCH_WAITING_EMOJI_ID: "5355002036817525409";
-export function getTelegramEmojiTag(emojiId: unknown): string;
-export function getDisplayNameFromAddress(
+// Generated from src/telegramDisplay.ts. Run npm run generate:runtime.
+declare const AUTOMATCH_WAITING_EMOJI_ID = "5355002036817525409";
+declare function resolveTelegramEmojiId(emoji: unknown): string;
+declare function getTelegramEmojiTag(emojiId: unknown): string;
+declare function getDisplayNameFromAddress(
   username: unknown,
   ethAddress: unknown,
   solAddress: unknown,
@@ -8,4 +10,9 @@ export function getDisplayNameFromAddress(
   emoji: unknown,
   includeEmoji?: boolean,
 ): string;
-export function resolveTelegramEmojiId(emoji: unknown): string;
+export {
+  AUTOMATCH_WAITING_EMOJI_ID,
+  getDisplayNameFromAddress,
+  getTelegramEmojiTag,
+  resolveTelegramEmojiId,
+};

@@ -1,24 +1,23 @@
+// Generated from src/eventPrizes/submittedTransactions.ts. Run npm run generate:runtime.
 "use strict";
-
-const { EventPrizeWithdrawalError: HttpsError } = require("./errors");
-const { persistSubmittedTransaction } = require("./withdrawalRepository");
-const {
-  CONFIRMATION_COMMITMENT,
-  CONFIRMATION_TIMEOUT_MS,
-  SEND_TRANSACTION_TIMEOUT_MS,
-  SIGNATURE_STATUS_TIMEOUT_MS,
-  TRANSACTION_STATUS_RETRY_DELAYS_MS,
-  loadSolanaDependencies,
-} = require("./solana");
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.waitForSubmittedTransactionStatus =
+  exports.sendAndConfirmSubmittedTransaction =
+  exports.isDefinitiveSubmittedTransactionFailure =
+  exports.getSubmittedTransactionSignature =
+  exports.deserializePersistedSubmittedTransaction =
+  exports.buildSubmittedTransaction =
+    void 0;
+const errors_js_1 = require("./errors.js");
+const withdrawalRepository_js_1 = require("./withdrawalRepository.js");
+const solana_js_1 = require("./solana.js");
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
 class DefinitiveSubmittedTransactionFailure extends Error {}
-
 const isDefinitiveSubmittedTransactionFailure = (error) =>
   error instanceof DefinitiveSubmittedTransactionFailure;
-
+exports.isDefinitiveSubmittedTransactionFailure =
+  isDefinitiveSubmittedTransactionFailure;
 const deserializePersistedSubmittedTransaction = (umi, withdrawal) => {
   const encoded = normalizeString(withdrawal?.signedTransactionBase64);
   const transactionSignature = normalizeString(
@@ -47,26 +46,27 @@ const deserializePersistedSubmittedTransaction = (umi, withdrawal) => {
     return null;
   }
 };
-
+exports.deserializePersistedSubmittedTransaction =
+  deserializePersistedSubmittedTransaction;
 const buildSubmittedTransaction = async ({
   umi,
   builder,
   withdrawalRecord,
   leaseId,
 }) => {
-  const { base58 } = loadSolanaDependencies();
+  const { base58 } = (0, solana_js_1.loadSolanaDependencies)();
   const latestBlockhash = await umi.rpc.getLatestBlockhash({
-    commitment: CONFIRMATION_COMMITMENT,
+    commitment: solana_js_1.CONFIRMATION_COMMITMENT,
   });
   const signedTransaction = await builder
     .setBlockhash(latestBlockhash)
     .buildAndSign(umi);
   const simulation = await umi.rpc.simulateTransaction(signedTransaction, {
-    commitment: CONFIRMATION_COMMITMENT,
+    commitment: solana_js_1.CONFIRMATION_COMMITMENT,
     verifySignatures: true,
   });
   if (simulation.err) {
-    throw new HttpsError(
+    throw new errors_js_1.EventPrizeWithdrawalError(
       "failed-precondition",
       "The prize transfer could not be simulated.",
     );
@@ -77,7 +77,8 @@ const buildSubmittedTransaction = async ({
   const signedTransactionBase64 = Buffer.from(
     umi.transactions.serialize(signedTransaction),
   ).toString("base64");
-  const persistedWithdrawal = await persistSubmittedTransaction({
+  const persistedWithdrawal = await (0,
+  withdrawalRepository_js_1.persistSubmittedTransaction)({
     withdrawalRecord,
     leaseId,
     transactionSignature,
@@ -93,7 +94,7 @@ const buildSubmittedTransaction = async ({
     persistedWithdrawal,
   };
 };
-
+exports.buildSubmittedTransaction = buildSubmittedTransaction;
 const waitForPromiseWithTimeout = (
   promise,
   timeoutMs,
@@ -119,25 +120,30 @@ const waitForPromiseWithTimeout = (
       },
     );
   });
-
 const getSubmittedTransactionSignature = (submitted) => {
   const transactionSignature = submitted?.signedTransaction?.signatures?.[0];
   if (!transactionSignature) {
-    throw new HttpsError("internal", "Prize transaction signature is missing.");
+    throw new errors_js_1.EventPrizeWithdrawalError(
+      "internal",
+      "Prize transaction signature is missing.",
+    );
   }
-  const { base58 } = loadSolanaDependencies();
+  const { base58 } = (0, solana_js_1.loadSolanaDependencies)();
   const transactionSignatureString =
     base58.deserialize(transactionSignature)[0];
   if (transactionSignatureString !== submitted.transactionSignature) {
-    throw new HttpsError("internal", "Prize transaction signature mismatch.");
+    throw new errors_js_1.EventPrizeWithdrawalError(
+      "internal",
+      "Prize transaction signature mismatch.",
+    );
   }
   return transactionSignature;
 };
-
+exports.getSubmittedTransactionSignature = getSubmittedTransactionSignature;
 const readSubmittedTransactionStatus = async ({
   umi,
   transactionSignature,
-  statusRequestTimeoutMs = SIGNATURE_STATUS_TIMEOUT_MS,
+  statusRequestTimeoutMs = solana_js_1.SIGNATURE_STATUS_TIMEOUT_MS,
 }) => {
   const [status] = await waitForPromiseWithTimeout(
     umi.rpc.getSignatureStatuses([transactionSignature], {
@@ -155,12 +161,11 @@ const readSubmittedTransactionStatus = async ({
     ? { kind: "failed", error: status.error }
     : { kind: "confirmed" };
 };
-
 const waitForSubmittedTransactionStatus = async ({
   umi,
   submitted,
-  retryDelaysMs = TRANSACTION_STATUS_RETRY_DELAYS_MS,
-  statusRequestTimeoutMs = SIGNATURE_STATUS_TIMEOUT_MS,
+  retryDelaysMs = solana_js_1.TRANSACTION_STATUS_RETRY_DELAYS_MS,
+  statusRequestTimeoutMs = solana_js_1.SIGNATURE_STATUS_TIMEOUT_MS,
 }) => {
   const transactionSignature = getSubmittedTransactionSignature(submitted);
   let observedStatus = false;
@@ -189,33 +194,36 @@ const waitForSubmittedTransactionStatus = async ({
     ? { kind: "pending", signatureFound }
     : { kind: "unknown", error: lastError };
 };
-
+exports.waitForSubmittedTransactionStatus = waitForSubmittedTransactionStatus;
 const sendAndConfirmSubmittedTransaction = async ({
   umi,
   submitted,
   statusRetryDelaysMs,
-  confirmationTimeoutMs = CONFIRMATION_TIMEOUT_MS,
-  sendTimeoutMs = SEND_TRANSACTION_TIMEOUT_MS,
-  statusRequestTimeoutMs = SIGNATURE_STATUS_TIMEOUT_MS,
+  confirmationTimeoutMs = solana_js_1.CONFIRMATION_TIMEOUT_MS,
+  sendTimeoutMs = solana_js_1.SEND_TRANSACTION_TIMEOUT_MS,
+  statusRequestTimeoutMs = solana_js_1.SIGNATURE_STATUS_TIMEOUT_MS,
 }) => {
   const transactionSignature = getSubmittedTransactionSignature(submitted);
-  const { base58 } = loadSolanaDependencies();
+  const { base58 } = (0, solana_js_1.loadSolanaDependencies)();
   let sendError = null;
   try {
     const sentSignature = await waitForPromiseWithTimeout(
       umi.rpc.sendTransaction(submitted.signedTransaction, {
         skipPreflight: false,
-        preflightCommitment: CONFIRMATION_COMMITMENT,
+        preflightCommitment: solana_js_1.CONFIRMATION_COMMITMENT,
         maxRetries: 3,
       }),
       sendTimeoutMs,
     );
     const sentSignatureString = base58.deserialize(sentSignature)[0];
     if (sentSignatureString !== submitted.transactionSignature) {
-      throw new HttpsError("internal", "Prize transaction signature mismatch.");
+      throw new errors_js_1.EventPrizeWithdrawalError(
+        "internal",
+        "Prize transaction signature mismatch.",
+      );
     }
   } catch (error) {
-    if (error instanceof HttpsError) {
+    if (error instanceof errors_js_1.EventPrizeWithdrawalError) {
       throw error;
     }
     sendError = error;
@@ -223,7 +231,7 @@ const sendAndConfirmSubmittedTransaction = async ({
   try {
     const confirmation = await waitForPromiseWithTimeout(
       umi.rpc.confirmTransaction(transactionSignature, {
-        commitment: CONFIRMATION_COMMITMENT,
+        commitment: solana_js_1.CONFIRMATION_COMMITMENT,
         strategy: {
           type: "blockhash",
           blockhash: submitted.blockhash,
@@ -238,7 +246,7 @@ const sendAndConfirmSubmittedTransaction = async ({
     }
   } catch (error) {
     if (
-      error instanceof HttpsError ||
+      error instanceof errors_js_1.EventPrizeWithdrawalError ||
       isDefinitiveSubmittedTransactionFailure(error)
     ) {
       throw error;
@@ -271,12 +279,4 @@ const sendAndConfirmSubmittedTransaction = async ({
     );
   }
 };
-
-module.exports = {
-  buildSubmittedTransaction,
-  deserializePersistedSubmittedTransaction,
-  getSubmittedTransactionSignature,
-  isDefinitiveSubmittedTransactionFailure,
-  sendAndConfirmSubmittedTransaction,
-  waitForSubmittedTransactionStatus,
-};
+exports.sendAndConfirmSubmittedTransaction = sendAndConfirmSubmittedTransaction;

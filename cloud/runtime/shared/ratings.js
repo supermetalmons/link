@@ -1,8 +1,18 @@
+// Generated from src/shared/ratings.ts. Run npm run generate:runtime.
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.isRatingUpdateResponse =
+  exports.isRatingUpdateRequest =
+  exports.getRatingDeviation =
+  exports.getRatingEventMetadata =
+  exports.createRatingUpdater =
+  exports.RATING_VOLATILITY =
+  exports.GLICKO_SETTINGS =
+    void 0;
 const RATING_VOLATILITY = 0.06;
-
+exports.RATING_VOLATILITY = RATING_VOLATILITY;
 const isRecord = (value) =>
   typeof value === "object" && value !== null && !Array.isArray(value);
-
 const hasExactKeys = (value, expectedKeys) => {
   const keys = Object.keys(value);
   return (
@@ -10,16 +20,15 @@ const hasExactKeys = (value, expectedKeys) => {
     keys.every((key) => expectedKeys.includes(key))
   );
 };
-
 const GLICKO_SETTINGS = Object.freeze({
   tau: 0.75,
   rating: 1500,
   rd: 100,
   vol: RATING_VOLATILITY,
 });
-
+exports.GLICKO_SETTINGS = GLICKO_SETTINGS;
 const getRatingDeviation = (gamesCount) => Math.max(60, 350 - gamesCount);
-
+exports.getRatingDeviation = getRatingDeviation;
 const createRatingUpdater =
   (Glicko2) =>
   (winRating, winPlayerGamesCount, lossRating, lossPlayerGamesCount) => {
@@ -36,13 +45,11 @@ const createRatingUpdater =
     );
     const matches = [[winner, loser, 1]];
     ranking.updateRatings(matches);
-
     const newWinRating = Math.round(winner.getRating());
     const newLossRating = Math.round(loser.getRating());
-
     return [newWinRating, newLossRating];
   };
-
+exports.createRatingUpdater = createRatingUpdater;
 const getRatingEventMetadata = (value) => {
   const invite = isRecord(value) ? value : {};
   const eventId =
@@ -55,7 +62,7 @@ const getRatingEventMetadata = (value) => {
     eventId,
   };
 };
-
+exports.getRatingEventMetadata = getRatingEventMetadata;
 const isRatingUpdateRequest = (value) =>
   isRecord(value) &&
   hasExactKeys(value, ["playerId", "opponentId", "inviteId", "matchId"]) &&
@@ -67,7 +74,7 @@ const isRatingUpdateRequest = (value) =>
   value.inviteId.trim() !== "" &&
   typeof value.matchId === "string" &&
   value.matchId.trim() !== "";
-
+exports.isRatingUpdateRequest = isRatingUpdateRequest;
 const isRatingUpdateResponse = (value) => {
   if (!isRecord(value)) {
     return false;
@@ -83,13 +90,4 @@ const isRatingUpdateResponse = (value) => {
     (hasExactKeys(value, ["ok", "skipped"]) && value.skipped === true)
   );
 };
-
-module.exports = {
-  GLICKO_SETTINGS,
-  RATING_VOLATILITY,
-  createRatingUpdater,
-  getRatingEventMetadata,
-  getRatingDeviation,
-  isRatingUpdateRequest,
-  isRatingUpdateResponse,
-};
+exports.isRatingUpdateResponse = isRatingUpdateResponse;

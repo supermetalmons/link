@@ -3,15 +3,17 @@
     "target": "ES2024",
     "module": "Node16",
     "moduleResolution": "Node16",
-    "allowJs": true,
-    "checkJs": true,
+    "moduleDetection": "force",
+    "allowJs": false,
     "strict": true,
     "noEmit": true,
+    "declaration": true,
+    "rootDir": "src",
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": ["node"],
+    "paths": {
+      "@mons/shared/*": ["./src/shared/*.ts"]
+    }
   },
-  "files": [
-    "telegram/deliveryRetryCoordinator.js",
-    "telegram/deliveryPolicy.js"
-  ]
+  "include": ["src/**/*.ts"]
 }

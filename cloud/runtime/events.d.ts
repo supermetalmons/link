@@ -1,5 +1,15 @@
+// Generated from src/events.ts. Run npm run generate:runtime.
+import type { EventLockManager } from "./events/lockManagerCore.js";
 import type { EventRuntimeStore } from "./eventCommands.js";
 import type { EventMatchPairRequest } from "./events/bracket.js";
+import type { EventOwnershipSnapshot } from "./events/ownership.js";
+type EventSyncLog = Record<string, unknown> & {
+  reason?: string | null;
+  requesterProfileId?: string | null;
+  skipped?: boolean;
+  didChange?: boolean;
+  durationMs?: number;
+};
 export type EventRuntimeCode =
   | "aborted"
   | "failed-precondition"
@@ -8,19 +18,12 @@ export type EventRuntimeCode =
   | "permission-denied"
   | "unauthenticated"
   | "unavailable";
-
-export class EventRuntimeError extends Error {
-  code: EventRuntimeCode;
-  constructor(code: EventRuntimeCode, message: string);
-}
-
 export type EventRuntimeRequest = {
   auth: {
     uid: string;
   } | null;
   data: Record<string, unknown>;
 };
-
 export type EventProgressOutboxRecord = {
   schemaVersion: 1;
   eventId: string;
@@ -30,7 +33,6 @@ export type EventProgressOutboxRecord = {
   firstQueuedAtMs: number;
   lastQueuedAtMs: number;
 };
-
 export type EventRuntime = {
   createEvent(request: EventRuntimeRequest): Promise<Record<string, unknown>>;
   disqualifyEventMatchWinners(
@@ -44,14 +46,13 @@ export type EventRuntime = {
     requesterUid: string;
     enforceParticipantGate: boolean;
     enforceThrottle: boolean;
-    syncLog: Record<string, unknown>;
+    syncLog: EventSyncLog;
   }): Promise<Record<string, unknown>>;
   syncEventState(
     request: EventRuntimeRequest,
   ): Promise<Record<string, unknown>>;
 };
-
-export function createEventRuntime(dependencies: {
+type Signature_createEventRuntime = (dependencies: {
   readMatchPair: (input: EventMatchPairRequest) => Promise<[unknown, unknown]>;
   readMatchPairs: (
     inputs: EventMatchPairRequest[],
@@ -62,17 +63,17 @@ export function createEventRuntime(dependencies: {
     sourceKey: string;
     reason: string;
     scheduleTimeMs?: number;
-  }): Promise<{ outboxId: string; outbox: EventProgressOutboxRecord }>;
-  eventLockManager: {
-    acquireEventLockWithRetry(
-      eventId: string,
-      ownerUid: string,
-      options: { attempts: number; delayMs: number },
-    ): Promise<Record<string, unknown> | null>;
-    isEventLockStillOwned(handle: Record<string, unknown>): Promise<boolean>;
-    releaseEventLock(handle: Record<string, unknown>): Promise<boolean>;
-    startEventLockHeartbeat(handle: Record<string, unknown>): () => void;
-  };
+  }): Promise<{
+    outboxId: string;
+    outbox: EventProgressOutboxRecord;
+  }>;
+  eventLockManager: Pick<
+    EventLockManager,
+    | "acquireEventLockWithRetry"
+    | "isEventLockStillOwned"
+    | "releaseEventLock"
+    | "startEventLockHeartbeat"
+  >;
   readProfileOwnershipSnapshot(query: {
     loginUids: string[];
     profileIds: string[];
@@ -81,7 +82,12 @@ export function createEventRuntime(dependencies: {
     eventId: string,
   ) => Promise<Record<string, Record<string, unknown>>>;
   now?: () => number;
-  random: () => number;
+  random?: () => number;
   sleep(milliseconds: number): Promise<void>;
-}): EventRuntime;
-import type { EventOwnershipSnapshot } from "./events/ownership.js";
+}) => EventRuntime;
+declare class EventRuntimeError extends Error {
+  code: EventRuntimeCode;
+  constructor(code: EventRuntimeCode, message: string);
+}
+declare const createEventRuntime: Signature_createEventRuntime;
+export { createEventRuntime, EventRuntimeError };

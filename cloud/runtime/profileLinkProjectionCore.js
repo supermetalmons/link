@@ -1,12 +1,23 @@
+// Generated from src/profileLinkProjectionCore.ts. Run npm run generate:runtime.
 "use strict";
-
-const { normalizeString } = require("./events/gameProjectionModel");
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.processWithConcurrency =
+  exports.createProfileLinkProjectionCore =
+  exports.PROFILE_LINK_CATCHUP_TIMEOUT_MS =
+  exports.PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP =
+  exports.PROFILE_LINK_CATCHUP_MAX_INVITES =
+  exports.PROFILE_LINK_CATCHUP_CONCURRENCY =
+    void 0;
+const gameProjectionModel_js_1 = require("./events/gameProjectionModel.js");
 const PROFILE_LINK_CATCHUP_MAX_INVITES = 20;
+exports.PROFILE_LINK_CATCHUP_MAX_INVITES = PROFILE_LINK_CATCHUP_MAX_INVITES;
 const PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP = 1;
+exports.PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP =
+  PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP;
 const PROFILE_LINK_CATCHUP_CONCURRENCY = 3;
+exports.PROFILE_LINK_CATCHUP_CONCURRENCY = PROFILE_LINK_CATCHUP_CONCURRENCY;
 const PROFILE_LINK_CATCHUP_TIMEOUT_MS = 50000;
-
+exports.PROFILE_LINK_CATCHUP_TIMEOUT_MS = PROFILE_LINK_CATCHUP_TIMEOUT_MS;
 const processWithConcurrency = async (
   items,
   concurrency,
@@ -40,7 +51,7 @@ const processWithConcurrency = async (
     throw failure;
   }
 };
-
+exports.processWithConcurrency = processWithConcurrency;
 const createProfileLinkProjectionCore = ({
   logger = console,
   now = Date.now,
@@ -56,7 +67,6 @@ const createProfileLinkProjectionCore = ({
   ) {
     throw new TypeError("profile link projection dependencies are required");
   }
-
   const processProfileLinkCatchup = async ({
     cleanupProfileIds = [],
     loginUid,
@@ -64,8 +74,11 @@ const createProfileLinkProjectionCore = ({
     profileId: eventProfileId,
     sourceUpdatedAtMs,
   }) => {
-    const normalizedLoginUid = normalizeString(loginUid);
-    const normalizedEventProfileId = normalizeString(eventProfileId);
+    const normalizedLoginUid = (0, gameProjectionModel_js_1.normalizeString)(
+      loginUid,
+    );
+    const normalizedEventProfileId = (0,
+    gameProjectionModel_js_1.normalizeString)(eventProfileId);
     if (!normalizedLoginUid || !normalizedEventProfileId) {
       throw new TypeError("invalid profile link projection input");
     }
@@ -74,7 +87,9 @@ const createProfileLinkProjectionCore = ({
         ? sourceUpdatedAtMs
         : now();
     const observedProfileIds = new Set(
-      cleanupProfileIds.map(normalizeString).filter(Boolean),
+      cleanupProfileIds
+        .map(gameProjectionModel_js_1.normalizeString)
+        .filter((value) => Boolean(value)),
     );
     observedProfileIds.add(normalizedEventProfileId);
     const ownership = await repository.readProfileOwnershipSnapshot({
@@ -88,7 +103,7 @@ const createProfileLinkProjectionCore = ({
     ) {
       throw new TypeError("invalid projection ownership snapshot");
     }
-    const profileId = normalizeString(
+    const profileId = (0, gameProjectionModel_js_1.normalizeString)(
       ownership.profileIdByLoginUid.get(normalizedLoginUid),
     );
     if (!profileId) {
@@ -100,7 +115,8 @@ const createProfileLinkProjectionCore = ({
       cleanupIds.length > 1
         ? PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP
         : PROFILE_LINK_CATCHUP_MAX_INVITES;
-    const normalizedMatchCursor = normalizeString(matchCursor) || "";
+    const normalizedMatchCursor =
+      (0, gameProjectionModel_js_1.normalizeString)(matchCursor) || "";
     const page = await repository.listMatchesPage(
       normalizedLoginUid,
       normalizedMatchCursor,
@@ -121,7 +137,7 @@ const createProfileLinkProjectionCore = ({
         typeof entry.matchId !== "string" ||
         entry.matchId <= previousMatchId ||
         (entry.resolution === "resolved"
-          ? !normalizeString(entry.inviteId)
+          ? !(0, gameProjectionModel_js_1.normalizeString)(entry.inviteId)
           : !["missing", "ambiguous"].includes(entry.resolution) ||
             entry.inviteId !== null)
       ) {
@@ -155,7 +171,6 @@ const createProfileLinkProjectionCore = ({
     if (hasMoreMatches && !lastScannedMatchId) {
       throw new Error("projector:profile-link-catchup-no-progress");
     }
-
     let attempted = 0;
     let processed = 0;
     let failed = 0;
@@ -180,11 +195,16 @@ const createProfileLinkProjectionCore = ({
             result.blockedReason === "unresolved-owner-profile" &&
             Array.isArray(result.ownerProfileIds) &&
             result.ownerProfileIds.some(
-              (ownerProfileId) => normalizeString(ownerProfileId) === profileId,
+              (ownerProfileId) =>
+                (0, gameProjectionModel_js_1.normalizeString)(
+                  ownerProfileId,
+                ) === profileId,
             ) &&
             cleanupIds.every(
               (cleanupProfileId) =>
-                normalizeString(cleanupProfileId) === profileId,
+                (0, gameProjectionModel_js_1.normalizeString)(
+                  cleanupProfileId,
+                ) === profileId,
             ),
           );
           if (result?.sourceCleanupSafe === false && !unresolvedOwnerIsSafe) {
@@ -208,7 +228,6 @@ const createProfileLinkProjectionCore = ({
     if (attempted !== inviteIds.length || failed > 0) {
       throw new Error("projector:profile-link-catchup-incomplete");
     }
-
     const summary = {
       loginUid: normalizedLoginUid,
       profileId,
@@ -225,17 +244,8 @@ const createProfileLinkProjectionCore = ({
     logger.info("projector:profile-link-catchup:done", summary);
     return summary;
   };
-
   return {
     processProfileLinkCatchup,
   };
 };
-
-module.exports = {
-  PROFILE_LINK_CATCHUP_CONCURRENCY,
-  PROFILE_LINK_CATCHUP_MAX_INVITES,
-  PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP,
-  PROFILE_LINK_CATCHUP_TIMEOUT_MS,
-  createProfileLinkProjectionCore,
-  processWithConcurrency,
-};
+exports.createProfileLinkProjectionCore = createProfileLinkProjectionCore;

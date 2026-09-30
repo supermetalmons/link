@@ -1,0 +1,814 @@
+import { isSafeRecordKey } from "./ids.js";
+import { isValidSolanaAddress } from "./solana.js";
+
+export type EventPrizeEventId =
+  | typeof LEGACY_CORE_PRIZES_EVENT_ID
+  | typeof COMPRESSED_PRIZES_EVENT_ID
+  | typeof ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID
+  | typeof ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID
+  | typeof RARE_WEITSMANS_PRIZES_EVENT_ID
+  | typeof PLANET_PEPPA_PRIZES_EVENT_ID
+  | typeof SHELVES_PRIZES_EVENT_ID
+  | typeof VEHICLE_WAMMIN_PRIZES_EVENT_ID
+  | typeof SWAG_PACK_PRIZES_EVENT_ID
+  | typeof REVERIE_BANNERS_PRIZES_EVENT_ID;
+
+export type EventPrizeId =
+  | "1092"
+  | "1111"
+  | "1514"
+  | "1866"
+  | "1682"
+  | "6793"
+  | "282"
+  | "283"
+  | "280"
+  | "281"
+  | "279"
+  | "284"
+  | "217"
+  | "220"
+  | "221"
+  | "3727"
+  | "3728"
+  | "3729"
+  | "865"
+  | "1643"
+  | "1213"
+  | "1241"
+  | "443"
+  | "1274"
+  | "66"
+  | "131"
+  | "316"
+  | "317"
+  | "318";
+
+export type EventPrizeStandard = "core" | "compressed";
+
+export type EventPrizeDefinition = Readonly<{
+  id: EventPrizeId;
+  imageUrl: string;
+  imageWidth: number;
+  imageHeight: number;
+  assetAddress: string;
+  collectionAddress: string;
+  standard: EventPrizeStandard;
+  claimAvailable: boolean;
+  alt: string;
+}>;
+
+export type EventPrizeConfig = Readonly<{
+  eventId: EventPrizeEventId;
+  collectionName: string;
+  prizes: readonly EventPrizeDefinition[];
+}>;
+
+export type ToggleEventPrizeSelectionRequest = {
+  eventId: EventPrizeEventId;
+  prizeId: EventPrizeId;
+};
+
+export type ToggleEventPrizeSelectionResponse = {
+  ok: true;
+  eventId: EventPrizeEventId;
+  selectedPrizeId: EventPrizeId | null;
+};
+
+export type EventPrizeAssignmentWireRecord = {
+  eventId: string;
+  profileId: string;
+  place: 1 | 2 | 3;
+  prizeId: string;
+  assignedAtMs: number;
+} & Record<string, unknown>;
+
+export type EventPrizeAssignmentRecord = EventPrizeAssignmentWireRecord & {
+  eventId: EventPrizeEventId;
+  prizeId: EventPrizeId;
+};
+
+export type ProfileEventPrizesResponse = {
+  ok: true;
+  profileId: string | null;
+  revision: number;
+  prizes: Record<string, EventPrizeAssignmentWireRecord>;
+};
+
+export type EventPrizeWithdrawalRequest = {
+  eventId: EventPrizeEventId;
+  prizeId: EventPrizeId;
+  solanaAddress: string;
+};
+
+export type EventPrizeWithdrawalStatusRequest = {
+  eventId: EventPrizeEventId;
+  operationId: string;
+  prizeId: EventPrizeId;
+};
+
+export type EventPrizeWithdrawalProcessingResponse = {
+  ok: true;
+  status: "processing";
+  operationId: string;
+  eventId: EventPrizeEventId;
+  prizeId: EventPrizeId;
+};
+
+export type EventPrizeWithdrawalCompletedResponse = {
+  ok: true;
+  status: "completed";
+  operationId: string;
+  eventId: EventPrizeEventId;
+  prizeId: EventPrizeId;
+  assetAddress: string;
+  recipientAddress: string;
+  transactionSignature: string;
+};
+
+export type EventPrizeWithdrawalResponse =
+  | EventPrizeWithdrawalProcessingResponse
+  | EventPrizeWithdrawalCompletedResponse;
+
+const EVENT_PRIZE_REVEAL_WINDOW_MS = 3_600_000;
+const LEGACY_CORE_PRIZES_EVENT_ID = "NN3eRzoZo80";
+const COMPRESSED_PRIZES_EVENT_ID = "FRkdorMWaYW";
+const ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID = "VOxalSrexcA";
+const ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID = "oXAceF6anag";
+const RARE_WEITSMANS_PRIZES_EVENT_ID = "RpPjMNyrJJa";
+const PLANET_PEPPA_PRIZES_EVENT_ID = "z3oj52Iiime";
+const SHELVES_PRIZES_EVENT_ID = "Q7uRdLXyVKF";
+const VEHICLE_WAMMIN_PRIZES_EVENT_ID = "wjFa2d03Ciu";
+const SWAG_PACK_PRIZES_EVENT_ID = "d9RtIQY8ONs";
+const REVERIE_BANNERS_PRIZES_EVENT_ID = "PCTotuzfUPu";
+const CORE_PRIZE_COLLECTION_ADDRESS =
+  "2xF7dq3maFLud8FQUYAyLiWucdF7RePyzHJs7NkurkoD";
+const COMPRESSED_PRIZE_COLLECTION_ADDRESS =
+  "HpGDYGz6aRUs5qbvp1dmWGKTicQctX4PixfcouAQDCHF";
+const ARTIFACT_MAGAZINE_3_COLLECTION_ADDRESS =
+  "36NQDyvCBqg4N1z5mZi2i4nW1K9ELdzmntMMKnqbChVZ";
+const RARE_WEITSMANS_COLLECTION_ADDRESS =
+  "3Rb9mG22dkAFVA8PVRgD76SiHUwUTK38Kq55NkrZuR2k";
+const PLANET_PEPPA_COLLECTION_ADDRESS =
+  "9irtKRLZkY4MjFFQNZPX3o6ZTszfR8kXFJXPBUvEDo9v";
+const SHELVES_COLLECTION_ADDRESS =
+  "BsnjB6xDv2HNenoZiNFDE1uMZVj86ciXwYAX75nUTDSt";
+const VEHICLE_WAMMIN_COLLECTION_ADDRESS =
+  "BBkMWyu4RRrNSdjGDV27FGgZZ58o7jfvQY1MrD2iTfs6";
+const SWAG_PACK_COLLECTION_ADDRESS =
+  "C22esis7kQMbX9JGWsMaKvsh1X5GeBmHPju28jiKDyAP";
+const REVERIE_BANNERS_COLLECTION_ADDRESS =
+  "E8k3YeCQeJ3oWT25Jc7EPg6wGtN2vDfHa1SzNqVY765L";
+const SCARECROW_PRIZE_IMAGE_SIZE = Object.freeze({
+  imageWidth: 420,
+  imageHeight: 525,
+});
+const COMPRESSED_PRIZE_IMAGE_SIZE = Object.freeze({
+  imageWidth: 776,
+  imageHeight: 1098,
+});
+const ARTIFACT_MAGAZINE_3_IMAGE_SIZE = Object.freeze({
+  imageWidth: 1320,
+  imageHeight: 1320,
+});
+const RARE_WEITSMANS_IMAGE_SIZE = Object.freeze({
+  imageWidth: 1024,
+  imageHeight: 1024,
+});
+const PLANET_PEPPA_IMAGE_SIZE = Object.freeze({
+  imageWidth: 1200,
+  imageHeight: 1200,
+});
+const SHELVES_IMAGE_SIZE = Object.freeze({
+  imageWidth: 1320,
+  imageHeight: 1951,
+});
+const VEHICLE_WAMMIN_IMAGE_SIZE = Object.freeze({
+  imageWidth: 1000,
+  imageHeight: 1000,
+});
+const SWAG_PACK_IMAGE_SIZE = Object.freeze({
+  imageWidth: 1320,
+  imageHeight: 1320,
+});
+const REVERIE_BANNERS_IMAGE_SIZE = Object.freeze({
+  imageWidth: 1500,
+  imageHeight: 500,
+});
+
+const createPrize = ({
+  id,
+  imageUrl,
+  imageWidth,
+  imageHeight,
+  assetAddress,
+  collectionAddress,
+  standard,
+  claimAvailable,
+}: Omit<EventPrizeDefinition, "alt">): EventPrizeDefinition =>
+  Object.freeze({
+    id,
+    imageUrl,
+    imageWidth,
+    imageHeight,
+    assetAddress,
+    collectionAddress,
+    standard,
+    claimAvailable,
+    alt: `Prize collectible ${id}`,
+  });
+
+const EVENT_PRIZE_CONFIGS: Readonly<
+  Record<EventPrizeEventId, EventPrizeConfig>
+> = Object.freeze({
+  [LEGACY_CORE_PRIZES_EVENT_ID]: Object.freeze({
+    eventId: LEGACY_CORE_PRIZES_EVENT_ID,
+    collectionName: "Scarecrow",
+    prizes: Object.freeze([
+      createPrize({
+        ...SCARECROW_PRIZE_IMAGE_SIZE,
+        id: "1092",
+        imageUrl: "https://cdn.lil.org/player/scarecrow/thumbs/1092.webp",
+        assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
+        collectionAddress: CORE_PRIZE_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...SCARECROW_PRIZE_IMAGE_SIZE,
+        id: "1111",
+        imageUrl: "https://cdn.lil.org/player/scarecrow/thumbs/1111.webp",
+        assetAddress: "8BhUWeckB6432Vnxr6Jg9ve2NN39huPk8PBNL87wQgpL",
+        collectionAddress: CORE_PRIZE_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...SCARECROW_PRIZE_IMAGE_SIZE,
+        id: "1514",
+        imageUrl: "https://cdn.lil.org/player/scarecrow/thumbs/1514.webp",
+        assetAddress: "FxgNuJ47j95kaWEVkPo4QGPfXzF4x5YKLFBSYezyFRRJ",
+        collectionAddress: CORE_PRIZE_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+    ]),
+  }),
+  [COMPRESSED_PRIZES_EVENT_ID]: Object.freeze({
+    eventId: COMPRESSED_PRIZES_EVENT_ID,
+    collectionName: "Card NFT",
+    prizes: Object.freeze([
+      createPrize({
+        ...COMPRESSED_PRIZE_IMAGE_SIZE,
+        id: "1866",
+        imageUrl: "https://cdn.lil.org/nft/card_nft/1866.webp",
+        assetAddress: "2KNT8rbXC7G8w5AChbEHHi6i4FN7EAZCtdWX65ZSuQp6",
+        collectionAddress: COMPRESSED_PRIZE_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...COMPRESSED_PRIZE_IMAGE_SIZE,
+        id: "1682",
+        imageUrl: "https://cdn.lil.org/nft/card_nft/1682.webp",
+        assetAddress: "AzQvo7HgBQYiP4bK314QQTsdRKCY98gK9bxrXNMZAeMA",
+        collectionAddress: COMPRESSED_PRIZE_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...COMPRESSED_PRIZE_IMAGE_SIZE,
+        id: "6793",
+        imageUrl: "https://cdn.lil.org/nft/card_nft/6793.webp",
+        assetAddress: "CHDbyCecsFmLa9sQrMRz7xBbCs2JALbM4LXB35bv1CU",
+        collectionAddress: COMPRESSED_PRIZE_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+    ]),
+  }),
+  [ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID]: Object.freeze({
+    eventId: ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID,
+    collectionName: "Artifact Magazine 3",
+    prizes: Object.freeze([
+      createPrize({
+        ...ARTIFACT_MAGAZINE_3_IMAGE_SIZE,
+        id: "282",
+        imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/282.webp",
+        assetAddress: "88taYXAaCEmStoLNYiZC6sRSsakDrATpiVtviBTqebxi",
+        collectionAddress: ARTIFACT_MAGAZINE_3_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...ARTIFACT_MAGAZINE_3_IMAGE_SIZE,
+        id: "283",
+        imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/283.webp",
+        assetAddress: "29e8p9KMcZgaMZmmMseptz3pAdvQwT4hzhvr5C9NxUbu",
+        collectionAddress: ARTIFACT_MAGAZINE_3_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...ARTIFACT_MAGAZINE_3_IMAGE_SIZE,
+        id: "280",
+        imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/280.webp",
+        assetAddress: "6H1UzLgUm3yW6nzFQVFnsMs3MTRpv5BtyDMfp97XcqqV",
+        collectionAddress: ARTIFACT_MAGAZINE_3_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+    ]),
+  }),
+  [ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID]: Object.freeze({
+    eventId: ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID,
+    collectionName: "Artifact Magazine 3",
+    prizes: Object.freeze([
+      createPrize({
+        ...ARTIFACT_MAGAZINE_3_IMAGE_SIZE,
+        id: "281",
+        imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/281.webp",
+        assetAddress: "7Bx4AxqugjJUYvR2AS8ggduSEjbf2kMcLP5T6dSVZLP9",
+        collectionAddress: ARTIFACT_MAGAZINE_3_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...ARTIFACT_MAGAZINE_3_IMAGE_SIZE,
+        id: "279",
+        imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/279.webp",
+        assetAddress: "FQhpFRVkJAg2hMoQn62Xo9UjuJuzideuiKB22nbNrQr9",
+        collectionAddress: ARTIFACT_MAGAZINE_3_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...ARTIFACT_MAGAZINE_3_IMAGE_SIZE,
+        id: "284",
+        imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/284.webp",
+        assetAddress: "H7SFR6CSyZYcfpvF4rSoDDfuj2TMiwfqUuyXzS2tLvXa",
+        collectionAddress: ARTIFACT_MAGAZINE_3_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+    ]),
+  }),
+  [RARE_WEITSMANS_PRIZES_EVENT_ID]: Object.freeze({
+    eventId: RARE_WEITSMANS_PRIZES_EVENT_ID,
+    collectionName: "Rare Weitsmans",
+    prizes: Object.freeze([
+      createPrize({
+        ...RARE_WEITSMANS_IMAGE_SIZE,
+        id: "217",
+        imageUrl: "https://cdn.lil.org/player/rare_weitsmans/mid/217.webp",
+        assetAddress: "EW4bmQognpFTCuM28UcZAk2BWkXZuyDroWXEcKPbZxBg",
+        collectionAddress: RARE_WEITSMANS_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...RARE_WEITSMANS_IMAGE_SIZE,
+        id: "220",
+        imageUrl: "https://cdn.lil.org/player/rare_weitsmans/mid/220.webp",
+        assetAddress: "qkG4PiwDKbpYiVorrvPyGCi7163EpPbk9xHw5rincmu",
+        collectionAddress: RARE_WEITSMANS_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...RARE_WEITSMANS_IMAGE_SIZE,
+        id: "221",
+        imageUrl: "https://cdn.lil.org/player/rare_weitsmans/mid/221.webp",
+        assetAddress: "Ag6U9kBe6aPJyMtEzEqDpnGnmejBvAjPGFSPhXCW9Ba4",
+        collectionAddress: RARE_WEITSMANS_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+    ]),
+  }),
+  [PLANET_PEPPA_PRIZES_EVENT_ID]: Object.freeze({
+    eventId: PLANET_PEPPA_PRIZES_EVENT_ID,
+    collectionName: "Planet Peppa",
+    prizes: Object.freeze([
+      createPrize({
+        ...PLANET_PEPPA_IMAGE_SIZE,
+        id: "3727",
+        imageUrl: "https://cdn.lil.org/player/planet_peppa/3727.webp",
+        assetAddress: "DL9oCFuvGJghtzQLkffqgAMXGJadvCDYqzEVLYhazhHj",
+        collectionAddress: PLANET_PEPPA_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...PLANET_PEPPA_IMAGE_SIZE,
+        id: "3728",
+        imageUrl: "https://cdn.lil.org/player/planet_peppa/3728.webp",
+        assetAddress: "4UAXpjnE67yzhNhm8k4VpSTWX8ssPTv3AzBmd9qLPnDM",
+        collectionAddress: PLANET_PEPPA_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...PLANET_PEPPA_IMAGE_SIZE,
+        id: "3729",
+        imageUrl: "https://cdn.lil.org/player/planet_peppa/3729.webp",
+        assetAddress: "2M3NjoXRpK1irpGhwz65GHNeryv5TwqfAovEPCA5SX8A",
+        collectionAddress: PLANET_PEPPA_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+    ]),
+  }),
+  [SHELVES_PRIZES_EVENT_ID]: Object.freeze({
+    eventId: SHELVES_PRIZES_EVENT_ID,
+    collectionName: "Shelves",
+    prizes: Object.freeze([
+      createPrize({
+        ...SHELVES_IMAGE_SIZE,
+        id: "865",
+        imageUrl: "https://cdn.lil.org/player/shelves/mid/865.webp",
+        assetAddress: "BuAjut5Ks3Yz3PKsrCjKxsk7B5bDBSJzjXQRTarbwkwD",
+        collectionAddress: SHELVES_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...SHELVES_IMAGE_SIZE,
+        id: "1643",
+        imageUrl: "https://cdn.lil.org/player/shelves/mid/1643.webp",
+        assetAddress: "7H1vUoGWLxpgGqDJsH1Nr1tmQTFQKE7yWnRqyXAuFuvj",
+        collectionAddress: SHELVES_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...SHELVES_IMAGE_SIZE,
+        id: "1213",
+        imageUrl: "https://cdn.lil.org/player/shelves/mid/1213.webp",
+        assetAddress: "2bRdHBoJUtYfYBzpmWbQD5hqkpypjk43i2AiGJwc2UaN",
+        collectionAddress: SHELVES_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+    ]),
+  }),
+  [VEHICLE_WAMMIN_PRIZES_EVENT_ID]: Object.freeze({
+    eventId: VEHICLE_WAMMIN_PRIZES_EVENT_ID,
+    collectionName: "Vehicle Wammin",
+    prizes: Object.freeze([
+      createPrize({
+        ...VEHICLE_WAMMIN_IMAGE_SIZE,
+        id: "1241",
+        imageUrl: "https://cdn.lil.org/player/vehicle_wammin/mid/1241.webp",
+        assetAddress: "5hNqZsyBS4fJvUAyUEmmD1mn23B8D8nQQKJ9b55ZZSJE",
+        collectionAddress: VEHICLE_WAMMIN_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...VEHICLE_WAMMIN_IMAGE_SIZE,
+        id: "443",
+        imageUrl: "https://cdn.lil.org/player/vehicle_wammin/mid/443.webp",
+        assetAddress: "Bvr7KVjxHvbx91Y6oXDqZFuVh88Amtwpy5MHPYhvrjX4",
+        collectionAddress: VEHICLE_WAMMIN_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...VEHICLE_WAMMIN_IMAGE_SIZE,
+        id: "1274",
+        imageUrl: "https://cdn.lil.org/player/vehicle_wammin/mid/1274.webp",
+        assetAddress: "Fzz4SWp9LDbMv17MmL1KV4odb1DJ4sJys6w91NaWLsEW",
+        collectionAddress: VEHICLE_WAMMIN_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+    ]),
+  }),
+  [SWAG_PACK_PRIZES_EVENT_ID]: Object.freeze({
+    eventId: SWAG_PACK_PRIZES_EVENT_ID,
+    collectionName: "swag pack",
+    prizes: Object.freeze([
+      createPrize({
+        ...SWAG_PACK_IMAGE_SIZE,
+        id: "66",
+        imageUrl: "https://cdn.lil.org/player/swag_pack/mid/66.webp",
+        assetAddress: "BBjweNsXkEc19Mb6xELJD4VhvpBG2gxsjnpGNgi2HZcG",
+        collectionAddress: SWAG_PACK_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...SWAG_PACK_IMAGE_SIZE,
+        id: "220",
+        imageUrl: "https://cdn.lil.org/player/swag_pack/mid/220.webp",
+        assetAddress: "5LTnDmNTnvbM5PNfbCgTJJa3WNmr6v4WCuXPNiKMjKkG",
+        collectionAddress: SWAG_PACK_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...SWAG_PACK_IMAGE_SIZE,
+        id: "131",
+        imageUrl: "https://cdn.lil.org/player/swag_pack/mid/131.webp",
+        assetAddress: "3mQLZM2xW3sDXW7h15eZfWLwt4TYaKi4eVkzfQMZtcRK",
+        collectionAddress: SWAG_PACK_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+    ]),
+  }),
+  [REVERIE_BANNERS_PRIZES_EVENT_ID]: Object.freeze({
+    eventId: REVERIE_BANNERS_PRIZES_EVENT_ID,
+    collectionName: "Rêverie Banners",
+    prizes: Object.freeze([
+      createPrize({
+        ...REVERIE_BANNERS_IMAGE_SIZE,
+        id: "316",
+        imageUrl: "https://cdn.lil.org/player/reverie_banners/316.png",
+        assetAddress: "3vBzfiy28mvLT1pwnBEJJD5v2ZCWbkMtkqBwsDskEy8q",
+        collectionAddress: REVERIE_BANNERS_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...REVERIE_BANNERS_IMAGE_SIZE,
+        id: "317",
+        imageUrl: "https://cdn.lil.org/player/reverie_banners/317.png",
+        assetAddress: "435PQwumaGJWAvZGzCnNnQVpVWRHLbnKR6XgXz79TWjg",
+        collectionAddress: REVERIE_BANNERS_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...REVERIE_BANNERS_IMAGE_SIZE,
+        id: "318",
+        imageUrl: "https://cdn.lil.org/player/reverie_banners/318.png",
+        assetAddress: "EVAuqJhEsDRXF4gzUweD5FiPeCvqpsNHbNrGY25LekaK",
+        collectionAddress: REVERIE_BANNERS_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+    ]),
+  }),
+});
+
+const EVENT_PRIZE_IDS: readonly EventPrizeId[] = Object.freeze(
+  Object.values(EVENT_PRIZE_CONFIGS).flatMap((config) =>
+    config.prizes.map((prize) => prize.id),
+  ),
+);
+
+const normalizeString = (value: unknown) =>
+  typeof value === "string" && value.trim() !== "" ? value.trim() : "";
+
+const getEventPrizeConfig = (eventId: unknown): EventPrizeConfig | null => {
+  const normalizedEventId = normalizeString(eventId);
+  return Object.prototype.hasOwnProperty.call(
+    EVENT_PRIZE_CONFIGS,
+    normalizedEventId,
+  )
+    ? EVENT_PRIZE_CONFIGS[normalizedEventId as EventPrizeEventId]
+    : null;
+};
+
+const getEventPrizeDefinitions = (
+  eventId: unknown,
+): readonly EventPrizeDefinition[] =>
+  getEventPrizeConfig(eventId)?.prizes || [];
+
+const getEventPrizeDefinition = (
+  eventId: unknown,
+  prizeId: unknown,
+): EventPrizeDefinition | null => {
+  const normalizedPrizeId = normalizeString(prizeId);
+  return (
+    getEventPrizeDefinitions(eventId).find(
+      (prize) => prize.id === normalizedPrizeId,
+    ) || null
+  );
+};
+
+const isEventPrizeEvent = (eventId: unknown): eventId is EventPrizeEventId =>
+  typeof eventId === "string" &&
+  normalizeString(eventId) === eventId &&
+  Boolean(getEventPrizeConfig(eventId));
+
+const isEventPrizeId = (
+  eventId: unknown,
+  prizeId: unknown,
+): prizeId is EventPrizeId =>
+  isEventPrizeEvent(eventId) &&
+  typeof prizeId === "string" &&
+  normalizeString(prizeId) === prizeId &&
+  Boolean(getEventPrizeDefinition(eventId, prizeId));
+
+const isEventPrizeRevealOpen = (
+  status: unknown,
+  startAtMs: unknown,
+  nowMs: number,
+): boolean =>
+  status === "active" ||
+  status === "ended" ||
+  (status === "scheduled" &&
+    typeof startAtMs === "number" &&
+    Number.isFinite(startAtMs) &&
+    Number.isFinite(nowMs) &&
+    startAtMs - nowMs < EVENT_PRIZE_REVEAL_WINDOW_MS);
+
+const isEventPrizeStandard = (value: unknown): value is EventPrizeStandard =>
+  value === "core" || value === "compressed";
+
+const isExactRecord = (
+  value: unknown,
+  keys: readonly string[],
+): value is Record<string, unknown> => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const actualKeys = Object.keys(value);
+  return (
+    actualKeys.length === keys.length &&
+    actualKeys.every((key) => keys.includes(key))
+  );
+};
+
+const isJsonValue = (value: unknown, depth = 0): boolean => {
+  if (depth > 64) return false;
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  ) {
+    return true;
+  }
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) {
+    return value.every((entry) => isJsonValue(entry, depth + 1));
+  }
+  if (!value || typeof value !== "object") return false;
+  return Object.values(value).every((entry) => isJsonValue(entry, depth + 1));
+};
+
+const isExactSafeRecordKey = (value: unknown): value is string =>
+  typeof value === "string" && value.trim() === value && isSafeRecordKey(value);
+
+const isToggleEventPrizeSelectionRequest = (
+  value: unknown,
+): value is ToggleEventPrizeSelectionRequest =>
+  isExactRecord(value, ["eventId", "prizeId"]) &&
+  isEventPrizeId(value.eventId, value.prizeId);
+
+const isToggleEventPrizeSelectionResponse = (
+  value: unknown,
+): value is ToggleEventPrizeSelectionResponse =>
+  isExactRecord(value, ["ok", "eventId", "selectedPrizeId"]) &&
+  value.ok === true &&
+  isEventPrizeEvent(value.eventId) &&
+  (value.selectedPrizeId === null ||
+    isEventPrizeId(value.eventId, value.selectedPrizeId));
+
+const isEventPrizeAssignmentWireRecord = (
+  value: unknown,
+): value is EventPrizeAssignmentWireRecord =>
+  !!value &&
+  typeof value === "object" &&
+  !Array.isArray(value) &&
+  isJsonValue(value) &&
+  ["eventId", "profileId", "place", "prizeId", "assignedAtMs"].every((key) =>
+    Object.hasOwn(value, key),
+  ) &&
+  isExactSafeRecordKey((value as Record<string, unknown>).eventId) &&
+  isExactSafeRecordKey((value as Record<string, unknown>).profileId) &&
+  ((value as Record<string, unknown>).place === 1 ||
+    (value as Record<string, unknown>).place === 2 ||
+    (value as Record<string, unknown>).place === 3) &&
+  isExactSafeRecordKey((value as Record<string, unknown>).prizeId) &&
+  Number.isSafeInteger((value as Record<string, unknown>).assignedAtMs) &&
+  ((value as Record<string, unknown>).assignedAtMs as number) >= 0;
+
+const isEventPrizeAssignmentRecord = (
+  value: unknown,
+): value is EventPrizeAssignmentRecord =>
+  isEventPrizeAssignmentWireRecord(value) &&
+  isEventPrizeEvent(value.eventId) &&
+  isEventPrizeId(value.eventId, value.prizeId);
+
+const isProfileEventPrizesResponse = (
+  value: unknown,
+): value is ProfileEventPrizesResponse => {
+  if (
+    !isExactRecord(value, ["ok", "profileId", "revision", "prizes"]) ||
+    value.ok !== true ||
+    (value.profileId !== null && !isExactSafeRecordKey(value.profileId)) ||
+    !Number.isSafeInteger(value.revision) ||
+    (value.revision as number) < 0 ||
+    !value.prizes ||
+    typeof value.prizes !== "object" ||
+    Array.isArray(value.prizes)
+  ) {
+    return false;
+  }
+  const prizes = Object.entries(value.prizes);
+  if (value.profileId === null) {
+    return value.revision === 0 && prizes.length === 0;
+  }
+  return prizes.every(
+    ([eventId, assignment]) =>
+      isEventPrizeAssignmentWireRecord(assignment) &&
+      assignment.eventId === eventId &&
+      assignment.profileId === value.profileId,
+  );
+};
+
+const isEventPrizeWithdrawalOperationId = (value: unknown): value is string =>
+  typeof value === "string" && /^epw_[0-9a-f]{64}$/.test(value);
+
+const isEventPrizeWithdrawalRequest = (
+  value: unknown,
+): value is EventPrizeWithdrawalRequest =>
+  isExactRecord(value, ["eventId", "prizeId", "solanaAddress"]) &&
+  isEventPrizeId(value.eventId, value.prizeId) &&
+  typeof value.solanaAddress === "string" &&
+  isValidSolanaAddress(value.solanaAddress);
+
+const isEventPrizeWithdrawalStatusRequest = (
+  value: unknown,
+): value is EventPrizeWithdrawalStatusRequest =>
+  isExactRecord(value, ["eventId", "operationId", "prizeId"]) &&
+  isEventPrizeId(value.eventId, value.prizeId) &&
+  isEventPrizeWithdrawalOperationId(value.operationId);
+
+const isEventPrizeWithdrawalProcessingResponse = (
+  value: unknown,
+): value is EventPrizeWithdrawalProcessingResponse =>
+  isExactRecord(value, ["eventId", "ok", "operationId", "prizeId", "status"]) &&
+  value.ok === true &&
+  value.status === "processing" &&
+  isEventPrizeId(value.eventId, value.prizeId) &&
+  isEventPrizeWithdrawalOperationId(value.operationId);
+
+const isEventPrizeWithdrawalCompletedResponse = (
+  value: unknown,
+): value is EventPrizeWithdrawalCompletedResponse =>
+  isExactRecord(value, [
+    "assetAddress",
+    "eventId",
+    "ok",
+    "operationId",
+    "prizeId",
+    "recipientAddress",
+    "status",
+    "transactionSignature",
+  ]) &&
+  value.ok === true &&
+  value.status === "completed" &&
+  isEventPrizeId(value.eventId, value.prizeId) &&
+  isEventPrizeWithdrawalOperationId(value.operationId) &&
+  typeof value.assetAddress === "string" &&
+  isValidSolanaAddress(value.assetAddress) &&
+  typeof value.recipientAddress === "string" &&
+  isValidSolanaAddress(value.recipientAddress) &&
+  typeof value.transactionSignature === "string" &&
+  value.transactionSignature.trim() === value.transactionSignature &&
+  value.transactionSignature.length > 0;
+
+const isEventPrizeWithdrawalResponse = (
+  value: unknown,
+): value is EventPrizeWithdrawalResponse =>
+  isEventPrizeWithdrawalProcessingResponse(value) ||
+  isEventPrizeWithdrawalCompletedResponse(value);
+
+export {
+  ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID,
+  ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID,
+  COMPRESSED_PRIZES_EVENT_ID,
+  EVENT_PRIZE_CONFIGS,
+  EVENT_PRIZE_IDS,
+  EVENT_PRIZE_REVEAL_WINDOW_MS,
+  LEGACY_CORE_PRIZES_EVENT_ID,
+  PLANET_PEPPA_PRIZES_EVENT_ID,
+  RARE_WEITSMANS_PRIZES_EVENT_ID,
+  REVERIE_BANNERS_PRIZES_EVENT_ID,
+  SHELVES_PRIZES_EVENT_ID,
+  SWAG_PACK_PRIZES_EVENT_ID,
+  VEHICLE_WAMMIN_PRIZES_EVENT_ID,
+  getEventPrizeConfig,
+  getEventPrizeDefinition,
+  getEventPrizeDefinitions,
+  isEventPrizeAssignmentRecord,
+  isEventPrizeAssignmentWireRecord,
+  isEventPrizeEvent,
+  isEventPrizeId,
+  isEventPrizeRevealOpen,
+  isEventPrizeStandard,
+  isEventPrizeWithdrawalCompletedResponse,
+  isEventPrizeWithdrawalOperationId,
+  isEventPrizeWithdrawalProcessingResponse,
+  isEventPrizeWithdrawalRequest,
+  isEventPrizeWithdrawalResponse,
+  isEventPrizeWithdrawalStatusRequest,
+  isProfileEventPrizesResponse,
+  isToggleEventPrizeSelectionRequest,
+  isToggleEventPrizeSelectionResponse,
+};

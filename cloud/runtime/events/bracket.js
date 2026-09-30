@@ -1,62 +1,131 @@
+// Generated from src/events/bracket.ts. Run npm run generate:runtime.
 "use strict";
-const { eventField } = require("../eventCommands");
-
-const {} = require("../batchRead");
-const {
-  resolveMatchWinner: defaultResolveMatchWinner,
-} = require("../matchOutcome");
-const {
-  buildEventPrizeAssignments,
-  normalizeEventPrizeAssignments,
-} = require("../eventPrizeAwards");
-const { getEventPrizeDefinitions } = require("@mons/shared/event-prizes");
-const {
-  filterProjectableEventPrizeAssignments,
-  isCompletedEventPrizeWithdrawal,
-  isMatchingProfileEventPrizeAssignment,
-} = require("../eventPrizeProjectionState");
-const {
-  buildRandomGameSeed: defaultBuildRandomGameSeed,
-} = require("../gameVariants");
-const {
-  applyMatchResolution,
-  assignWinnerToNextRound,
-  buildSeedToProfileId,
-  buildFixedBracketState: buildFixedBracketStateCore,
-  buildScheduledEventDueUpdatesCore,
-  createEmptyEventMatch,
-  getSortedMatchKeys,
-  getSortedRoundIndexes,
-  hasThirdPlaceMatchField,
-  isMatchResolved,
-  isMatchSlotBlocked,
-  isMatchWinnerDisqualified,
-  recomputeRoundStatuses,
-  reconcileBracketMatchReadiness: reconcileBracketMatchReadinessCore,
-  reconcileThirdPlaceMatchReadiness: reconcileThirdPlaceMatchReadinessCore,
-  setMatchSlotBlocked,
-  setMatchSlotParticipant,
-} = require("./startTransitionCore");
-const {
-  canonicalizeEventPrizeSelections,
-  profileOwnershipUnavailable,
-  resolveOwnedProfileReferences,
-  resolvePrizeProjectionOwnerId,
-} = require("./ownership");
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.setMatchSlotParticipant =
+  exports.setMatchSlotBlocked =
+  exports.recomputeRoundStatuses =
+  exports.isMatchWinnerDisqualified =
+  exports.isMatchSlotBlocked =
+  exports.isMatchResolved =
+  exports.hasThirdPlaceMatchField =
+  exports.getSortedRoundIndexes =
+  exports.getSortedMatchKeys =
+  exports.createEmptyEventMatch =
+  exports.buildSeedToProfileId =
+  exports.assignWinnerToNextRound =
+  exports.applyMatchResolution =
+  exports.createEventBracketRuntime =
+  exports.resolveRoundMatchesWithConcurrency =
+  exports.resolveRoundMatchState =
+  exports.resolveEventPrizeAssignments =
+  exports.removeCompletedEventPrizeProjections =
+  exports.reconcileThirdPlaceMatchReadiness =
+  exports.reconcileProfileEventPrizeAssignments =
+  exports.reconcileBracketMatchReadiness =
+  exports.rebuildParticipantStatesFromRounds =
+  exports.getEventPrizePlacements =
+  exports.buildScheduledEventDueUpdates =
+  exports.buildFixedBracketState =
+  exports.addEventPrizeAssignmentUpdates =
+    void 0;
+const eventCommands_js_1 = require("../eventCommands.js");
+const matchOutcome_js_1 = require("../matchOutcome.js");
+const eventPrizeAwards_js_1 = require("../eventPrizeAwards.js");
+const event_prizes_1 = require("@mons/shared/event-prizes");
+const eventPrizeProjectionState_js_1 = require("../eventPrizeProjectionState.js");
+const gameVariants_js_1 = require("../gameVariants.js");
+const startTransitionCore_js_1 = require("./startTransitionCore.js");
+Object.defineProperty(exports, "applyMatchResolution", {
+  enumerable: true,
+  get: function () {
+    return startTransitionCore_js_1.applyMatchResolution;
+  },
+});
+Object.defineProperty(exports, "assignWinnerToNextRound", {
+  enumerable: true,
+  get: function () {
+    return startTransitionCore_js_1.assignWinnerToNextRound;
+  },
+});
+Object.defineProperty(exports, "buildSeedToProfileId", {
+  enumerable: true,
+  get: function () {
+    return startTransitionCore_js_1.buildSeedToProfileId;
+  },
+});
+Object.defineProperty(exports, "createEmptyEventMatch", {
+  enumerable: true,
+  get: function () {
+    return startTransitionCore_js_1.createEmptyEventMatch;
+  },
+});
+Object.defineProperty(exports, "getSortedMatchKeys", {
+  enumerable: true,
+  get: function () {
+    return startTransitionCore_js_1.getSortedMatchKeys;
+  },
+});
+Object.defineProperty(exports, "getSortedRoundIndexes", {
+  enumerable: true,
+  get: function () {
+    return startTransitionCore_js_1.getSortedRoundIndexes;
+  },
+});
+Object.defineProperty(exports, "hasThirdPlaceMatchField", {
+  enumerable: true,
+  get: function () {
+    return startTransitionCore_js_1.hasThirdPlaceMatchField;
+  },
+});
+Object.defineProperty(exports, "isMatchResolved", {
+  enumerable: true,
+  get: function () {
+    return startTransitionCore_js_1.isMatchResolved;
+  },
+});
+Object.defineProperty(exports, "isMatchSlotBlocked", {
+  enumerable: true,
+  get: function () {
+    return startTransitionCore_js_1.isMatchSlotBlocked;
+  },
+});
+Object.defineProperty(exports, "isMatchWinnerDisqualified", {
+  enumerable: true,
+  get: function () {
+    return startTransitionCore_js_1.isMatchWinnerDisqualified;
+  },
+});
+Object.defineProperty(exports, "recomputeRoundStatuses", {
+  enumerable: true,
+  get: function () {
+    return startTransitionCore_js_1.recomputeRoundStatuses;
+  },
+});
+Object.defineProperty(exports, "setMatchSlotBlocked", {
+  enumerable: true,
+  get: function () {
+    return startTransitionCore_js_1.setMatchSlotBlocked;
+  },
+});
+Object.defineProperty(exports, "setMatchSlotParticipant", {
+  enumerable: true,
+  get: function () {
+    return startTransitionCore_js_1.setMatchSlotParticipant;
+  },
+});
+const ownership_js_1 = require("./ownership.js");
 const createEventBracketRuntime = (dependencies = {}) => {
   const state = dependencies.state;
   const resolveMatchWinner =
-    dependencies.resolveMatchWinner || defaultResolveMatchWinner;
+    dependencies.resolveMatchWinner || matchOutcome_js_1.resolveMatchWinner;
   const buildRandomGameSeed =
-    dependencies.buildRandomGameSeed || defaultBuildRandomGameSeed;
+    dependencies.buildRandomGameSeed || gameVariants_js_1.buildRandomGameSeed;
   const readEventPrizeWithdrawals =
     dependencies.readEventPrizeWithdrawals ||
     (async () => {
       throw new Error("readEventPrizeWithdrawals dependency is required");
     });
   const EVENT_MATCH_RESOLVE_CONCURRENCY = 4;
-
   const normalizeString = (value) =>
     typeof value === "string" && value.trim() !== "" ? value.trim() : "";
   const normalizeStringOrNull = (value) => normalizeString(value) || null;
@@ -75,7 +144,8 @@ const createEventBracketRuntime = (dependencies = {}) => {
     if (placementEntries.length === 0) {
       return { placements: [], selections: {} };
     }
-    if (!ownershipSnapshot) throw profileOwnershipUnavailable();
+    if (!ownershipSnapshot)
+      throw (0, ownership_js_1.profileOwnershipUnavailable)();
     const placementReferences = placementProfileIds.map((profileId) => {
       const participant =
         participantsById?.[profileId] ||
@@ -90,7 +160,8 @@ const createEventBracketRuntime = (dependencies = {}) => {
         loginUid: normalizeString(participant && participant.loginUid),
       };
     });
-    const canonicalPlacementProfileIds = resolveOwnedProfileReferences(
+    const canonicalPlacementProfileIds = (0,
+    ownership_js_1.resolveOwnedProfileReferences)(
       ownershipSnapshot,
       placementReferences,
     );
@@ -132,7 +203,8 @@ const createEventBracketRuntime = (dependencies = {}) => {
           !unplacedParticipantProfileIds.has(normalizeString(profileId)),
       ),
     );
-    const canonicalSelections = canonicalizeEventPrizeSelections(
+    const canonicalSelections = (0,
+    ownership_js_1.canonicalizeEventPrizeSelections)(
       { participants: Object.fromEntries(placementParticipantEntries) },
       placementSelections,
       ownershipSnapshot,
@@ -142,7 +214,6 @@ const createEventBracketRuntime = (dependencies = {}) => {
       selections: canonicalSelections,
     };
   };
-
   const toFiniteInteger = (value, fallback = 0) => {
     const numeric = typeof value === "number" ? value : Number(value);
     if (!Number.isFinite(numeric)) {
@@ -150,19 +221,16 @@ const createEventBracketRuntime = (dependencies = {}) => {
     }
     return Math.floor(numeric);
   };
-
   const reconcileBracketMatchReadiness = (input) =>
-    reconcileBracketMatchReadinessCore({
+    (0, startTransitionCore_js_1.reconcileBracketMatchReadiness)({
       ...input,
       buildRandomGameSeed,
     });
-
   const reconcileThirdPlaceMatchReadiness = (input) =>
-    reconcileThirdPlaceMatchReadinessCore({
+    (0, startTransitionCore_js_1.reconcileThirdPlaceMatchReadiness)({
       ...input,
       buildRandomGameSeed,
     });
-
   const rebuildParticipantStatesFromRounds = ({
     participantsById,
     rounds,
@@ -170,20 +238,22 @@ const createEventBracketRuntime = (dependencies = {}) => {
     eventEnded,
   }) => {
     const eliminationsByProfileId = {};
-    const sortedRoundIndexes = getSortedRoundIndexes(rounds);
+    const sortedRoundIndexes = (0,
+    startTransitionCore_js_1.getSortedRoundIndexes)(rounds);
     for (const roundIndex of sortedRoundIndexes) {
       const round = rounds[String(roundIndex)];
       if (!round || !round.matches || typeof round.matches !== "object") {
         continue;
       }
-      const matchKeys = getSortedMatchKeys(round.matches);
+      const matchKeys = (0, startTransitionCore_js_1.getSortedMatchKeys)(
+        round.matches,
+      );
       for (const matchKey of matchKeys) {
         const match = round.matches[matchKey];
         if (!match || typeof match !== "object") {
           continue;
         }
-
-        if (!isMatchResolved(match)) {
+        if (!(0, startTransitionCore_js_1.isMatchResolved)(match)) {
           continue;
         }
         const loserProfileId = normalizeString(match && match.loserProfileId);
@@ -197,7 +267,6 @@ const createEventBracketRuntime = (dependencies = {}) => {
         };
       }
     }
-
     const normalizedWinnerProfileId = normalizeStringOrNull(winnerProfileId);
     const nextParticipants = {};
     let didChange = false;
@@ -208,12 +277,10 @@ const createEventBracketRuntime = (dependencies = {}) => {
         nextParticipants[profileId] = participant;
         continue;
       }
-
       const elimination = eliminationsByProfileId[profileId] || null;
       let state = "active";
       let eliminatedRoundIndex = null;
       let eliminatedByProfileId = null;
-
       if (
         eventEnded &&
         normalizedWinnerProfileId &&
@@ -225,7 +292,6 @@ const createEventBracketRuntime = (dependencies = {}) => {
         eliminatedRoundIndex = elimination.eliminatedRoundIndex;
         eliminatedByProfileId = elimination.eliminatedByProfileId;
       }
-
       const normalizedCurrentEliminatedRoundIndex =
         typeof participant.eliminatedRoundIndex === "number"
           ? Math.floor(participant.eliminatedRoundIndex)
@@ -240,7 +306,6 @@ const createEventBracketRuntime = (dependencies = {}) => {
       ) {
         didChange = true;
       }
-
       nextParticipants[profileId] = {
         ...participant,
         state,
@@ -248,13 +313,11 @@ const createEventBracketRuntime = (dependencies = {}) => {
         eliminatedByProfileId,
       };
     }
-
     return {
       didChange,
       participantsById: nextParticipants,
     };
   };
-
   const getEventPrizeDisqualifiedIdentityKeys = ({
     rounds,
     thirdPlaceMatch,
@@ -276,17 +339,18 @@ const createEventBracketRuntime = (dependencies = {}) => {
         }
       }
     };
-
-    for (const roundIndex of getSortedRoundIndexes(rounds)) {
+    for (const roundIndex of (0,
+    startTransitionCore_js_1.getSortedRoundIndexes)(rounds)) {
       const matches = rounds[String(roundIndex)]?.matches;
-      for (const matchKey of getSortedMatchKeys(matches)) {
+      for (const matchKey of (0, startTransitionCore_js_1.getSortedMatchKeys)(
+        matches,
+      )) {
         addMatchIdentities(matches[matchKey]);
       }
     }
     addMatchIdentities(thirdPlaceMatch);
     return identityKeys;
   };
-
   const isEventPrizeParticipantDisqualified = (participant, identityKeys) => {
     if (!participant) {
       return false;
@@ -298,7 +362,6 @@ const createEventBracketRuntime = (dependencies = {}) => {
       (loginUid && identityKeys.has(loginUid))
     );
   };
-
   const getResolvedMatchProfileId = (match, result) => {
     const directProfileId = normalizeString(
       result === "winner" ? match?.winnerProfileId : match?.loserProfileId,
@@ -320,22 +383,23 @@ const createEventBracketRuntime = (dependencies = {}) => {
           : "host";
     return normalizeString(match?.[`${side}ProfileId`]);
   };
-
   const getEventPrizePlacements = ({
     event,
     rounds,
     participantsById,
     thirdPlaceMatch,
   }) => {
-    const sortedRoundIndexes = getSortedRoundIndexes(rounds);
+    const sortedRoundIndexes = (0,
+    startTransitionCore_js_1.getSortedRoundIndexes)(rounds);
     const finalRoundIndex = sortedRoundIndexes[sortedRoundIndexes.length - 1];
     const finalRound = rounds[String(finalRoundIndex)];
-    const finalMatchKey = getSortedMatchKeys(finalRound?.matches)[0];
+    const finalMatchKey = (0, startTransitionCore_js_1.getSortedMatchKeys)(
+      finalRound?.matches,
+    )[0];
     const finalMatch = finalRound?.matches?.[finalMatchKey];
     if (!finalMatch) {
       return [];
     }
-
     const disqualifiedIdentityKeys = getEventPrizeDisqualifiedIdentityKeys({
       rounds,
       thirdPlaceMatch,
@@ -350,7 +414,6 @@ const createEventBracketRuntime = (dependencies = {}) => {
     ) {
       return [];
     }
-
     const placements = [{ place: 1, profileId: winnerProfileId }];
     const reservedProfileIds = new Set([winnerProfileId]);
     const placementCandidates = [];
@@ -371,12 +434,10 @@ const createEventBracketRuntime = (dependencies = {}) => {
       reservedProfileIds.add(normalizedProfileId);
       placementCandidates.push(normalizedProfileId);
     };
-
     pushCandidate(getResolvedMatchProfileId(finalMatch, "loser"));
     if (Object.keys(participantsById).length >= 3 && thirdPlaceMatch) {
       pushCandidate(getResolvedMatchProfileId(thirdPlaceMatch, "winner"));
     }
-
     Object.values(participantsById)
       .filter(
         (participant) =>
@@ -406,7 +467,6 @@ const createEventBracketRuntime = (dependencies = {}) => {
         );
       })
       .forEach((participant) => pushCandidate(participant.profileId));
-
     if (placementCandidates[0]) {
       placements.push({ place: 2, profileId: placementCandidates[0] });
     }
@@ -415,14 +475,13 @@ const createEventBracketRuntime = (dependencies = {}) => {
     }
     return placements;
   };
-
   const hasCompleteEventPrizeAssignments = (
     assignments,
     placementCount,
     eventId,
   ) => {
     const expectedCount = Math.min(
-      getEventPrizeDefinitions(eventId).length,
+      (0, event_prizes_1.getEventPrizeDefinitions)(eventId).length,
       placementCount,
     );
     if (expectedCount <= 0) {
@@ -435,14 +494,14 @@ const createEventBracketRuntime = (dependencies = {}) => {
     }
     return Object.keys(assignments).length === expectedCount;
   };
-
   const getProjectableEventPrizeAssignments = async ({
     event,
     eventId,
     assignments,
     ownershipSnapshot,
   }) => {
-    const projectableAssignments = filterProjectableEventPrizeAssignments({
+    const projectableAssignments = (0,
+    eventPrizeProjectionState_js_1.filterProjectableEventPrizeAssignments)({
       eventId,
       assignments,
       withdrawals: await readEventPrizeWithdrawals(eventId),
@@ -450,10 +509,11 @@ const createEventBracketRuntime = (dependencies = {}) => {
     const canonicalAssignments = {};
     const canonicalProfileIds = new Set();
     for (const [place, assignment] of Object.entries(projectableAssignments)) {
-      if (!ownershipSnapshot) throw profileOwnershipUnavailable();
+      if (!ownershipSnapshot)
+        throw (0, ownership_js_1.profileOwnershipUnavailable)();
       const sourceProfileId = normalizeString(assignment?.profileId);
       const canonicalProfileId = normalizeString(
-        resolvePrizeProjectionOwnerId({
+        (0, ownership_js_1.resolvePrizeProjectionOwnerId)({
           event,
           profileId: sourceProfileId,
           snapshot: ownershipSnapshot,
@@ -473,14 +533,12 @@ const createEventBracketRuntime = (dependencies = {}) => {
     }
     return canonicalAssignments;
   };
-
   const assignmentsMatch = (current, assignment) =>
     current?.eventId === assignment?.eventId &&
     current?.profileId === assignment?.profileId &&
     Number(current?.place) === Number(assignment?.place) &&
     current?.prizeId === assignment?.prizeId &&
     Number(current?.assignedAtMs) === Number(assignment?.assignedAtMs);
-
   const addEventPrizeAssignmentUpdates = async ({
     updates,
     eventId,
@@ -488,10 +546,15 @@ const createEventBracketRuntime = (dependencies = {}) => {
     includeEventAssignments,
   }) => {
     if (includeEventAssignments) {
-      updates.push(eventField(eventId, "prizeAssignments", assignments));
+      updates.push(
+        (0, eventCommands_js_1.eventField)(
+          eventId,
+          "prizeAssignments",
+          assignments,
+        ),
+      );
     }
   };
-
   const reconcileProfileEventPrizeAssignments = async ({
     event,
     eventId,
@@ -525,7 +588,6 @@ const createEventBracketRuntime = (dependencies = {}) => {
       didChange: transactions.some((transaction) => transaction.committed),
     };
   };
-
   const removeCompletedEventPrizeProjections = async ({
     event,
     eventId,
@@ -536,7 +598,7 @@ const createEventBracketRuntime = (dependencies = {}) => {
     await Promise.all(
       Object.values(assignments || {}).map(async (assignment) => {
         if (
-          !isCompletedEventPrizeWithdrawal(
+          !(0, eventPrizeProjectionState_js_1.isCompletedEventPrizeWithdrawal)(
             withdrawals[assignment.prizeId],
             eventId,
             assignment.prizeId,
@@ -544,9 +606,10 @@ const createEventBracketRuntime = (dependencies = {}) => {
         ) {
           return;
         }
-        if (!ownershipSnapshot) throw profileOwnershipUnavailable();
+        if (!ownershipSnapshot)
+          throw (0, ownership_js_1.profileOwnershipUnavailable)();
         const canonicalProfileId = normalizeString(
-          resolvePrizeProjectionOwnerId({
+          (0, ownership_js_1.resolvePrizeProjectionOwnerId)({
             event,
             profileId: normalizeString(assignment.profileId),
             snapshot: ownershipSnapshot,
@@ -565,7 +628,8 @@ const createEventBracketRuntime = (dependencies = {}) => {
               profileId,
               eventId,
               (currentAssignment) =>
-                isMatchingProfileEventPrizeAssignment(
+                (0,
+                eventPrizeProjectionState_js_1.isMatchingProfileEventPrizeAssignment)(
                   currentAssignment,
                   eventId,
                   assignment.prizeId,
@@ -578,7 +642,6 @@ const createEventBracketRuntime = (dependencies = {}) => {
       }),
     );
   };
-
   const resolveEventPrizeAssignments = async ({
     eventId,
     event,
@@ -595,7 +658,8 @@ const createEventBracketRuntime = (dependencies = {}) => {
       participantsById,
       thirdPlaceMatch,
     });
-    const storedAssignments = normalizeEventPrizeAssignments(
+    const storedAssignments = (0,
+    eventPrizeAwards_js_1.normalizeEventPrizeAssignments)(
       event?.prizeAssignments,
       eventId,
     );
@@ -615,7 +679,7 @@ const createEventBracketRuntime = (dependencies = {}) => {
       ownershipSnapshot,
     );
     return {
-      assignments: buildEventPrizeAssignments({
+      assignments: (0, eventPrizeAwards_js_1.buildEventPrizeAssignments)({
         eventId,
         placements: canonical.placements,
         selections: canonical.selections,
@@ -624,7 +688,6 @@ const createEventBracketRuntime = (dependencies = {}) => {
       didCreate: true,
     };
   };
-
   const getRoundMatchRead = (matchRecord) => {
     if (!matchRecord || typeof matchRecord !== "object") return null;
     if (
@@ -639,12 +702,10 @@ const createEventBracketRuntime = (dependencies = {}) => {
       ? { inviteId, matchId: inviteId, playerId, opponentId }
       : null;
   };
-
   const resolveRoundMatchState = async (matchRecord, matchPair) => {
     if (!matchRecord || typeof matchRecord !== "object") {
       return null;
     }
-
     const existingStatus = normalizeString(matchRecord.status);
     if (existingStatus === "bye") {
       const winnerProfileId = normalizeString(matchRecord.winnerProfileId);
@@ -657,7 +718,6 @@ const createEventBracketRuntime = (dependencies = {}) => {
         loserProfileId: null,
       };
     }
-
     if (existingStatus === "host" || existingStatus === "guest") {
       const winnerProfileId =
         normalizeString(matchRecord.winnerProfileId) ||
@@ -678,12 +738,10 @@ const createEventBracketRuntime = (dependencies = {}) => {
         loserProfileId: loserProfileId || null,
       };
     }
-
     const input = getRoundMatchRead(matchRecord);
     if (!input) {
       return null;
     }
-
     const [hostMatch, guestMatch] =
       matchPair || (await dependencies.readMatchPair(input));
     const outcome = await resolveMatchWinner(hostMatch, guestMatch);
@@ -703,13 +761,11 @@ const createEventBracketRuntime = (dependencies = {}) => {
     }
     return null;
   };
-
   const resolveRoundMatchesWithConcurrency = async (matchesByKey) => {
     const entries = Object.entries(matchesByKey || {});
     if (entries.length <= 0) {
       return [];
     }
-
     const reads = entries.flatMap(([, matchRecord], index) => {
       const input = getRoundMatchRead(matchRecord);
       return input ? [{ index, input }] : [];
@@ -733,14 +789,12 @@ const createEventBracketRuntime = (dependencies = {}) => {
         pairsByIndex.set(index, pairs[offset]),
       );
     }
-
     const results = new Array(entries.length);
     const concurrency = Math.max(
       1,
       Math.min(EVENT_MATCH_RESOLVE_CONCURRENCY, entries.length),
     );
     let nextIndex = 0;
-
     const worker = async () => {
       while (true) {
         const index = nextIndex;
@@ -760,33 +814,35 @@ const createEventBracketRuntime = (dependencies = {}) => {
         };
       }
     };
-
     await Promise.all(Array.from({ length: concurrency }, () => worker()));
     return results;
   };
-
   return {
     addEventPrizeAssignmentUpdates,
-    applyMatchResolution,
-    assignWinnerToNextRound,
+    applyMatchResolution: startTransitionCore_js_1.applyMatchResolution,
+    assignWinnerToNextRound: startTransitionCore_js_1.assignWinnerToNextRound,
     buildFixedBracketState: (input) =>
-      buildFixedBracketStateCore({ ...input, buildRandomGameSeed }),
-    buildScheduledEventDueUpdates: (input) =>
-      buildScheduledEventDueUpdatesCore({
+      (0, startTransitionCore_js_1.buildFixedBracketState)({
         ...input,
         buildRandomGameSeed,
       }),
-    buildSeedToProfileId,
-    createEmptyEventMatch,
+    buildScheduledEventDueUpdates: (input) =>
+      (0, startTransitionCore_js_1.buildScheduledEventDueUpdatesCore)({
+        ...input,
+        buildRandomGameSeed,
+      }),
+    buildSeedToProfileId: startTransitionCore_js_1.buildSeedToProfileId,
+    createEmptyEventMatch: startTransitionCore_js_1.createEmptyEventMatch,
     getEventPrizePlacements,
-    getSortedMatchKeys,
-    getSortedRoundIndexes,
-    hasThirdPlaceMatchField,
-    isMatchResolved,
-    isMatchSlotBlocked,
-    isMatchWinnerDisqualified,
+    getSortedMatchKeys: startTransitionCore_js_1.getSortedMatchKeys,
+    getSortedRoundIndexes: startTransitionCore_js_1.getSortedRoundIndexes,
+    hasThirdPlaceMatchField: startTransitionCore_js_1.hasThirdPlaceMatchField,
+    isMatchResolved: startTransitionCore_js_1.isMatchResolved,
+    isMatchSlotBlocked: startTransitionCore_js_1.isMatchSlotBlocked,
+    isMatchWinnerDisqualified:
+      startTransitionCore_js_1.isMatchWinnerDisqualified,
     rebuildParticipantStatesFromRounds,
-    recomputeRoundStatuses,
+    recomputeRoundStatuses: startTransitionCore_js_1.recomputeRoundStatuses,
     reconcileBracketMatchReadiness,
     reconcileProfileEventPrizeAssignments,
     reconcileThirdPlaceMatchReadiness,
@@ -794,14 +850,30 @@ const createEventBracketRuntime = (dependencies = {}) => {
     resolveEventPrizeAssignments,
     resolveRoundMatchState,
     resolveRoundMatchesWithConcurrency,
-    setMatchSlotBlocked,
-    setMatchSlotParticipant,
+    setMatchSlotBlocked: startTransitionCore_js_1.setMatchSlotBlocked,
+    setMatchSlotParticipant: startTransitionCore_js_1.setMatchSlotParticipant,
   };
 };
-
+exports.createEventBracketRuntime = createEventBracketRuntime;
 const defaultRuntime = createEventBracketRuntime();
-
-module.exports = {
-  ...defaultRuntime,
-  createEventBracketRuntime,
-};
+((exports.addEventPrizeAssignmentUpdates =
+  defaultRuntime.addEventPrizeAssignmentUpdates),
+  (exports.buildFixedBracketState = defaultRuntime.buildFixedBracketState),
+  (exports.buildScheduledEventDueUpdates =
+    defaultRuntime.buildScheduledEventDueUpdates),
+  (exports.getEventPrizePlacements = defaultRuntime.getEventPrizePlacements),
+  (exports.rebuildParticipantStatesFromRounds =
+    defaultRuntime.rebuildParticipantStatesFromRounds),
+  (exports.reconcileBracketMatchReadiness =
+    defaultRuntime.reconcileBracketMatchReadiness),
+  (exports.reconcileProfileEventPrizeAssignments =
+    defaultRuntime.reconcileProfileEventPrizeAssignments),
+  (exports.reconcileThirdPlaceMatchReadiness =
+    defaultRuntime.reconcileThirdPlaceMatchReadiness),
+  (exports.removeCompletedEventPrizeProjections =
+    defaultRuntime.removeCompletedEventPrizeProjections),
+  (exports.resolveEventPrizeAssignments =
+    defaultRuntime.resolveEventPrizeAssignments),
+  (exports.resolveRoundMatchState = defaultRuntime.resolveRoundMatchState),
+  (exports.resolveRoundMatchesWithConcurrency =
+    defaultRuntime.resolveRoundMatchesWithConcurrency));

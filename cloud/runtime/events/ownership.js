@@ -1,17 +1,31 @@
+// Generated from src/events/ownership.ts. Run npm run generate:runtime.
 "use strict";
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.resolveRequesterParticipation =
+  exports.resolveParticipantParticipation =
+  exports.resolvePrizeProjectionOwnerId =
+  exports.resolveOwnedProfileReferences =
+  exports.requesterOwnsProfileReference =
+  exports.profileOwnershipUnavailable =
+  exports.getOwnershipProfile =
+  exports.getLoginProfileId =
+  exports.getCanonicalProfileId =
+  exports.directRequesterParticipation =
+  exports.directParticipantParticipation =
+  exports.canonicalizeEventPrizeSelections =
+  exports.canonicalizeEventParticipants =
+  exports.buildEventOwnershipQuery =
+    void 0;
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
 const profileOwnershipUnavailable = () => {
   const error = new Error("profile-ownership-unavailable");
   error.code = "unavailable";
   return error;
 };
-
+exports.profileOwnershipUnavailable = profileOwnershipUnavailable;
 const uniqueStrings = (values) =>
   Array.from(new Set(values.map(normalizeString).filter(Boolean)));
-
 const participantEntries = (event) =>
   Object.entries(
     event && event.participants && typeof event.participants === "object"
@@ -30,7 +44,6 @@ const participantEntries = (event) =>
         ]
       : [],
   );
-
 const buildEventOwnershipQuery = (
   event,
   { loginUids = [], profileIds = [] } = {},
@@ -58,7 +71,7 @@ const buildEventOwnershipQuery = (
     ]),
   };
 };
-
+exports.buildEventOwnershipQuery = buildEventOwnershipQuery;
 const getLoginProfileId = (snapshot, loginUid) => {
   const uid = normalizeString(loginUid);
   if (!uid || !snapshot?.loginOwnerByUid?.has(uid)) {
@@ -66,7 +79,7 @@ const getLoginProfileId = (snapshot, loginUid) => {
   }
   return normalizeString(snapshot.loginOwnerByUid.get(uid)?.profileId) || null;
 };
-
+exports.getLoginProfileId = getLoginProfileId;
 const getCanonicalProfileId = (snapshot, profileId) => {
   const id = normalizeString(profileId);
   if (!id) {
@@ -80,7 +93,7 @@ const getCanonicalProfileId = (snapshot, profileId) => {
     normalizeString(snapshot.canonicalProfileIdByProfileId.get(id)) || null
   );
 };
-
+exports.getCanonicalProfileId = getCanonicalProfileId;
 const getOwnershipProfile = (snapshot, profileId) => {
   const id = normalizeString(profileId);
   const value = id ? snapshot?.profileById?.get(id) : null;
@@ -88,7 +101,7 @@ const getOwnershipProfile = (snapshot, profileId) => {
     ? value.profile
     : null;
 };
-
+exports.getOwnershipProfile = getOwnershipProfile;
 const resolveOwnedProfileReferences = (snapshot, references) => {
   const canonicalProfileIds = [];
   const seen = new Set();
@@ -110,7 +123,7 @@ const resolveOwnedProfileReferences = (snapshot, references) => {
   }
   return canonicalProfileIds;
 };
-
+exports.resolveOwnedProfileReferences = resolveOwnedProfileReferences;
 const directParticipantParticipation = (event, requesterUidInput) => {
   const requesterUid = normalizeString(requesterUidInput);
   const directMatches = participantEntries(event)
@@ -121,7 +134,7 @@ const directParticipantParticipation = (event, requesterUidInput) => {
   }
   return requesterParticipation([]);
 };
-
+exports.directParticipantParticipation = directParticipantParticipation;
 const directRequesterParticipation = (event, requesterUidInput) => {
   const requesterUid = normalizeString(requesterUidInput);
   const direct = directParticipantParticipation(event, requesterUid);
@@ -136,7 +149,7 @@ const directRequesterParticipation = (event, requesterUidInput) => {
   }
   return requesterParticipation([]);
 };
-
+exports.directRequesterParticipation = directRequesterParticipation;
 const requesterParticipation = (profileIds) => {
   const uniqueProfileIds = uniqueStrings(profileIds);
   if (uniqueProfileIds.length > 1) {
@@ -147,7 +160,6 @@ const requesterParticipation = (profileIds) => {
     profileId: uniqueProfileIds[0] || null,
   };
 };
-
 const resolveRequesterParticipation = (event, requesterUidInput, snapshot) => {
   const direct = directRequesterParticipation(event, requesterUidInput);
   if (direct.isParticipant || !snapshot) return direct;
@@ -168,7 +180,7 @@ const resolveRequesterParticipation = (event, requesterUidInput, snapshot) => {
       : [],
   );
 };
-
+exports.resolveRequesterParticipation = resolveRequesterParticipation;
 const resolveParticipantParticipation = (
   event,
   requesterUidInput,
@@ -186,7 +198,7 @@ const resolveParticipantParticipation = (
     ),
   );
 };
-
+exports.resolveParticipantParticipation = resolveParticipantParticipation;
 const requesterOwnsProfileReference = ({
   requesterUid: requesterUidInput,
   snapshot,
@@ -205,7 +217,7 @@ const requesterOwnsProfileReference = ({
       getCanonicalProfileId(snapshot, normalizeString(storedProfileIdInput)),
   );
 };
-
+exports.requesterOwnsProfileReference = requesterOwnsProfileReference;
 const canonicalizeEventParticipants = (event, snapshot) => {
   const entries = participantEntries(event);
   if (entries.length === 0) {
@@ -233,7 +245,7 @@ const canonicalizeEventParticipants = (event, snapshot) => {
   }
   return { didChange, participantsById };
 };
-
+exports.canonicalizeEventParticipants = canonicalizeEventParticipants;
 const canonicalizeEventPrizeSelections = (event, value, snapshot) => {
   const isSelectionRecord =
     value && typeof value === "object" && !Array.isArray(value);
@@ -308,7 +320,7 @@ const canonicalizeEventPrizeSelections = (event, value, snapshot) => {
     );
   return { didChange, selectionsByProfileId };
 };
-
+exports.canonicalizeEventPrizeSelections = canonicalizeEventPrizeSelections;
 const resolvePrizeProjectionOwnerId = ({
   event,
   profileId: profileIdInput,
@@ -331,20 +343,4 @@ const resolvePrizeProjectionOwnerId = ({
   }
   return canonicalProfileId;
 };
-
-module.exports = {
-  buildEventOwnershipQuery,
-  canonicalizeEventParticipants,
-  canonicalizeEventPrizeSelections,
-  directParticipantParticipation,
-  directRequesterParticipation,
-  getCanonicalProfileId,
-  getLoginProfileId,
-  getOwnershipProfile,
-  profileOwnershipUnavailable,
-  requesterOwnsProfileReference,
-  resolveOwnedProfileReferences,
-  resolvePrizeProjectionOwnerId,
-  resolveParticipantParticipation,
-  resolveRequesterParticipation,
-};
+exports.resolvePrizeProjectionOwnerId = resolvePrizeProjectionOwnerId;

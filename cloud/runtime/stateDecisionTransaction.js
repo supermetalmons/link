@@ -1,8 +1,10 @@
+// Generated from src/stateDecisionTransaction.ts. Run npm run generate:runtime.
 "use strict";
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.runStateDecisionTransaction = void 0;
 const asCurrentValue = (value) => (value === undefined ? null : value);
-
-const validateDecisionOutput = (output) => {
+const validateDecisionOutput = (input) => {
+  const output = input;
   if (!output || typeof output !== "object" || Array.isArray(output)) {
     throw new TypeError("State transaction decision must return an object");
   }
@@ -25,7 +27,6 @@ const validateDecisionOutput = (output) => {
     decision: output.decision,
   };
 };
-
 const runStateDecisionTransaction = async (reference, decide) => {
   if (!reference || typeof reference.transaction !== "function") {
     throw new TypeError("reference.transaction is required");
@@ -33,7 +34,6 @@ const runStateDecisionTransaction = async (reference, decide) => {
   if (typeof decide !== "function") {
     throw new TypeError("transaction decision callback is required");
   }
-
   let finalOutput;
   const result = await reference.transaction((current) => {
     const normalizedCurrent = asCurrentValue(current);
@@ -49,7 +49,4 @@ const runStateDecisionTransaction = async (reference, decide) => {
     value: result?.value ?? null,
   };
 };
-
-module.exports = {
-  runStateDecisionTransaction,
-};
+exports.runStateDecisionTransaction = runStateDecisionTransaction;

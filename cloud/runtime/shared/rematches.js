@@ -1,6 +1,20 @@
+// Generated from src/shared/rematches.ts. Run npm run generate:runtime.
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.getHistoricalMatchIds =
+  exports.deriveLatestMatchId =
+  exports.selectInviteMatch =
+  exports.getLatestApprovedRematchIndex =
+  exports.getLatestRematchIndex =
+  exports.getHintMatchIndex =
+  exports.parseInviteMatchIndex =
+  exports.createInviteCandidatesFromMatchId =
+  exports.inviteMatchesPlayers =
+  exports.rematchSeriesEnded =
+  exports.parseRematchIndices =
+    void 0;
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : null;
-
 const parseCanonicalRematchIndex = (value) => {
   if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) {
     return null;
@@ -8,7 +22,6 @@ const parseCanonicalRematchIndex = (value) => {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) ? parsed : null;
 };
-
 const parseRematchIndices = (rawValue) => {
   if (typeof rawValue !== "string" || rawValue === "") {
     return [];
@@ -22,28 +35,25 @@ const parseRematchIndices = (rawValue) => {
     .map(parseCanonicalRematchIndex)
     .filter((value) => value !== null);
 };
-
+exports.parseRematchIndices = parseRematchIndices;
 const rematchSeriesEnded = (inviteData) => {
   if (!inviteData || typeof inviteData !== "object") {
     return false;
   }
+  const record = inviteData;
   const hostRematches =
-    typeof inviteData.hostRematches === "string"
-      ? inviteData.hostRematches
-      : "";
+    typeof record.hostRematches === "string" ? record.hostRematches : "";
   const guestRematches =
-    typeof inviteData.guestRematches === "string"
-      ? inviteData.guestRematches
-      : "";
+    typeof record.guestRematches === "string" ? record.guestRematches : "";
   return hostRematches.endsWith("x") || guestRematches.endsWith("x");
 };
-
+exports.rematchSeriesEnded = rematchSeriesEnded;
 const inviteMatchesPlayers = (inviteData, playerId, opponentId) =>
   !!inviteData &&
   typeof inviteData === "object" &&
   ((inviteData.hostId === playerId && inviteData.guestId === opponentId) ||
     (inviteData.hostId === opponentId && inviteData.guestId === playerId));
-
+exports.inviteMatchesPlayers = inviteMatchesPlayers;
 const createInviteCandidatesFromMatchId = (matchId) => {
   const candidates = [];
   for (let splitIndex = matchId.length - 1; splitIndex > 0; splitIndex -= 1) {
@@ -58,7 +68,7 @@ const createInviteCandidatesFromMatchId = (matchId) => {
   }
   return candidates;
 };
-
+exports.createInviteCandidatesFromMatchId = createInviteCandidatesFromMatchId;
 const parseInviteMatchIndex = (inviteId, matchId) => {
   if (
     typeof inviteId !== "string" ||
@@ -77,7 +87,7 @@ const parseInviteMatchIndex = (inviteId, matchId) => {
   const suffix = matchId.slice(inviteId.length);
   return parseCanonicalRematchIndex(suffix);
 };
-
+exports.parseInviteMatchIndex = parseInviteMatchIndex;
 const getHintMatchIndex = (inviteId, latestMatchIdHint) => {
   const rawIndex = parseInviteMatchIndex(inviteId, latestMatchIdHint);
   if (rawIndex !== null) {
@@ -90,7 +100,7 @@ const getHintMatchIndex = (inviteId, latestMatchIdHint) => {
   }
   return parseInviteMatchIndex(normalizedInviteId, normalizedHint) || 0;
 };
-
+exports.getHintMatchIndex = getHintMatchIndex;
 const getLatestRematchIndex = (inviteData, minimumIndex = 0) => {
   const hostIndices = parseRematchIndices(
     inviteData ? inviteData.hostRematches : null,
@@ -98,7 +108,6 @@ const getLatestRematchIndex = (inviteData, minimumIndex = 0) => {
   const guestIndices = parseRematchIndices(
     inviteData ? inviteData.guestRematches : null,
   );
-
   let maxIndex =
     Number.isFinite(minimumIndex) && minimumIndex > 0
       ? Math.floor(minimumIndex)
@@ -115,7 +124,7 @@ const getLatestRematchIndex = (inviteData, minimumIndex = 0) => {
   });
   return maxIndex;
 };
-
+exports.getLatestRematchIndex = getLatestRematchIndex;
 const getApprovedRematchIndices = (inviteData) => {
   const hostIndices = parseRematchIndices(
     inviteData ? inviteData.hostRematches : null,
@@ -134,10 +143,9 @@ const getApprovedRematchIndices = (inviteData) => {
   }
   return approved;
 };
-
 const getLatestApprovedRematchIndex = (inviteData) =>
   getApprovedRematchIndices(inviteData).at(-1) || 0;
-
+exports.getLatestApprovedRematchIndex = getLatestApprovedRematchIndex;
 const selectInviteMatch = (inviteId, inviteData, actorUid, options = {}) => {
   const hostIndices = parseRematchIndices(inviteData?.hostRematches);
   const guestIndices = parseRematchIndices(inviteData?.guestRematches);
@@ -157,13 +165,13 @@ const selectInviteMatch = (inviteId, inviteData, actorUid, options = {}) => {
     hasPendingProposal,
   };
 };
-
+exports.selectInviteMatch = selectInviteMatch;
 const deriveLatestMatchId = (inviteId, inviteData, latestMatchIdHint) => {
   const hintedIndex = getHintMatchIndex(inviteId, latestMatchIdHint);
   const maxIndex = getLatestRematchIndex(inviteData, hintedIndex);
   return maxIndex > 0 ? `${inviteId}${maxIndex}` : inviteId;
 };
-
+exports.deriveLatestMatchId = deriveLatestMatchId;
 const getHistoricalMatchIds = (inviteId, inviteData) => {
   const normalizedInviteId = normalizeString(inviteId);
   if (!normalizedInviteId || !inviteData || typeof inviteData !== "object") {
@@ -184,17 +192,4 @@ const getHistoricalMatchIds = (inviteId, inviteData) => {
     index === 0 ? normalizedInviteId : `${normalizedInviteId}${index}`,
   );
 };
-
-module.exports = {
-  parseRematchIndices,
-  rematchSeriesEnded,
-  inviteMatchesPlayers,
-  createInviteCandidatesFromMatchId,
-  parseInviteMatchIndex,
-  getHintMatchIndex,
-  getLatestRematchIndex,
-  getLatestApprovedRematchIndex,
-  selectInviteMatch,
-  deriveLatestMatchId,
-  getHistoricalMatchIds,
-};
+exports.getHistoricalMatchIds = getHistoricalMatchIds;

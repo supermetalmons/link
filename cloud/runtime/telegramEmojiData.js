@@ -1,3 +1,7 @@
+// Generated from src/telegramEmojiData.ts. Run npm run generate:runtime.
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.customTelegramEmojis = void 0;
 const customTelegramEmojis = {
   1: "5273900723417929741",
   2: "5273897076990696847",
@@ -622,7 +626,4 @@ const customTelegramEmojis = {
   1465: "5280776304633868803",
   1466: "5278711026659915839",
 };
-
-module.exports = {
-  customTelegramEmojis,
-};
+exports.customTelegramEmojis = customTelegramEmojis;

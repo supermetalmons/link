@@ -54,6 +54,8 @@ npm run check:all
 
 The complete gate uses Node.js 24 or newer and needs no Java or external database emulator. Release commands use the empty `cloud/workers/api/release.env` and preserve encrypted Cloudflare secrets.
 
+Portable runtime code and shared contracts are authored in `cloud/runtime/src/`. After changing source, run `npm run generate:runtime` and commit the emitted CommonJS modules and declarations with it. `npm run watch:runtime` keeps those outputs current during development. `npm run check:runtime` lints and typechecks the source and verifies generated output freshness; it also runs before frontend builds, API upload dry-runs, and API candidate uploads. Existing Worker, admin, browser, and Node import paths continue to consume the generated files.
+
 ## Canonical profile maintenance
 
 ```sh

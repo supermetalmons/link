@@ -1,7 +1,17 @@
+// Generated from src/telegram/client.ts. Run npm run generate:runtime.
 "use strict";
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.sendTelegramMessage =
+  exports.sendTelegramMediaGroup =
+  exports.isKnownSafeTelegramSendError =
+  exports.editTelegramMessage =
+  exports.deleteTelegramMessage =
+  exports.TELEGRAM_HTTP_TIMEOUT_MS =
+    void 0;
+const values_js_1 = require("./values.js");
 const TELEGRAM_API_ROOT = "https://api.telegram.org";
 const TELEGRAM_HTTP_TIMEOUT_MS = 10_000;
+exports.TELEGRAM_HTTP_TIMEOUT_MS = TELEGRAM_HTTP_TIMEOUT_MS;
 const TELEGRAM_SAFE_SEND_ERROR_CODES = new Set([
   "EAI_AGAIN",
   "ECONNREFUSED",
@@ -12,12 +22,10 @@ const TELEGRAM_SAFE_SEND_ERROR_CODES = new Set([
 ]);
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
 const normalizePositiveInteger = (value) => {
   const number = typeof value === "number" ? value : Number(value);
   return Number.isInteger(number) && number > 0 ? number : null;
 };
-
 const sanitizeDescription = (value, token) => {
   const description = normalizeString(value);
   if (!description) {
@@ -30,36 +38,39 @@ const sanitizeDescription = (value, token) => {
       : description
   ).slice(0, 500);
 };
-
 const parseRetryAfterSeconds = (data) => {
-  const value = data?.parameters?.retry_after;
+  const value = (0, values_js_1.readProperty)(
+    (0, values_js_1.readProperty)(data, "parameters"),
+    "retry_after",
+  );
   const number = typeof value === "number" ? value : Number(value);
   return Number.isFinite(number) && number > 0 ? Math.ceil(number) : null;
 };
-
 const getTransportErrorCode = (error) => {
-  for (const value of [error?.code, error?.cause?.code]) {
+  for (const value of [
+    (0, values_js_1.readProperty)(error, "code"),
+    (0, values_js_1.readProperty)(
+      (0, values_js_1.readProperty)(error, "cause"),
+      "code",
+    ),
+  ]) {
     if (typeof value === "string" && value.trim() !== "") {
       return value.trim().toUpperCase();
     }
   }
   return "";
 };
-
 const isKnownSafeTelegramSendError = (error) =>
   TELEGRAM_SAFE_SEND_ERROR_CODES.has(getTransportErrorCode(error));
-
+exports.isKnownSafeTelegramSendError = isKnownSafeTelegramSendError;
 const isSendOperation = (operation) =>
   operation === "send" || operation === "send-media-group";
-
 const isNotModifiedDescription = (description) =>
   description.includes("message is not modified");
-
 const isMissingDescription = (description) =>
   description.includes("message to edit not found") ||
   description.includes("message to delete not found") ||
   description.includes("message not found");
-
 const buildFailure = ({
   classification,
   code,
@@ -74,7 +85,6 @@ const buildFailure = ({
   httpStatus,
   retryAfterSeconds,
 });
-
 const telegramRequest = async ({
   operation,
   method,
@@ -98,7 +108,6 @@ const telegramRequest = async ({
       description: "Fetch implementation is unavailable",
     });
   }
-
   const controller = new AbortController();
   const normalizedTimeout =
     Number.isFinite(timeoutMs) && timeoutMs > 0
@@ -120,7 +129,9 @@ const telegramRequest = async ({
     );
   } catch (error) {
     clearTimeout(timer);
-    const timedOut = controller.signal.aborted || error?.name === "AbortError";
+    const timedOut =
+      controller.signal.aborted ||
+      (0, values_js_1.readProperty)(error, "name") === "AbortError";
     return buildFailure({
       classification:
         isSendOperation(operation) &&
@@ -128,10 +139,12 @@ const telegramRequest = async ({
           ? "uncertain"
           : "retryable",
       code: timedOut ? "timeout" : "network-error",
-      description: sanitizeDescription(error?.message, normalizedToken),
+      description: sanitizeDescription(
+        (0, values_js_1.readProperty)(error, "message"),
+        normalizedToken,
+      ),
     });
   }
-
   let data;
   try {
     data = await response.json();
@@ -148,15 +161,22 @@ const telegramRequest = async ({
     return buildFailure({
       classification: isSendOperation(operation) ? "uncertain" : "retryable",
       code: "malformed-response",
-      description: sanitizeDescription(error?.message, normalizedToken),
+      description: sanitizeDescription(
+        (0, values_js_1.readProperty)(error, "message"),
+        normalizedToken,
+      ),
       httpStatus: response.status,
     });
   }
   clearTimeout(timer);
-
-  const description = sanitizeDescription(data?.description, normalizedToken);
+  const description = sanitizeDescription(
+    (0, values_js_1.readProperty)(data, "description"),
+    normalizedToken,
+  );
   const normalizedDescription = description.toLowerCase();
-  const telegramErrorCode = Number(data?.error_code);
+  const telegramErrorCode = Number(
+    (0, values_js_1.readProperty)(data, "error_code"),
+  );
   if (response.status === 429 || telegramErrorCode === 429) {
     return buildFailure({
       classification: "retryable",
@@ -166,8 +186,11 @@ const telegramRequest = async ({
       retryAfterSeconds: parseRetryAfterSeconds(data),
     });
   }
-
-  if (!data || typeof data !== "object" || typeof data.ok !== "boolean") {
+  if (
+    !data ||
+    typeof data !== "object" ||
+    typeof (0, values_js_1.readProperty)(data, "ok") !== "boolean"
+  ) {
     return buildFailure({
       classification: isSendOperation(operation) ? "uncertain" : "retryable",
       code: "malformed-response",
@@ -175,7 +198,6 @@ const telegramRequest = async ({
       httpStatus: response.status,
     });
   }
-
   const transientHttpStatus = response.status === 408 || response.status >= 500;
   const transientTelegramCode =
     telegramErrorCode === 408 || telegramErrorCode >= 500;
@@ -190,12 +212,19 @@ const telegramRequest = async ({
       httpStatus: response.status,
     });
   }
-
-  if (response.ok && data && data.ok === true) {
+  if (
+    response.ok &&
+    data &&
+    (0, values_js_1.readProperty)(data, "ok") === true
+  ) {
     if (operation === "send-media-group") {
-      const messageIds = Array.isArray(data.result)
-        ? data.result.map((message) =>
-            normalizePositiveInteger(message?.message_id),
+      const messageIds = Array.isArray(
+        (0, values_js_1.readProperty)(data, "result"),
+      )
+        ? (0, values_js_1.readProperty)(data, "result").map((message) =>
+            normalizePositiveInteger(
+              (0, values_js_1.readProperty)(message, "message_id"),
+            ),
           )
         : [];
       if (
@@ -213,12 +242,17 @@ const telegramRequest = async ({
       return {
         ok: true,
         outcome: "sent",
-        messageIds,
+        messageIds: messageIds,
         httpStatus: response.status,
       };
     }
     if (operation === "send") {
-      const messageId = normalizePositiveInteger(data?.result?.message_id);
+      const messageId = normalizePositiveInteger(
+        (0, values_js_1.readProperty)(
+          (0, values_js_1.readProperty)(data, "result"),
+          "message_id",
+        ),
+      );
       if (!messageId) {
         return buildFailure({
           classification: "uncertain",
@@ -240,7 +274,6 @@ const telegramRequest = async ({
       httpStatus: response.status,
     };
   }
-
   if (operation === "edit" && isNotModifiedDescription(normalizedDescription)) {
     return {
       ok: true,
@@ -263,7 +296,6 @@ const telegramRequest = async ({
       httpStatus: response.status,
     });
   }
-
   return buildFailure({
     classification: "terminal",
     code:
@@ -274,7 +306,6 @@ const telegramRequest = async ({
     httpStatus: response.status,
   });
 };
-
 const sendTelegramMessage = async ({
   chatId,
   text,
@@ -303,7 +334,7 @@ const sendTelegramMessage = async ({
     timeoutMs,
   });
 };
-
+exports.sendTelegramMessage = sendTelegramMessage;
 const sendTelegramMediaGroup = async ({
   chatId,
   imageUrls,
@@ -348,7 +379,7 @@ const sendTelegramMediaGroup = async ({
     timeoutMs,
   });
 };
-
+exports.sendTelegramMediaGroup = sendTelegramMediaGroup;
 const editTelegramMessage = async ({
   chatId,
   messageId,
@@ -377,7 +408,7 @@ const editTelegramMessage = async ({
     timeoutMs,
   });
 };
-
+exports.editTelegramMessage = editTelegramMessage;
 const deleteTelegramMessage = async ({
   chatId,
   messageId,
@@ -396,12 +427,4 @@ const deleteTelegramMessage = async ({
     fetchImpl,
     timeoutMs,
   });
-
-module.exports = {
-  TELEGRAM_HTTP_TIMEOUT_MS,
-  deleteTelegramMessage,
-  editTelegramMessage,
-  isKnownSafeTelegramSendError,
-  sendTelegramMediaGroup,
-  sendTelegramMessage,
-};
+exports.deleteTelegramMessage = deleteTelegramMessage;

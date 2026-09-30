@@ -1,44 +1,57 @@
+// Generated from src/eventPrizes/assets.ts. Run npm run generate:runtime.
 "use strict";
-
-const { EventPrizeWithdrawalError: HttpsError } = require("./errors");
-const { normalizeSolanaAddress } = require("../eventPrizeWithdrawalState");
-const { CONFIRMATION_COMMITMENT, loadSolanaDependencies } = require("./solana");
-
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.validateCompressedPrizeAsset =
+  exports.loadPrizeAssetState =
+  exports.createPrizeAssetVerificationError =
+  exports.buildCompressedTransferBuilder =
+    void 0;
+const errors_js_1 = require("./errors.js");
+const eventPrizeWithdrawalState_js_1 = require("../eventPrizeWithdrawalState.js");
+const solana_js_1 = require("./solana.js");
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
 const isBytes32 = (value) => value instanceof Uint8Array && value.length === 32;
-
 const areBytesEqual = (left, right) =>
   left instanceof Uint8Array &&
   right instanceof Uint8Array &&
   left.length === right.length &&
   left.every((value, index) => value === right[index]);
-
 const createPrizeAssetVerificationError = (message) =>
-  new HttpsError("failed-precondition", message);
-
-const parseCompressedPrizeObservation = ({ prize, rpcAsset }) => {
-  const { base58 } = loadSolanaDependencies();
+  new errors_js_1.EventPrizeWithdrawalError("failed-precondition", message);
+exports.createPrizeAssetVerificationError = createPrizeAssetVerificationError;
+const parseCompressedPrizeObservation = ({ prize, rpcAsset: rawAsset }) => {
+  const rpcAsset = rawAsset;
+  const { base58 } = (0, solana_js_1.loadSolanaDependencies)();
   const assetAddress = normalizeString(prize?.assetAddress);
   const collectionAddress = normalizeString(prize?.collectionAddress);
-  const assetOwner = normalizeSolanaAddress(rpcAsset?.ownership?.owner);
+  const assetOwner = (0, eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(
+    rpcAsset?.ownership?.owner,
+  );
   const compression = rpcAsset?.compression;
-  const compressionTree = normalizeSolanaAddress(compression?.tree);
+  const compressionTree = (0,
+  eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(compression?.tree);
   const leafId = Number(compression?.leaf_id);
-
   if (
-    normalizeSolanaAddress(assetAddress) !== assetAddress ||
-    normalizeSolanaAddress(collectionAddress) !== collectionAddress ||
-    normalizeSolanaAddress(rpcAsset?.id) !== assetAddress ||
+    (0, eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(assetAddress) !==
+      assetAddress ||
+    (0, eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(
+      collectionAddress,
+    ) !== collectionAddress ||
+    (0, eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(rpcAsset?.id) !==
+      assetAddress ||
     !assetOwner ||
     !Array.isArray(rpcAsset?.grouping) ||
     typeof rpcAsset?.ownership?.frozen !== "boolean" ||
     rpcAsset?.ownership?.ownership_model !== "single" ||
     !compressionTree ||
     compression?.compressed !== true ||
-    !normalizeSolanaAddress(compression?.data_hash) ||
-    !normalizeSolanaAddress(compression?.creator_hash) ||
+    !(0, eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(
+      compression?.data_hash,
+    ) ||
+    !(0, eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(
+      compression?.creator_hash,
+    ) ||
     !Number.isSafeInteger(leafId) ||
     leafId < 0
   ) {
@@ -46,7 +59,6 @@ const parseCompressedPrizeObservation = ({ prize, rpcAsset }) => {
       "The compressed prize data could not be verified.",
     );
   }
-
   let dataHash;
   let creatorHash;
   try {
@@ -62,7 +74,6 @@ const parseCompressedPrizeObservation = ({ prize, rpcAsset }) => {
       "The compressed prize data could not be verified.",
     );
   }
-
   if (
     rpcAsset.interface !== "V1_NFT" ||
     compression.collection_hash != null ||
@@ -73,7 +84,6 @@ const parseCompressedPrizeObservation = ({ prize, rpcAsset }) => {
       "The compressed prize format is not supported.",
     );
   }
-
   const collectionGroups = rpcAsset.grouping.filter(
     (group) => group?.group_key === "collection",
   );
@@ -82,7 +92,8 @@ const parseCompressedPrizeObservation = ({ prize, rpcAsset }) => {
       "The compressed prize data could not be verified.",
     );
   }
-  const observedCollectionAddress = normalizeSolanaAddress(
+  const observedCollectionAddress = (0,
+  eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(
     collectionGroups[0].group_value,
   );
   if (!observedCollectionAddress) {
@@ -94,17 +105,16 @@ const parseCompressedPrizeObservation = ({ prize, rpcAsset }) => {
     assetOwner,
     collectionAddress,
     collectionMatches: observedCollectionAddress === collectionAddress,
-    compression,
+    compression: compression,
     compressionTree,
     creatorHash,
     dataHash,
     leafId,
-    rpcAsset,
+    rpcAsset: rpcAsset,
   };
 };
-
 const resolveCompressedPrizeOwnership = (observation) => {
-  const { canTransfer } = loadSolanaDependencies("compressed");
+  const { canTransfer } = (0, solana_js_1.loadSolanaDependencies)("compressed");
   const { assetOwner, rpcAsset } = observation;
   if (rpcAsset.burnt === true || rpcAsset.ownership.non_transferable === true) {
     return {
@@ -124,23 +134,26 @@ const resolveCompressedPrizeOwnership = (observation) => {
   }
   return { assetOwner, blocked: false };
 };
-
-const validateCompressedPrizeProof = ({ umi, assetWithProof, observation }) => {
-  const { findLeafAssetIdPda } = loadSolanaDependencies("compressed");
-  const {
-    assetOwner,
-    compression,
-    compressionTree,
-    creatorHash,
-    dataHash,
-    leafId,
-  } = observation;
+const validateCompressedPrizeProof = ({
+  umi,
+  assetWithProof: rawProofAsset,
+  observation,
+}) => {
+  const assetWithProof = rawProofAsset;
+  const { findLeafAssetIdPda } = (0, solana_js_1.loadSolanaDependencies)(
+    "compressed",
+  );
+  const { assetOwner, compressionTree, creatorHash, dataHash, leafId } =
+    observation;
   const rpcAsset = observation.rpcAsset;
   const rpcAssetProof = assetWithProof?.rpcAssetProof;
   const leafDelegate = rpcAsset?.ownership?.delegate;
   const expectedLeafDelegate =
-    normalizeSolanaAddress(leafDelegate) || assetOwner;
-  const merkleTree = normalizeSolanaAddress(assetWithProof?.merkleTree);
+    (0, eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(leafDelegate) ||
+    assetOwner;
+  const merkleTree = (0, eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(
+    assetWithProof?.merkleTree,
+  );
   const nonce = Number(assetWithProof?.nonce);
   const index = Number(assetWithProof?.index);
   const proof = assetWithProof?.proof;
@@ -149,14 +162,21 @@ const validateCompressedPrizeProof = ({ umi, assetWithProof, observation }) => {
   const leafNodeOffset = Array.isArray(rawProof)
     ? 2 ** rawProof.length
     : Number.NaN;
-
   if (
-    (leafDelegate != null && !normalizeSolanaAddress(leafDelegate)) ||
-    normalizeSolanaAddress(assetWithProof?.leafOwner) !== assetOwner ||
-    normalizeSolanaAddress(assetWithProof?.leafDelegate) !==
-      expectedLeafDelegate ||
+    (leafDelegate != null &&
+      !(0, eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(
+        leafDelegate,
+      )) ||
+    (0, eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(
+      assetWithProof?.leafOwner,
+    ) !== assetOwner ||
+    (0, eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(
+      assetWithProof?.leafDelegate,
+    ) !== expectedLeafDelegate ||
     !merkleTree ||
-    normalizeSolanaAddress(rpcAssetProof?.tree_id) !== merkleTree ||
+    (0, eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(
+      rpcAssetProof?.tree_id,
+    ) !== merkleTree ||
     compressionTree !== merkleTree ||
     !Number.isSafeInteger(nonce) ||
     nonce < 0 ||
@@ -169,9 +189,15 @@ const validateCompressedPrizeProof = ({ umi, assetWithProof, observation }) => {
     !areBytesEqual(assetWithProof.dataHash, dataHash) ||
     !areBytesEqual(assetWithProof.creatorHash, creatorHash) ||
     !Array.isArray(proof) ||
-    proof.some((node) => !normalizeSolanaAddress(node)) ||
+    proof.some(
+      (node) =>
+        !(0, eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(node),
+    ) ||
     !Array.isArray(rawProof) ||
-    rawProof.some((node) => !normalizeSolanaAddress(node)) ||
+    rawProof.some(
+      (node) =>
+        !(0, eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(node),
+    ) ||
     proof.length > rawProof.length ||
     proof.some((node, proofIndex) => node !== rawProof[proofIndex]) ||
     !Number.isSafeInteger(rawNodeIndex) ||
@@ -182,7 +208,6 @@ const validateCompressedPrizeProof = ({ umi, assetWithProof, observation }) => {
       "The compressed prize data could not be verified.",
     );
   }
-
   const [derivedAssetAddress] = findLeafAssetIdPda(umi, {
     merkleTree: assetWithProof.merkleTree,
     leafIndex: assetWithProof.nonce,
@@ -193,10 +218,9 @@ const validateCompressedPrizeProof = ({ umi, assetWithProof, observation }) => {
     );
   }
 };
-
 const createCompressedPrizeMetadata = (rpcAsset) => {
-  const { TokenProgramVersion, TokenStandard, none, some, wrapNullable } =
-    loadSolanaDependencies("compressed");
+  const { TokenProgramVersion, TokenStandard, none, some, wrapNullable } = (0,
+  solana_js_1.loadSolanaDependencies)("compressed");
   return {
     name: rpcAsset.content?.metadata?.name ?? "",
     symbol: rpcAsset.content?.metadata?.symbol ?? "",
@@ -211,15 +235,14 @@ const createCompressedPrizeMetadata = (rpcAsset) => {
     creators: rpcAsset.creators,
   };
 };
-
 const getCompressedPrizeCollectionVerification = ({
   collectionAddress,
   creatorHash,
   dataHash,
   metadata,
 }) => {
-  const { hashMetadataCreators, hashMetadataData, publicKey, some } =
-    loadSolanaDependencies("compressed");
+  const { hashMetadataCreators, hashMetadataData, publicKey, some } = (0,
+  solana_js_1.loadSolanaDependencies)("compressed");
   if (!metadata || !Array.isArray(metadata.creators)) {
     throw createPrizeAssetVerificationError(
       "The compressed prize data could not be verified.",
@@ -255,7 +278,6 @@ const getCompressedPrizeCollectionVerification = ({
   }
   return areBytesEqual(verifiedDataHash, dataHash);
 };
-
 const resolveCompressedPrizeCollection = (observation) => {
   if (!observation.collectionMatches) {
     return {
@@ -280,8 +302,12 @@ const resolveCompressedPrizeCollection = (observation) => {
   }
   return null;
 };
-
-const validateCompressedPrizeAsset = ({ umi, prize, assetWithProof }) => {
+const validateCompressedPrizeAsset = ({
+  umi,
+  prize,
+  assetWithProof: rawProofAsset,
+}) => {
+  const assetWithProof = rawProofAsset;
   const observation = parseCompressedPrizeObservation({
     prize,
     rpcAsset: assetWithProof?.rpcAsset,
@@ -291,28 +317,29 @@ const validateCompressedPrizeAsset = ({ umi, prize, assetWithProof }) => {
   if (collectionResolution) return collectionResolution;
   return resolveCompressedPrizeOwnership(observation);
 };
-
+exports.validateCompressedPrizeAsset = validateCompressedPrizeAsset;
 const buildCoreTransferBuilder = ({
   umi,
   asset,
   collection,
   recipientAddress,
 }) => {
-  const { publicKey, transferCore } = loadSolanaDependencies("core");
+  const { publicKey, transferCore } = (0, solana_js_1.loadSolanaDependencies)(
+    "core",
+  );
   return transferCore(umi, {
     asset,
     collection,
     newOwner: publicKey(recipientAddress),
   });
 };
-
 const buildCompressedTransferBuilder = ({
   umi,
   assetWithProof,
   recipientAddress,
 }) => {
-  const { publicKey, transferCompressed } =
-    loadSolanaDependencies("compressed");
+  const { publicKey, transferCompressed } = (0,
+  solana_js_1.loadSolanaDependencies)("compressed");
   return transferCompressed(umi, {
     ...assetWithProof,
     leafOwner: umi.identity,
@@ -320,12 +347,12 @@ const buildCompressedTransferBuilder = ({
     newLeafOwner: publicKey(recipientAddress),
   });
 };
-
+exports.buildCompressedTransferBuilder = buildCompressedTransferBuilder;
 const loadCorePrizeAssetState = async ({ umi, prize, recipientAddress }) => {
-  const { fetchAsset, fetchCollection, publicKey } =
-    loadSolanaDependencies("core");
+  const { fetchAsset, fetchCollection, publicKey } = (0,
+  solana_js_1.loadSolanaDependencies)("core");
   const asset = await fetchAsset(umi, publicKey(prize.assetAddress), {
-    commitment: CONFIRMATION_COMMITMENT,
+    commitment: solana_js_1.CONFIRMATION_COMMITMENT,
   });
   if (
     asset.publicKey !== prize.assetAddress ||
@@ -333,19 +360,23 @@ const loadCorePrizeAssetState = async ({ umi, prize, recipientAddress }) => {
     asset.updateAuthority.address !== prize.collectionAddress
   ) {
     return {
-      assetOwner: normalizeSolanaAddress(asset.owner),
+      assetOwner: (0, eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(
+        asset.owner,
+      ),
       blocked: true,
       message: "The prize collection could not be verified.",
     };
   }
   return {
-    assetOwner: normalizeSolanaAddress(asset.owner),
+    assetOwner: (0, eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(
+      asset.owner,
+    ),
     blocked: false,
     buildTransferBuilder: async () => {
       const collection = await fetchCollection(
         umi,
         publicKey(prize.collectionAddress),
-        { commitment: CONFIRMATION_COMMITMENT },
+        { commitment: solana_js_1.CONFIRMATION_COMMITMENT },
       );
       if (collection.publicKey !== prize.collectionAddress) {
         throw createPrizeAssetVerificationError(
@@ -361,13 +392,13 @@ const loadCorePrizeAssetState = async ({ umi, prize, recipientAddress }) => {
     },
   };
 };
-
 const loadCompressedPrizeAssetState = async ({
   umi,
   prize,
   recipientAddress,
 }) => {
-  const { getAssetWithProof, publicKey } = loadSolanaDependencies("compressed");
+  const { getAssetWithProof, publicKey } = (0,
+  solana_js_1.loadSolanaDependencies)("compressed");
   const assetWithProof = await getAssetWithProof(
     umi,
     publicKey(prize.assetAddress),
@@ -390,9 +421,8 @@ const loadCompressedPrizeAssetState = async ({
           }),
       };
 };
-
 const loadCompressedPrizeRecoveryState = async ({ umi, prize }) => {
-  const { publicKey } = loadSolanaDependencies("compressed");
+  const { publicKey } = (0, solana_js_1.loadSolanaDependencies)("compressed");
   const rpcAsset = await umi.rpc.getAsset({
     assetId: publicKey(prize.assetAddress),
     displayOptions: { showUnverifiedCollections: true },
@@ -401,7 +431,6 @@ const loadCompressedPrizeRecoveryState = async ({ umi, prize }) => {
   const collectionResolution = resolveCompressedPrizeCollection(observation);
   return collectionResolution || resolveCompressedPrizeOwnership(observation);
 };
-
 const loadPrizeAssetState = ({
   umi,
   prize,
@@ -418,10 +447,4 @@ const loadPrizeAssetState = ({
   }
   throw new TypeError("Unsupported event prize standard.");
 };
-
-module.exports = {
-  buildCompressedTransferBuilder,
-  createPrizeAssetVerificationError,
-  loadPrizeAssetState,
-  validateCompressedPrizeAsset,
-};
+exports.loadPrizeAssetState = loadPrizeAssetState;

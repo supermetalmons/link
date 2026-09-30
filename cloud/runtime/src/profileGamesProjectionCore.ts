@@ -1,0 +1,826 @@
+import type { MatchPresentationSnapshot } from "@mons/shared/match-presentation";
+
+import { PROFILE_GAME_PROJECTION_SOURCE } from "./stateCompatibility.js";
+
+import { orderProfileMergeCleanupIds } from "./profileMergeTargets.js";
+import { deriveLatestMatchId } from "@mons/shared/rematches";
+import { inferAutomatchStateHint } from "@mons/shared/navigation";
+import { isAutoInviteId } from "@mons/shared/ids";
+import {
+  PROJECTOR_SCHEMA_VERSION,
+  deriveProjectionStatus,
+  fingerprintForProjection,
+  getEmojiId,
+  getNavigationSortBucket,
+  getOwnerContext,
+  getOwnerProfileIds,
+  getProfileDisplayName,
+  getProfileEmoji,
+  isEventOwnedInvite,
+  normalizeString,
+  pickListSortMillis,
+  readEventTimestampMs,
+  readTimestampMillis,
+  shouldProjectInvite,
+} from "./events/gameProjectionModel.js";
+export type ProjectionRecord = {
+  data: Record<string, unknown>;
+  version: number;
+};
+export type ProjectionWrite = {
+  type: "create" | "delete" | "merge" | "update";
+  profileId: string;
+  inviteId: string;
+  data?: Record<string, unknown>;
+  expectedVersion?: number;
+};
+export type ProjectionOwnershipSnapshot = {
+  profileDataById: ReadonlyMap<string, Record<string, unknown>>;
+  profileIdByLoginUid: ReadonlyMap<string, string | null>;
+};
+export type ProfileGamesProjectionRepository = {
+  commitProjectionWrites(writes: ProjectionWrite[]): Promise<void>;
+  getProjections(
+    profileIds: readonly string[],
+    inviteId: string,
+  ): Promise<Map<string, ProjectionRecord>>;
+  readAutomatchEntry(inviteId: string): Promise<unknown>;
+  readInviteMetadata(inviteId: string): Promise<Record<string, unknown> | null>;
+  readMatchPresentation?(
+    inviteId: string,
+    matchId: string,
+  ): Promise<MatchPresentationSnapshot>;
+  hasCompletedRatingUpdate(inviteId: string, matchId: string): Promise<boolean>;
+  readProfileOwnershipSnapshot(query: {
+    loginUids: readonly string[];
+    profileIds: readonly string[];
+  }): Promise<ProjectionOwnershipSnapshot>;
+};
+export type RecomputeInviteProjectionOptions = {
+  cleanupProfileIds?: string[];
+  eventTimestampMs?: number;
+  latestMatchIdHint?: string | null;
+  listSortAtMs?: number;
+  preserveListSortAt?: boolean;
+  preserveNewerListSortAt?: boolean;
+};
+export type RecomputeInviteProjectionResult = {
+  blockedReason?: string;
+  deletes?: number;
+  inviteId: string | null;
+  ok: boolean;
+  ownerProfileIds?: string[];
+  reason: string;
+  shouldProject?: boolean;
+  skipReason?: string;
+  skipped: boolean | number;
+  sourceCleanupSafe: boolean;
+  writes?: number;
+};
+type Signature_createProfileGamesProjectionCore = (dependencies: {
+  logger?: Pick<Console, "error">;
+  repository: ProfileGamesProjectionRepository;
+  wait?(milliseconds: number): Promise<void>;
+}) => {
+  recomputeInviteProjection(
+    inviteId: string,
+    reason: string,
+    options?: RecomputeInviteProjectionOptions,
+  ): Promise<RecomputeInviteProjectionResult>;
+};
+type Signature_buildResolvedProfile = (profilePath: string[]) => {
+  cleanupProfileIds: string[];
+  profileId: string | null;
+};
+type Signature_buildInviteProjectionOwnerPlan = (
+  hostProfile: ReturnType<typeof buildResolvedProfile>,
+  guestProfile: ReturnType<typeof buildResolvedProfile>,
+  cleanupProfileIds?: string[],
+) => { cleanupProfileIds: string[]; ownerProfileIds: string[] };
+type Signature_readExistingProjectionRecords = (input: {
+  attempts?: number;
+  inviteId: string;
+  logger?: Pick<Console, "error">;
+  profileIds: string[];
+  readRecords(
+    profileIds: readonly string[],
+  ): Promise<Map<string, ProjectionRecord>>;
+  reason: string;
+  retryDelayMs?: number;
+  wait?(milliseconds: number): Promise<void>;
+}) => Promise<
+  Array<{
+    profileId: string;
+    data: Record<string, unknown>;
+    version: number;
+  }>
+>;
+
+const READ_RETRY_ATTEMPTS = 2;
+const READ_RETRY_DELAY_MS = 25;
+
+const delay = async (ms: number) => {
+  const safeDelay = Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0;
+  if (safeDelay > 0) {
+    await new Promise<void>((resolve) => setTimeout(resolve, safeDelay));
+  }
+};
+
+const readWithRetries = async <T>(
+  read: () => Promise<T>,
+  attempts = READ_RETRY_ATTEMPTS,
+  retryDelayMs = READ_RETRY_DELAY_MS,
+  wait = delay,
+) => {
+  let failure: unknown = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await read();
+    } catch (error) {
+      failure = error;
+      if (attempt < attempts) {
+        await wait(retryDelayMs);
+      }
+    }
+  }
+  throw failure;
+};
+
+const readExistingProjectionRecords: Signature_readExistingProjectionRecords =
+  async ({
+    attempts = READ_RETRY_ATTEMPTS,
+    inviteId,
+    profileIds,
+    readRecords,
+    reason,
+    retryDelayMs = READ_RETRY_DELAY_MS,
+    logger = console,
+    wait = delay,
+  }) => {
+    const uniqueProfileIds = [...new Set(profileIds)];
+    if (uniqueProfileIds.length === 0) return [];
+    let projections;
+    try {
+      projections = await readWithRetries(
+        () => readRecords(uniqueProfileIds),
+        attempts,
+        retryDelayMs,
+        wait,
+      );
+    } catch (error) {
+      logger.error("projector:existing-doc-read-failed", {
+        inviteId,
+        ownerProfileIds: uniqueProfileIds,
+        reason,
+        error:
+          error && (error as { message?: unknown }).message
+            ? (error as { message?: unknown }).message
+            : error,
+      });
+      throw error;
+    }
+    return uniqueProfileIds.flatMap((profileId) => {
+      const projection = projections.get(profileId);
+      return projection
+        ? [
+            {
+              profileId,
+              data: projection.data,
+              version: projection.version,
+            },
+          ]
+        : [];
+    });
+  };
+
+const buildResolvedProfile: Signature_buildResolvedProfile = (profilePath) => {
+  const profileId = profilePath[profilePath.length - 1] || null;
+  return profileId
+    ? {
+        cleanupProfileIds: Array.from(new Set(profilePath)),
+        profileId,
+      }
+    : { cleanupProfileIds: [], profileId: null };
+};
+
+const buildInviteProjectionOwnerPlan: Signature_buildInviteProjectionOwnerPlan =
+  (hostProfile, guestProfile, cleanupProfileIds = []) => {
+    const ownerProfileIds = getOwnerProfileIds(
+      hostProfile.profileId,
+      guestProfile.profileId,
+    );
+    return {
+      cleanupProfileIds: orderProfileMergeCleanupIds(
+        [
+          ...hostProfile.cleanupProfileIds,
+          ...guestProfile.cleanupProfileIds,
+          ...cleanupProfileIds,
+          ...ownerProfileIds,
+        ],
+        ownerProfileIds,
+      ),
+      ownerProfileIds,
+    };
+  };
+
+const getStoredProjectionOwnerRole = (
+  profileId: string,
+  data: Record<string, unknown> | null,
+) => {
+  const ownerRole = normalizeString(data && data.ownerRole);
+  if (ownerRole === "host" || ownerRole === "guest") {
+    return ownerRole;
+  }
+  const ownerProfileId =
+    normalizeString(data && data.ownerProfileId) || profileId;
+  if (ownerProfileId === normalizeString(data && data.hostProfileId)) {
+    return "host";
+  }
+  if (ownerProfileId === normalizeString(data && data.guestProfileId)) {
+    return "guest";
+  }
+  return null;
+};
+
+const findFreshestSourceProjectionData = ({
+  existingRecords,
+  ownerContext,
+  ownerProfileId,
+  requiresResolvedOpponentEmoji,
+}: {
+  existingRecords: Awaited<ReturnType<typeof readExistingProjectionRecords>>;
+  ownerContext: ReturnType<typeof getOwnerContext>;
+  ownerProfileId: string;
+  requiresResolvedOpponentEmoji: boolean;
+}) => {
+  let freshest: Record<string, unknown> | null = null;
+  let freshestMs = Number.NEGATIVE_INFINITY;
+  for (const existing of existingRecords) {
+    if (existing.profileId === ownerProfileId) {
+      continue;
+    }
+    const data = existing.data;
+    const storedOwnerLoginId = normalizeString(data.ownerLoginId);
+    const ownerLoginId = normalizeString(ownerContext.ownerLoginId);
+    if (
+      storedOwnerLoginId &&
+      ownerLoginId &&
+      storedOwnerLoginId !== ownerLoginId
+    ) {
+      continue;
+    }
+    if (
+      (!storedOwnerLoginId || !ownerLoginId) &&
+      getStoredProjectionOwnerRole(existing.profileId, data) !==
+        ownerContext.ownerRole
+    ) {
+      continue;
+    }
+    if (
+      requiresResolvedOpponentEmoji &&
+      getEmojiId(data.opponentEmoji ?? data.opponentEmojiId) === null
+    ) {
+      continue;
+    }
+    const freshnessMs = [
+      data.updatedAt,
+      data.lastEventAt,
+      data.listSortAt,
+      data.createdAt,
+    ].reduce<number>((current, value) => {
+      const millis = readTimestampMillis(value);
+      return Number.isFinite(millis)
+        ? Math.max(current, millis as number)
+        : current;
+    }, Number.NEGATIVE_INFINITY);
+    if (!freshest || freshnessMs > freshestMs) {
+      freshest = data;
+      freshestMs = freshnessMs;
+    }
+  }
+  return freshest;
+};
+
+const createProfileGamesProjectionCore: Signature_createProfileGamesProjectionCore =
+  ({ logger = console, repository, wait = delay }) => {
+    if (!repository) {
+      throw new TypeError("profile games projection dependencies are required");
+    }
+
+    const toTimestampMillis = (value: unknown) => {
+      const millis = readTimestampMillis(value);
+      if (millis === null) {
+        throw new TypeError("invalid projection timestamp");
+      }
+      return Math.max(1, millis);
+    };
+
+    const retry = <T>(read: () => Promise<T>) =>
+      readWithRetries(read, undefined, undefined, wait);
+
+    const resolveProfileForLogin = (
+      ownership: ProjectionOwnershipSnapshot,
+      loginUid: unknown,
+    ) => {
+      const normalizedLoginUid = normalizeString(loginUid);
+      if (!normalizedLoginUid) {
+        return { cleanupProfileIds: [], profileId: null };
+      }
+      if (
+        !ownership ||
+        !(ownership.profileIdByLoginUid instanceof Map) ||
+        !ownership.profileIdByLoginUid.has(normalizedLoginUid)
+      ) {
+        throw new TypeError("invalid projection ownership snapshot");
+      }
+      const profileId = normalizeString(
+        ownership.profileIdByLoginUid.get(normalizedLoginUid),
+      );
+      if (!profileId) {
+        return { cleanupProfileIds: [], profileId: null };
+      }
+      return buildResolvedProfile([profileId]);
+    };
+
+    const readProfileSummary = (
+      ownership: ProjectionOwnershipSnapshot,
+      profileId: unknown,
+    ) => {
+      const normalizedProfileId = normalizeString(profileId);
+      if (!normalizedProfileId) {
+        return null;
+      }
+      if (
+        !ownership ||
+        !(ownership.profileDataById instanceof Map) ||
+        !ownership.profileDataById.has(normalizedProfileId)
+      ) {
+        throw new TypeError("invalid projection ownership snapshot");
+      }
+      const profileData = ownership.profileDataById.get(normalizedProfileId);
+      return profileData
+        ? {
+            name: getProfileDisplayName(profileData),
+            emoji: getProfileEmoji(profileData),
+          }
+        : null;
+    };
+
+    const readLoginSummaryFromMatches = async (
+      loginUid: string,
+      latestMatchId: string,
+      inviteId: string,
+      presentationCache: Map<string, MatchPresentationSnapshot>,
+    ) => {
+      const normalizedLoginUid = normalizeString(loginUid);
+      if (!normalizedLoginUid || !repository.readMatchPresentation) {
+        return null;
+      }
+      const normalizedLatestMatchId = normalizeString(latestMatchId);
+      const normalizedInviteId = normalizeString(inviteId);
+      const candidateMatchIds = Array.from(
+        new Set(
+          [normalizedLatestMatchId, normalizedInviteId].filter(
+            (value): value is string => Boolean(value),
+          ),
+        ),
+      );
+      for (const candidateMatchId of candidateMatchIds) {
+        try {
+          if (!presentationCache.has(candidateMatchId)) {
+            const snapshot = await retry(() =>
+              repository.readMatchPresentation!(
+                normalizedInviteId!,
+                candidateMatchId,
+              ),
+            );
+            presentationCache.set(candidateMatchId, snapshot);
+          }
+          const snapshot = presentationCache.get(candidateMatchId)!;
+          const emoji = Object.hasOwn(snapshot.players, normalizedLoginUid)
+            ? getEmojiId(snapshot.players[normalizedLoginUid].emojiId)
+            : null;
+          if (emoji !== null) {
+            return { name: null, emoji };
+          }
+        } catch (error) {
+          logger.error("projector:login-summary-read-failed", {
+            loginUid: normalizedLoginUid,
+            matchId: candidateMatchId,
+            attempts: READ_RETRY_ATTEMPTS,
+            error:
+              error && (error as { message?: unknown }).message
+                ? (error as { message?: unknown }).message
+                : error,
+          });
+          throw error;
+        }
+      }
+      return null;
+    };
+
+    const recomputeInviteProjection: ReturnType<Signature_createProfileGamesProjectionCore>["recomputeInviteProjection"] =
+      async (inviteId, reason, options = {}) => {
+        const normalizedInviteId = normalizeString(inviteId);
+        if (!normalizedInviteId) {
+          return {
+            ok: false,
+            inviteId: inviteId || null,
+            reason,
+            skipped: true,
+            skipReason: "invalid-invite-id",
+            sourceCleanupSafe: false,
+            blockedReason: "invalid-invite-id",
+          };
+        }
+
+        const nowMs = readEventTimestampMs(options);
+        const [inviteData, automatchData] = await Promise.all([
+          retry(() => repository.readInviteMetadata(normalizedInviteId)),
+          retry(() => repository.readAutomatchEntry(normalizedInviteId)),
+        ]);
+        const hostLoginId = normalizeString(inviteData && inviteData.hostId);
+        const guestLoginId = normalizeString(inviteData && inviteData.guestId);
+        const loginUids = Array.from(
+          new Set(
+            [hostLoginId, guestLoginId].filter((value): value is string =>
+              Boolean(value),
+            ),
+          ),
+        );
+        let ownership;
+        try {
+          ownership = await repository.readProfileOwnershipSnapshot({
+            loginUids,
+            profileIds: [],
+          });
+        } catch (error) {
+          logger.error("projector:profile-resolve:profile-read-failed", {
+            loginUids,
+            attempts: 1,
+            error:
+              error && (error as { message?: unknown }).message
+                ? (error as { message?: unknown }).message
+                : error,
+          });
+          throw error;
+        }
+        const hostProfile = resolveProfileForLogin(ownership, hostLoginId);
+        const guestProfile = resolveProfileForLogin(ownership, guestLoginId);
+        const hostProfileId = hostProfile.profileId;
+        const guestProfileId = guestProfile.profileId;
+        const { cleanupProfileIds, ownerProfileIds } =
+          buildInviteProjectionOwnerPlan(
+            hostProfile,
+            guestProfile,
+            options.cleanupProfileIds,
+          );
+        const automatchStateHint = inferAutomatchStateHint({
+          inviteId: normalizedInviteId,
+          queueValue: automatchData,
+          hasGuest: !!guestLoginId,
+          storedStateHint: inviteData ? inviteData.automatchStateHint : null,
+        });
+        const latestMatchId = deriveLatestMatchId(
+          normalizedInviteId,
+          inviteData,
+          options.latestMatchIdHint || null,
+        );
+        const latestMatchRatingCompleted =
+          isEventOwnedInvite(inviteData) && latestMatchId
+            ? await retry(() =>
+                repository.hasCompletedRatingUpdate(
+                  normalizedInviteId,
+                  latestMatchId,
+                ),
+              )
+            : false;
+        const status = deriveProjectionStatus({
+          inviteId: normalizedInviteId,
+          inviteData,
+          automatchStateHint,
+          latestMatchRatingCompleted,
+        });
+        const shouldProject = shouldProjectInvite({
+          inviteId: normalizedInviteId,
+          inviteData,
+          automatchStateHint,
+        });
+        const sortBucket = getNavigationSortBucket(status);
+        const matchPresentationCache = new Map<
+          string,
+          MatchPresentationSnapshot
+        >();
+
+        const existingRecords = await readExistingProjectionRecords({
+          inviteId: normalizedInviteId,
+          profileIds: cleanupProfileIds,
+          readRecords: (profileIds) =>
+            repository.getProjections(profileIds, normalizedInviteId),
+          reason,
+          logger,
+          wait,
+        });
+        const existingRecordsByOwnerProfileId = new Map(
+          existingRecords.map((entry) => [entry.profileId, entry]),
+        );
+        const ownerSet = new Set(ownerProfileIds);
+        const hasUnresolvedOwner = Boolean(
+          shouldProject &&
+          (ownerProfileIds.length === 0 ||
+            !hostLoginId ||
+            !hostProfileId ||
+            (guestLoginId && !guestProfileId)),
+        );
+        let sourceCleanupSafe = !hasUnresolvedOwner;
+        let blockedReason = hasUnresolvedOwner
+          ? "unresolved-owner-profile"
+          : null;
+        const writes: ProjectionWrite[] = [];
+        let setCount = 0;
+        let deleteCount = 0;
+        let skippedCount = 0;
+
+        if (!shouldProject || ownerProfileIds.length === 0) {
+          if (sourceCleanupSafe) {
+            for (const existing of existingRecords) {
+              writes.push({
+                type: "delete",
+                profileId: existing.profileId,
+                inviteId: normalizedInviteId,
+              });
+              deleteCount += 1;
+            }
+          }
+          if (writes.length > 0) {
+            await repository.commitProjectionWrites(writes);
+          }
+          return {
+            ok: true,
+            inviteId: normalizedInviteId,
+            reason,
+            shouldProject,
+            ownerProfileIds,
+            sourceCleanupSafe,
+            ...(blockedReason ? { blockedReason } : {}),
+            writes: 0,
+            deletes: deleteCount,
+            skipped: 0,
+          };
+        }
+
+        const commonProjection = {
+          schemaVersion: PROJECTOR_SCHEMA_VERSION,
+          projectorVersion: PROJECTOR_SCHEMA_VERSION,
+          source: PROFILE_GAME_PROJECTION_SOURCE,
+          entityType: "game",
+          inviteId: normalizedInviteId,
+          kind: isAutoInviteId(normalizedInviteId) ? "auto" : "direct",
+          hostLoginId,
+          guestLoginId,
+          hostProfileId,
+          guestProfileId,
+          status,
+          sortBucket,
+          isPendingAutomatch: status === "pending",
+          automatchStateHint,
+          automatchCanceledAt:
+            typeof (inviteData && inviteData.automatchCanceledAt) === "number"
+              ? inviteData!.automatchCanceledAt
+              : null,
+          latestMatchId,
+        };
+
+        for (const ownerProfileId of ownerProfileIds) {
+          const ownerContext = getOwnerContext({
+            ownerProfileId,
+            hostProfileId,
+            guestProfileId,
+            hostLoginId,
+            guestLoginId,
+          });
+          const existingRecord =
+            existingRecordsByOwnerProfileId.get(ownerProfileId);
+          const existingData = existingRecord ? existingRecord.data : null;
+          const requiresResolvedOpponentEmoji =
+            status === "active" || status === "ended";
+          const sourceProjectionData = findFreshestSourceProjectionData({
+            existingRecords,
+            ownerContext,
+            ownerProfileId,
+            requiresResolvedOpponentEmoji,
+          });
+          const opponentProfileSummary = ownerContext.opponentProfileId
+            ? readProfileSummary(ownership, ownerContext.opponentProfileId)
+            : null;
+          const existingOpponentName = normalizeString(
+            existingData
+              ? (existingData.opponentName ?? existingData.opponentDisplayName)
+              : null,
+          );
+          const sourceOpponentName = normalizeString(
+            sourceProjectionData
+              ? (sourceProjectionData.opponentName ??
+                  sourceProjectionData.opponentDisplayName)
+              : null,
+          );
+          const opponentName =
+            opponentProfileSummary &&
+            typeof opponentProfileSummary.name === "string"
+              ? opponentProfileSummary.name
+              : existingOpponentName || sourceOpponentName;
+          const opponentEmojiFromProfile =
+            opponentProfileSummary &&
+            opponentProfileSummary.emoji !== null &&
+            opponentProfileSummary.emoji !== undefined
+              ? opponentProfileSummary.emoji
+              : null;
+          let opponentEmojiFromLogin = null;
+          if (
+            opponentEmojiFromProfile === null &&
+            ownerContext.opponentLoginId
+          ) {
+            const summary = await readLoginSummaryFromMatches(
+              ownerContext.opponentLoginId,
+              latestMatchId,
+              normalizedInviteId,
+              matchPresentationCache,
+            );
+            opponentEmojiFromLogin =
+              summary && summary.emoji !== null && summary.emoji !== undefined
+                ? summary.emoji
+                : null;
+          }
+          const existingOpponentEmoji = getEmojiId(
+            existingData
+              ? (existingData.opponentEmoji ?? existingData.opponentEmojiId)
+              : null,
+          );
+          const sourceOpponentEmoji = getEmojiId(
+            sourceProjectionData
+              ? (sourceProjectionData.opponentEmoji ??
+                  sourceProjectionData.opponentEmojiId)
+              : null,
+          );
+          const opponentEmoji =
+            opponentEmojiFromProfile !== null
+              ? opponentEmojiFromProfile
+              : opponentEmojiFromLogin !== null
+                ? opponentEmojiFromLogin
+                : existingOpponentEmoji !== null
+                  ? existingOpponentEmoji
+                  : sourceOpponentEmoji;
+          if (requiresResolvedOpponentEmoji && opponentEmoji === null) {
+            sourceCleanupSafe = false;
+            blockedReason = "unresolved-opponent-emoji";
+            skippedCount += 1;
+            continue;
+          }
+
+          const projectionFingerprintPayload = {
+            schemaVersion: PROJECTOR_SCHEMA_VERSION,
+            inviteId: normalizedInviteId,
+            ownerProfileId,
+            kind: commonProjection.kind,
+            hostLoginId,
+            guestLoginId,
+            hostProfileId,
+            guestProfileId,
+            status,
+            sortBucket,
+            isPendingAutomatch: commonProjection.isPendingAutomatch,
+            automatchStateHint,
+            automatchCanceledAt: commonProjection.automatchCanceledAt,
+            latestMatchId,
+            ownerRole: ownerContext.ownerRole,
+            ownerLoginId: ownerContext.ownerLoginId,
+            opponentProfileId: ownerContext.opponentProfileId,
+            opponentLoginId: ownerContext.opponentLoginId,
+            opponentName,
+            opponentEmoji,
+          };
+          const nextFingerprint = fingerprintForProjection(
+            projectionFingerprintPayload,
+          );
+          const previousFingerprint =
+            existingData &&
+            typeof existingData.lastEventFingerprint === "string"
+              ? existingData.lastEventFingerprint
+              : null;
+          if (previousFingerprint === nextFingerprint) {
+            skippedCount += 1;
+            continue;
+          }
+
+          const canonicalListSortMs = existingData
+            ? readTimestampMillis(existingData.listSortAt)
+            : null;
+          const sourceListSortMs = readTimestampMillis(
+            sourceProjectionData && sourceProjectionData.listSortAt,
+          );
+          const existingListSortMs = Number.isFinite(canonicalListSortMs)
+            ? canonicalListSortMs
+            : sourceListSortMs;
+          const nextListSortMs = pickListSortMillis({
+            options,
+            status,
+            automatchData: automatchData as { timestamp?: number } | null,
+            nowMs,
+            existingListSortMs,
+          });
+          const existingCreatedAt =
+            readTimestampMillis(existingData && existingData.createdAt) ??
+            readTimestampMillis(
+              sourceProjectionData && sourceProjectionData.createdAt,
+            );
+          const existingEndedAt =
+            readTimestampMillis(existingData && existingData.endedAt) ??
+            readTimestampMillis(
+              sourceProjectionData && sourceProjectionData.endedAt,
+            );
+          const projectionData = {
+            ...commonProjection,
+            ownerProfileId,
+            ownerRole: ownerContext.ownerRole,
+            ownerLoginId: ownerContext.ownerLoginId,
+            opponentProfileId: ownerContext.opponentProfileId,
+            opponentLoginId: ownerContext.opponentLoginId,
+            opponentName,
+            opponentDisplayName: opponentName,
+            opponentEmoji,
+            opponentEmojiId: opponentEmoji,
+            listSortAt: toTimestampMillis(nextListSortMs),
+            createdAt:
+              existingCreatedAt === null
+                ? toTimestampMillis(nowMs)
+                : toTimestampMillis(existingCreatedAt),
+            updatedAt: toTimestampMillis(nowMs),
+            endedAt:
+              status === "ended"
+                ? existingEndedAt === null
+                  ? toTimestampMillis(nowMs)
+                  : toTimestampMillis(existingEndedAt)
+                : null,
+            lastEventFingerprint: nextFingerprint,
+            lastEventType: normalizeString(reason) || null,
+            lastEventReason: normalizeString(reason) || null,
+            lastEventAt: toTimestampMillis(nowMs),
+          };
+          const type =
+            options.preserveListSortAt === true
+              ? existingRecord
+                ? "update"
+                : "create"
+              : "merge";
+          writes.push({
+            type,
+            profileId: ownerProfileId,
+            inviteId: normalizedInviteId,
+            data: projectionData,
+            ...(type === "update"
+              ? { expectedVersion: existingRecord!.version }
+              : {}),
+          });
+          setCount += 1;
+        }
+
+        if (sourceCleanupSafe) {
+          for (const existing of existingRecords) {
+            if (!ownerSet.has(existing.profileId)) {
+              writes.push({
+                type: "delete",
+                profileId: existing.profileId,
+                inviteId: normalizedInviteId,
+              });
+              deleteCount += 1;
+            }
+          }
+        }
+        if (writes.length > 0) {
+          await repository.commitProjectionWrites(writes);
+        }
+        return {
+          ok: true,
+          inviteId: normalizedInviteId,
+          reason,
+          shouldProject,
+          ownerProfileIds,
+          sourceCleanupSafe,
+          ...(blockedReason ? { blockedReason } : {}),
+          writes: setCount,
+          deletes: deleteCount,
+          skipped: skippedCount,
+        };
+      };
+
+    return { recomputeInviteProjection };
+  };
+
+export {
+  READ_RETRY_ATTEMPTS,
+  READ_RETRY_DELAY_MS,
+  buildInviteProjectionOwnerPlan,
+  buildResolvedProfile,
+  createProfileGamesProjectionCore,
+  readExistingProjectionRecords,
+};
