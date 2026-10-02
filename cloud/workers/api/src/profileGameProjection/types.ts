@@ -145,7 +145,7 @@ export type EventRecoveryDependencies = RecoveryDependencies &
 
 export type ProfileLinkRecoveryDependencies = Pick<
   RecoveryDependencies,
-  "now"
+  "now" | "logger"
 > & {
   createProfileLinkJobs?: (env: Env) => ProfileLinkRecoveryJobs;
 };

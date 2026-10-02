@@ -31,6 +31,7 @@ import {
   claimAndEnqueueProjectionTasks,
   collectProjectionRepairs,
 } from "./projectionSweep.ts";
+import { reportRecoveryFailure } from "./recoveryReporting.ts";
 
 const EVENT_TELEGRAM_PROJECTION_OWNER_UID = "event-telegram-projector";
 const EVENT_PROJECTION_SWEEP_LIMIT = 100;
@@ -428,6 +429,7 @@ export async function sweepEventTelegramProjections(
   state: EventStore &
     Pick<EventOutboxReads, "listDueEventTelegramProjectionOutboxes">,
   nowMs: number,
+  logger: Pick<Console, "error"> = console,
 ): Promise<number> {
   const records = await state.listDueEventTelegramProjectionOutboxes(
     nowMs,
@@ -446,6 +448,19 @@ export async function sweepEventTelegramProjections(
     invalidEventIds,
     (eventId) => markInvalidEventProjectionSweepEntry(state, eventId, nowMs),
     "invalid-record-failed",
+    (eventId, error, itemIndex) =>
+      reportRecoveryFailure(
+        logger,
+        {
+          event: "telegram_projection_recovery_record_failed",
+          scope: "telegram",
+          source: "event",
+          phase: "repair",
+          itemIndex,
+          eventId,
+        },
+        error,
+      ),
   );
   const { sentCount, claimFailures } = await claimAndEnqueueProjectionTasks({
     candidates,
@@ -454,6 +469,19 @@ export async function sweepEventTelegramProjections(
     toTask: (candidate) => candidate.task,
     queue,
     fallbackErrorMessage: "event-claim-failed",
+    onClaimFailure: ({ task }, error, itemIndex) =>
+      reportRecoveryFailure(
+        logger,
+        {
+          event: "telegram_projection_recovery_record_failed",
+          scope: "telegram",
+          source: "event",
+          phase: "claim",
+          itemIndex,
+          eventId: task.eventId,
+        },
+        error,
+      ),
   });
   const failures = [...repairFailures, ...claimFailures];
   if (failures.length === 1) {

@@ -1260,8 +1260,11 @@ test("event sweep enqueues in order and aggregates all repair and claim failures
     ...marker,
     requestId: "newer-request",
   });
+  const logs: string[] = [];
   await assert.rejects(
-    sweepEventTelegramProjections(queue, state.client, 200),
+    sweepEventTelegramProjections(queue, state.client, 200, {
+      error: (entry) => logs.push(entry),
+    }),
     (error) => {
       assert.ok(error instanceof AggregateError);
       assert.equal(error.message, "event-projection-sweep-failed");
@@ -1286,6 +1289,38 @@ test("event sweep enqueues in order and aggregates all repair and claim failures
   assert.deepEqual(batches, [
     [task, { ...task, eventId: "event-last", requestId: "request-last" }],
   ]);
+  assert.deepEqual(
+    logs.map((entry) => {
+      const { eventId, phase, itemIndex, error } = JSON.parse(entry);
+      return { eventId, phase, itemIndex, error };
+    }),
+    [
+      {
+        eventId: "repair-failed",
+        phase: "repair",
+        itemIndex: 0,
+        error: { name: "Error", message: "repair-unavailable" },
+      },
+      {
+        eventId: "repair-non-error",
+        phase: "repair",
+        itemIndex: 1,
+        error: { type: "string" },
+      },
+      {
+        eventId: "claim-failed",
+        phase: "claim",
+        itemIndex: 0,
+        error: { name: "Error", message: "claim-unavailable" },
+      },
+      {
+        eventId: "claim-non-error",
+        phase: "claim",
+        itemIndex: 3,
+        error: { type: "string" },
+      },
+    ],
+  );
 });
 
 test("event sweep preserves queue failure precedence over repair and claim failures", async () => {
@@ -1309,9 +1344,19 @@ test("event sweep preserves queue failure precedence over repair and claim failu
     );
     throw queueFailure;
   };
+  const logs: string[] = [];
   await assert.rejects(
-    sweepEventTelegramProjections(queue, state.client, 200),
+    sweepEventTelegramProjections(queue, state.client, 200, {
+      error(entry) {
+        logs.push(entry);
+        throw new Error("logger-failed");
+      },
+    }),
     (error) => error === queueFailure,
+  );
+  assert.deepEqual(
+    logs.map((entry) => JSON.parse(entry).eventId),
+    ["repair-failed", "claim-failed"],
   );
 });
 

@@ -1,4 +1,5 @@
 import { MATERIAL_KEYS, type MiningMaterialName } from "@mons/shared/mining";
+import { readD1FirstRow } from "../d1Reads.ts";
 import {
   type CanonicalProjectionState,
   CanonicalProfileCorruption,
@@ -106,10 +107,11 @@ export async function readCanonicalRatingUpdate(
   db: D1Database,
   operationId: string,
 ): Promise<CanonicalRatingUpdateSnapshot | null> {
-  const row = await db
-    .prepare("SELECT * FROM rating_updates WHERE operation_id = ?")
-    .bind(operationId)
-    .first<RatingRow>();
+  const row = await readD1FirstRow<RatingRow>(
+    db
+      .prepare("SELECT * FROM rating_updates WHERE operation_id = ?")
+      .bind(operationId),
+  );
   return row ? parseCanonicalRatingUpdateRow(row) : null;
 }
 

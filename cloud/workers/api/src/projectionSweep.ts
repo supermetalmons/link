@@ -1,4 +1,8 @@
 import { runRecoveryItems } from "./recoveryRunner.ts";
+import {
+  reportRecoveryItemFailure,
+  type RecoveryFailureReporter,
+} from "./recoveryReporting.ts";
 
 export async function sendQueueTasks<T>(
   queue: Pick<Queue<T>, "sendBatch">,
@@ -18,6 +22,7 @@ export async function collectProjectionRepairs<Entry, Task = never>(
   entries: readonly Entry[],
   repair: (entry: Entry) => Promise<ProjectionRepairResult<Task> | void>,
   fallbackErrorMessage: string,
+  onFailure?: RecoveryFailureReporter<Entry>,
 ): Promise<{
   repairedTasks: Task[];
   removedCount: number;
@@ -26,7 +31,9 @@ export async function collectProjectionRepairs<Entry, Task = never>(
   const repairedTasks: Task[] = [];
   let removedCount = 0;
   const failures: Error[] = [];
+  let index = 0;
   await runRecoveryItems(entries, async (entry) => {
+    const itemIndex = index++;
     try {
       const result = await repair(entry);
       if (result?.kind === "repaired") {
@@ -35,6 +42,7 @@ export async function collectProjectionRepairs<Entry, Task = never>(
         removedCount += 1;
       }
     } catch (error) {
+      reportRecoveryItemFailure(onFailure, entry, error, itemIndex);
       failures.push(
         error instanceof Error ? error : new Error(fallbackErrorMessage),
       );
@@ -47,15 +55,19 @@ export async function collectSuccessfulClaims<T>(
   items: readonly T[],
   claim: (item: T) => Promise<boolean>,
   fallbackErrorMessage: string,
+  onFailure?: RecoveryFailureReporter<T>,
 ): Promise<{ claimed: T[]; failure: Error | null; failures: Error[] }> {
   const claimed: T[] = [];
   const failures: Error[] = [];
+  let index = 0;
   await runRecoveryItems(items, async (item) => {
+    const itemIndex = index++;
     try {
       if (await claim(item)) {
         claimed.push(item);
       }
     } catch (error) {
+      reportRecoveryItemFailure(onFailure, item, error, itemIndex);
       failures.push(
         error instanceof Error ? error : new Error(fallbackErrorMessage),
       );
@@ -71,6 +83,7 @@ export async function claimAndEnqueueProjectionTasks<Candidate, Task>({
   queue,
   initialTasks = [],
   fallbackErrorMessage,
+  onClaimFailure,
 }: {
   candidates: readonly Candidate[];
   claim: (candidate: Candidate) => Promise<boolean>;
@@ -78,6 +91,7 @@ export async function claimAndEnqueueProjectionTasks<Candidate, Task>({
   queue: Pick<Queue<Task>, "sendBatch">;
   initialTasks?: readonly Task[];
   fallbackErrorMessage: string;
+  onClaimFailure?: RecoveryFailureReporter<Candidate>;
 }): Promise<{
   sentCount: number;
   claimFailure: Error | null;
@@ -87,6 +101,7 @@ export async function claimAndEnqueueProjectionTasks<Candidate, Task>({
     candidates,
     claim,
     fallbackErrorMessage,
+    onClaimFailure,
   );
   const tasks = [...initialTasks, ...claims.claimed.map(toTask)];
   await sendQueueTasks(queue, tasks);

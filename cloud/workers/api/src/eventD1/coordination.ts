@@ -20,6 +20,7 @@ import {
   rethrowEventBatchFailure,
 } from "./guards.ts";
 import { readEventLease, readEventSyncThrottle } from "./reads.ts";
+import { readD1FirstRow } from "../d1Reads.ts";
 
 const EVENT_WRITE_ADMISSION_TTL_MS = 5 * 60 * 1_000;
 
@@ -40,11 +41,11 @@ function parseRuntimeControl(
 export async function readEventRuntimeControl(
   db: EventD1Connection,
 ): Promise<EventRuntimeControl> {
-  const row = await db
-    .prepare(
+  const row = await readD1FirstRow<RuntimeControlRow>(
+    db.prepare(
       "SELECT storage_mode, freeze_generation, updated_at_ms FROM event_runtime_control WHERE singleton = 1",
-    )
-    .first<RuntimeControlRow>();
+    ),
+  );
   return parseRuntimeControl(row);
 }
 

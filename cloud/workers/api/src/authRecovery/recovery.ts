@@ -5,6 +5,11 @@ import {
   type AuthRecoveryQuarantineReason,
 } from "../profileCanonical/recovery.ts";
 import { PROFILE_BACKGROUND_SWEEP_LIMIT } from "../profileBackgroundLimits.ts";
+import {
+  logRecoveryEvent,
+  reportRecoveryFailure,
+  type RecoveryFailureContext,
+} from "../recoveryReporting.ts";
 import { enqueuePersistedCanonicalAuthRecovery } from "./dispatch.ts";
 import type { AuthRecoveryDependencies } from "./processing.ts";
 
@@ -28,13 +33,16 @@ async function sweepCanonicalAuthRecoveryJobs(
     threshold,
     PROFILE_BACKGROUND_SWEEP_LIMIT,
   );
-  for (const row of rows) {
+  for (const [itemIndex, row] of rows.entries()) {
     let quarantineReason: AuthRecoveryQuarantineReason | null = null;
+    let profileId: string | undefined;
+    let phase: RecoveryFailureContext["phase"] = "inspect";
     try {
       const inspected = inspectCanonicalAuthRecoverySweepRow(row);
-      const { profileId } = inspected;
+      profileId = inspected.profileId;
       quarantineReason = inspected.quarantineReason;
       if (quarantineReason) {
+        phase = "quarantine";
         const quarantined = await quarantineCanonicalAuthRecoveryJob(
           db,
           row,
@@ -42,25 +50,31 @@ async function sweepCanonicalAuthRecoveryJobs(
           now(),
         );
         if (quarantined) {
-          logger.error(
-            JSON.stringify({
-              event: "auth_recovery_job_quarantined",
-              ...quarantined,
-            }),
-          );
+          logRecoveryEvent(logger, "error", {
+            event: "auth_recovery_job_quarantined",
+            ...quarantined,
+          });
         }
         continue;
       }
+      phase = "enqueue";
       await enqueuePersistedCanonicalAuthRecovery(env, db, profileId, now());
       enqueued++;
     } catch (error) {
       firstFailure ||= error;
-      logger.error(
-        JSON.stringify({
+      reportRecoveryFailure(
+        logger,
+        {
           event: quarantineReason
             ? "auth_recovery_quarantine_failure"
             : "auth_recovery_enqueue_failure",
-        }),
+          scope: "auth",
+          phase,
+          itemIndex,
+          profileId:
+            quarantineReason === "invalid-profile-id" ? undefined : profileId,
+        },
+        error,
       );
     }
   }
@@ -83,7 +97,8 @@ export async function handleAuthRecoverySweep(
   env: Env,
 ): Promise<void> {
   const enqueued = await sweepAuthRecoveryJobs(env);
-  console.info(
-    JSON.stringify({ event: "auth_recovery_sweep_completed", enqueued }),
-  );
+  logRecoveryEvent(console, "info", {
+    event: "auth_recovery_sweep_completed",
+    enqueued,
+  });
 }

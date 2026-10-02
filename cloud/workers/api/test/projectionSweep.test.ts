@@ -168,6 +168,50 @@ test("projection claims use the caller's fallback for non-Error failures", async
   assert.equal(result.failures[1], laterFailure);
 });
 
+test("repair and claim reporters receive original failures and cannot interrupt recovery", async () => {
+  const failure = new Error("unavailable");
+  const reports: unknown[][] = [];
+  const report = (item: number, error: unknown, index: number) => {
+    reports.push([item, error, index]);
+    throw new Error("reporter-unavailable");
+  };
+  const repair = await collectProjectionRepairs(
+    [1, 2, 3],
+    async (item) => {
+      if (item === 1) throw failure;
+      if (item === 2) throw "private";
+      return { kind: "repaired", task: item };
+    },
+    "repair-failed",
+    report,
+  );
+  assert.deepEqual(repair.repairedTasks, [3]);
+  assert.equal(repair.failures[0], failure);
+  assert.equal(repair.failures[1].message, "repair-failed");
+  assert.deepEqual(reports, [
+    [1, failure, 0],
+    [2, "private", 1],
+  ]);
+  reports.length = 0;
+  const claims = await collectSuccessfulClaims(
+    [1, 2, 3],
+    async (item) => {
+      if (item === 1) throw failure;
+      if (item === 2) throw "private";
+      return true;
+    },
+    "claim-failed",
+    report,
+  );
+  assert.deepEqual(claims.claimed, [3]);
+  assert.equal(claims.failure, failure);
+  assert.equal(claims.failures[1].message, "claim-failed");
+  assert.deepEqual(reports, [
+    [1, failure, 0],
+    [2, "private", 1],
+  ]);
+});
+
 test("projection dispatch sends initial tasks and successful claims before returning all failures", async () => {
   const failure = new Error("claim-unavailable");
   const laterFailure = new Error("later-failure");
@@ -241,6 +285,7 @@ test("projection dispatch preserves queue failure precedence and stops later bat
   const claimFailure = new Error("claim-unavailable");
   const queueFailure = new Error("queue-unavailable");
   const batches: number[][] = [];
+  const reports: unknown[][] = [];
   await assert.rejects(
     claimAndEnqueueProjectionTasks({
       candidates: Array.from({ length: 202 }, (_, index) => index),
@@ -259,6 +304,10 @@ test("projection dispatch preserves queue failure precedence and stops later bat
         },
       },
       fallbackErrorMessage: "projection-claim-failed",
+      onClaimFailure(item, error, index) {
+        reports.push([item, error, index]);
+        throw new Error("reporter-unavailable");
+      },
     }),
     (error) => error === queueFailure,
   );
@@ -266,4 +315,5 @@ test("projection dispatch preserves queue failure precedence and stops later bat
     Array.from({ length: 100 }, (_, index) => index + 1),
     Array.from({ length: 100 }, (_, index) => index + 101),
   ]);
+  assert.deepEqual(reports, [[0, claimFailure, 0]]);
 });

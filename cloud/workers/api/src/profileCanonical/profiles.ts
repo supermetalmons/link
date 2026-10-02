@@ -6,6 +6,7 @@ import {
   type LeaderboardReadType,
 } from "@mons/shared/profiles";
 import { buildUsernameLookupKey } from "@mons/shared/usernames";
+import { readD1FirstRow } from "../d1Reads.ts";
 import { canonicalProfileRedirectCte } from "./redirectSql.ts";
 import {
   type CanonicalSortKey,
@@ -385,12 +386,12 @@ export function profileWriteRow(
 export async function readCanonicalControl(
   db: D1Database,
 ): Promise<CanonicalControlSnapshot> {
-  const row = await db
-    .prepare(
+  const row = await readD1FirstRow<CanonicalControlRow>(
+    db.prepare(
       `SELECT state FROM profile_canonical_control
        WHERE singleton = 1`,
-    )
-    .first<CanonicalControlRow>();
+    ),
+  );
   return parseCanonicalControlRow(row);
 }
 

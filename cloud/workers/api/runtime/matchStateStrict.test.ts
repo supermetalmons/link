@@ -89,6 +89,10 @@ describe("strict match runtime", () => {
             prepare: (query: string) => {
               const statement = {
                 bind: () => statement,
+                all: async () => {
+                  const row = await statement.first();
+                  return { success: true, results: row ? [row] : [] };
+                },
                 first: async () =>
                   query.includes("FROM match_state_control")
                     ? {
@@ -340,17 +344,22 @@ describe("strict match runtime", () => {
                 expect(constraint).toBe("first-primary");
                 return {
                   prepare: (query: string) => ({
-                    first: async () => {
+                    all: async () => {
                       reads++;
                       expect(query).toContain("match_state_control");
                       if (changed && control.row === null) {
                         throw new Error("injected-authority-unavailable");
                       }
-                      const row = await db
+                      const result = await db
                         .withSession("first-primary")
                         .prepare(query)
-                        .first();
-                      return changed ? { ...row, ...control.row } : row;
+                        .all();
+                      return {
+                        ...result,
+                        results: result.results.map((row) =>
+                          changed ? { ...row, ...control.row } : row,
+                        ),
+                      };
                     },
                   }),
                 };

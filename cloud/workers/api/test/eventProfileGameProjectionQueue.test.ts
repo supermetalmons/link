@@ -184,7 +184,16 @@ test("the dedicated event queue honors frozen profile and automatch controls", a
         const base = TELEGRAM_TEST_ENV.PROFILE_GAMES_DB.prepare(query);
         if (!query.includes("automatch_runtime_control")) return base;
         const statement: D1PreparedStatement = {
-          all: base.all.bind(base),
+          all: async <T>() => {
+            const result = await base.all<T>();
+            return {
+              ...result,
+              results: result.results.map((row) => ({
+                ...row,
+                state: "frozen",
+              })),
+            };
+          },
           raw: base.raw.bind(base),
           run: base.run.bind(base),
           bind: () => statement,

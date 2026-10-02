@@ -564,21 +564,35 @@ function withMatchControl(
     const statement = base.prepare(query);
     if (!query.includes("match_state_control")) return statement;
     return {
-      all: statement.all.bind(statement),
       bind: statement.bind.bind(statement),
+      first: statement.first.bind(statement),
       raw: statement.raw.bind(statement),
       run: statement.run.bind(statement),
-      first: async <T>() => {
+      all: async <T>() => {
         reads += 1;
         const currentState = typeof state === "function" ? state() : state;
         if (currentState === "unreadable")
           throw new Error("database-unavailable");
         return {
-          backend: "durable",
-          state: currentState,
-          epoch: epoch(),
-          freeze_generation: 0,
-        } as T;
+          success: true,
+          results: [
+            {
+              backend: "durable",
+              state: currentState,
+              epoch: epoch(),
+              freeze_generation: 0,
+            } as T,
+          ],
+          meta: {
+            changed_db: false,
+            changes: 0,
+            duration: 0,
+            last_row_id: 0,
+            rows_read: 1,
+            rows_written: 0,
+            size_after: 0,
+          },
+        };
       },
     };
   };

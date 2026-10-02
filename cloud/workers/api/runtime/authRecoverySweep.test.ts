@@ -615,6 +615,121 @@ describe("canonical auth recovery sweep quarantine", () => {
     expect(await readJob(healthy)).toMatchObject({
       last_enqueued_at_ms: nowMs,
     });
+    const entry = JSON.parse(logger.error.mock.calls[0][0]);
+    expect(entry).toMatchObject({
+      event: "auth_recovery_quarantine_failure",
+      scope: "auth",
+      phase: "quarantine",
+      profileId: invalid,
+      itemIndex: 0,
+    });
+    expect(JSON.stringify(entry.error)).toContain(
+      "simulated-quarantine-failure",
+    );
+    expect(entry).not.toHaveProperty("stack");
+    expect(entry).not.toHaveProperty("sweep_snapshot_token");
+  });
+
+  it("dispatches healthy work when successful quarantine logging throws", async () => {
+    const invalid = await seedJob({
+      loginUidsJson: "[false]",
+      lastEnqueuedAtMs: 0,
+    });
+    const healthy = await seedJob({ lastEnqueuedAtMs: 1 });
+    logger.error.mockImplementationOnce(() => {
+      throw new Error("logger-unavailable");
+    });
+
+    await expect(sweep()).resolves.toBe(1);
+    expect(send).toHaveBeenCalledExactlyOnceWith(
+      { kind: "auth-profile-recovery", profileId: healthy },
+      { delaySeconds: 60 },
+    );
+    expect(await readQuarantine(invalid)).not.toBeNull();
+    expect(JSON.parse(logger.error.mock.calls[0][0])).toMatchObject({
+      event: "auth_recovery_job_quarantined",
+      profileIdHex: Array.from(new TextEncoder().encode(invalid), (byte) =>
+        byte.toString(16).padStart(2, "0"),
+      ).join(""),
+      revisionHex: "31",
+      reason: "invalid-record",
+    });
+  });
+
+  it("reports all transport failures safely and continues dispatch when logging throws", async () => {
+    const first = await seedJob({ lastEnqueuedAtMs: 0 });
+    const second = await seedJob({ lastEnqueuedAtMs: 1 });
+    const healthy = await seedJob({ lastEnqueuedAtMs: 2 });
+    const original = await Promise.all([readJob(first), readJob(second)]);
+    const firstFailure = Object.assign(
+      new Error("queue-unavailable", {
+        cause: new Error("provider-unavailable"),
+      }),
+      { request: { token: "private" } },
+    );
+    send.mockImplementation(async (task) => {
+      if (task.profileId === first) throw firstFailure;
+      if (task.profileId === second) throw { token: "private" };
+    });
+    logger.error.mockImplementationOnce(() => {
+      throw new Error("logger-unavailable");
+    });
+    logger.error.mockImplementationOnce(() => {
+      throw new Error("logger-unavailable");
+    });
+
+    await expect(sweep()).rejects.toBe(firstFailure);
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(await Promise.all([readJob(first), readJob(second)])).toEqual(
+      original,
+    );
+    expect(await readJob(healthy)).toMatchObject({
+      last_enqueued_at_ms: nowMs,
+    });
+    const entries = logger.error.mock.calls.map(([entry]) => JSON.parse(entry));
+    expect(entries).toMatchObject([
+      {
+        profileId: first,
+        itemIndex: 0,
+        phase: "enqueue",
+        error: {
+          message: "queue-unavailable",
+          cause: { message: "provider-unavailable" },
+        },
+      },
+      {
+        profileId: second,
+        itemIndex: 1,
+        phase: "enqueue",
+        error: { type: "object" },
+      },
+    ]);
+    expect(JSON.stringify(entries)).not.toContain("private");
+    expect(JSON.stringify(entries)).not.toContain("stack");
+    expect(JSON.stringify(entries)).not.toContain("login_uids_json");
+  });
+
+  it("omits malformed profile identity from quarantine failure logs", async () => {
+    const invalid = await seedJob({
+      profileId: " profile#private ",
+      lastEnqueuedAtMs: 0,
+    });
+    const healthy = await seedJob({ lastEnqueuedAtMs: 1 });
+    await testEnv.PROFILE_DB.prepare(
+      `CREATE TRIGGER reject_auth_recovery_quarantine
+       BEFORE INSERT ON profile_auth_recovery_quarantine
+       BEGIN SELECT RAISE(ABORT, 'simulated-quarantine-failure'); END`,
+    ).run();
+
+    await expect(sweep()).rejects.toThrow("simulated-quarantine-failure");
+    expect(send).toHaveBeenCalledExactlyOnceWith(
+      { kind: "auth-profile-recovery", profileId: healthy },
+      { delaySeconds: 60 },
+    );
+    const entry = JSON.parse(logger.error.mock.calls[0][0]);
+    expect(entry).toMatchObject({ itemIndex: 0, phase: "quarantine" });
+    expect(entry).not.toHaveProperty("profileId");
+    expect(JSON.stringify(entry)).not.toContain(invalid);
   });
 
   it("does not quarantine transport failures or advance their dispatch timestamp", async () => {

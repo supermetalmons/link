@@ -20,6 +20,10 @@ import { createProfileGameProjectionLockStore } from "../profileGameProjectionLo
 import { createProfileLinkCatchupStore } from "../profileLinkCatchupD1.ts";
 import { runRecoveryItems } from "../recoveryRunner.ts";
 import {
+  logRecoveryEvent,
+  reportRecoveryFailure,
+} from "../recoveryReporting.ts";
+import {
   claimAndEnqueueProjectionTasks,
   collectProjectionRepairs,
   sendQueueTasks,
@@ -320,9 +324,12 @@ export async function sweepRatingProfileGameProjections(
   );
   const tasks: ProfileGameProjectionTask[] = [];
   let firstFailure: unknown;
+  let index = 0;
   await runRecoveryItems(
     records,
     async (record) => {
+      const itemIndex = index++;
+      let phase: "claim" | "quarantine" = "claim";
       try {
         const claimed = await rating.claimRatingProfileGameProjection(
           record.operationId,
@@ -338,6 +345,7 @@ export async function sweepRatingProfileGameProjections(
           !isSafeRecordKey(record.matchId) ||
           record.operationId !== `${record.inviteId}__${record.matchId}`
         ) {
+          phase = "quarantine";
           await rating.markRatingProfileGameProjection(
             record.operationId,
             "dead",
@@ -352,11 +360,17 @@ export async function sweepRatingProfileGameProjections(
         });
       } catch (error) {
         firstFailure ||= error;
-        logger.error(
-          JSON.stringify({
+        reportRecoveryFailure(
+          logger,
+          {
             event: "profile_game_projection_recovery_record_failed",
+            scope: "profile-game",
+            source: "rating",
+            phase,
+            itemIndex,
             operationId: record.operationId,
-          }),
+          },
+          error,
         );
       }
     },
@@ -411,15 +425,26 @@ export async function sweepAutomatchProfileGameProjections(
     (inviteId) =>
       repairInvalidAutomatchSweepEntry(state, inviteId, nowMs, createRequestId),
     "profile-game-projection-invalid-record-failed",
+    (inviteId, error, itemIndex) =>
+      reportRecoveryFailure(
+        logger,
+        {
+          event: "profile_game_projection_recovery_record_failed",
+          scope: "profile-game",
+          source: "automatch",
+          phase: "repair",
+          itemIndex,
+          inviteId,
+        },
+        error,
+      ),
   );
   if (repairedTasks.length > 0 || invalidRemoved > 0) {
-    logger.error(
-      JSON.stringify({
-        event: "profile_game_projection_invalid_outboxes_recovered",
-        repaired: repairedTasks.length,
-        removed: invalidRemoved,
-      }),
-    );
+    logRecoveryEvent(logger, "error", {
+      event: "profile_game_projection_invalid_outboxes_recovered",
+      repaired: repairedTasks.length,
+      removed: invalidRemoved,
+    });
   }
   const candidates = entries.flatMap((entry) =>
     entry.kind === "candidate" ? [entry.value] : [],
@@ -431,6 +456,19 @@ export async function sweepAutomatchProfileGameProjections(
     queue: env.PROFILE_GAME_PROJECTION_QUEUE,
     initialTasks: repairedTasks,
     fallbackErrorMessage: "profile-game-projection-claim-failed",
+    onClaimFailure: ({ task }, error, itemIndex) =>
+      reportRecoveryFailure(
+        logger,
+        {
+          event: "profile_game_projection_recovery_record_failed",
+          scope: "profile-game",
+          source: "automatch",
+          phase: "claim",
+          itemIndex,
+          inviteId: task.inviteId,
+        },
+        error,
+      ),
   });
   if (claimFailure) {
     throw claimFailure;
@@ -478,15 +516,26 @@ export async function sweepEventProfileGameProjections(
     (eventId) =>
       repairInvalidEventSweepEntry(state, eventId, nowMs, createRequestId),
     "event-profile-game-invalid-record-failed",
+    (eventId, error, itemIndex) =>
+      reportRecoveryFailure(
+        logger,
+        {
+          event: "profile_game_projection_recovery_record_failed",
+          scope: "profile-game",
+          source: "event",
+          phase: "repair",
+          itemIndex,
+          eventId,
+        },
+        error,
+      ),
   );
   if (repairedTasks.length > 0 || invalidRemoved > 0) {
-    logger.error(
-      JSON.stringify({
-        event: "event_profile_game_projection_invalid_outboxes_recovered",
-        repaired: repairedTasks.length,
-        removed: invalidRemoved,
-      }),
-    );
+    logRecoveryEvent(logger, "error", {
+      event: "event_profile_game_projection_invalid_outboxes_recovered",
+      repaired: repairedTasks.length,
+      removed: invalidRemoved,
+    });
   }
   const candidateByEventId = new Map<string, EventSweepCandidate>();
   for (const entry of entries) {
@@ -501,6 +550,19 @@ export async function sweepEventProfileGameProjections(
     queue: env.EVENT_PROFILE_GAME_PROJECTION_QUEUE,
     initialTasks: repairedTasks,
     fallbackErrorMessage: "profile-game-projection-claim-failed",
+    onClaimFailure: ({ task }, error, itemIndex) =>
+      reportRecoveryFailure(
+        logger,
+        {
+          event: "profile_game_projection_recovery_record_failed",
+          scope: "profile-game",
+          source: "event",
+          phase: "claim",
+          itemIndex,
+          eventId: task.eventId,
+        },
+        error,
+      ),
   });
   if (claimFailure) {
     failures.push(claimFailure);
@@ -522,6 +584,7 @@ export async function sweepProfileLinkProfileGameProjections(
   dependencies: ProfileLinkRecoveryDependencies = {},
 ): Promise<number> {
   const nowMs = (dependencies.now || Date.now)();
+  const logger = dependencies.logger || console;
   const jobs = (
     dependencies.createProfileLinkJobs ||
     ((workerEnv: Env) => createProfileLinkCatchupStore(workerEnv.PROFILE_DB))
@@ -546,6 +609,19 @@ export async function sweepProfileLinkProfileGameProjections(
     }),
     queue: env.PROFILE_GAME_PROJECTION_QUEUE,
     fallbackErrorMessage: "profile-game-projection-claim-failed",
+    onClaimFailure: (job, error, itemIndex) =>
+      reportRecoveryFailure(
+        logger,
+        {
+          event: "profile_game_projection_recovery_record_failed",
+          scope: "profile-game",
+          source: "profile-link",
+          phase: "claim",
+          itemIndex,
+          loginUid: job.loginUid,
+        },
+        error,
+      ),
   });
   if (claimFailure) throw claimFailure;
   return sentCount;
@@ -570,13 +646,15 @@ export async function sweepProfileGameProjections(
     ],
   );
   if (cleanup.status === "rejected") {
-    (dependencies.logger || console).error(
-      JSON.stringify({
+    reportRecoveryFailure(
+      dependencies.logger || console,
+      {
         event: "profile_game_projection_lock_cleanup_failed",
+        scope: "profile-game",
+        phase: "cleanup",
         lockScope: "cleanup",
-        code:
-          cleanup.reason instanceof Error ? cleanup.reason.message : "unknown",
-      }),
+      },
+      cleanup.reason,
     );
   }
   const failures = [automatch, event, profile, rating, cleanup].flatMap(
@@ -604,18 +682,13 @@ export async function handleProfileGameProjectionSweep(
   env: Env,
 ): Promise<void> {
   const enqueued = await sweepProfileGameProjections(env);
-  console.info(
-    JSON.stringify({
-      event: "profile_game_projection_sweep_completed",
-      enqueued:
-        enqueued.automatch +
-        enqueued.event +
-        enqueued.profile +
-        enqueued.rating,
-      automatchEnqueued: enqueued.automatch,
-      eventEnqueued: enqueued.event,
-      profileEnqueued: enqueued.profile,
-      ratingEnqueued: enqueued.rating,
-    }),
-  );
+  logRecoveryEvent(console, "info", {
+    event: "profile_game_projection_sweep_completed",
+    enqueued:
+      enqueued.automatch + enqueued.event + enqueued.profile + enqueued.rating,
+    automatchEnqueued: enqueued.automatch,
+    eventEnqueued: enqueued.event,
+    profileEnqueued: enqueued.profile,
+    ratingEnqueued: enqueued.rating,
+  });
 }

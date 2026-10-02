@@ -187,7 +187,16 @@ describe("Worker entrypoint", () => {
                 if (state === "unreadable") throw failure;
                 const statement = base.prepare(query);
                 const frozenStatement: D1PreparedStatement = {
-                  all: statement.all.bind(statement),
+                  all: async <T>() => {
+                    const result =
+                      await statement.all<Record<string, unknown>>();
+                    return {
+                      ...result,
+                      results: result.results.map(
+                        (row) => ({ ...row, state }) as T,
+                      ),
+                    };
+                  },
                   raw: statement.raw.bind(statement),
                   run: statement.run.bind(statement),
                   bind: () => frozenStatement,

@@ -2121,6 +2121,93 @@ test("scheduled recovery bounds concurrent claims", async () => {
   assert.equal(maximum, 10);
 });
 
+test("rating recovery identifies concurrent failures and dispatches healthy work when logging fails", async () => {
+  const first = Promise.withResolvers<boolean>();
+  const second = Promise.withResolvers<boolean>();
+  const started = Promise.withResolvers<void>();
+  const reportedSecond = Promise.withResolvers<void>();
+  const firstFailure = new Error("first-failed-last");
+  const secondFailure = new Error("second-failed-first");
+  const rating = ratingRepository(null, { marks: [], patches: [] });
+  const records = ["first", "second", "healthy"].map((id) => ({
+    inviteId: id,
+    matchId: id,
+    operationId: `${id}__${id}`,
+    revision: 1,
+    version: 1,
+  }));
+  rating.listDueRatingProfileGameProjections = async () => records;
+  rating.claimRatingProfileGameProjection = async (id) => {
+    if (id === records[0].operationId) return first.promise;
+    if (id === records[1].operationId) return second.promise;
+    started.resolve();
+    return true;
+  };
+  const logs: string[] = [];
+  const batches: unknown[][] = [];
+  const sweep = sweepRatingProfileGameProjections(
+    {
+      ...TELEGRAM_TEST_ENV,
+      PROFILE_GAME_PROJECTION_QUEUE: {
+        ...TELEGRAM_TEST_ENV.PROFILE_GAME_PROJECTION_QUEUE,
+        async sendBatch(messages) {
+          batches.push(Array.from(messages, ({ body }) => body));
+          return {
+            metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+          };
+        },
+      },
+    },
+    {
+      createRating: () => rating,
+      now: () => 600_000,
+      logger: {
+        error(message) {
+          logs.push(message);
+          if (JSON.parse(message).operationId === records[1].operationId)
+            reportedSecond.resolve();
+          throw new Error("logger-failed");
+        },
+        info() {},
+      },
+    },
+  );
+  const rejected = assert.rejects(sweep, (error) => error === secondFailure);
+  await started.promise;
+  second.reject(secondFailure);
+  await reportedSecond.promise;
+  first.reject(firstFailure);
+  await rejected;
+  assert.deepEqual(
+    logs.map((entry) => {
+      const { operationId, itemIndex, phase, error } = JSON.parse(entry);
+      return { operationId, itemIndex, phase, message: error.message };
+    }),
+    [
+      {
+        operationId: records[1].operationId,
+        itemIndex: 1,
+        phase: "claim",
+        message: secondFailure.message,
+      },
+      {
+        operationId: records[0].operationId,
+        itemIndex: 0,
+        phase: "claim",
+        message: firstFailure.message,
+      },
+    ],
+  );
+  assert.deepEqual(batches, [
+    [
+      {
+        kind: "rating-profile-game-projection",
+        operationId: records[2].operationId,
+      },
+    ],
+  ]);
+});
+
 test("event recovery helpers accept only their required outbox capabilities", async () => {
   const state: Pick<
     EventStore,
@@ -2562,6 +2649,7 @@ for (const kind of ["automatch", "event"] as const) {
       { failClaim: true, failSend: true },
     ]) {
       const batches: unknown[][] = [];
+      const logs: string[] = [];
       const validRecord =
         kind === "automatch" ? automatchOutbox() : eventOutbox();
       const values = new Map<string, unknown>([
@@ -2616,7 +2704,13 @@ for (const kind of ["automatch", "event"] as const) {
           {
             createStateRepository: () => state,
             createRequestId: () => "repair-request",
-            logger: silentLogger,
+            logger: {
+              error(message) {
+                logs.push(message);
+                throw new Error("logger-failed");
+              },
+              info() {},
+            },
             now: () => 600_000,
           },
         ),
@@ -2643,6 +2737,42 @@ for (const kind of ["automatch", "event"] as const) {
         "broken-claim",
         "valid",
       ]);
+      assert.deepEqual(
+        logs.map((entry) => {
+          const { inviteId, eventId, phase, itemIndex, error } =
+            JSON.parse(entry);
+          return {
+            id: inviteId ?? eventId,
+            phase,
+            itemIndex,
+            message: error.message,
+          };
+        }),
+        [
+          {
+            id: "broken-repair",
+            phase: "repair",
+            itemIndex: 0,
+            message: repairFailure.message,
+          },
+          {
+            id: "later-broken-repair",
+            phase: "repair",
+            itemIndex: 1,
+            message: laterRepairFailure.message,
+          },
+          ...(failClaim
+            ? [
+                {
+                  id: "broken-claim",
+                  phase: "claim",
+                  itemIndex: 0,
+                  message: claimFailure.message,
+                },
+              ]
+            : []),
+        ],
+      );
       assert.deepEqual(batches, [
         [...(failClaim ? [] : ["broken-claim"]), "valid"].map((id) =>
           kind === "automatch"
@@ -2659,6 +2789,98 @@ for (const kind of ["automatch", "event"] as const) {
         ),
       ]);
     }
+  });
+
+  test(`${kind} recovery dispatches repaired and healthy work when the repair notice logger throws`, async () => {
+    const validRecord =
+      kind === "automatch" ? automatchOutbox() : eventOutbox();
+    const values = new Map<string, unknown>([
+      ["broken", "invalid"],
+      ["valid", validRecord],
+    ]);
+    const state = attachProjectionTestPorts({
+      getStatePath: async (_path: string, query?: Record<string, unknown>) =>
+        query?.startAt === "" ? {} : Object.fromEntries(values),
+      listDueEventProfileGameProjectionOutboxes: async () =>
+        [...values].map(([eventId, record]) => ({ eventId, record })),
+      transactStatePath: async (
+        path: string,
+        updater: (current: unknown) => unknown,
+      ) => {
+        const id = path.split("/").at(-1) || "";
+        const result = applyStateTransaction(values.get(id), updater);
+        if (result.committed) values.set(id, result.value);
+        return result;
+      },
+    });
+    const batches: ProfileGameProjectionTask[][] = [];
+    const logs: string[] = [];
+    const queue = {
+      ...TELEGRAM_TEST_ENV.PROFILE_GAME_PROJECTION_QUEUE,
+      async sendBatch(
+        messages: Iterable<MessageSendRequest<ProfileGameProjectionTask>>,
+      ) {
+        batches.push(Array.from(messages, ({ body }) => body));
+        return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
+      },
+    };
+    const sweep =
+      kind === "automatch"
+        ? sweepAutomatchProfileGameProjections
+        : sweepEventProfileGameProjections;
+    assert.equal(
+      await sweep(
+        {
+          ...TELEGRAM_TEST_ENV,
+          PROFILE_GAME_PROJECTION_QUEUE: queue,
+          EVENT_PROFILE_GAME_PROJECTION_QUEUE: queue,
+        },
+        {
+          createStateRepository: () => state,
+          createRequestId: () => "repair-request",
+          now: () => 600_000,
+          logger: {
+            error(message) {
+              logs.push(message);
+              throw new Error("logger-failed");
+            },
+            info() {},
+          },
+        },
+      ),
+      2,
+    );
+    assert.equal(logs.length, 1);
+    assert.equal(JSON.parse(logs[0]).repaired, 1);
+    assert.deepEqual(batches, [
+      [
+        ...(kind === "automatch"
+          ? [
+              {
+                kind: "automatch-profile-game-projection",
+                inviteId: "broken",
+                requestId: "repair-request",
+              },
+              {
+                kind: "automatch-profile-game-projection",
+                inviteId: "valid",
+                requestId: validRecord.requestId,
+              },
+            ]
+          : [
+              {
+                kind: "event-profile-game-projection",
+                eventId: "broken",
+                requestId: "repair-request",
+              },
+              {
+                kind: "event-profile-game-projection",
+                eventId: "valid",
+                requestId: validRecord.requestId,
+              },
+            ]),
+      ],
+    ]);
   });
 }
 

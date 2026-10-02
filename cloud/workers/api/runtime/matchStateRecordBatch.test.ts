@@ -101,6 +101,11 @@ function observedSource() {
                     d1Calls.push({ session: id, queries: [query] });
                     return target.first();
                   };
+                if (property === "all")
+                  return () => {
+                    d1Calls.push({ session: id, queries: [query] });
+                    return target.all();
+                  };
                 const value = Reflect.get(target, property, target);
                 return typeof value === "function" ? value.bind(target) : value;
               },

@@ -30,12 +30,15 @@ import type {
   EventPrizeAssignmentRecord,
   ProfileEventPrizePageQuery,
 } from "../../../../runtime/eventReads.js";
+import { readD1FirstRow } from "../d1Reads.ts";
 
 export async function readEventRecord(
   db: EventD1Connection,
   eventId: string,
 ): Promise<DecodedEventRow | null> {
-  const row = await prepareEventRecordRead(db, eventId).first<EventRow>();
+  const row = await readD1FirstRow<EventRow>(
+    prepareEventRecordRead(db, eventId),
+  );
   return row ? decodeEventRow(row) : null;
 }
 

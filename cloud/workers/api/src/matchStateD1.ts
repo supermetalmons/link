@@ -1,5 +1,6 @@
 import { RETIRED_STATE_BACKEND } from "./stateCompatibility.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
+import { readD1FirstRow } from "./d1Reads.ts";
 
 export type MatchStateControl = {
   backend: typeof RETIRED_STATE_BACKEND | "durable";
@@ -66,10 +67,11 @@ export async function readMatchStateControl(
 ): Promise<MatchStateControl> {
   let row: ControlRow | null;
   try {
-    row = await db
-      .withSession("first-primary")
-      .prepare("SELECT * FROM match_state_control WHERE singleton = 1")
-      .first<ControlRow>();
+    row = await readD1FirstRow<ControlRow>(
+      db
+        .withSession("first-primary")
+        .prepare("SELECT * FROM match_state_control WHERE singleton = 1"),
+    );
   } catch {
     throw new MatchStateD1Failure("control-unavailable");
   }

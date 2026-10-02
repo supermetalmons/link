@@ -9,6 +9,7 @@ import {
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 import { measureAutomatchPhase } from "../src/automatchTelemetry.ts";
 import { runScheduledTasks } from "../src/scheduledTasks.ts";
+import { readD1FirstRow } from "../src/d1Reads.ts";
 
 const query = "SELECT private_query FROM private_table WHERE private_key = ?";
 const bindingValue = "private-binding-value";
@@ -185,6 +186,119 @@ test("first, raw, and exec retain their return formats and report missing metada
       { method: "exec", args: [query] },
     ],
   );
+});
+
+test("single-row reads retain metadata, bindings, sessions, and phase attribution", async () => {
+  const empty = {
+    ...result,
+    results: [],
+    meta: { ...result.meta, rows_read: 0 },
+  };
+  let index = 0;
+  const fixture = databaseFixture(() => (index++ === 0 ? result : empty));
+  let summary: D1TelemetrySummary | undefined;
+  await collectD1Telemetry(
+    { ...TELEGRAM_TEST_ENV, PROFILE_DB: fixture.db },
+    async (env) => {
+      assert.equal(
+        await readD1FirstRow(env.PROFILE_DB.prepare(query).bind(bindingValue)),
+        result.results[0],
+      );
+      await runScheduledTasks(
+        [
+          {
+            name: "profileRead",
+            run: () =>
+              measureD1Phase("lookup", async () => {
+                const session = env.PROFILE_DB.withSession("first-primary");
+                assert.equal(
+                  await readD1FirstRow(session.prepare(query).bind(2)),
+                  null,
+                );
+              }),
+          },
+        ],
+        { scheduledTime: 0 },
+      );
+    },
+    {
+      onComplete: (value) => {
+        summary = value;
+      },
+    },
+  );
+  assert.ok(summary);
+  assert.equal(summary.d1.calls, 2);
+  assert.equal(summary.d1.failedCalls, 0);
+  assert.equal(summary.d1.metadataResults, 2);
+  assert.equal(summary.d1.callsWithoutMetadata, 0);
+  assert.equal(summary.d1.rowsRead, 3);
+  assert.equal(summary.d1.sqlDurationMs, 4);
+  assert.deepEqual(summary.databases.PROFILE_DB, summary.d1);
+  for (const phase of ["other", "lookup", "profileRead"]) {
+    assert.equal(summary.phases[phase].d1.calls, 1);
+    assert.equal(summary.phases[phase].d1.metadataResults, 1);
+    assert.equal(summary.phases[phase].d1.callsWithoutMetadata, 0);
+  }
+  assert.deepEqual(fixture.calls, [
+    { method: "all", args: [] },
+    { method: "withSession", args: ["first-primary"] },
+    { method: "all", args: [] },
+  ]);
+  assert.deepEqual(fixture.prepared, [
+    { query, values: [bindingValue] },
+    { query, values: [2] },
+  ]);
+  for (const secret of [query, bindingValue, "private-result-value"])
+    assert.equal(JSON.stringify(summary).includes(secret), false);
+});
+
+test("single-row read failures are counted once and preserve the original error", async () => {
+  const failure = new Error("private-row-read-failure");
+  const fixture = databaseFixture(() => {
+    throw failure;
+  });
+  let summary: D1TelemetrySummary | undefined;
+  await assert.rejects(
+    collectD1Telemetry(
+      { ...TELEGRAM_TEST_ENV, PROFILE_DB: fixture.db },
+      (env) => readD1FirstRow(env.PROFILE_DB.prepare(query)),
+      {
+        onComplete: (value) => {
+          summary = value;
+        },
+      },
+    ),
+    (error) => error === failure,
+  );
+  assert.ok(summary);
+  assert.equal(summary.d1.calls, 1);
+  assert.equal(summary.d1.failedCalls, 1);
+  assert.equal(summary.d1.metadataResults, 0);
+  assert.equal(summary.d1.callsWithoutMetadata, 1);
+  assert.deepEqual(fixture.calls, [{ method: "all", args: [] }]);
+});
+
+test("unsampled single-row reads use the original binding and make one database call", async () => {
+  const fixture = databaseFixture();
+  const env = { ...TELEGRAM_TEST_ENV, PROFILE_DB: fixture.db };
+  const logs: Record<string, unknown>[] = [];
+  const row = await withD1OperationTelemetry(
+    "ratings.update",
+    env,
+    (original) => {
+      assert.equal(original, env);
+      assert.equal(original.PROFILE_DB, fixture.db);
+      return readD1FirstRow(
+        original.PROFILE_DB.prepare(query).bind(bindingValue),
+      );
+    },
+    { sample: () => false, log: (record) => logs.push(record) },
+  );
+  assert.equal(row, result.results[0]);
+  assert.deepEqual(fixture.calls, [{ method: "all", args: [] }]);
+  assert.deepEqual(fixture.prepared, [{ query, values: [bindingValue] }]);
+  assert.deepEqual(logs, []);
 });
 
 test("uses duration fallback and rejects invalid metadata without failing the query", async () => {

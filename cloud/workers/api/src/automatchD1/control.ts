@@ -1,4 +1,5 @@
 import { RETIRED_STATE_BACKEND } from "../stateCompatibility.ts";
+import { readD1FirstRow } from "../d1Reads.ts";
 import { timestamp } from "./codec.ts";
 import {
   AutomatchD1Failure,
@@ -58,9 +59,9 @@ export function parseAutomatchRuntimeControlRow(
 export async function readAutomatchRuntimeControl(
   db: D1Database,
 ): Promise<AutomatchRuntimeControl> {
-  const row = await prepareAutomatchRuntimeControlRead(
-    db.withSession("first-primary"),
-  ).first<ControlRow>();
+  const row = await readD1FirstRow<ControlRow>(
+    prepareAutomatchRuntimeControlRead(db.withSession("first-primary")),
+  );
   return parseAutomatchRuntimeControlRow(row);
 }
 

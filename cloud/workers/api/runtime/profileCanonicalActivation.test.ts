@@ -12,7 +12,7 @@ const testEnv = env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] };
 
 function controlEnvironment(value: unknown): Env {
   const statement = {
-    first: async () => value,
+    all: async () => ({ results: value === null ? [] : [value] }),
   } as unknown as D1PreparedStatement;
   const database = {
     prepare: () => statement,

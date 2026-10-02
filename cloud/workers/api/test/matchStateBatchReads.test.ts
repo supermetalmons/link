@@ -56,9 +56,23 @@ function fixture({
         assert.equal(constraint, "first-primary");
         return {
           prepare: () => ({
-            first: async () => ({
-              ...(await control(++stats.controls)),
-              freeze_generation: 0,
+            all: async () => ({
+              success: true,
+              results: [
+                {
+                  ...(await control(++stats.controls)),
+                  freeze_generation: 0,
+                },
+              ],
+              meta: {
+                changed_db: false,
+                changes: 0,
+                duration: 0,
+                last_row_id: 0,
+                rows_read: 1,
+                rows_written: 0,
+                size_after: 0,
+              },
             }),
           }),
         };

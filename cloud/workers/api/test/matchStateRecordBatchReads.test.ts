@@ -120,14 +120,21 @@ function fixture({
                 statement.values = values;
                 return statement;
               },
+              async all() {
+                assert.ok(sql.includes("FROM match_state_control"));
+                stats.d1Calls.push({ session, queries: [sql] });
+                return {
+                  success: true,
+                  results: [
+                    {
+                      ...(await control(++stats.controls)),
+                      freeze_generation: 0,
+                    },
+                  ],
+                };
+              },
               async first() {
                 stats.d1Calls.push({ session, queries: [sql] });
-                if (sql.includes("FROM match_state_control")) {
-                  return {
-                    ...(await control(++stats.controls)),
-                    freeze_generation: 0,
-                  };
-                }
                 const input = {
                   playerId: statement.values[0],
                   matchId: statement.values[1],

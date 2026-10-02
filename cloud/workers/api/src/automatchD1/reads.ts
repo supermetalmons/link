@@ -6,6 +6,7 @@ import {
   type MutationRecordRow,
 } from "./types.ts";
 import { decodeSnapshot, requireKey, requireRoot } from "./codec.ts";
+import { readD1FirstRow } from "../d1Reads.ts";
 
 function validateQueryLimit(limit: number): void {
   if (!Number.isSafeInteger(limit) || limit < 1) {
@@ -41,13 +42,14 @@ export function createAutomatchReads(db: D1Database) {
     const { table, valueColumn, revisionColumn } = requireRoot(root);
     requireKey(key);
     signal?.throwIfAborted();
-    const row = await db
-      .withSession("first-primary")
-      .prepare(
-        `SELECT record_key, ${valueColumn} AS payload_json, ${revisionColumn} AS revision FROM ${table} WHERE record_key = ?`,
-      )
-      .bind(key)
-      .first<RecordRow>();
+    const row = await readD1FirstRow<RecordRow>(
+      db
+        .withSession("first-primary")
+        .prepare(
+          `SELECT record_key, ${valueColumn} AS payload_json, ${revisionColumn} AS revision FROM ${table} WHERE record_key = ?`,
+        )
+        .bind(key),
+    );
     signal?.throwIfAborted();
     return row
       ? decodeSnapshot(root, row)

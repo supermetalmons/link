@@ -100,8 +100,24 @@ const profileGamesDb = {
 } satisfies D1Database;
 
 function matchStateStatement(query: string): D1PreparedStatement {
+  const row = {
+    backend: "durable",
+    state: "active",
+    epoch: 2,
+    freeze_generation: 0,
+    candidate_version_id: null,
+    import_id: null,
+    source_digest: null,
+    source_record_count: null,
+    source_claim_count: null,
+    source_bundle_count: null,
+    fence_digest: null,
+    verified_digest: null,
+    verified_at_ms: null,
+    activated_at_ms: null,
+  };
   return {
-    all: d1Statement.all,
+    all: async <T>() => ({ success: true, results: [row as T], meta: d1Meta }),
     raw: d1Statement.raw,
     bind: () => matchStateStatement(query),
     run: async () => ({
@@ -109,23 +125,7 @@ function matchStateStatement(query: string): D1PreparedStatement {
       results: [],
       meta: { ...d1Meta, changes: 1 },
     }),
-    first: async <T>() =>
-      ({
-        backend: "durable",
-        state: "active",
-        epoch: 2,
-        freeze_generation: 0,
-        candidate_version_id: null,
-        import_id: null,
-        source_digest: null,
-        source_record_count: null,
-        source_claim_count: null,
-        source_bundle_count: null,
-        fence_digest: null,
-        verified_digest: null,
-        verified_at_ms: null,
-        activated_at_ms: null,
-      }) as T,
+    first: async <T>() => row as T,
   };
 }
 
@@ -179,43 +179,46 @@ function automatchStatement(
   query: string,
   bindings: unknown[] = [],
 ): D1PreparedStatement {
+  const row = query.includes("INSERT INTO automatch_write_admissions")
+    ? {
+        admission_id: bindings[0],
+        kind: bindings[1],
+        created_at_ms: bindings[2],
+        backend: "d1",
+        epoch: 1,
+        freeze_generation: 0,
+      }
+    : {
+        backend: "d1",
+        state: "active",
+        epoch: 1,
+        freeze_generation: 0,
+        staged_at_ms: 1,
+        candidate_version_id: "00000000-0000-4000-8000-000000000001",
+        imported_at_ms: 2,
+        source_digest: "a".repeat(64),
+        import_digest: "a".repeat(64),
+        activated_at_ms: 3,
+        metadata_json: JSON.stringify({
+          verifiedAtMs: 2,
+          activationCandidateVersionId: "00000000-0000-4000-8000-000000000001",
+        }),
+      };
   return {
-    all: d1Statement.all,
+    all: async <T>() => ({ success: true, results: [row as T], meta: d1Meta }),
     raw: d1Statement.raw,
     run: d1Statement.run,
     bind: (...values) => automatchStatement(query, values),
-    first: async <T>() =>
-      (query.includes("INSERT INTO automatch_write_admissions")
-        ? {
-            admission_id: bindings[0],
-            kind: bindings[1],
-            created_at_ms: bindings[2],
-            backend: "d1",
-            epoch: 1,
-            freeze_generation: 0,
-          }
-        : {
-            backend: "d1",
-            state: "active",
-            epoch: 1,
-            freeze_generation: 0,
-            staged_at_ms: 1,
-            candidate_version_id: "00000000-0000-4000-8000-000000000001",
-            imported_at_ms: 2,
-            source_digest: "a".repeat(64),
-            import_digest: "a".repeat(64),
-            activated_at_ms: 3,
-            metadata_json: JSON.stringify({
-              verifiedAtMs: 2,
-              activationCandidateVersionId:
-                "00000000-0000-4000-8000-000000000001",
-            }),
-          }) as T,
+    first: async <T>() => row as T,
   };
 }
 
 const canonicalControlStatement: D1PreparedStatement = {
-  all: d1Statement.all,
+  all: async <T>() => ({
+    success: true,
+    results: [{ state: "active" } as T],
+    meta: d1Meta,
+  }),
   bind: () => canonicalControlStatement,
   first: async <T>() => ({ state: "active" }) as T,
   raw: d1Statement.raw,
@@ -392,7 +395,11 @@ export function withProfileControl(
 ): Env {
   let statement: D1PreparedStatement;
   statement = {
-    all: d1Statement.all,
+    all: async <T>() => ({
+      success: true,
+      results: [{ state } as T],
+      meta: d1Meta,
+    }),
     bind: () => statement,
     first: async <T>() => ({ state }) as T,
     raw: d1Statement.raw,

@@ -12,6 +12,10 @@ import { parseAutomatchTelegramProjectionOutbox as parseOutbox } from "../telegr
 import { readTelegramStorageMode } from "../telegramD1.ts";
 import { sweepEventTelegramProjections } from "../eventTelegramProjection.ts";
 import {
+  logRecoveryEvent,
+  reportRecoveryFailure,
+} from "../recoveryReporting.ts";
+import {
   claimAndEnqueueProjectionTasks,
   collectProjectionRepairs,
   sendQueueTasks,
@@ -140,6 +144,19 @@ export async function sweepAutomatchProjections(
       invalidInviteIds,
       (inviteId) => markInvalidAutomatchSweepEntry(state, inviteId, nowMs),
       "projection-invalid-record-failed",
+      (inviteId, error, itemIndex) =>
+        reportRecoveryFailure(
+          logger,
+          {
+            event: "telegram_projection_recovery_record_failed",
+            scope: "telegram",
+            source: "automatch",
+            phase: "repair",
+            itemIndex,
+            inviteId,
+          },
+          error,
+        ),
     );
     const { sentCount, claimFailure } = await claimAndEnqueueProjectionTasks({
       candidates,
@@ -148,6 +165,19 @@ export async function sweepAutomatchProjections(
       toTask: ({ task }) => task,
       queue: env.TELEGRAM_PROJECTION_QUEUE,
       fallbackErrorMessage: "projection-claim-failed",
+      onClaimFailure: ({ task }, error, itemIndex) =>
+        reportRecoveryFailure(
+          logger,
+          {
+            event: "telegram_projection_recovery_record_failed",
+            scope: "telegram",
+            source: "automatch",
+            phase: "claim",
+            itemIndex,
+            inviteId: task.inviteId,
+          },
+          error,
+        ),
     });
     if (claimFailure) {
       throw claimFailure;
@@ -157,11 +187,15 @@ export async function sweepAutomatchProjections(
     }
     return sentCount;
   } catch (error) {
-    logger.error(
-      JSON.stringify({
+    reportRecoveryFailure(
+      logger,
+      {
         event: "telegram_projection_automatch_sweep_failed",
-        code: error instanceof Error ? error.message : "unknown",
-      }),
+        scope: "telegram",
+        source: "automatch",
+        phase: "sweep",
+      },
+      error,
     );
     throw error;
   }
@@ -192,17 +226,34 @@ export async function sweepRatingProjections(
       }),
       queue: env.TELEGRAM_PROJECTION_QUEUE,
       fallbackErrorMessage: "projection-claim-failed",
+      onClaimFailure: (record, error, itemIndex) =>
+        reportRecoveryFailure(
+          logger,
+          {
+            event: "telegram_projection_recovery_record_failed",
+            scope: "telegram",
+            source: "rating",
+            phase: "claim",
+            itemIndex,
+            operationId: record.operationId,
+          },
+          error,
+        ),
     });
     if (claimFailure) {
       throw claimFailure;
     }
     return sentCount;
   } catch (error) {
-    logger.error(
-      JSON.stringify({
+    reportRecoveryFailure(
+      logger,
+      {
         event: "telegram_projection_rating_sweep_failed",
-        code: error instanceof Error ? error.message : "unknown",
-      }),
+        scope: "telegram",
+        source: "rating",
+        phase: "sweep",
+      },
+      error,
     );
     throw error;
   }
@@ -234,12 +285,17 @@ export async function sweepTelegramProjections(
       env.TELEGRAM_PROJECTION_QUEUE,
       state,
       nowMs,
+      logger,
     ).catch((error) => {
-      logger.error(
-        JSON.stringify({
+      reportRecoveryFailure(
+        logger,
+        {
           event: "telegram_projection_event_sweep_failed",
-          code: error instanceof Error ? error.message : "unknown",
-        }),
+          scope: "telegram",
+          source: "event",
+          phase: "sweep",
+        },
+        error,
       );
       throw error;
     }),
@@ -250,7 +306,12 @@ export async function sweepTelegramProjections(
     event.status === "rejected" ||
     ratingCount.status === "rejected"
   ) {
-    throw new Error("telegram-projection-sweep-failed");
+    throw new AggregateError(
+      [automatch, event, ratingCount].flatMap((result) =>
+        result.status === "rejected" ? [result.reason] : [],
+      ),
+      "telegram-projection-sweep-failed",
+    );
   }
   return {
     automatch: automatch.value,
@@ -264,16 +325,16 @@ export async function handleTelegramProjectionSweep(
   env: Env,
 ): Promise<void> {
   if ((await readTelegramStorageMode(env.TELEGRAM_DB)) === "frozen") {
-    console.info(JSON.stringify({ event: "telegram_projection_sweep_frozen" }));
+    logRecoveryEvent(console, "info", {
+      event: "telegram_projection_sweep_frozen",
+    });
     return;
   }
   const result = await sweepTelegramProjections(env);
-  console.info(
-    JSON.stringify({
-      event: "telegram_projection_sweep_completed",
-      automatch: result.automatch,
-      eventCount: result.event,
-      rating: result.rating,
-    }),
-  );
+  logRecoveryEvent(console, "info", {
+    event: "telegram_projection_sweep_completed",
+    automatch: result.automatch,
+    eventCount: result.event,
+    rating: result.rating,
+  });
 }

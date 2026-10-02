@@ -737,11 +737,13 @@ test("recovery takes current records and reports scan failures", async () => {
   } satisfies Env;
   const logs: string[] = [];
   const failedState = memoryState({}).client;
+  const automatchFailure = new Error("automatch-state-unavailable");
+  const eventFailure = new Error("event-state-unavailable");
   failedState.getPath = async () => {
-    throw new Error("state-unavailable");
+    throw automatchFailure;
   };
   failedState.listDueEventTelegramProjectionOutboxes = async () => {
-    throw new Error("state-unavailable");
+    throw eventFailure;
   };
   await assert.rejects(
     () =>
@@ -751,9 +753,18 @@ test("recovery takes current records and reports scan failures", async () => {
         logger: { error: (message) => logs.push(message), info() {} },
         now: () => 600_000,
       }),
-    /telegram-projection-sweep-failed/,
+    (error) => {
+      assert.ok(error instanceof AggregateError);
+      assert.equal(error.message, "telegram-projection-sweep-failed");
+      assert.deepEqual(error.errors, [automatchFailure, eventFailure]);
+      return true;
+    },
   );
   assert.equal(logs.length, 2);
+  assert.deepEqual(
+    logs.map((entry) => JSON.parse(entry).error.message),
+    ["automatch-state-unavailable", "event-state-unavailable"],
+  );
   assert.deepEqual(batches.flat(), [
     {
       kind: "rating-telegram-projection",
@@ -797,7 +808,7 @@ test("recovery takes current records and reports scan failures", async () => {
   ]);
 });
 
-test("recovery preserves repair and claim failure precedence after sending successful work", async () => {
+test("recovery reports every failure and preserves dispatch and precedence when logging fails", async () => {
   for (const { failClaim, failSend } of [
     { failClaim: false, failSend: false },
     { failClaim: true, failSend: false },
@@ -863,7 +874,13 @@ test("recovery preserves repair and claim failure precedence after sending succe
         sweepTelegramProjections(env, {
           createStateRepository: () => store.client,
           createRating: () => ratingRepository(null, []),
-          logger: { error: (message) => logs.push(message), info() {} },
+          logger: {
+            error(message) {
+              logs.push(message);
+              throw new Error("logger-failed");
+            },
+            info() {},
+          },
           now: () => 600_000,
         }),
       /telegram-projection-sweep-failed/,
@@ -890,9 +907,45 @@ test("recovery preserves repair and claim failure precedence after sending succe
       ).updatedAtMs,
       600_000,
     );
-    assert.equal(logs.length, 1);
+    const entries = logs.map((entry) => JSON.parse(entry));
+    const items = entries.filter(
+      (entry) => entry.event === "telegram_projection_recovery_record_failed",
+    );
+    assert.deepEqual(
+      items.map(({ inviteId, phase, itemIndex, error }) => ({
+        inviteId,
+        phase,
+        itemIndex,
+        message: error.message,
+      })),
+      [
+        {
+          inviteId: "auto_broken_repair",
+          phase: "repair",
+          itemIndex: 0,
+          message: "repair-failed",
+        },
+        {
+          inviteId: "auto_later_broken_repair",
+          phase: "repair",
+          itemIndex: 1,
+          message: "later-repair-failed",
+        },
+        ...(failClaim
+          ? [
+              {
+                inviteId: "auto_bad",
+                phase: "claim",
+                itemIndex: 0,
+                message: "claim-failed",
+              },
+            ]
+          : []),
+      ],
+    );
+    assert.equal(entries.length, items.length + 1);
     assert.equal(
-      JSON.parse(logs[0]).code,
+      entries.at(-1).code,
       failSend ? "queue-failed" : failClaim ? "claim-failed" : "repair-failed",
     );
   }

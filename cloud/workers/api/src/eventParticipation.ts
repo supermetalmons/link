@@ -1,5 +1,4 @@
 import {
-  eventField,
   getEventField,
   mergeEventPlans,
 } from "../../../runtime/eventCommands.js";
@@ -14,8 +13,6 @@ import {
   type ToggleEventPrizeSelectionResponse,
 } from "@mons/shared/event-prizes";
 import {
-  MAX_EVENT_PARTICIPANTS,
-  buildEventParticipantSnapshot,
   isEventParticipantSnapshot,
   type EventParticipantSnapshot,
   type JoinEventRequest,
@@ -36,33 +33,35 @@ import { buildScheduledEventDueUpdatesCore } from "../../../runtime/events/start
 import {
   buildEventOwnershipQuery,
   directParticipantParticipation,
-  getCanonicalProfileId,
-  getLoginProfileId,
-  getOwnershipProfile,
-  requesterOwnsProfileReference,
   resolveParticipantParticipation,
   type EventOwnershipSnapshot,
 } from "../../../runtime/events/ownership.js";
 import { AuthApiFailure } from "./authErrors.ts";
 import { EventNotUpcoming } from "./eventD1.ts";
-import type {
-  GameplayProfile,
-  GameplayRepository,
-} from "./gameplayRepository.ts";
+import type { GameplayRepository } from "./gameplayRepository.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 import { requireProfileOwnershipSnapshot } from "./profileOwnership.ts";
+import {
+  applyOwnershipPolicy,
+  assertRemovalAllowed,
+  buildParticipant,
+  buildRemovalPlan,
+  finalizeJoin,
+  inspectJoin,
+  normalizeString,
+  participantCount,
+  planJoin,
+  resolveRemovalContext,
+  toRecord,
+  type EventDueTransition,
+  type EventRecord,
+} from "./eventParticipationPolicy.ts";
 
 const EVENT_LOCK_ATTEMPTS = 40;
 const EVENT_LOCK_RETRY_DELAY_MS = 100;
 const EVENT_OPERATION_TIMEOUT_MS = 25_000;
 const EVENT_RECONCILIATION_TIMEOUT_MS = 2_000;
 const gameVariantHelpers = createGameVariantHelpers(monsRules);
-
-type EventRecord = Record<string, unknown>;
-type EventDueTransition = {
-  didChange: boolean;
-  updates: EventCommitPlan;
-};
 
 export type EventParticipationRepository = EventStore &
   Pick<GameplayRepository, "readProfileOwnershipSnapshot"> &
@@ -85,16 +84,6 @@ export type EventParticipationDependencies = {
   signal?: AbortSignal;
 };
 
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function normalizeString(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
-
 function requireTimestamp(value: unknown): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     throw new AuthApiFailure(
@@ -116,33 +105,6 @@ function cloneEvent(value: Record<string, unknown>): EventRecord {
   return structuredClone(value);
 }
 
-function buildParticipant(
-  profile: GameplayProfile,
-  loginUid: string,
-  joinedAtMs: number,
-): EventParticipantSnapshot {
-  const participant = buildEventParticipantSnapshot(
-    profile,
-    loginUid,
-    joinedAtMs,
-  );
-  if (!participant) {
-    throw new AuthApiFailure(
-      503,
-      "unavailable",
-      "event-participation-service-unavailable",
-    );
-  }
-  return participant;
-}
-
-function participantCount(event: EventRecord): number {
-  const participants = toRecord(event.participants) || {};
-  return Object.values(participants).filter(
-    (participant) => toRecord(participant) !== null,
-  ).length;
-}
-
 async function loadOwnershipSnapshot(
   event: EventRecord,
   repository: EventParticipationRepository,
@@ -152,43 +114,6 @@ async function loadOwnershipSnapshot(
     repository,
     buildEventOwnershipQuery(event, extras),
   );
-}
-
-function applyOwnershipPolicy<T>(operation: () => T): T {
-  try {
-    return operation();
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message === "profile-ownership-unavailable"
-    ) {
-      throw new AuthApiFailure(
-        503,
-        "unavailable",
-        "profile-ownership-unavailable",
-      );
-    }
-    throw error;
-  }
-}
-
-function directParticipantSnapshot(
-  value: unknown,
-  profileId: string,
-  loginUid: string,
-): EventParticipantSnapshot {
-  const participant = toRecord(value);
-  const normalized = participant
-    ? { ...participant, profileId, loginUid }
-    : null;
-  if (!isEventParticipantSnapshot(normalized)) {
-    throw new AuthApiFailure(
-      503,
-      "unavailable",
-      "event-participation-service-unavailable",
-    );
-  }
-  return normalized;
 }
 
 async function readEvent(
@@ -298,24 +223,6 @@ function isSameParticipant(
   return (Object.keys(expected) as Array<keyof EventParticipantSnapshot>).every(
     (key) => value[key] === expected[key],
   );
-}
-
-function participantFromCanonicalParent(
-  value: unknown,
-  loginUid: string,
-): EventParticipantSnapshot {
-  const matches = Object.entries(toRecord(value) || {}).filter(
-    ([, participant]) =>
-      normalizeString(toRecord(participant)?.loginUid) === loginUid,
-  );
-  if (matches.length !== 1) {
-    throw new AuthApiFailure(
-      503,
-      "unavailable",
-      "event-participation-service-unavailable",
-    );
-  }
-  return directParticipantSnapshot(matches[0][1], matches[0][0], loginUid);
 }
 
 async function persistDueTransition(
@@ -493,21 +400,15 @@ export async function joinEvent(
     async (assertOwned) => {
       const { event, prizeSelections: eventPrizeSelections } =
         await readParticipationSnapshot(eventId, repository, signal);
-      const participants = toRecord(event.participants) || {};
       const nowMs = now();
-      if (
-        event.status === "scheduled" &&
-        typeof event.startAtMs === "number" &&
-        nowMs >= event.startAtMs &&
-        participantCount(event) < 2
-      ) {
-        const prizeSelections = eventPrizeSelections;
+      const inspection = inspectJoin(event, identity.uid, nowMs);
+      if (inspection.kind === "settle-due") {
         const dueTransition = await buildDueUpdates({
           eventId,
-          event,
+          event: cloneEvent(event),
           nowMs,
           ownershipSnapshot: null,
-          prizeSelections,
+          prizeSelections: eventPrizeSelections,
         });
         await persistDueTransition(
           eventId,
@@ -522,61 +423,27 @@ export async function joinEvent(
           "This event is no longer accepting participants.",
         );
       }
-      const directParticipation = applyOwnershipPolicy(() =>
-        directParticipantParticipation(event, identity.uid),
-      );
       let ownershipSnapshot: EventOwnershipSnapshot | null = null;
       let prizeSelections: EventSnapshot["prizeSelections"] | undefined;
-      let profile: GameplayProfile | null = null;
-      let existingParticipantProfileId = directParticipation.profileId || "";
-      if (
-        !directParticipation.isParticipant ||
-        (typeof event.startAtMs === "number" && nowMs >= event.startAtMs)
-      ) {
+      if (inspection.needsOwnership) {
         prizeSelections = eventPrizeSelections;
         ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
           loginUids: [identity.uid],
           profileIds: getPrizeSelectionProfileIds(prizeSelections),
         });
       }
-      if (!directParticipation.isParticipant) {
-        const ownerProfileId = applyOwnershipPolicy(() =>
-          getLoginProfileId(ownershipSnapshot!, identity.uid),
-        );
-        profile = ownerProfileId
-          ? (getOwnershipProfile(
-              ownershipSnapshot!,
-              ownerProfileId,
-            ) as GameplayProfile | null)
-          : null;
-        if (!profile) {
-          throw new AuthApiFailure(
-            409,
-            "failed-precondition",
-            "Please sign in to join this event.",
-          );
-        }
-        const ownedParticipation = applyOwnershipPolicy(() =>
-          resolveParticipantParticipation(
-            event,
-            identity.uid,
-            ownershipSnapshot,
-          ),
-        );
-        existingParticipantProfileId =
-          ownedParticipation.profileId || profile.profileId;
-      }
-      if (event.status !== "scheduled") {
-        throw new AuthApiFailure(
-          409,
-          "failed-precondition",
-          "This event has already started.",
-        );
-      }
-      if (typeof event.startAtMs === "number" && nowMs >= event.startAtMs) {
+      const draft = planJoin({
+        eventId,
+        event,
+        loginUid: identity.uid,
+        nowMs,
+        inspection,
+        ownershipSnapshot,
+      });
+      if (draft.kind === "settle-due") {
         const dueTransition = await buildDueUpdates({
           eventId,
-          event,
+          event: cloneEvent(event),
           nowMs,
           ownershipSnapshot,
           prizeSelections,
@@ -594,44 +461,6 @@ export async function joinEvent(
           "This event is no longer accepting participants.",
         );
       }
-
-      const existingParticipant = toRecord(
-        participants[existingParticipantProfileId],
-      );
-      if (
-        !existingParticipant &&
-        participantCount(event) >= MAX_EVENT_PARTICIPANTS
-      ) {
-        throw new AuthApiFailure(
-          409,
-          "failed-precondition",
-          `This event is full (${MAX_EVENT_PARTICIPANTS} players max).`,
-        );
-      }
-      const existingJoinedAtMs = existingParticipant?.joinedAtMs;
-      const participant = directParticipation.isParticipant
-        ? directParticipantSnapshot(
-            existingParticipant,
-            existingParticipantProfileId,
-            identity.uid,
-          )
-        : buildParticipant(
-            { ...profile!, profileId: existingParticipantProfileId },
-            identity.uid,
-            typeof existingJoinedAtMs === "number" ? existingJoinedAtMs : nowMs,
-          );
-      participants[existingParticipantProfileId] = participant;
-      event.participants = participants;
-      event.updatedAtMs = nowMs;
-      const updates: EventCommitPlan = [
-        {
-          kind: "event-participant",
-          eventId: eventId,
-          profileId: existingParticipantProfileId,
-          value: participant,
-        },
-        eventField(eventId, "updatedAtMs", nowMs),
-      ];
       const settleNowMs = now();
       const isDueAtSettle =
         typeof event.startAtMs === "number" && settleNowMs >= event.startAtMs;
@@ -639,60 +468,29 @@ export async function joinEvent(
         prizeSelections = eventPrizeSelections;
       }
       if (!ownershipSnapshot && isDueAtSettle) {
-        ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
-          loginUids: [identity.uid],
-          profileIds: getPrizeSelectionProfileIds(prizeSelections),
-        });
+        ownershipSnapshot = await loadOwnershipSnapshot(
+          draft.eventForSettlement,
+          repository,
+          {
+            loginUids: [identity.uid],
+            profileIds: getPrizeSelectionProfileIds(prizeSelections),
+          },
+        );
       }
       const dueTransition = await buildDueUpdates({
         eventId,
-        event,
+        event: cloneEvent(draft.eventForSettlement),
         nowMs: settleNowMs,
         ownershipSnapshot,
         prizeSelections: isDueAtSettle ? prizeSelections : undefined,
       });
-      let expectedTransitionStatus: "active" | "dismissed" | undefined;
-      if (dueTransition.didChange) {
-        updates.push(...dueTransition.updates);
-        const transitionStatus = getEventField(
-          dueTransition.updates,
-          eventId,
-          "status",
-        );
-        if (transitionStatus !== "active" && transitionStatus !== "dismissed") {
-          throw new AuthApiFailure(
-            503,
-            "unavailable",
-            "event-participation-service-unavailable",
-          );
-        }
-        expectedTransitionStatus = transitionStatus;
-      }
-      let storedParticipant = participant;
-      const canonicalParticipants = getEventField(
-        updates,
-        eventId,
-        "participants",
-      );
-      if (canonicalParticipants !== undefined) {
-        const index = updates.findIndex(
-          (command) =>
-            command.kind === "event-participant" &&
-            command.eventId === eventId &&
-            command.profileId === existingParticipantProfileId,
-        );
-        if (index >= 0) updates.splice(index, 1);
-        storedParticipant = participantFromCanonicalParent(
-          canonicalParticipants,
-          participant.loginUid,
-        );
-      }
+      const commit = finalizeJoin(eventId, draft, dueTransition);
       await assertOwned();
-      storedParticipant = await persistJoin(
+      const storedParticipant = await persistJoin(
         eventId,
-        storedParticipant,
-        updates,
-        expectedTransitionStatus,
+        commit.participant,
+        commit.updates,
+        commit.expectedTransitionStatus,
         repository,
         signal,
       );
@@ -742,7 +540,7 @@ async function removeEventParticipation(
     dependencies.signal || AbortSignal.timeout(EVENT_OPERATION_TIMEOUT_MS);
   const eventId = eventIdInput.trim();
   const isLeaving = participantProfileIdInput === null;
-  let participantProfileId = participantProfileIdInput?.trim() || "";
+  const requestedProfileId = participantProfileIdInput?.trim() || "";
   const busyMessage = isLeaving
     ? "Event is busy. Please try leaving again."
     : "Event is busy. Please try removing again.";
@@ -766,84 +564,22 @@ async function removeEventParticipation(
         repository,
         signal,
       );
-      const creatorLoginUid = normalizeString(event.createdByLoginUid);
-      const creatorProfileId = normalizeString(event.createdByProfileId);
-      const participants = toRecord(event.participants) || {};
-      const directCreator = identity.uid === creatorLoginUid;
+      const directCreator =
+        identity.uid === normalizeString(event.createdByLoginUid);
       let ownershipSnapshot: EventOwnershipSnapshot | null = null;
       if (!directCreator) {
         ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
           loginUids: [identity.uid],
           profileIds: getPrizeSelectionProfileIds(prizeSelections),
         });
-        if (
-          !isLeaving &&
-          !applyOwnershipPolicy(() =>
-            requesterOwnsProfileReference({
-              requesterUid: identity.uid,
-              snapshot: ownershipSnapshot,
-              storedLoginUid: creatorLoginUid,
-              storedProfileId: creatorProfileId,
-            }),
-          )
-        ) {
-          throw new AuthApiFailure(
-            403,
-            "permission-denied",
-            "Only the event creator can remove participants.",
-          );
-        }
       }
-      if (isLeaving) {
-        participantProfileId =
-          applyOwnershipPolicy(() =>
-            resolveParticipantParticipation(
-              event,
-              identity.uid,
-              ownershipSnapshot,
-            ),
-          ).profileId || "";
-      }
-      const targetParticipant = toRecord(participants[participantProfileId]);
-      const targetLoginUid = normalizeString(targetParticipant?.loginUid);
-      const targetProfileId =
-        normalizeString(targetParticipant?.profileId) || participantProfileId;
-      if (isLeaving && targetParticipant && ownershipSnapshot) {
-        const snapshot = ownershipSnapshot;
-        const ownedParticipantIds = applyOwnershipPolicy(() => {
-          const ownerProfileId = getLoginProfileId(snapshot, identity.uid);
-          if (!ownerProfileId) return [];
-          return Object.entries(participants).flatMap(([key, value]) => {
-            const candidate = toRecord(value);
-            if (!candidate) return [];
-            const candidateProfileId =
-              normalizeString(candidate.profileId) || key;
-            return getCanonicalProfileId(snapshot, candidateProfileId) ===
-              ownerProfileId
-              ? [key]
-              : [];
-          });
-        });
-        if (
-          ownedParticipantIds.length !== 1 ||
-          ownedParticipantIds[0] !== participantProfileId
-        ) {
-          throw new AuthApiFailure(
-            503,
-            "unavailable",
-            "profile-ownership-unavailable",
-          );
-        }
-      }
-      if (event.status !== "scheduled") {
-        throw new AuthApiFailure(
-          409,
-          "failed-precondition",
-          isLeaving
-            ? closedMessage
-            : "Only scheduled events can remove participants.",
-        );
-      }
+      const removal = resolveRemovalContext({
+        event,
+        loginUid: identity.uid,
+        participantProfileId: isLeaving ? null : requestedProfileId,
+        ownershipSnapshot,
+      });
+      const { participantProfileId } = removal;
       const nowMs = now();
       if (
         typeof event.startAtMs !== "number" ||
@@ -868,7 +604,7 @@ async function removeEventParticipation(
         }
         const dueTransition = await buildDueUpdates({
           eventId,
-          event,
+          event: cloneEvent(event),
           nowMs: dueNowMs,
           ownershipSnapshot,
           prizeSelections,
@@ -885,56 +621,7 @@ async function removeEventParticipation(
       if (await persistDueTransitionIfNeeded(nowMs)) {
         throw new AuthApiFailure(409, "failed-precondition", closedMessage);
       }
-      if (isLeaving && directCreator) {
-        throw new AuthApiFailure(
-          409,
-          "failed-precondition",
-          "Event creator cannot leave.",
-        );
-      }
-      if (!targetParticipant) {
-        throw new AuthApiFailure(
-          409,
-          "failed-precondition",
-          isLeaving
-            ? "You are not participating in this event."
-            : "Selected participant was not found.",
-        );
-      }
-      let targetIsCreator =
-        participantProfileId === creatorProfileId ||
-        targetProfileId === creatorProfileId ||
-        targetLoginUid === creatorLoginUid;
-      if (!targetIsCreator && directCreator) {
-        const hasSeparateCreatorParticipant = Object.entries(participants).some(
-          ([candidateProfileId, value]) => {
-            if (candidateProfileId === participantProfileId) return false;
-            const candidate = toRecord(value);
-            return (
-              candidateProfileId === creatorProfileId ||
-              normalizeString(candidate?.profileId) === creatorProfileId ||
-              normalizeString(candidate?.loginUid) === creatorLoginUid
-            );
-          },
-        );
-        targetIsCreator = !hasSeparateCreatorParticipant;
-      }
-      if (!targetIsCreator && ownershipSnapshot) {
-        targetIsCreator = applyOwnershipPolicy(
-          () =>
-            getCanonicalProfileId(ownershipSnapshot!, targetProfileId) ===
-            getCanonicalProfileId(ownershipSnapshot!, creatorProfileId),
-        );
-      }
-      if (targetIsCreator) {
-        throw new AuthApiFailure(
-          409,
-          "failed-precondition",
-          isLeaving
-            ? "Event creator cannot leave."
-            : "Event creator cannot be removed.",
-        );
-      }
+      assertRemovalAllowed(removal);
       await assertOwned();
       const commitNowMs = now();
       if (await persistDueTransitionIfNeeded(commitNowMs)) {
@@ -944,21 +631,7 @@ async function removeEventParticipation(
         await persistRemoval(
           eventId,
           participantProfileId,
-          [
-            {
-              kind: "event-participant",
-              eventId: eventId,
-              profileId: participantProfileId,
-              value: null,
-            },
-            {
-              kind: "prize-selection",
-              eventId: eventId,
-              profileId: participantProfileId,
-              value: null,
-            },
-            eventField(eventId, "updatedAtMs", commitNowMs),
-          ],
+          buildRemovalPlan(eventId, participantProfileId, commitNowMs),
           repository,
           signal,
           isLeaving ? { upcomingEventId: eventId } : undefined,
@@ -988,7 +661,7 @@ async function removeEventParticipation(
                 : null;
             const dueTransition = await buildDueUpdates({
               eventId,
-              event: latest.event,
+              event: cloneEvent(latest.event),
               nowMs: dueNowMs,
               ownershipSnapshot: latestOwnership,
               prizeSelections: latest.prizeSelections,
