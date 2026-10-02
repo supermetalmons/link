@@ -1,8 +1,8 @@
 import type { EventData, EventMatch } from "./events/model.js";
 import type { EventOwnershipProfile } from "./events/ownership.js";
-import type {
-  EventLockManager,
-  EventLockHandle,
+import {
+  withEventLease,
+  type EventLockManager,
 } from "./events/lockManagerCore.js";
 import type { EventCommand, EventCommitPlan } from "./eventCommands.js";
 import type { EventPrizeAssignmentRecord, EventStatus } from "./eventReads.js";
@@ -135,12 +135,8 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
     dependencies.readProfileOwnershipSnapshot;
   const enqueueEventProgressTask = dependencies.enqueueEventProgressTask;
   const readEventPrizeWithdrawals = dependencies.readEventPrizeWithdrawals;
-  const {
-    acquireEventLockWithRetry,
-    isEventLockStillOwned,
-    releaseEventLock,
-    startEventLockHeartbeat,
-  } = dependencies.eventLockManager;
+  const lockManager = dependencies.eventLockManager;
+  const { acquireEventLockWithRetry, isEventLockStillOwned } = lockManager;
   const {
     addEventPrizeAssignmentUpdates,
     applyMatchResolution,
@@ -473,6 +469,7 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
       );
     }
 
+    const requesterUid = request.auth.uid;
     const eventId = normalizeString(request.data && request.data.eventId);
     if (!eventId) {
       throw new HttpsError("invalid-argument", "eventId is required.");
@@ -496,23 +493,17 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
     if (!(initialEventValue !== null && initialEventValue !== undefined)) {
       throw new HttpsError("not-found", "Event not found.");
     }
-    const lockHandle = await acquireEventLockWithRetry(
-      eventId,
-      request.auth.uid,
-      {
-        attempts: 40,
-        delayMs: 100,
-      },
-    );
+    const lockHandle = await acquireEventLockWithRetry(eventId, requesterUid, {
+      attempts: 40,
+      delayMs: 100,
+    });
     if (!lockHandle) {
       throw new HttpsError(
         "unavailable",
         "Event is busy. Please try postponing again.",
       );
     }
-    const stopLockHeartbeat = startEventLockHeartbeat(lockHandle);
-
-    try {
+    return withEventLease(lockManager, lockHandle, async () => {
       const snapshot = isEventPrizeEvent(eventId)
         ? await state.readEventSnapshot(eventId)
         : null;
@@ -533,19 +524,19 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
         nowMs >= event.startAtMs
           ? cloneValue(snapshot!.prizeSelections)
           : undefined;
-      const directCreator = request.auth.uid === creatorLoginUid;
+      const directCreator = requesterUid === creatorLoginUid;
       const dueParticipantCount = getEventParticipantIds(event).length;
       const ownershipSnapshot =
         directCreator &&
         (nowMs < (event.startAtMs as number) || dueParticipantCount < 2)
           ? null
           : await loadOwnershipSnapshot(event, {
-              loginUids: [request.auth.uid],
+              loginUids: [requesterUid],
               profileIds: getPrizeSelectionProfileIds(prizeSelections),
             });
       if (
         !requesterOwnsProfileReference({
-          requesterUid: request.auth.uid,
+          requesterUid,
           snapshot: ownershipSnapshot,
           storedLoginUid: creatorLoginUid,
           storedProfileId: creatorProfileId,
@@ -650,10 +641,7 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
         postponeByMinutes,
         startAtMs: nextStartAtMs,
       };
-    } finally {
-      stopLockHeartbeat();
-      await releaseEventLock(lockHandle);
-    }
+    });
   };
 
   const disqualifyEventMatchWinners: EventRuntime["disqualifyEventMatchWinners"] =
@@ -669,9 +657,6 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
         mode: "callable-disqualify",
       });
       syncLog.targetMatchKey = matchKeyInput || null;
-      let lockHandle: EventLockHandle | null = null;
-      let stopLockHeartbeat = () => {};
-
       try {
         if (!request.auth) {
           throw new HttpsError(
@@ -679,6 +664,7 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
             "The function must be called while authenticated.",
           );
         }
+        const requesterUid = request.auth.uid;
         if (!eventId) {
           throw new HttpsError("invalid-argument", "eventId is required.");
         }
@@ -690,9 +676,9 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
           throw new HttpsError("invalid-argument", "matchKey is invalid.");
         }
 
-        lockHandle = await acquireEventLockWithRetry(
+        const lockHandle = await acquireEventLockWithRetry(
           eventId,
-          request.auth.uid,
+          requesterUid,
           {
             attempts: 40,
             delayMs: 100,
@@ -704,126 +690,127 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
             "Event is busy. Please try disqualifying again.",
           );
         }
-        stopLockHeartbeat = startEventLockHeartbeat(lockHandle);
+        const result = await withEventLease(
+          lockManager,
+          lockHandle,
+          async () => {
+            let resolvedMatchKey = matchKeyInput;
+            const eventValue = await state.readEvent(eventId);
+            if (!(eventValue !== null && eventValue !== undefined)) {
+              throw new HttpsError("not-found", "Event not found.");
+            }
+            const event = cloneValue<EventData>(eventValue || {});
+            const ownershipSnapshot = await loadOwnershipSnapshot(event, {
+              loginUids: [requesterUid],
+            });
+            ensurePilotEventCreator(requesterUid, ownershipSnapshot);
+            if (normalizeString(event.status) !== "active") {
+              throw new HttpsError(
+                "failed-precondition",
+                "Only active events can be updated.",
+              );
+            }
 
-        let didDisqualify = false;
-        let resolvedMatchKey = matchKeyInput;
-        try {
-          const eventValue = await state.readEvent(eventId);
-          if (!(eventValue !== null && eventValue !== undefined)) {
-            throw new HttpsError("not-found", "Event not found.");
-          }
-          const event = cloneValue<EventData>(eventValue || {});
-          const ownershipSnapshot = await loadOwnershipSnapshot(event, {
-            loginUids: [request.auth.uid],
-          });
-          ensurePilotEventCreator(request.auth.uid, ownershipSnapshot);
-          if (normalizeString(event.status) !== "active") {
-            throw new HttpsError(
-              "failed-precondition",
-              "Only active events can be updated.",
-            );
-          }
+            let targetMatch: EventMatch | null = null;
+            let targetMatchUpdate: Omit<
+              Extract<EventCommand, { kind: "event-disqualification" }>,
+              "value"
+            > | null = null;
+            if (isThirdPlaceTarget) {
+              const thirdPlaceMatchCandidate = event.thirdPlaceMatch;
+              if (
+                thirdPlaceMatchCandidate &&
+                typeof thirdPlaceMatchCandidate === "object"
+              ) {
+                targetMatch = thirdPlaceMatchCandidate;
+                resolvedMatchKey = THIRD_PLACE_MATCH_KEY;
+                targetMatchUpdate = {
+                  kind: "event-disqualification",
+                  eventId,
+                  roundKey: null,
+                  matchKey: "third_place",
+                };
+              }
+            } else {
+              const round =
+                event.rounds && typeof event.rounds === "object"
+                  ? event.rounds[String(parsedMatchKey!.roundIndex)]
+                  : null;
+              if (
+                !round ||
+                !round.matches ||
+                typeof round.matches !== "object"
+              ) {
+                throw new HttpsError(
+                  "failed-precondition",
+                  "Selected match not found.",
+                );
+              }
 
-          let targetMatch: EventMatch | null = null;
-          let targetMatchUpdate: Omit<
-            Extract<EventCommand, { kind: "event-disqualification" }>,
-            "value"
-          > | null = null;
-          if (isThirdPlaceTarget) {
-            const thirdPlaceMatchCandidate = event.thirdPlaceMatch;
-            if (
-              thirdPlaceMatchCandidate &&
-              typeof thirdPlaceMatchCandidate === "object"
-            ) {
-              targetMatch = thirdPlaceMatchCandidate;
-              resolvedMatchKey = THIRD_PLACE_MATCH_KEY;
+              targetMatch = round.matches[resolvedMatchKey];
+              if (!targetMatch || typeof targetMatch !== "object") {
+                const fallbackEntry =
+                  Object.entries(round.matches).find(([candidateMatchKey]) => {
+                    const parsedCandidate = parseMatchKey(candidateMatchKey);
+                    return (
+                      parsedCandidate?.matchIndex === parsedMatchKey!.matchIndex
+                    );
+                  }) || null;
+                if (fallbackEntry) {
+                  [resolvedMatchKey, targetMatch] = fallbackEntry;
+                }
+              }
               targetMatchUpdate = {
                 kind: "event-disqualification",
                 eventId,
-                roundKey: null,
-                matchKey: "third_place",
+                roundKey: String(parsedMatchKey!.roundIndex),
+                matchKey: resolvedMatchKey,
               };
             }
-          } else {
-            const round =
-              event.rounds && typeof event.rounds === "object"
-                ? event.rounds[String(parsedMatchKey!.roundIndex)]
-                : null;
-            if (!round || !round.matches || typeof round.matches !== "object") {
+
+            if (!targetMatch || typeof targetMatch !== "object") {
               throw new HttpsError(
                 "failed-precondition",
                 "Selected match not found.",
               );
             }
 
-            targetMatch = round.matches[resolvedMatchKey];
-            if (!targetMatch || typeof targetMatch !== "object") {
-              const fallbackEntry =
-                Object.entries(round.matches).find(([candidateMatchKey]) => {
-                  const parsedCandidate = parseMatchKey(candidateMatchKey);
-                  return (
-                    parsedCandidate?.matchIndex === parsedMatchKey!.matchIndex
-                  );
-                }) || null;
-              if (fallbackEntry) {
-                [resolvedMatchKey, targetMatch] = fallbackEntry;
-              }
-            }
-            targetMatchUpdate = {
-              kind: "event-disqualification",
-              eventId,
-              roundKey: String(parsedMatchKey!.roundIndex),
-              matchKey: resolvedMatchKey,
-            };
-          }
-
-          if (!targetMatch || typeof targetMatch !== "object") {
-            throw new HttpsError(
-              "failed-precondition",
-              "Selected match not found.",
-            );
-          }
-
-          if (
-            normalizeString(targetMatch.status) !== "pending" ||
-            !normalizeString(targetMatch.inviteId)
-          ) {
-            throw new HttpsError(
-              "failed-precondition",
-              "Only active matches can be disqualified.",
-            );
-          }
-          if (
-            !normalizeString(targetMatch.hostProfileId) ||
-            !normalizeString(targetMatch.guestProfileId)
-          ) {
-            throw new HttpsError(
-              "failed-precondition",
-              "Selected match must have two participants.",
-            );
-          }
-
-          didDisqualify = !isMatchWinnerDisqualified(targetMatch);
-          if (didDisqualify) {
-            const lockOwned = await isEventLockStillOwned(lockHandle);
-            if (!lockOwned) {
+            if (
+              normalizeString(targetMatch.status) !== "pending" ||
+              !normalizeString(targetMatch.inviteId)
+            ) {
               throw new HttpsError(
-                "unavailable",
-                "Event is busy. Please try disqualifying again.",
+                "failed-precondition",
+                "Only active matches can be disqualified.",
               );
             }
-            await state.commitEventPlan([
-              { ...targetMatchUpdate!, value: true },
-              eventField(eventId, "updatedAtMs", getNowMs()),
-            ]);
-          }
-        } finally {
-          stopLockHeartbeat();
-          stopLockHeartbeat = () => {};
-          await releaseEventLock(lockHandle);
-          lockHandle = null;
-        }
+            if (
+              !normalizeString(targetMatch.hostProfileId) ||
+              !normalizeString(targetMatch.guestProfileId)
+            ) {
+              throw new HttpsError(
+                "failed-precondition",
+                "Selected match must have two participants.",
+              );
+            }
+
+            const didDisqualify = !isMatchWinnerDisqualified(targetMatch);
+            if (didDisqualify) {
+              const lockOwned = await isEventLockStillOwned(lockHandle);
+              if (!lockOwned) {
+                throw new HttpsError(
+                  "unavailable",
+                  "Event is busy. Please try disqualifying again.",
+                );
+              }
+              await state.commitEventPlan([
+                { ...targetMatchUpdate!, value: true },
+                eventField(eventId, "updatedAtMs", getNowMs()),
+              ]);
+            }
+            return { didDisqualify, resolvedMatchKey };
+          },
+        );
 
         let syncResult = null;
         for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -831,7 +818,7 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
           syncLog.reason = null;
           syncResult = await runEventSyncState({
             eventId,
-            requesterUid: request.auth.uid,
+            requesterUid,
             enforceParticipantGate: false,
             enforceThrottle: false,
             syncLog,
@@ -848,14 +835,10 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
 
         return {
           ...syncResult,
-          didDisqualify,
-          matchKey: resolvedMatchKey,
+          didDisqualify: result.didDisqualify,
+          matchKey: result.resolvedMatchKey,
         };
       } finally {
-        stopLockHeartbeat();
-        if (lockHandle) {
-          await releaseEventLock(lockHandle);
-        }
         syncLog.durationMs = getNowMs() - startedAtMs;
         logSyncEventStateResult(syncLog);
       }
@@ -884,18 +867,19 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
     enforceThrottle,
     syncLog,
   }) => {
-    let lockHandle: EventLockHandle | null = null;
-    let stopLockHeartbeat = () => {};
-
     try {
       const eventValue = await state.readEvent(eventId);
       if (!(eventValue !== null && eventValue !== undefined)) {
         throw new HttpsError("not-found", "Event not found.");
       }
-      lockHandle = await acquireEventLockWithRetry(eventId, requesterUid, {
-        attempts: 10,
-        delayMs: 100,
-      });
+      const lockHandle = await acquireEventLockWithRetry(
+        eventId,
+        requesterUid,
+        {
+          attempts: 10,
+          delayMs: 100,
+        },
+      );
       if (!lockHandle) {
         syncLog.skipped = true;
         syncLog.reason = "locked";
@@ -904,535 +888,541 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
           reason: "locked",
         });
       }
-      stopLockHeartbeat = startEventLockHeartbeat(lockHandle);
-
-      const snapshot = isEventPrizeEvent(eventId)
-        ? await state.readEventSnapshot(eventId)
-        : null;
-      const lockedEventValue = snapshot
-        ? snapshot.event
-        : await state.readEvent(eventId);
-      if (!(lockedEventValue !== null && lockedEventValue !== undefined)) {
-        throw new HttpsError("not-found", "Event not found.");
-      }
-      const event = cloneValue<EventData>(lockedEventValue || {});
-      const nowMs = getNowMs();
-      let prizeSelections;
-      if (
-        isEventPrizeEvent(eventId) &&
-        (event.status === "active" ||
-          event.status === "ended" ||
-          (event.status === "scheduled" &&
-            typeof event.startAtMs === "number" &&
-            nowMs >= event.startAtMs))
-      ) {
-        prizeSelections = cloneValue(snapshot!.prizeSelections);
-      }
-      const directParticipation = enforceParticipantGate
-        ? directRequesterParticipation(event, requesterUid)
-        : null;
-      const scheduledEventIsDue =
-        event.status === "scheduled" &&
-        typeof event.startAtMs === "number" &&
-        nowMs >= event.startAtMs;
-      const needsOwnershipSnapshot =
-        event.status === "active" ||
-        (scheduledEventIsDue && getEventParticipantIds(event).length >= 2) ||
-        (event.status === "ended" && isEventPrizeEvent(eventId)) ||
-        (enforceParticipantGate && !directParticipation?.isParticipant);
-      const ownershipSnapshot = needsOwnershipSnapshot
-        ? await loadOwnershipSnapshot(event, {
-            loginUids: enforceParticipantGate ? [requesterUid] : [],
-            profileIds: getPrizeSelectionProfileIds(prizeSelections),
-          })
-        : null;
-      if (enforceParticipantGate) {
-        const lockedRequesterParticipation = resolveRequesterParticipation(
-          event,
-          requesterUid,
-          ownershipSnapshot,
-        );
-        syncLog.requesterProfileId = lockedRequesterParticipation.profileId;
-        if (!lockedRequesterParticipation.isParticipant) {
-          syncLog.skipped = true;
-          syncLog.reason = "not-participant";
-          return buildSkippedSyncResponse({
-            eventId,
-            reason: "not-participant",
-          });
-        }
-      }
-      if (enforceThrottle) {
-        const syncThrottle = await tryAcquireEventSyncThrottle(
-          eventId,
-          requesterUid,
-        );
-        if (!syncThrottle) {
-          syncLog.skipped = true;
-          syncLog.reason = "rate-limited";
-          return buildSkippedSyncResponse({
-            eventId,
-            reason: "rate-limited",
-          });
-        }
-      }
-      const updates: EventCommitPlan = [];
-      let didChange = false;
-      let eventPrizeAssignmentsForProjectionCleanup: Record<
-        string,
-        EventPrizeAssignmentRecord
-      > | null = null;
-
-      if (event.status === "scheduled") {
-        const dueTransition = await buildScheduledEventDueUpdates({
-          eventId,
-          event,
-          nowMs,
-          ownershipSnapshot,
-          prizeSelections,
-        });
-        updates.push(...dueTransition.updates);
-        didChange = dueTransition.didChange;
-      } else if (event.status === "active") {
-        const normalizedOriginalCurrentRoundIndex = toFiniteInteger(
-          event.currentRoundIndex,
-          NaN,
-        );
-        const originalCurrentRoundIndex = Number.isFinite(
-          normalizedOriginalCurrentRoundIndex,
-        )
-          ? normalizedOriginalCurrentRoundIndex
+      return await withEventLease(lockManager, lockHandle, async () => {
+        const snapshot = isEventPrizeEvent(eventId)
+          ? await state.readEventSnapshot(eventId)
           : null;
-        const originalStatus = normalizeString(event.status) || "active";
-        const originalEndedAtMs =
-          typeof event.endedAtMs === "number"
-            ? Math.floor(event.endedAtMs)
-            : null;
-        const originalWinnerProfileId = normalizeStringOrNull(
-          event.winnerProfileId,
-        );
-        const originalWinnerDisplayName = normalizeStringOrNull(
-          event.winnerDisplayName,
-        );
-        const rounds = cloneValue(
-          event.rounds && typeof event.rounds === "object" ? event.rounds : {},
-        );
-        let participants = cloneValue(
-          event.participants && typeof event.participants === "object"
-            ? event.participants
-            : {},
-        );
-        const supportsThirdPlaceMatch = hasThirdPlaceMatchField(event);
-        let thirdPlaceMatch =
-          supportsThirdPlaceMatch &&
-          event.thirdPlaceMatch &&
-          typeof event.thirdPlaceMatch === "object"
-            ? cloneValue(event.thirdPlaceMatch)
-            : null;
-        const inviteUpdates: EventCommitPlan = [];
-        let roundsChanged = false;
-        let participantsChanged = false;
-        let thirdPlaceMatchChanged = false;
-        const sortedRoundIndexes = getSortedRoundIndexes(rounds);
-        for (const roundIndex of sortedRoundIndexes) {
-          const round = rounds[String(roundIndex)];
-          if (!round || !round.matches || typeof round.matches !== "object") {
-            continue;
-          }
-          const resolvedEntries = await resolveRoundMatchesWithConcurrency(
-            round.matches,
+        const lockedEventValue = snapshot
+          ? snapshot.event
+          : await state.readEvent(eventId);
+        if (!(lockedEventValue !== null && lockedEventValue !== undefined)) {
+          throw new HttpsError("not-found", "Event not found.");
+        }
+        const event = cloneValue<EventData>(lockedEventValue || {});
+        const nowMs = getNowMs();
+        let prizeSelections;
+        if (
+          isEventPrizeEvent(eventId) &&
+          (event.status === "active" ||
+            event.status === "ended" ||
+            (event.status === "scheduled" &&
+              typeof event.startAtMs === "number" &&
+              nowMs >= event.startAtMs))
+        ) {
+          prizeSelections = cloneValue(snapshot!.prizeSelections);
+        }
+        const directParticipation = enforceParticipantGate
+          ? directRequesterParticipation(event, requesterUid)
+          : null;
+        const scheduledEventIsDue =
+          event.status === "scheduled" &&
+          typeof event.startAtMs === "number" &&
+          nowMs >= event.startAtMs;
+        const needsOwnershipSnapshot =
+          event.status === "active" ||
+          (scheduledEventIsDue && getEventParticipantIds(event).length >= 2) ||
+          (event.status === "ended" && isEventPrizeEvent(eventId)) ||
+          (enforceParticipantGate && !directParticipation?.isParticipant);
+        const ownershipSnapshot = needsOwnershipSnapshot
+          ? await loadOwnershipSnapshot(event, {
+              loginUids: enforceParticipantGate ? [requesterUid] : [],
+              profileIds: getPrizeSelectionProfileIds(prizeSelections),
+            })
+          : null;
+        if (enforceParticipantGate) {
+          const lockedRequesterParticipation = resolveRequesterParticipation(
+            event,
+            requesterUid,
+            ownershipSnapshot,
           );
-          for (const entry of resolvedEntries) {
-            const { matchRecord, resolved } = entry;
-            if (!resolved) {
+          syncLog.requesterProfileId = lockedRequesterParticipation.profileId;
+          if (!lockedRequesterParticipation.isParticipant) {
+            syncLog.skipped = true;
+            syncLog.reason = "not-participant";
+            return buildSkippedSyncResponse({
+              eventId,
+              reason: "not-participant",
+            });
+          }
+        }
+        if (enforceThrottle) {
+          const syncThrottle = await tryAcquireEventSyncThrottle(
+            eventId,
+            requesterUid,
+          );
+          if (!syncThrottle) {
+            syncLog.skipped = true;
+            syncLog.reason = "rate-limited";
+            return buildSkippedSyncResponse({
+              eventId,
+              reason: "rate-limited",
+            });
+          }
+        }
+        const updates: EventCommitPlan = [];
+        let didChange = false;
+        let eventPrizeAssignmentsForProjectionCleanup: Record<
+          string,
+          EventPrizeAssignmentRecord
+        > | null = null;
+
+        if (event.status === "scheduled") {
+          const dueTransition = await buildScheduledEventDueUpdates({
+            eventId,
+            event,
+            nowMs,
+            ownershipSnapshot,
+            prizeSelections,
+          });
+          updates.push(...dueTransition.updates);
+          didChange = dueTransition.didChange;
+        } else if (event.status === "active") {
+          const normalizedOriginalCurrentRoundIndex = toFiniteInteger(
+            event.currentRoundIndex,
+            NaN,
+          );
+          const originalCurrentRoundIndex = Number.isFinite(
+            normalizedOriginalCurrentRoundIndex,
+          )
+            ? normalizedOriginalCurrentRoundIndex
+            : null;
+          const originalStatus = normalizeString(event.status) || "active";
+          const originalEndedAtMs =
+            typeof event.endedAtMs === "number"
+              ? Math.floor(event.endedAtMs)
+              : null;
+          const originalWinnerProfileId = normalizeStringOrNull(
+            event.winnerProfileId,
+          );
+          const originalWinnerDisplayName = normalizeStringOrNull(
+            event.winnerDisplayName,
+          );
+          const rounds = cloneValue(
+            event.rounds && typeof event.rounds === "object"
+              ? event.rounds
+              : {},
+          );
+          let participants = cloneValue(
+            event.participants && typeof event.participants === "object"
+              ? event.participants
+              : {},
+          );
+          const supportsThirdPlaceMatch = hasThirdPlaceMatchField(event);
+          let thirdPlaceMatch =
+            supportsThirdPlaceMatch &&
+            event.thirdPlaceMatch &&
+            typeof event.thirdPlaceMatch === "object"
+              ? cloneValue(event.thirdPlaceMatch)
+              : null;
+          const inviteUpdates: EventCommitPlan = [];
+          let roundsChanged = false;
+          let participantsChanged = false;
+          let thirdPlaceMatchChanged = false;
+          const sortedRoundIndexes = getSortedRoundIndexes(rounds);
+          for (const roundIndex of sortedRoundIndexes) {
+            const round = rounds[String(roundIndex)];
+            if (!round || !round.matches || typeof round.matches !== "object") {
               continue;
             }
-            if (applyMatchResolution(matchRecord, resolved, nowMs)) {
-              roundsChanged = true;
+            const resolvedEntries = await resolveRoundMatchesWithConcurrency(
+              round.matches,
+            );
+            for (const entry of resolvedEntries) {
+              const { matchRecord, resolved } = entry;
+              if (!resolved) {
+                continue;
+              }
+              if (applyMatchResolution(matchRecord, resolved, nowMs)) {
+                roundsChanged = true;
+              }
             }
           }
-        }
 
-        if (thirdPlaceMatch) {
-          const resolvedThirdPlace =
-            await resolveRoundMatchState(thirdPlaceMatch);
+          if (thirdPlaceMatch) {
+            const resolvedThirdPlace =
+              await resolveRoundMatchState(thirdPlaceMatch);
+            if (
+              resolvedThirdPlace &&
+              applyMatchResolution(thirdPlaceMatch, resolvedThirdPlace, nowMs)
+            ) {
+              thirdPlaceMatchChanged = true;
+            }
+          }
+
           if (
-            resolvedThirdPlace &&
-            applyMatchResolution(thirdPlaceMatch, resolvedThirdPlace, nowMs)
+            await reconcileBracketMatchReadiness({
+              eventId,
+              rounds,
+              nowMs,
+              participantsById: participants,
+              inviteUpdates,
+              ownershipSnapshot,
+            })
           ) {
-            thirdPlaceMatchChanged = true;
+            roundsChanged = true;
           }
-        }
 
-        if (
-          await reconcileBracketMatchReadiness({
-            eventId,
+          if (supportsThirdPlaceMatch) {
+            const thirdPlaceResult = await reconcileThirdPlaceMatchReadiness({
+              eventId,
+              rounds,
+              nowMs,
+              participantsById: participants,
+              inviteUpdates,
+              thirdPlaceMatch,
+              ownershipSnapshot,
+            });
+            thirdPlaceMatch = thirdPlaceResult.thirdPlaceMatch;
+            if (thirdPlaceResult.didChange) {
+              thirdPlaceMatchChanged = true;
+            }
+          }
+
+          const {
+            didChange: roundStatusChanged,
+            finalRoundIndex,
+            earliestUnresolvedRoundIndex,
+            finalRoundWinnerProfileId,
+          } = recomputeRoundStatuses({
             rounds,
             nowMs,
-            participantsById: participants,
-            inviteUpdates,
-            ownershipSnapshot,
-          })
-        ) {
-          roundsChanged = true;
-        }
-
-        if (supportsThirdPlaceMatch) {
-          const thirdPlaceResult = await reconcileThirdPlaceMatchReadiness({
-            eventId,
-            rounds,
-            nowMs,
-            participantsById: participants,
-            inviteUpdates,
-            thirdPlaceMatch,
-            ownershipSnapshot,
           });
-          thirdPlaceMatch = thirdPlaceResult.thirdPlaceMatch;
-          if (thirdPlaceResult.didChange) {
-            thirdPlaceMatchChanged = true;
+          if (roundStatusChanged) {
+            roundsChanged = true;
           }
-        }
 
-        const {
-          didChange: roundStatusChanged,
-          finalRoundIndex,
-          earliestUnresolvedRoundIndex,
-          finalRoundWinnerProfileId,
-        } = recomputeRoundStatuses({
-          rounds,
-          nowMs,
-        });
-        if (roundStatusChanged) {
-          roundsChanged = true;
-        }
+          const finalRoundCompleted =
+            finalRoundIndex !== null && earliestUnresolvedRoundIndex === null;
+          const thirdPlaceResolved =
+            !supportsThirdPlaceMatch ||
+            !thirdPlaceMatch ||
+            isMatchResolved(thirdPlaceMatch);
+          const eventShouldEnd = finalRoundCompleted && thirdPlaceResolved;
+          const winnerProfileId =
+            normalizeString(finalRoundWinnerProfileId) || null;
+          const nextCurrentRoundIndex =
+            earliestUnresolvedRoundIndex !== null
+              ? earliestUnresolvedRoundIndex
+              : finalRoundIndex;
+          event.currentRoundIndex = nextCurrentRoundIndex;
 
-        const finalRoundCompleted =
-          finalRoundIndex !== null && earliestUnresolvedRoundIndex === null;
-        const thirdPlaceResolved =
-          !supportsThirdPlaceMatch ||
-          !thirdPlaceMatch ||
-          isMatchResolved(thirdPlaceMatch);
-        const eventShouldEnd = finalRoundCompleted && thirdPlaceResolved;
-        const winnerProfileId =
-          normalizeString(finalRoundWinnerProfileId) || null;
-        const nextCurrentRoundIndex =
-          earliestUnresolvedRoundIndex !== null
-            ? earliestUnresolvedRoundIndex
-            : finalRoundIndex;
-        event.currentRoundIndex = nextCurrentRoundIndex;
-
-        const participantStateResult = rebuildParticipantStatesFromRounds({
-          participantsById: participants,
-          rounds,
-          winnerProfileId,
-          eventEnded: eventShouldEnd,
-        });
-        if (participantStateResult.didChange) {
-          participants = participantStateResult.participantsById;
-          participantsChanged = true;
-        }
-
-        if (eventShouldEnd) {
-          const winnerParticipant =
-            (winnerProfileId && participants[winnerProfileId]) || null;
-          event.status = "ended";
-          if (typeof event.endedAtMs !== "number") {
-            event.endedAtMs = nowMs;
+          const participantStateResult = rebuildParticipantStatesFromRounds({
+            participantsById: participants,
+            rounds,
+            winnerProfileId,
+            eventEnded: eventShouldEnd,
+          });
+          if (participantStateResult.didChange) {
+            participants = participantStateResult.participantsById;
+            participantsChanged = true;
           }
-          event.winnerProfileId = winnerProfileId;
-          event.winnerDisplayName = winnerParticipant
-            ? winnerParticipant.displayName
-            : null;
+
+          if (eventShouldEnd) {
+            const winnerParticipant =
+              (winnerProfileId && participants[winnerProfileId]) || null;
+            event.status = "ended";
+            if (typeof event.endedAtMs !== "number") {
+              event.endedAtMs = nowMs;
+            }
+            event.winnerProfileId = winnerProfileId;
+            event.winnerDisplayName = winnerParticipant
+              ? winnerParticipant.displayName
+              : null;
+            if (isEventPrizeEvent(eventId)) {
+              if (typeof event.prizeSelectionsLockedAtMs !== "number") {
+                event.prizeSelectionsLockedAtMs = nowMs;
+                updates.push(
+                  eventField(eventId, "prizeSelectionsLockedAtMs", nowMs),
+                );
+              }
+              const prizeAssignmentResult = await resolveEventPrizeAssignments({
+                eventId,
+                event,
+                rounds,
+                participantsById: participants,
+                thirdPlaceMatch,
+                assignedAtMs: event.endedAtMs,
+                ownershipSnapshot,
+                prizeSelections,
+              });
+              if (Object.keys(prizeAssignmentResult.assignments).length > 0) {
+                eventPrizeAssignmentsForProjectionCleanup =
+                  prizeAssignmentResult.assignments;
+                event.prizeAssignments = prizeAssignmentResult.assignments;
+                await addEventPrizeAssignmentUpdates({
+                  updates,
+                  eventId,
+                  assignments: prizeAssignmentResult.assignments,
+                  includeEventAssignments: true,
+                });
+              }
+            }
+          } else {
+            event.status = "active";
+            event.endedAtMs = null;
+            event.winnerProfileId = null;
+            event.winnerDisplayName = null;
+          }
+
+          let eventChanged = false;
+          const normalizedCurrentRoundIndex =
+            typeof event.currentRoundIndex === "number"
+              ? Math.floor(event.currentRoundIndex)
+              : null;
+          if (normalizedCurrentRoundIndex !== originalCurrentRoundIndex) {
+            updates.push(
+              eventField(
+                eventId,
+                "currentRoundIndex",
+                normalizedCurrentRoundIndex,
+              ),
+            );
+            eventChanged = true;
+          }
+
+          const normalizedStatus = normalizeString(event.status) || "active";
+          if (normalizedStatus !== originalStatus) {
+            updates.push(
+              eventField(eventId, "status", normalizedStatus as EventStatus),
+            );
+            eventChanged = true;
+          }
+
+          const normalizedEndedAtMs =
+            typeof event.endedAtMs === "number"
+              ? Math.floor(event.endedAtMs)
+              : null;
+          if (normalizedEndedAtMs !== originalEndedAtMs) {
+            updates.push(eventField(eventId, "endedAtMs", normalizedEndedAtMs));
+            eventChanged = true;
+          }
+
+          const normalizedWinnerProfileId = normalizeStringOrNull(
+            event.winnerProfileId,
+          );
+          if (normalizedWinnerProfileId !== originalWinnerProfileId) {
+            updates.push(
+              eventField(eventId, "winnerProfileId", normalizedWinnerProfileId),
+            );
+            eventChanged = true;
+          }
+
+          const normalizedWinnerDisplayName = normalizeStringOrNull(
+            event.winnerDisplayName,
+          );
+          if (normalizedWinnerDisplayName !== originalWinnerDisplayName) {
+            updates.push(
+              eventField(
+                eventId,
+                "winnerDisplayName",
+                normalizedWinnerDisplayName,
+              ),
+            );
+            eventChanged = true;
+          }
+          if (supportsThirdPlaceMatch && thirdPlaceMatchChanged) {
+            updates.push(
+              eventField(eventId, "thirdPlaceMatch", thirdPlaceMatch),
+            );
+            eventChanged = true;
+          }
+
+          if (roundsChanged) {
+            updates.push(eventField(eventId, "rounds", rounds));
+          }
+          if (participantsChanged) {
+            updates.push(eventField(eventId, "participants", participants));
+          }
+          if (inviteUpdates.length > 0) {
+            updates.push(...inviteUpdates);
+          }
+          if (
+            roundsChanged ||
+            participantsChanged ||
+            inviteUpdates.length > 0 ||
+            eventChanged
+          ) {
+            updates.push(eventField(eventId, "updatedAtMs", nowMs));
+            didChange = true;
+          }
+        } else if (event.status === "ended") {
+          const rounds = cloneValue(
+            event.rounds && typeof event.rounds === "object"
+              ? event.rounds
+              : {},
+          );
+          const supportsThirdPlaceMatch = hasThirdPlaceMatchField(event);
+          let thirdPlaceMatch =
+            supportsThirdPlaceMatch &&
+            event.thirdPlaceMatch &&
+            typeof event.thirdPlaceMatch === "object"
+              ? cloneValue(event.thirdPlaceMatch)
+              : null;
+          let roundsChanged = false;
+          let thirdPlaceMatchChanged = false;
+          let prizeStateChanged = false;
+          const sortedRoundIndexes = getSortedRoundIndexes(rounds);
+          for (const roundIndex of sortedRoundIndexes) {
+            const round = rounds[String(roundIndex)];
+            if (!round || !round.matches || typeof round.matches !== "object") {
+              continue;
+            }
+            const resolvedEntries = await resolveRoundMatchesWithConcurrency(
+              round.matches,
+            );
+            for (const entry of resolvedEntries) {
+              const { matchRecord, resolved } = entry;
+              if (!resolved) {
+                continue;
+              }
+              if (applyMatchResolution(matchRecord, resolved, nowMs)) {
+                roundsChanged = true;
+              }
+            }
+          }
+
+          if (thirdPlaceMatch) {
+            const resolvedThirdPlace =
+              await resolveRoundMatchState(thirdPlaceMatch);
+            if (
+              resolvedThirdPlace &&
+              applyMatchResolution(thirdPlaceMatch, resolvedThirdPlace, nowMs)
+            ) {
+              thirdPlaceMatchChanged = true;
+            }
+          }
+
+          if (supportsThirdPlaceMatch) {
+            const thirdPlaceResult = await reconcileThirdPlaceMatchReadiness({
+              eventId,
+              rounds,
+              nowMs,
+              participantsById:
+                event.participants && typeof event.participants === "object"
+                  ? event.participants
+                  : {},
+              inviteUpdates: [],
+              thirdPlaceMatch,
+              allowInviteCreation: false,
+            });
+            thirdPlaceMatch = thirdPlaceResult.thirdPlaceMatch;
+            if (thirdPlaceResult.didChange) {
+              thirdPlaceMatchChanged = true;
+            }
+          }
+
           if (isEventPrizeEvent(eventId)) {
             if (typeof event.prizeSelectionsLockedAtMs !== "number") {
-              event.prizeSelectionsLockedAtMs = nowMs;
               updates.push(
-                eventField(eventId, "prizeSelectionsLockedAtMs", nowMs),
+                eventField(
+                  eventId,
+                  "prizeSelectionsLockedAtMs",
+                  typeof event.endedAtMs === "number" ? event.endedAtMs : nowMs,
+                ),
               );
+              prizeStateChanged = true;
             }
             const prizeAssignmentResult = await resolveEventPrizeAssignments({
               eventId,
               event,
               rounds,
-              participantsById: participants,
+              participantsById:
+                event.participants && typeof event.participants === "object"
+                  ? event.participants
+                  : {},
               thirdPlaceMatch,
-              assignedAtMs: event.endedAtMs,
+              assignedAtMs:
+                typeof event.endedAtMs === "number" ? event.endedAtMs : nowMs,
               ownershipSnapshot,
               prizeSelections,
             });
             if (Object.keys(prizeAssignmentResult.assignments).length > 0) {
               eventPrizeAssignmentsForProjectionCleanup =
                 prizeAssignmentResult.assignments;
-              event.prizeAssignments = prizeAssignmentResult.assignments;
-              await addEventPrizeAssignmentUpdates({
-                updates,
-                eventId,
-                assignments: prizeAssignmentResult.assignments,
-                includeEventAssignments: true,
-              });
+              if (prizeAssignmentResult.didCreate) {
+                await addEventPrizeAssignmentUpdates({
+                  updates,
+                  eventId,
+                  assignments: prizeAssignmentResult.assignments,
+                  includeEventAssignments: true,
+                });
+                prizeStateChanged = true;
+              }
             }
           }
-        } else {
-          event.status = "active";
-          event.endedAtMs = null;
-          event.winnerProfileId = null;
-          event.winnerDisplayName = null;
+
+          if (roundsChanged || thirdPlaceMatchChanged) {
+            updates.push(eventField(eventId, "rounds", rounds));
+            if (supportsThirdPlaceMatch) {
+              updates.push(
+                eventField(eventId, "thirdPlaceMatch", thirdPlaceMatch),
+              );
+            }
+          }
+          if (roundsChanged || thirdPlaceMatchChanged || prizeStateChanged) {
+            updates.push(eventField(eventId, "updatedAtMs", nowMs));
+            didChange = true;
+          }
         }
 
-        let eventChanged = false;
-        const normalizedCurrentRoundIndex =
-          typeof event.currentRoundIndex === "number"
-            ? Math.floor(event.currentRoundIndex)
-            : null;
-        if (normalizedCurrentRoundIndex !== originalCurrentRoundIndex) {
-          updates.push(
-            eventField(
+        if (didChange) {
+          const lockOwned = await isEventLockStillOwned(lockHandle);
+          if (!lockOwned) {
+            const latestValue = await state.readEvent(eventId);
+            syncLog.skipped = true;
+            syncLog.reason = "locked";
+            return buildSkippedSyncResponse({
               eventId,
-              "currentRoundIndex",
-              normalizedCurrentRoundIndex,
-            ),
-          );
-          eventChanged = true;
-        }
-
-        const normalizedStatus = normalizeString(event.status) || "active";
-        if (normalizedStatus !== originalStatus) {
-          updates.push(
-            eventField(eventId, "status", normalizedStatus as EventStatus),
-          );
-          eventChanged = true;
-        }
-
-        const normalizedEndedAtMs =
-          typeof event.endedAtMs === "number"
-            ? Math.floor(event.endedAtMs)
-            : null;
-        if (normalizedEndedAtMs !== originalEndedAtMs) {
-          updates.push(eventField(eventId, "endedAtMs", normalizedEndedAtMs));
-          eventChanged = true;
-        }
-
-        const normalizedWinnerProfileId = normalizeStringOrNull(
-          event.winnerProfileId,
-        );
-        if (normalizedWinnerProfileId !== originalWinnerProfileId) {
-          updates.push(
-            eventField(eventId, "winnerProfileId", normalizedWinnerProfileId),
-          );
-          eventChanged = true;
-        }
-
-        const normalizedWinnerDisplayName = normalizeStringOrNull(
-          event.winnerDisplayName,
-        );
-        if (normalizedWinnerDisplayName !== originalWinnerDisplayName) {
-          updates.push(
-            eventField(
-              eventId,
-              "winnerDisplayName",
-              normalizedWinnerDisplayName,
-            ),
-          );
-          eventChanged = true;
-        }
-        if (supportsThirdPlaceMatch && thirdPlaceMatchChanged) {
-          updates.push(eventField(eventId, "thirdPlaceMatch", thirdPlaceMatch));
-          eventChanged = true;
-        }
-
-        if (roundsChanged) {
-          updates.push(eventField(eventId, "rounds", rounds));
-        }
-        if (participantsChanged) {
-          updates.push(eventField(eventId, "participants", participants));
-        }
-        if (inviteUpdates.length > 0) {
-          updates.push(...inviteUpdates);
-        }
-        if (
-          roundsChanged ||
-          participantsChanged ||
-          inviteUpdates.length > 0 ||
-          eventChanged
-        ) {
-          updates.push(eventField(eventId, "updatedAtMs", nowMs));
-          didChange = true;
-        }
-      } else if (event.status === "ended") {
-        const rounds = cloneValue(
-          event.rounds && typeof event.rounds === "object" ? event.rounds : {},
-        );
-        const supportsThirdPlaceMatch = hasThirdPlaceMatchField(event);
-        let thirdPlaceMatch =
-          supportsThirdPlaceMatch &&
-          event.thirdPlaceMatch &&
-          typeof event.thirdPlaceMatch === "object"
-            ? cloneValue(event.thirdPlaceMatch)
-            : null;
-        let roundsChanged = false;
-        let thirdPlaceMatchChanged = false;
-        let prizeStateChanged = false;
-        const sortedRoundIndexes = getSortedRoundIndexes(rounds);
-        for (const roundIndex of sortedRoundIndexes) {
-          const round = rounds[String(roundIndex)];
-          if (!round || !round.matches || typeof round.matches !== "object") {
-            continue;
+              reason: "locked",
+              event: latestValue,
+            });
           }
-          const resolvedEntries = await resolveRoundMatchesWithConcurrency(
-            round.matches,
-          );
-          for (const entry of resolvedEntries) {
-            const { matchRecord, resolved } = entry;
-            if (!resolved) {
-              continue;
-            }
-            if (applyMatchResolution(matchRecord, resolved, nowMs)) {
-              roundsChanged = true;
-            }
-          }
+          await state.commitEventPlan(mergeEventPlans(updates));
         }
-
-        if (thirdPlaceMatch) {
-          const resolvedThirdPlace =
-            await resolveRoundMatchState(thirdPlaceMatch);
-          if (
-            resolvedThirdPlace &&
-            applyMatchResolution(thirdPlaceMatch, resolvedThirdPlace, nowMs)
-          ) {
-            thirdPlaceMatchChanged = true;
-          }
-        }
-
-        if (supportsThirdPlaceMatch) {
-          const thirdPlaceResult = await reconcileThirdPlaceMatchReadiness({
-            eventId,
-            rounds,
-            nowMs,
-            participantsById:
-              event.participants && typeof event.participants === "object"
-                ? event.participants
-                : {},
-            inviteUpdates: [],
-            thirdPlaceMatch,
-            allowInviteCreation: false,
-          });
-          thirdPlaceMatch = thirdPlaceResult.thirdPlaceMatch;
-          if (thirdPlaceResult.didChange) {
-            thirdPlaceMatchChanged = true;
-          }
-        }
-
-        if (isEventPrizeEvent(eventId)) {
-          if (typeof event.prizeSelectionsLockedAtMs !== "number") {
-            updates.push(
-              eventField(
-                eventId,
-                "prizeSelectionsLockedAtMs",
-                typeof event.endedAtMs === "number" ? event.endedAtMs : nowMs,
-              ),
+        if (eventPrizeAssignmentsForProjectionCleanup) {
+          if (!(await isEventLockStillOwned(lockHandle))) {
+            throw new HttpsError(
+              "aborted",
+              "Event lock expired while projecting prizes.",
             );
-            prizeStateChanged = true;
           }
-          const prizeAssignmentResult = await resolveEventPrizeAssignments({
-            eventId,
+          const projectionResult = await reconcileProfileEventPrizeAssignments({
             event,
-            rounds,
-            participantsById:
-              event.participants && typeof event.participants === "object"
-                ? event.participants
-                : {},
-            thirdPlaceMatch,
-            assignedAtMs:
-              typeof event.endedAtMs === "number" ? event.endedAtMs : nowMs,
+            eventId,
+            assignments: eventPrizeAssignmentsForProjectionCleanup,
             ownershipSnapshot,
-            prizeSelections,
           });
-          if (Object.keys(prizeAssignmentResult.assignments).length > 0) {
-            eventPrizeAssignmentsForProjectionCleanup =
-              prizeAssignmentResult.assignments;
-            if (prizeAssignmentResult.didCreate) {
-              await addEventPrizeAssignmentUpdates({
-                updates,
-                eventId,
-                assignments: prizeAssignmentResult.assignments,
-                includeEventAssignments: true,
-              });
-              prizeStateChanged = true;
-            }
-          }
+          if (projectionResult.didChange) didChange = true;
         }
-
-        if (roundsChanged || thirdPlaceMatchChanged) {
-          updates.push(eventField(eventId, "rounds", rounds));
-          if (supportsThirdPlaceMatch) {
-            updates.push(
-              eventField(eventId, "thirdPlaceMatch", thirdPlaceMatch),
+        const projectionCleanupRequest =
+          getCompletedEventPrizeProjectionCleanupRequest({
+            eventId,
+            eventStatus: event.status,
+            assignments: eventPrizeAssignmentsForProjectionCleanup,
+          });
+        if (projectionCleanupRequest) {
+          if (!(await isEventLockStillOwned(lockHandle))) {
+            throw new HttpsError(
+              "aborted",
+              "Event lock expired while cleaning prize projections.",
             );
           }
-        }
-        if (roundsChanged || thirdPlaceMatchChanged || prizeStateChanged) {
-          updates.push(eventField(eventId, "updatedAtMs", nowMs));
-          didChange = true;
-        }
-      }
-
-      if (didChange) {
-        const lockOwned = await isEventLockStillOwned(lockHandle);
-        if (!lockOwned) {
-          const latestValue = await state.readEvent(eventId);
-          syncLog.skipped = true;
-          syncLog.reason = "locked";
-          return buildSkippedSyncResponse({
-            eventId,
-            reason: "locked",
-            event: latestValue,
+          await removeCompletedEventPrizeProjections({
+            ...projectionCleanupRequest,
+            event,
+            ownershipSnapshot,
           });
         }
-        await state.commitEventPlan(mergeEventPlans(updates));
-      }
-      if (eventPrizeAssignmentsForProjectionCleanup) {
-        if (!(await isEventLockStillOwned(lockHandle))) {
-          throw new HttpsError(
-            "aborted",
-            "Event lock expired while projecting prizes.",
-          );
-        }
-        const projectionResult = await reconcileProfileEventPrizeAssignments({
-          event,
-          eventId,
-          assignments: eventPrizeAssignmentsForProjectionCleanup,
-          ownershipSnapshot,
-        });
-        if (projectionResult.didChange) didChange = true;
-      }
-      const projectionCleanupRequest =
-        getCompletedEventPrizeProjectionCleanupRequest({
-          eventId,
-          eventStatus: event.status,
-          assignments: eventPrizeAssignmentsForProjectionCleanup,
-        });
-      if (projectionCleanupRequest) {
-        if (!(await isEventLockStillOwned(lockHandle))) {
-          throw new HttpsError(
-            "aborted",
-            "Event lock expired while cleaning prize projections.",
-          );
-        }
-        await removeCompletedEventPrizeProjections({
-          ...projectionCleanupRequest,
-          event,
-          ownershipSnapshot,
-        });
-      }
 
-      const refreshedValue = await state.readEvent(eventId);
-      syncLog.didChange = didChange;
-      return {
-        ok: true,
-        eventId,
-        didChange,
-        event: refreshedValue,
-      };
+        const refreshedValue = await state.readEvent(eventId);
+        syncLog.didChange = didChange;
+        return {
+          ok: true,
+          eventId,
+          didChange,
+          event: refreshedValue,
+        };
+      });
     } catch (error) {
       if (!syncLog.reason) {
         syncLog.reason =
@@ -1441,11 +1431,6 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
             : "error";
       }
       throw error;
-    } finally {
-      if (lockHandle) {
-        stopLockHeartbeat();
-        await releaseEventLock(lockHandle);
-      }
     }
   };
 

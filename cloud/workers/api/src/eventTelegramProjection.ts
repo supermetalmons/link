@@ -10,7 +10,10 @@ import {
   isV2TelegramEvent,
   loadEndedMatchResults,
 } from "../../../runtime/telegram/eventProjectionCore.js";
-import { createEventLockManagerCore } from "../../../runtime/events/lockManagerCore.js";
+import {
+  createEventLockManagerCore,
+  withEventLease,
+} from "../../../runtime/events/lockManagerCore.js";
 import type { EventStore } from "./eventStoreContracts.ts";
 import type { EventOutboxReads } from "./eventOutboxReadRepository.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
@@ -206,8 +209,7 @@ export async function processEventProjectionTask(
   if (!lockHandle) {
     throw new Error("event-telegram-lock-busy");
   }
-  const stopHeartbeat = lockManager.startEventLockHeartbeat(lockHandle);
-  try {
+  return withEventLease(lockManager, lockHandle, async () => {
     const [eventData, projectionSnapshot] = await Promise.all([
       state.readEvent(task.eventId),
       state.readEventTelegramProjectionState(task.eventId),
@@ -353,10 +355,7 @@ export async function processEventProjectionTask(
     }
     await settleEventOutbox(state, task);
     return stateCommitted ? "projected" : "superseded";
-  } finally {
-    stopHeartbeat();
-    await lockManager.releaseEventLock(lockHandle);
-  }
+  });
 }
 
 export function eventProjectionSweepEntries(

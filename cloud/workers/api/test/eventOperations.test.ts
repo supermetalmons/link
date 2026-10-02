@@ -1652,7 +1652,7 @@ test("fails closed under the event lock when D1 ownership is unavailable", async
   assert.deepEqual(state.patches, []);
 });
 
-test("disqualifies an active match and synchronizes the terminal state", async () => {
+test("disqualifies an active match and releases its lease before synchronizing the terminal state", async () => {
   const activeMatch = {
     ...match("0_0", profileId, "opponent"),
     inviteId: "invite-1",
@@ -1680,6 +1680,15 @@ test("disqualifies an active match and synchronizes the terminal state", async (
     },
   };
   const state = createRepository({ "events/event-1": event });
+  const leaseLifecycle: string[] = [];
+  const transactLease = state.repository.transactEventLease;
+  state.repository.transactEventLease = async (...args) => {
+    const result = await transactLease(...args);
+    if (result.decision === "acquired" || result.decision === "released") {
+      leaseLifecycle.push(result.decision);
+    }
+    return result;
+  };
   const response = await disqualifyEventMatchWinners(
     workflowEnvironment(() => undefined),
     identity,
@@ -1695,6 +1704,13 @@ test("disqualifies an active match and synchronizes the terminal state", async (
   assert.equal(response.matchKey, "0_0");
   assert.ok("didChange" in response);
   assert.equal(response.event.status, "ended");
+  assert.deepEqual(leaseLifecycle, [
+    "acquired",
+    "released",
+    "acquired",
+    "released",
+  ]);
+  assert.equal(getPath(state.values, "eventLocks/event-1"), null);
   assert.equal(
     getPath(
       state.values,

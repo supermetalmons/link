@@ -2,6 +2,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.EventRuntimeError = exports.createEventRuntime = void 0;
+const lockManagerCore_js_1 = require("./events/lockManagerCore.js");
 const eventCommands_js_1 = require("./eventCommands.js");
 const event_prizes_1 = require("@mons/shared/event-prizes");
 const eventPrizeProjectionState_js_1 = require("./eventPrizeProjectionState.js");
@@ -24,12 +25,8 @@ const createEventRuntime = (dependencies) => {
     dependencies.readProfileOwnershipSnapshot;
   const enqueueEventProgressTask = dependencies.enqueueEventProgressTask;
   const readEventPrizeWithdrawals = dependencies.readEventPrizeWithdrawals;
-  const {
-    acquireEventLockWithRetry,
-    isEventLockStillOwned,
-    releaseEventLock,
-    startEventLockHeartbeat,
-  } = dependencies.eventLockManager;
+  const lockManager = dependencies.eventLockManager;
+  const { acquireEventLockWithRetry, isEventLockStillOwned } = lockManager;
   const {
     addEventPrizeAssignmentUpdates,
     applyMatchResolution,
@@ -321,6 +318,7 @@ const createEventRuntime = (dependencies) => {
         "The function must be called while authenticated.",
       );
     }
+    const requesterUid = request.auth.uid;
     const eventId = normalizeString(request.data && request.data.eventId);
     if (!eventId) {
       throw new HttpsError("invalid-argument", "eventId is required.");
@@ -339,160 +337,159 @@ const createEventRuntime = (dependencies) => {
     if (!(initialEventValue !== null && initialEventValue !== undefined)) {
       throw new HttpsError("not-found", "Event not found.");
     }
-    const lockHandle = await acquireEventLockWithRetry(
-      eventId,
-      request.auth.uid,
-      {
-        attempts: 40,
-        delayMs: 100,
-      },
-    );
+    const lockHandle = await acquireEventLockWithRetry(eventId, requesterUid, {
+      attempts: 40,
+      delayMs: 100,
+    });
     if (!lockHandle) {
       throw new HttpsError(
         "unavailable",
         "Event is busy. Please try postponing again.",
       );
     }
-    const stopLockHeartbeat = startEventLockHeartbeat(lockHandle);
-    try {
-      const snapshot = (0, event_prizes_1.isEventPrizeEvent)(eventId)
-        ? await state.readEventSnapshot(eventId)
-        : null;
-      const eventValue = snapshot
-        ? snapshot.event
-        : await state.readEvent(eventId);
-      if (!(eventValue !== null && eventValue !== undefined)) {
-        throw new HttpsError("not-found", "Event not found.");
-      }
-      const event = cloneValue(eventValue || {});
-      const creatorLoginUid = normalizeString(event.createdByLoginUid);
-      const creatorProfileId = normalizeString(event.createdByProfileId);
-      const nowMs = getNowMs();
-      const prizeSelections =
-        (0, event_prizes_1.isEventPrizeEvent)(eventId) &&
-        normalizeString(event.status) === "scheduled" &&
-        typeof event.startAtMs === "number" &&
-        nowMs >= event.startAtMs
-          ? cloneValue(snapshot.prizeSelections)
-          : undefined;
-      const directCreator = request.auth.uid === creatorLoginUid;
-      const dueParticipantCount = (0, participants_js_1.getEventParticipantIds)(
-        event,
-      ).length;
-      const ownershipSnapshot =
-        directCreator && (nowMs < event.startAtMs || dueParticipantCount < 2)
-          ? null
-          : await loadOwnershipSnapshot(event, {
-              loginUids: [request.auth.uid],
-              profileIds: getPrizeSelectionProfileIds(prizeSelections),
-            });
-      if (
-        !(0, ownership_js_1.requesterOwnsProfileReference)({
-          requesterUid: request.auth.uid,
-          snapshot: ownershipSnapshot,
-          storedLoginUid: creatorLoginUid,
-          storedProfileId: creatorProfileId,
-        })
-      ) {
-        throw new HttpsError(
-          "permission-denied",
-          "Only the event creator can postpone this event.",
-        );
-      }
-      if (normalizeString(event.status) !== "scheduled") {
-        throw new HttpsError(
-          "failed-precondition",
-          "Only scheduled events can be postponed.",
-        );
-      }
-      if (
-        typeof event.startAtMs !== "number" ||
-        !Number.isFinite(event.startAtMs)
-      ) {
-        throw new HttpsError(
-          "failed-precondition",
-          "This event cannot be postponed right now.",
-        );
-      }
-      if (nowMs >= event.startAtMs) {
-        const dueTransition = await buildScheduledEventDueUpdates({
-          eventId,
-          event,
-          nowMs,
-          ownershipSnapshot,
-          prizeSelections,
-        });
-        if (dueTransition.didChange) {
-          const lockOwned = await isEventLockStillOwned(lockHandle);
-          if (!lockOwned) {
-            throw new HttpsError(
-              "unavailable",
-              "Event is busy. Please try postponing again.",
-            );
-          }
-          await state.commitEventPlan(dueTransition.updates);
+    return (0, lockManagerCore_js_1.withEventLease)(
+      lockManager,
+      lockHandle,
+      async () => {
+        const snapshot = (0, event_prizes_1.isEventPrizeEvent)(eventId)
+          ? await state.readEventSnapshot(eventId)
+          : null;
+        const eventValue = snapshot
+          ? snapshot.event
+          : await state.readEvent(eventId);
+        if (!(eventValue !== null && eventValue !== undefined)) {
+          throw new HttpsError("not-found", "Event not found.");
         }
-        throw new HttpsError(
-          "failed-precondition",
-          "This event can no longer be postponed.",
-        );
-      }
-      const nextStartAtMs =
-        Math.floor(event.startAtMs) + postponeByMinutes * 60 * 1000;
-      (0, scheduling_js_1.assertScheduledStartWindow)(nextStartAtMs, nowMs);
-      const sourceKey = `start:${eventId}:${nextStartAtMs}`;
-      let progress;
-      try {
-        progress = await enqueueEventProgressTask({
-          eventId,
-          sourceKey,
-          reason: "scheduled-start-postpone",
-          scheduleTimeMs: nextStartAtMs,
-        });
-      } catch (error) {
-        console.error(
-          JSON.stringify({
-            event: "event_progress_enqueue_failed",
+        const event = cloneValue(eventValue || {});
+        const creatorLoginUid = normalizeString(event.createdByLoginUid);
+        const creatorProfileId = normalizeString(event.createdByProfileId);
+        const nowMs = getNowMs();
+        const prizeSelections =
+          (0, event_prizes_1.isEventPrizeEvent)(eventId) &&
+          normalizeString(event.status) === "scheduled" &&
+          typeof event.startAtMs === "number" &&
+          nowMs >= event.startAtMs
+            ? cloneValue(snapshot.prizeSelections)
+            : undefined;
+        const directCreator = requesterUid === creatorLoginUid;
+        const dueParticipantCount = (0,
+        participants_js_1.getEventParticipantIds)(event).length;
+        const ownershipSnapshot =
+          directCreator && (nowMs < event.startAtMs || dueParticipantCount < 2)
+            ? null
+            : await loadOwnershipSnapshot(event, {
+                loginUids: [requesterUid],
+                profileIds: getPrizeSelectionProfileIds(prizeSelections),
+              });
+        if (
+          !(0, ownership_js_1.requesterOwnsProfileReference)({
+            requesterUid,
+            snapshot: ownershipSnapshot,
+            storedLoginUid: creatorLoginUid,
+            storedProfileId: creatorProfileId,
+          })
+        ) {
+          throw new HttpsError(
+            "permission-denied",
+            "Only the event creator can postpone this event.",
+          );
+        }
+        if (normalizeString(event.status) !== "scheduled") {
+          throw new HttpsError(
+            "failed-precondition",
+            "Only scheduled events can be postponed.",
+          );
+        }
+        if (
+          typeof event.startAtMs !== "number" ||
+          !Number.isFinite(event.startAtMs)
+        ) {
+          throw new HttpsError(
+            "failed-precondition",
+            "This event cannot be postponed right now.",
+          );
+        }
+        if (nowMs >= event.startAtMs) {
+          const dueTransition = await buildScheduledEventDueUpdates({
+            eventId,
+            event,
+            nowMs,
+            ownershipSnapshot,
+            prizeSelections,
+          });
+          if (dueTransition.didChange) {
+            const lockOwned = await isEventLockStillOwned(lockHandle);
+            if (!lockOwned) {
+              throw new HttpsError(
+                "unavailable",
+                "Event is busy. Please try postponing again.",
+              );
+            }
+            await state.commitEventPlan(dueTransition.updates);
+          }
+          throw new HttpsError(
+            "failed-precondition",
+            "This event can no longer be postponed.",
+          );
+        }
+        const nextStartAtMs =
+          Math.floor(event.startAtMs) + postponeByMinutes * 60 * 1000;
+        (0, scheduling_js_1.assertScheduledStartWindow)(nextStartAtMs, nowMs);
+        const sourceKey = `start:${eventId}:${nextStartAtMs}`;
+        let progress;
+        try {
+          progress = await enqueueEventProgressTask({
             eventId,
             sourceKey,
             reason: "scheduled-start-postpone",
-            kind: error instanceof Error ? error.name : typeof error,
-          }),
-        );
-        throw new HttpsError(
-          "unavailable",
-          "Could not schedule postponed event start. Please try again.",
-        );
-      }
-      const lockOwned = await isEventLockStillOwned(lockHandle);
-      if (!lockOwned) {
-        throw new HttpsError(
-          "unavailable",
-          "Event is busy. Please try postponing again.",
-        );
-      }
-      event.startAtMs = nextStartAtMs;
-      event.updatedAtMs = nowMs;
-      await state.commitEventPlan([
-        (0, eventCommands_js_1.eventField)(eventId, "startAtMs", nextStartAtMs),
-        (0, eventCommands_js_1.eventField)(eventId, "updatedAtMs", nowMs),
-        {
-          kind: "progress-outbox",
-          outboxId: progress.outboxId,
-          value: progress.outbox,
-        },
-      ]);
-      return {
-        ok: true,
-        eventId,
-        event,
-        postponeByMinutes,
-        startAtMs: nextStartAtMs,
-      };
-    } finally {
-      stopLockHeartbeat();
-      await releaseEventLock(lockHandle);
-    }
+            scheduleTimeMs: nextStartAtMs,
+          });
+        } catch (error) {
+          console.error(
+            JSON.stringify({
+              event: "event_progress_enqueue_failed",
+              eventId,
+              sourceKey,
+              reason: "scheduled-start-postpone",
+              kind: error instanceof Error ? error.name : typeof error,
+            }),
+          );
+          throw new HttpsError(
+            "unavailable",
+            "Could not schedule postponed event start. Please try again.",
+          );
+        }
+        const lockOwned = await isEventLockStillOwned(lockHandle);
+        if (!lockOwned) {
+          throw new HttpsError(
+            "unavailable",
+            "Event is busy. Please try postponing again.",
+          );
+        }
+        event.startAtMs = nextStartAtMs;
+        event.updatedAtMs = nowMs;
+        await state.commitEventPlan([
+          (0, eventCommands_js_1.eventField)(
+            eventId,
+            "startAtMs",
+            nextStartAtMs,
+          ),
+          (0, eventCommands_js_1.eventField)(eventId, "updatedAtMs", nowMs),
+          {
+            kind: "progress-outbox",
+            outboxId: progress.outboxId,
+            value: progress.outbox,
+          },
+        ]);
+        return {
+          ok: true,
+          eventId,
+          event,
+          postponeByMinutes,
+          startAtMs: nextStartAtMs,
+        };
+      },
+    );
   };
   const disqualifyEventMatchWinners = async (request) => {
     const startedAtMs = getNowMs();
@@ -506,8 +503,6 @@ const createEventRuntime = (dependencies) => {
       mode: "callable-disqualify",
     });
     syncLog.targetMatchKey = matchKeyInput || null;
-    let lockHandle = null;
-    let stopLockHeartbeat = () => {};
     try {
       if (!request.auth) {
         throw new HttpsError(
@@ -515,6 +510,7 @@ const createEventRuntime = (dependencies) => {
           "The function must be called while authenticated.",
         );
       }
+      const requesterUid = request.auth.uid;
       if (!eventId) {
         throw new HttpsError("invalid-argument", "eventId is required.");
       }
@@ -526,140 +522,142 @@ const createEventRuntime = (dependencies) => {
       if (!isThirdPlaceTarget && !parsedMatchKey) {
         throw new HttpsError("invalid-argument", "matchKey is invalid.");
       }
-      lockHandle = await acquireEventLockWithRetry(eventId, request.auth.uid, {
-        attempts: 40,
-        delayMs: 100,
-      });
+      const lockHandle = await acquireEventLockWithRetry(
+        eventId,
+        requesterUid,
+        {
+          attempts: 40,
+          delayMs: 100,
+        },
+      );
       if (!lockHandle) {
         throw new HttpsError(
           "unavailable",
           "Event is busy. Please try disqualifying again.",
         );
       }
-      stopLockHeartbeat = startEventLockHeartbeat(lockHandle);
-      let didDisqualify = false;
-      let resolvedMatchKey = matchKeyInput;
-      try {
-        const eventValue = await state.readEvent(eventId);
-        if (!(eventValue !== null && eventValue !== undefined)) {
-          throw new HttpsError("not-found", "Event not found.");
-        }
-        const event = cloneValue(eventValue || {});
-        const ownershipSnapshot = await loadOwnershipSnapshot(event, {
-          loginUids: [request.auth.uid],
-        });
-        ensurePilotEventCreator(request.auth.uid, ownershipSnapshot);
-        if (normalizeString(event.status) !== "active") {
-          throw new HttpsError(
-            "failed-precondition",
-            "Only active events can be updated.",
-          );
-        }
-        let targetMatch = null;
-        let targetMatchUpdate = null;
-        if (isThirdPlaceTarget) {
-          const thirdPlaceMatchCandidate = event.thirdPlaceMatch;
-          if (
-            thirdPlaceMatchCandidate &&
-            typeof thirdPlaceMatchCandidate === "object"
-          ) {
-            targetMatch = thirdPlaceMatchCandidate;
-            resolvedMatchKey = events_1.THIRD_PLACE_MATCH_KEY;
+      const result = await (0, lockManagerCore_js_1.withEventLease)(
+        lockManager,
+        lockHandle,
+        async () => {
+          let resolvedMatchKey = matchKeyInput;
+          const eventValue = await state.readEvent(eventId);
+          if (!(eventValue !== null && eventValue !== undefined)) {
+            throw new HttpsError("not-found", "Event not found.");
+          }
+          const event = cloneValue(eventValue || {});
+          const ownershipSnapshot = await loadOwnershipSnapshot(event, {
+            loginUids: [requesterUid],
+          });
+          ensurePilotEventCreator(requesterUid, ownershipSnapshot);
+          if (normalizeString(event.status) !== "active") {
+            throw new HttpsError(
+              "failed-precondition",
+              "Only active events can be updated.",
+            );
+          }
+          let targetMatch = null;
+          let targetMatchUpdate = null;
+          if (isThirdPlaceTarget) {
+            const thirdPlaceMatchCandidate = event.thirdPlaceMatch;
+            if (
+              thirdPlaceMatchCandidate &&
+              typeof thirdPlaceMatchCandidate === "object"
+            ) {
+              targetMatch = thirdPlaceMatchCandidate;
+              resolvedMatchKey = events_1.THIRD_PLACE_MATCH_KEY;
+              targetMatchUpdate = {
+                kind: "event-disqualification",
+                eventId,
+                roundKey: null,
+                matchKey: "third_place",
+              };
+            }
+          } else {
+            const round =
+              event.rounds && typeof event.rounds === "object"
+                ? event.rounds[String(parsedMatchKey.roundIndex)]
+                : null;
+            if (!round || !round.matches || typeof round.matches !== "object") {
+              throw new HttpsError(
+                "failed-precondition",
+                "Selected match not found.",
+              );
+            }
+            targetMatch = round.matches[resolvedMatchKey];
+            if (!targetMatch || typeof targetMatch !== "object") {
+              const fallbackEntry =
+                Object.entries(round.matches).find(([candidateMatchKey]) => {
+                  const parsedCandidate = (0, events_1.parseEventMatchKey)(
+                    candidateMatchKey,
+                  );
+                  return (
+                    parsedCandidate?.matchIndex === parsedMatchKey.matchIndex
+                  );
+                }) || null;
+              if (fallbackEntry) {
+                [resolvedMatchKey, targetMatch] = fallbackEntry;
+              }
+            }
             targetMatchUpdate = {
               kind: "event-disqualification",
               eventId,
-              roundKey: null,
-              matchKey: "third_place",
+              roundKey: String(parsedMatchKey.roundIndex),
+              matchKey: resolvedMatchKey,
             };
           }
-        } else {
-          const round =
-            event.rounds && typeof event.rounds === "object"
-              ? event.rounds[String(parsedMatchKey.roundIndex)]
-              : null;
-          if (!round || !round.matches || typeof round.matches !== "object") {
+          if (!targetMatch || typeof targetMatch !== "object") {
             throw new HttpsError(
               "failed-precondition",
               "Selected match not found.",
             );
           }
-          targetMatch = round.matches[resolvedMatchKey];
-          if (!targetMatch || typeof targetMatch !== "object") {
-            const fallbackEntry =
-              Object.entries(round.matches).find(([candidateMatchKey]) => {
-                const parsedCandidate = (0, events_1.parseEventMatchKey)(
-                  candidateMatchKey,
-                );
-                return (
-                  parsedCandidate?.matchIndex === parsedMatchKey.matchIndex
-                );
-              }) || null;
-            if (fallbackEntry) {
-              [resolvedMatchKey, targetMatch] = fallbackEntry;
-            }
-          }
-          targetMatchUpdate = {
-            kind: "event-disqualification",
-            eventId,
-            roundKey: String(parsedMatchKey.roundIndex),
-            matchKey: resolvedMatchKey,
-          };
-        }
-        if (!targetMatch || typeof targetMatch !== "object") {
-          throw new HttpsError(
-            "failed-precondition",
-            "Selected match not found.",
-          );
-        }
-        if (
-          normalizeString(targetMatch.status) !== "pending" ||
-          !normalizeString(targetMatch.inviteId)
-        ) {
-          throw new HttpsError(
-            "failed-precondition",
-            "Only active matches can be disqualified.",
-          );
-        }
-        if (
-          !normalizeString(targetMatch.hostProfileId) ||
-          !normalizeString(targetMatch.guestProfileId)
-        ) {
-          throw new HttpsError(
-            "failed-precondition",
-            "Selected match must have two participants.",
-          );
-        }
-        didDisqualify = !isMatchWinnerDisqualified(targetMatch);
-        if (didDisqualify) {
-          const lockOwned = await isEventLockStillOwned(lockHandle);
-          if (!lockOwned) {
+          if (
+            normalizeString(targetMatch.status) !== "pending" ||
+            !normalizeString(targetMatch.inviteId)
+          ) {
             throw new HttpsError(
-              "unavailable",
-              "Event is busy. Please try disqualifying again.",
+              "failed-precondition",
+              "Only active matches can be disqualified.",
             );
           }
-          await state.commitEventPlan([
-            { ...targetMatchUpdate, value: true },
-            (0, eventCommands_js_1.eventField)(
-              eventId,
-              "updatedAtMs",
-              getNowMs(),
-            ),
-          ]);
-        }
-      } finally {
-        stopLockHeartbeat();
-        stopLockHeartbeat = () => {};
-        await releaseEventLock(lockHandle);
-        lockHandle = null;
-      }
+          if (
+            !normalizeString(targetMatch.hostProfileId) ||
+            !normalizeString(targetMatch.guestProfileId)
+          ) {
+            throw new HttpsError(
+              "failed-precondition",
+              "Selected match must have two participants.",
+            );
+          }
+          const didDisqualify = !isMatchWinnerDisqualified(targetMatch);
+          if (didDisqualify) {
+            const lockOwned = await isEventLockStillOwned(lockHandle);
+            if (!lockOwned) {
+              throw new HttpsError(
+                "unavailable",
+                "Event is busy. Please try disqualifying again.",
+              );
+            }
+            await state.commitEventPlan([
+              { ...targetMatchUpdate, value: true },
+              (0, eventCommands_js_1.eventField)(
+                eventId,
+                "updatedAtMs",
+                getNowMs(),
+              ),
+            ]);
+          }
+          return { didDisqualify, resolvedMatchKey };
+        },
+      );
       let syncResult = null;
       for (let attempt = 0; attempt < 4; attempt += 1) {
         syncLog.skipped = false;
         syncLog.reason = null;
         syncResult = await runEventSyncState({
           eventId,
-          requesterUid: request.auth.uid,
+          requesterUid,
           enforceParticipantGate: false,
           enforceThrottle: false,
           syncLog,
@@ -675,14 +673,10 @@ const createEventRuntime = (dependencies) => {
       }
       return {
         ...syncResult,
-        didDisqualify,
-        matchKey: resolvedMatchKey,
+        didDisqualify: result.didDisqualify,
+        matchKey: result.resolvedMatchKey,
       };
     } finally {
-      stopLockHeartbeat();
-      if (lockHandle) {
-        await releaseEventLock(lockHandle);
-      }
       syncLog.durationMs = getNowMs() - startedAtMs;
       logSyncEventStateResult(syncLog);
     }
@@ -701,17 +695,19 @@ const createEventRuntime = (dependencies) => {
     enforceThrottle,
     syncLog,
   }) => {
-    let lockHandle = null;
-    let stopLockHeartbeat = () => {};
     try {
       const eventValue = await state.readEvent(eventId);
       if (!(eventValue !== null && eventValue !== undefined)) {
         throw new HttpsError("not-found", "Event not found.");
       }
-      lockHandle = await acquireEventLockWithRetry(eventId, requesterUid, {
-        attempts: 10,
-        delayMs: 100,
-      });
+      const lockHandle = await acquireEventLockWithRetry(
+        eventId,
+        requesterUid,
+        {
+          attempts: 10,
+          delayMs: 100,
+        },
+      );
       if (!lockHandle) {
         syncLog.skipped = true;
         syncLog.reason = "locked";
@@ -720,560 +716,593 @@ const createEventRuntime = (dependencies) => {
           reason: "locked",
         });
       }
-      stopLockHeartbeat = startEventLockHeartbeat(lockHandle);
-      const snapshot = (0, event_prizes_1.isEventPrizeEvent)(eventId)
-        ? await state.readEventSnapshot(eventId)
-        : null;
-      const lockedEventValue = snapshot
-        ? snapshot.event
-        : await state.readEvent(eventId);
-      if (!(lockedEventValue !== null && lockedEventValue !== undefined)) {
-        throw new HttpsError("not-found", "Event not found.");
-      }
-      const event = cloneValue(lockedEventValue || {});
-      const nowMs = getNowMs();
-      let prizeSelections;
-      if (
-        (0, event_prizes_1.isEventPrizeEvent)(eventId) &&
-        (event.status === "active" ||
-          event.status === "ended" ||
-          (event.status === "scheduled" &&
-            typeof event.startAtMs === "number" &&
-            nowMs >= event.startAtMs))
-      ) {
-        prizeSelections = cloneValue(snapshot.prizeSelections);
-      }
-      const directParticipation = enforceParticipantGate
-        ? (0, ownership_js_1.directRequesterParticipation)(event, requesterUid)
-        : null;
-      const scheduledEventIsDue =
-        event.status === "scheduled" &&
-        typeof event.startAtMs === "number" &&
-        nowMs >= event.startAtMs;
-      const needsOwnershipSnapshot =
-        event.status === "active" ||
-        (scheduledEventIsDue &&
-          (0, participants_js_1.getEventParticipantIds)(event).length >= 2) ||
-        (event.status === "ended" &&
-          (0, event_prizes_1.isEventPrizeEvent)(eventId)) ||
-        (enforceParticipantGate && !directParticipation?.isParticipant);
-      const ownershipSnapshot = needsOwnershipSnapshot
-        ? await loadOwnershipSnapshot(event, {
-            loginUids: enforceParticipantGate ? [requesterUid] : [],
-            profileIds: getPrizeSelectionProfileIds(prizeSelections),
-          })
-        : null;
-      if (enforceParticipantGate) {
-        const lockedRequesterParticipation = (0,
-        ownership_js_1.resolveRequesterParticipation)(
-          event,
-          requesterUid,
-          ownershipSnapshot,
-        );
-        syncLog.requesterProfileId = lockedRequesterParticipation.profileId;
-        if (!lockedRequesterParticipation.isParticipant) {
-          syncLog.skipped = true;
-          syncLog.reason = "not-participant";
-          return buildSkippedSyncResponse({
-            eventId,
-            reason: "not-participant",
-          });
-        }
-      }
-      if (enforceThrottle) {
-        const syncThrottle = await tryAcquireEventSyncThrottle(
-          eventId,
-          requesterUid,
-        );
-        if (!syncThrottle) {
-          syncLog.skipped = true;
-          syncLog.reason = "rate-limited";
-          return buildSkippedSyncResponse({
-            eventId,
-            reason: "rate-limited",
-          });
-        }
-      }
-      const updates = [];
-      let didChange = false;
-      let eventPrizeAssignmentsForProjectionCleanup = null;
-      if (event.status === "scheduled") {
-        const dueTransition = await buildScheduledEventDueUpdates({
-          eventId,
-          event,
-          nowMs,
-          ownershipSnapshot,
-          prizeSelections,
-        });
-        updates.push(...dueTransition.updates);
-        didChange = dueTransition.didChange;
-      } else if (event.status === "active") {
-        const normalizedOriginalCurrentRoundIndex = toFiniteInteger(
-          event.currentRoundIndex,
-          NaN,
-        );
-        const originalCurrentRoundIndex = Number.isFinite(
-          normalizedOriginalCurrentRoundIndex,
-        )
-          ? normalizedOriginalCurrentRoundIndex
-          : null;
-        const originalStatus = normalizeString(event.status) || "active";
-        const originalEndedAtMs =
-          typeof event.endedAtMs === "number"
-            ? Math.floor(event.endedAtMs)
+      return await (0, lockManagerCore_js_1.withEventLease)(
+        lockManager,
+        lockHandle,
+        async () => {
+          const snapshot = (0, event_prizes_1.isEventPrizeEvent)(eventId)
+            ? await state.readEventSnapshot(eventId)
             : null;
-        const originalWinnerProfileId = normalizeStringOrNull(
-          event.winnerProfileId,
-        );
-        const originalWinnerDisplayName = normalizeStringOrNull(
-          event.winnerDisplayName,
-        );
-        const rounds = cloneValue(
-          event.rounds && typeof event.rounds === "object" ? event.rounds : {},
-        );
-        let participants = cloneValue(
-          event.participants && typeof event.participants === "object"
-            ? event.participants
-            : {},
-        );
-        const supportsThirdPlaceMatch = hasThirdPlaceMatchField(event);
-        let thirdPlaceMatch =
-          supportsThirdPlaceMatch &&
-          event.thirdPlaceMatch &&
-          typeof event.thirdPlaceMatch === "object"
-            ? cloneValue(event.thirdPlaceMatch)
-            : null;
-        const inviteUpdates = [];
-        let roundsChanged = false;
-        let participantsChanged = false;
-        let thirdPlaceMatchChanged = false;
-        const sortedRoundIndexes = getSortedRoundIndexes(rounds);
-        for (const roundIndex of sortedRoundIndexes) {
-          const round = rounds[String(roundIndex)];
-          if (!round || !round.matches || typeof round.matches !== "object") {
-            continue;
+          const lockedEventValue = snapshot
+            ? snapshot.event
+            : await state.readEvent(eventId);
+          if (!(lockedEventValue !== null && lockedEventValue !== undefined)) {
+            throw new HttpsError("not-found", "Event not found.");
           }
-          const resolvedEntries = await resolveRoundMatchesWithConcurrency(
-            round.matches,
-          );
-          for (const entry of resolvedEntries) {
-            const { matchRecord, resolved } = entry;
-            if (!resolved) {
-              continue;
-            }
-            if (applyMatchResolution(matchRecord, resolved, nowMs)) {
-              roundsChanged = true;
-            }
-          }
-        }
-        if (thirdPlaceMatch) {
-          const resolvedThirdPlace =
-            await resolveRoundMatchState(thirdPlaceMatch);
+          const event = cloneValue(lockedEventValue || {});
+          const nowMs = getNowMs();
+          let prizeSelections;
           if (
-            resolvedThirdPlace &&
-            applyMatchResolution(thirdPlaceMatch, resolvedThirdPlace, nowMs)
+            (0, event_prizes_1.isEventPrizeEvent)(eventId) &&
+            (event.status === "active" ||
+              event.status === "ended" ||
+              (event.status === "scheduled" &&
+                typeof event.startAtMs === "number" &&
+                nowMs >= event.startAtMs))
           ) {
-            thirdPlaceMatchChanged = true;
+            prizeSelections = cloneValue(snapshot.prizeSelections);
           }
-        }
-        if (
-          await reconcileBracketMatchReadiness({
-            eventId,
-            rounds,
-            nowMs,
-            participantsById: participants,
-            inviteUpdates,
-            ownershipSnapshot,
-          })
-        ) {
-          roundsChanged = true;
-        }
-        if (supportsThirdPlaceMatch) {
-          const thirdPlaceResult = await reconcileThirdPlaceMatchReadiness({
-            eventId,
-            rounds,
-            nowMs,
-            participantsById: participants,
-            inviteUpdates,
-            thirdPlaceMatch,
-            ownershipSnapshot,
-          });
-          thirdPlaceMatch = thirdPlaceResult.thirdPlaceMatch;
-          if (thirdPlaceResult.didChange) {
-            thirdPlaceMatchChanged = true;
-          }
-        }
-        const {
-          didChange: roundStatusChanged,
-          finalRoundIndex,
-          earliestUnresolvedRoundIndex,
-          finalRoundWinnerProfileId,
-        } = recomputeRoundStatuses({
-          rounds,
-          nowMs,
-        });
-        if (roundStatusChanged) {
-          roundsChanged = true;
-        }
-        const finalRoundCompleted =
-          finalRoundIndex !== null && earliestUnresolvedRoundIndex === null;
-        const thirdPlaceResolved =
-          !supportsThirdPlaceMatch ||
-          !thirdPlaceMatch ||
-          isMatchResolved(thirdPlaceMatch);
-        const eventShouldEnd = finalRoundCompleted && thirdPlaceResolved;
-        const winnerProfileId =
-          normalizeString(finalRoundWinnerProfileId) || null;
-        const nextCurrentRoundIndex =
-          earliestUnresolvedRoundIndex !== null
-            ? earliestUnresolvedRoundIndex
-            : finalRoundIndex;
-        event.currentRoundIndex = nextCurrentRoundIndex;
-        const participantStateResult = rebuildParticipantStatesFromRounds({
-          participantsById: participants,
-          rounds,
-          winnerProfileId,
-          eventEnded: eventShouldEnd,
-        });
-        if (participantStateResult.didChange) {
-          participants = participantStateResult.participantsById;
-          participantsChanged = true;
-        }
-        if (eventShouldEnd) {
-          const winnerParticipant =
-            (winnerProfileId && participants[winnerProfileId]) || null;
-          event.status = "ended";
-          if (typeof event.endedAtMs !== "number") {
-            event.endedAtMs = nowMs;
-          }
-          event.winnerProfileId = winnerProfileId;
-          event.winnerDisplayName = winnerParticipant
-            ? winnerParticipant.displayName
+          const directParticipation = enforceParticipantGate
+            ? (0, ownership_js_1.directRequesterParticipation)(
+                event,
+                requesterUid,
+              )
             : null;
-          if ((0, event_prizes_1.isEventPrizeEvent)(eventId)) {
-            if (typeof event.prizeSelectionsLockedAtMs !== "number") {
-              event.prizeSelectionsLockedAtMs = nowMs;
-              updates.push(
-                (0, eventCommands_js_1.eventField)(
-                  eventId,
-                  "prizeSelectionsLockedAtMs",
-                  nowMs,
-                ),
-              );
+          const scheduledEventIsDue =
+            event.status === "scheduled" &&
+            typeof event.startAtMs === "number" &&
+            nowMs >= event.startAtMs;
+          const needsOwnershipSnapshot =
+            event.status === "active" ||
+            (scheduledEventIsDue &&
+              (0, participants_js_1.getEventParticipantIds)(event).length >=
+                2) ||
+            (event.status === "ended" &&
+              (0, event_prizes_1.isEventPrizeEvent)(eventId)) ||
+            (enforceParticipantGate && !directParticipation?.isParticipant);
+          const ownershipSnapshot = needsOwnershipSnapshot
+            ? await loadOwnershipSnapshot(event, {
+                loginUids: enforceParticipantGate ? [requesterUid] : [],
+                profileIds: getPrizeSelectionProfileIds(prizeSelections),
+              })
+            : null;
+          if (enforceParticipantGate) {
+            const lockedRequesterParticipation = (0,
+            ownership_js_1.resolveRequesterParticipation)(
+              event,
+              requesterUid,
+              ownershipSnapshot,
+            );
+            syncLog.requesterProfileId = lockedRequesterParticipation.profileId;
+            if (!lockedRequesterParticipation.isParticipant) {
+              syncLog.skipped = true;
+              syncLog.reason = "not-participant";
+              return buildSkippedSyncResponse({
+                eventId,
+                reason: "not-participant",
+              });
             }
-            const prizeAssignmentResult = await resolveEventPrizeAssignments({
+          }
+          if (enforceThrottle) {
+            const syncThrottle = await tryAcquireEventSyncThrottle(
+              eventId,
+              requesterUid,
+            );
+            if (!syncThrottle) {
+              syncLog.skipped = true;
+              syncLog.reason = "rate-limited";
+              return buildSkippedSyncResponse({
+                eventId,
+                reason: "rate-limited",
+              });
+            }
+          }
+          const updates = [];
+          let didChange = false;
+          let eventPrizeAssignmentsForProjectionCleanup = null;
+          if (event.status === "scheduled") {
+            const dueTransition = await buildScheduledEventDueUpdates({
               eventId,
               event,
-              rounds,
-              participantsById: participants,
-              thirdPlaceMatch,
-              assignedAtMs: event.endedAtMs,
+              nowMs,
               ownershipSnapshot,
               prizeSelections,
             });
-            if (Object.keys(prizeAssignmentResult.assignments).length > 0) {
-              eventPrizeAssignmentsForProjectionCleanup =
-                prizeAssignmentResult.assignments;
-              event.prizeAssignments = prizeAssignmentResult.assignments;
-              await addEventPrizeAssignmentUpdates({
-                updates,
+            updates.push(...dueTransition.updates);
+            didChange = dueTransition.didChange;
+          } else if (event.status === "active") {
+            const normalizedOriginalCurrentRoundIndex = toFiniteInteger(
+              event.currentRoundIndex,
+              NaN,
+            );
+            const originalCurrentRoundIndex = Number.isFinite(
+              normalizedOriginalCurrentRoundIndex,
+            )
+              ? normalizedOriginalCurrentRoundIndex
+              : null;
+            const originalStatus = normalizeString(event.status) || "active";
+            const originalEndedAtMs =
+              typeof event.endedAtMs === "number"
+                ? Math.floor(event.endedAtMs)
+                : null;
+            const originalWinnerProfileId = normalizeStringOrNull(
+              event.winnerProfileId,
+            );
+            const originalWinnerDisplayName = normalizeStringOrNull(
+              event.winnerDisplayName,
+            );
+            const rounds = cloneValue(
+              event.rounds && typeof event.rounds === "object"
+                ? event.rounds
+                : {},
+            );
+            let participants = cloneValue(
+              event.participants && typeof event.participants === "object"
+                ? event.participants
+                : {},
+            );
+            const supportsThirdPlaceMatch = hasThirdPlaceMatchField(event);
+            let thirdPlaceMatch =
+              supportsThirdPlaceMatch &&
+              event.thirdPlaceMatch &&
+              typeof event.thirdPlaceMatch === "object"
+                ? cloneValue(event.thirdPlaceMatch)
+                : null;
+            const inviteUpdates = [];
+            let roundsChanged = false;
+            let participantsChanged = false;
+            let thirdPlaceMatchChanged = false;
+            const sortedRoundIndexes = getSortedRoundIndexes(rounds);
+            for (const roundIndex of sortedRoundIndexes) {
+              const round = rounds[String(roundIndex)];
+              if (
+                !round ||
+                !round.matches ||
+                typeof round.matches !== "object"
+              ) {
+                continue;
+              }
+              const resolvedEntries = await resolveRoundMatchesWithConcurrency(
+                round.matches,
+              );
+              for (const entry of resolvedEntries) {
+                const { matchRecord, resolved } = entry;
+                if (!resolved) {
+                  continue;
+                }
+                if (applyMatchResolution(matchRecord, resolved, nowMs)) {
+                  roundsChanged = true;
+                }
+              }
+            }
+            if (thirdPlaceMatch) {
+              const resolvedThirdPlace =
+                await resolveRoundMatchState(thirdPlaceMatch);
+              if (
+                resolvedThirdPlace &&
+                applyMatchResolution(thirdPlaceMatch, resolvedThirdPlace, nowMs)
+              ) {
+                thirdPlaceMatchChanged = true;
+              }
+            }
+            if (
+              await reconcileBracketMatchReadiness({
                 eventId,
-                assignments: prizeAssignmentResult.assignments,
-                includeEventAssignments: true,
-              });
-            }
-          }
-        } else {
-          event.status = "active";
-          event.endedAtMs = null;
-          event.winnerProfileId = null;
-          event.winnerDisplayName = null;
-        }
-        let eventChanged = false;
-        const normalizedCurrentRoundIndex =
-          typeof event.currentRoundIndex === "number"
-            ? Math.floor(event.currentRoundIndex)
-            : null;
-        if (normalizedCurrentRoundIndex !== originalCurrentRoundIndex) {
-          updates.push(
-            (0, eventCommands_js_1.eventField)(
-              eventId,
-              "currentRoundIndex",
-              normalizedCurrentRoundIndex,
-            ),
-          );
-          eventChanged = true;
-        }
-        const normalizedStatus = normalizeString(event.status) || "active";
-        if (normalizedStatus !== originalStatus) {
-          updates.push(
-            (0, eventCommands_js_1.eventField)(
-              eventId,
-              "status",
-              normalizedStatus,
-            ),
-          );
-          eventChanged = true;
-        }
-        const normalizedEndedAtMs =
-          typeof event.endedAtMs === "number"
-            ? Math.floor(event.endedAtMs)
-            : null;
-        if (normalizedEndedAtMs !== originalEndedAtMs) {
-          updates.push(
-            (0, eventCommands_js_1.eventField)(
-              eventId,
-              "endedAtMs",
-              normalizedEndedAtMs,
-            ),
-          );
-          eventChanged = true;
-        }
-        const normalizedWinnerProfileId = normalizeStringOrNull(
-          event.winnerProfileId,
-        );
-        if (normalizedWinnerProfileId !== originalWinnerProfileId) {
-          updates.push(
-            (0, eventCommands_js_1.eventField)(
-              eventId,
-              "winnerProfileId",
-              normalizedWinnerProfileId,
-            ),
-          );
-          eventChanged = true;
-        }
-        const normalizedWinnerDisplayName = normalizeStringOrNull(
-          event.winnerDisplayName,
-        );
-        if (normalizedWinnerDisplayName !== originalWinnerDisplayName) {
-          updates.push(
-            (0, eventCommands_js_1.eventField)(
-              eventId,
-              "winnerDisplayName",
-              normalizedWinnerDisplayName,
-            ),
-          );
-          eventChanged = true;
-        }
-        if (supportsThirdPlaceMatch && thirdPlaceMatchChanged) {
-          updates.push(
-            (0, eventCommands_js_1.eventField)(
-              eventId,
-              "thirdPlaceMatch",
-              thirdPlaceMatch,
-            ),
-          );
-          eventChanged = true;
-        }
-        if (roundsChanged) {
-          updates.push(
-            (0, eventCommands_js_1.eventField)(eventId, "rounds", rounds),
-          );
-        }
-        if (participantsChanged) {
-          updates.push(
-            (0, eventCommands_js_1.eventField)(
-              eventId,
-              "participants",
-              participants,
-            ),
-          );
-        }
-        if (inviteUpdates.length > 0) {
-          updates.push(...inviteUpdates);
-        }
-        if (
-          roundsChanged ||
-          participantsChanged ||
-          inviteUpdates.length > 0 ||
-          eventChanged
-        ) {
-          updates.push(
-            (0, eventCommands_js_1.eventField)(eventId, "updatedAtMs", nowMs),
-          );
-          didChange = true;
-        }
-      } else if (event.status === "ended") {
-        const rounds = cloneValue(
-          event.rounds && typeof event.rounds === "object" ? event.rounds : {},
-        );
-        const supportsThirdPlaceMatch = hasThirdPlaceMatchField(event);
-        let thirdPlaceMatch =
-          supportsThirdPlaceMatch &&
-          event.thirdPlaceMatch &&
-          typeof event.thirdPlaceMatch === "object"
-            ? cloneValue(event.thirdPlaceMatch)
-            : null;
-        let roundsChanged = false;
-        let thirdPlaceMatchChanged = false;
-        let prizeStateChanged = false;
-        const sortedRoundIndexes = getSortedRoundIndexes(rounds);
-        for (const roundIndex of sortedRoundIndexes) {
-          const round = rounds[String(roundIndex)];
-          if (!round || !round.matches || typeof round.matches !== "object") {
-            continue;
-          }
-          const resolvedEntries = await resolveRoundMatchesWithConcurrency(
-            round.matches,
-          );
-          for (const entry of resolvedEntries) {
-            const { matchRecord, resolved } = entry;
-            if (!resolved) {
-              continue;
-            }
-            if (applyMatchResolution(matchRecord, resolved, nowMs)) {
+                rounds,
+                nowMs,
+                participantsById: participants,
+                inviteUpdates,
+                ownershipSnapshot,
+              })
+            ) {
               roundsChanged = true;
             }
-          }
-        }
-        if (thirdPlaceMatch) {
-          const resolvedThirdPlace =
-            await resolveRoundMatchState(thirdPlaceMatch);
-          if (
-            resolvedThirdPlace &&
-            applyMatchResolution(thirdPlaceMatch, resolvedThirdPlace, nowMs)
-          ) {
-            thirdPlaceMatchChanged = true;
-          }
-        }
-        if (supportsThirdPlaceMatch) {
-          const thirdPlaceResult = await reconcileThirdPlaceMatchReadiness({
-            eventId,
-            rounds,
-            nowMs,
-            participantsById:
-              event.participants && typeof event.participants === "object"
-                ? event.participants
-                : {},
-            inviteUpdates: [],
-            thirdPlaceMatch,
-            allowInviteCreation: false,
-          });
-          thirdPlaceMatch = thirdPlaceResult.thirdPlaceMatch;
-          if (thirdPlaceResult.didChange) {
-            thirdPlaceMatchChanged = true;
-          }
-        }
-        if ((0, event_prizes_1.isEventPrizeEvent)(eventId)) {
-          if (typeof event.prizeSelectionsLockedAtMs !== "number") {
-            updates.push(
-              (0, eventCommands_js_1.eventField)(
+            if (supportsThirdPlaceMatch) {
+              const thirdPlaceResult = await reconcileThirdPlaceMatchReadiness({
                 eventId,
-                "prizeSelectionsLockedAtMs",
-                typeof event.endedAtMs === "number" ? event.endedAtMs : nowMs,
-              ),
-            );
-            prizeStateChanged = true;
-          }
-          const prizeAssignmentResult = await resolveEventPrizeAssignments({
-            eventId,
-            event,
-            rounds,
-            participantsById:
-              event.participants && typeof event.participants === "object"
-                ? event.participants
-                : {},
-            thirdPlaceMatch,
-            assignedAtMs:
-              typeof event.endedAtMs === "number" ? event.endedAtMs : nowMs,
-            ownershipSnapshot,
-            prizeSelections,
-          });
-          if (Object.keys(prizeAssignmentResult.assignments).length > 0) {
-            eventPrizeAssignmentsForProjectionCleanup =
-              prizeAssignmentResult.assignments;
-            if (prizeAssignmentResult.didCreate) {
-              await addEventPrizeAssignmentUpdates({
-                updates,
-                eventId,
-                assignments: prizeAssignmentResult.assignments,
-                includeEventAssignments: true,
+                rounds,
+                nowMs,
+                participantsById: participants,
+                inviteUpdates,
+                thirdPlaceMatch,
+                ownershipSnapshot,
               });
-              prizeStateChanged = true;
+              thirdPlaceMatch = thirdPlaceResult.thirdPlaceMatch;
+              if (thirdPlaceResult.didChange) {
+                thirdPlaceMatchChanged = true;
+              }
+            }
+            const {
+              didChange: roundStatusChanged,
+              finalRoundIndex,
+              earliestUnresolvedRoundIndex,
+              finalRoundWinnerProfileId,
+            } = recomputeRoundStatuses({
+              rounds,
+              nowMs,
+            });
+            if (roundStatusChanged) {
+              roundsChanged = true;
+            }
+            const finalRoundCompleted =
+              finalRoundIndex !== null && earliestUnresolvedRoundIndex === null;
+            const thirdPlaceResolved =
+              !supportsThirdPlaceMatch ||
+              !thirdPlaceMatch ||
+              isMatchResolved(thirdPlaceMatch);
+            const eventShouldEnd = finalRoundCompleted && thirdPlaceResolved;
+            const winnerProfileId =
+              normalizeString(finalRoundWinnerProfileId) || null;
+            const nextCurrentRoundIndex =
+              earliestUnresolvedRoundIndex !== null
+                ? earliestUnresolvedRoundIndex
+                : finalRoundIndex;
+            event.currentRoundIndex = nextCurrentRoundIndex;
+            const participantStateResult = rebuildParticipantStatesFromRounds({
+              participantsById: participants,
+              rounds,
+              winnerProfileId,
+              eventEnded: eventShouldEnd,
+            });
+            if (participantStateResult.didChange) {
+              participants = participantStateResult.participantsById;
+              participantsChanged = true;
+            }
+            if (eventShouldEnd) {
+              const winnerParticipant =
+                (winnerProfileId && participants[winnerProfileId]) || null;
+              event.status = "ended";
+              if (typeof event.endedAtMs !== "number") {
+                event.endedAtMs = nowMs;
+              }
+              event.winnerProfileId = winnerProfileId;
+              event.winnerDisplayName = winnerParticipant
+                ? winnerParticipant.displayName
+                : null;
+              if ((0, event_prizes_1.isEventPrizeEvent)(eventId)) {
+                if (typeof event.prizeSelectionsLockedAtMs !== "number") {
+                  event.prizeSelectionsLockedAtMs = nowMs;
+                  updates.push(
+                    (0, eventCommands_js_1.eventField)(
+                      eventId,
+                      "prizeSelectionsLockedAtMs",
+                      nowMs,
+                    ),
+                  );
+                }
+                const prizeAssignmentResult =
+                  await resolveEventPrizeAssignments({
+                    eventId,
+                    event,
+                    rounds,
+                    participantsById: participants,
+                    thirdPlaceMatch,
+                    assignedAtMs: event.endedAtMs,
+                    ownershipSnapshot,
+                    prizeSelections,
+                  });
+                if (Object.keys(prizeAssignmentResult.assignments).length > 0) {
+                  eventPrizeAssignmentsForProjectionCleanup =
+                    prizeAssignmentResult.assignments;
+                  event.prizeAssignments = prizeAssignmentResult.assignments;
+                  await addEventPrizeAssignmentUpdates({
+                    updates,
+                    eventId,
+                    assignments: prizeAssignmentResult.assignments,
+                    includeEventAssignments: true,
+                  });
+                }
+              }
+            } else {
+              event.status = "active";
+              event.endedAtMs = null;
+              event.winnerProfileId = null;
+              event.winnerDisplayName = null;
+            }
+            let eventChanged = false;
+            const normalizedCurrentRoundIndex =
+              typeof event.currentRoundIndex === "number"
+                ? Math.floor(event.currentRoundIndex)
+                : null;
+            if (normalizedCurrentRoundIndex !== originalCurrentRoundIndex) {
+              updates.push(
+                (0, eventCommands_js_1.eventField)(
+                  eventId,
+                  "currentRoundIndex",
+                  normalizedCurrentRoundIndex,
+                ),
+              );
+              eventChanged = true;
+            }
+            const normalizedStatus = normalizeString(event.status) || "active";
+            if (normalizedStatus !== originalStatus) {
+              updates.push(
+                (0, eventCommands_js_1.eventField)(
+                  eventId,
+                  "status",
+                  normalizedStatus,
+                ),
+              );
+              eventChanged = true;
+            }
+            const normalizedEndedAtMs =
+              typeof event.endedAtMs === "number"
+                ? Math.floor(event.endedAtMs)
+                : null;
+            if (normalizedEndedAtMs !== originalEndedAtMs) {
+              updates.push(
+                (0, eventCommands_js_1.eventField)(
+                  eventId,
+                  "endedAtMs",
+                  normalizedEndedAtMs,
+                ),
+              );
+              eventChanged = true;
+            }
+            const normalizedWinnerProfileId = normalizeStringOrNull(
+              event.winnerProfileId,
+            );
+            if (normalizedWinnerProfileId !== originalWinnerProfileId) {
+              updates.push(
+                (0, eventCommands_js_1.eventField)(
+                  eventId,
+                  "winnerProfileId",
+                  normalizedWinnerProfileId,
+                ),
+              );
+              eventChanged = true;
+            }
+            const normalizedWinnerDisplayName = normalizeStringOrNull(
+              event.winnerDisplayName,
+            );
+            if (normalizedWinnerDisplayName !== originalWinnerDisplayName) {
+              updates.push(
+                (0, eventCommands_js_1.eventField)(
+                  eventId,
+                  "winnerDisplayName",
+                  normalizedWinnerDisplayName,
+                ),
+              );
+              eventChanged = true;
+            }
+            if (supportsThirdPlaceMatch && thirdPlaceMatchChanged) {
+              updates.push(
+                (0, eventCommands_js_1.eventField)(
+                  eventId,
+                  "thirdPlaceMatch",
+                  thirdPlaceMatch,
+                ),
+              );
+              eventChanged = true;
+            }
+            if (roundsChanged) {
+              updates.push(
+                (0, eventCommands_js_1.eventField)(eventId, "rounds", rounds),
+              );
+            }
+            if (participantsChanged) {
+              updates.push(
+                (0, eventCommands_js_1.eventField)(
+                  eventId,
+                  "participants",
+                  participants,
+                ),
+              );
+            }
+            if (inviteUpdates.length > 0) {
+              updates.push(...inviteUpdates);
+            }
+            if (
+              roundsChanged ||
+              participantsChanged ||
+              inviteUpdates.length > 0 ||
+              eventChanged
+            ) {
+              updates.push(
+                (0, eventCommands_js_1.eventField)(
+                  eventId,
+                  "updatedAtMs",
+                  nowMs,
+                ),
+              );
+              didChange = true;
+            }
+          } else if (event.status === "ended") {
+            const rounds = cloneValue(
+              event.rounds && typeof event.rounds === "object"
+                ? event.rounds
+                : {},
+            );
+            const supportsThirdPlaceMatch = hasThirdPlaceMatchField(event);
+            let thirdPlaceMatch =
+              supportsThirdPlaceMatch &&
+              event.thirdPlaceMatch &&
+              typeof event.thirdPlaceMatch === "object"
+                ? cloneValue(event.thirdPlaceMatch)
+                : null;
+            let roundsChanged = false;
+            let thirdPlaceMatchChanged = false;
+            let prizeStateChanged = false;
+            const sortedRoundIndexes = getSortedRoundIndexes(rounds);
+            for (const roundIndex of sortedRoundIndexes) {
+              const round = rounds[String(roundIndex)];
+              if (
+                !round ||
+                !round.matches ||
+                typeof round.matches !== "object"
+              ) {
+                continue;
+              }
+              const resolvedEntries = await resolveRoundMatchesWithConcurrency(
+                round.matches,
+              );
+              for (const entry of resolvedEntries) {
+                const { matchRecord, resolved } = entry;
+                if (!resolved) {
+                  continue;
+                }
+                if (applyMatchResolution(matchRecord, resolved, nowMs)) {
+                  roundsChanged = true;
+                }
+              }
+            }
+            if (thirdPlaceMatch) {
+              const resolvedThirdPlace =
+                await resolveRoundMatchState(thirdPlaceMatch);
+              if (
+                resolvedThirdPlace &&
+                applyMatchResolution(thirdPlaceMatch, resolvedThirdPlace, nowMs)
+              ) {
+                thirdPlaceMatchChanged = true;
+              }
+            }
+            if (supportsThirdPlaceMatch) {
+              const thirdPlaceResult = await reconcileThirdPlaceMatchReadiness({
+                eventId,
+                rounds,
+                nowMs,
+                participantsById:
+                  event.participants && typeof event.participants === "object"
+                    ? event.participants
+                    : {},
+                inviteUpdates: [],
+                thirdPlaceMatch,
+                allowInviteCreation: false,
+              });
+              thirdPlaceMatch = thirdPlaceResult.thirdPlaceMatch;
+              if (thirdPlaceResult.didChange) {
+                thirdPlaceMatchChanged = true;
+              }
+            }
+            if ((0, event_prizes_1.isEventPrizeEvent)(eventId)) {
+              if (typeof event.prizeSelectionsLockedAtMs !== "number") {
+                updates.push(
+                  (0, eventCommands_js_1.eventField)(
+                    eventId,
+                    "prizeSelectionsLockedAtMs",
+                    typeof event.endedAtMs === "number"
+                      ? event.endedAtMs
+                      : nowMs,
+                  ),
+                );
+                prizeStateChanged = true;
+              }
+              const prizeAssignmentResult = await resolveEventPrizeAssignments({
+                eventId,
+                event,
+                rounds,
+                participantsById:
+                  event.participants && typeof event.participants === "object"
+                    ? event.participants
+                    : {},
+                thirdPlaceMatch,
+                assignedAtMs:
+                  typeof event.endedAtMs === "number" ? event.endedAtMs : nowMs,
+                ownershipSnapshot,
+                prizeSelections,
+              });
+              if (Object.keys(prizeAssignmentResult.assignments).length > 0) {
+                eventPrizeAssignmentsForProjectionCleanup =
+                  prizeAssignmentResult.assignments;
+                if (prizeAssignmentResult.didCreate) {
+                  await addEventPrizeAssignmentUpdates({
+                    updates,
+                    eventId,
+                    assignments: prizeAssignmentResult.assignments,
+                    includeEventAssignments: true,
+                  });
+                  prizeStateChanged = true;
+                }
+              }
+            }
+            if (roundsChanged || thirdPlaceMatchChanged) {
+              updates.push(
+                (0, eventCommands_js_1.eventField)(eventId, "rounds", rounds),
+              );
+              if (supportsThirdPlaceMatch) {
+                updates.push(
+                  (0, eventCommands_js_1.eventField)(
+                    eventId,
+                    "thirdPlaceMatch",
+                    thirdPlaceMatch,
+                  ),
+                );
+              }
+            }
+            if (roundsChanged || thirdPlaceMatchChanged || prizeStateChanged) {
+              updates.push(
+                (0, eventCommands_js_1.eventField)(
+                  eventId,
+                  "updatedAtMs",
+                  nowMs,
+                ),
+              );
+              didChange = true;
             }
           }
-        }
-        if (roundsChanged || thirdPlaceMatchChanged) {
-          updates.push(
-            (0, eventCommands_js_1.eventField)(eventId, "rounds", rounds),
-          );
-          if (supportsThirdPlaceMatch) {
-            updates.push(
-              (0, eventCommands_js_1.eventField)(
+          if (didChange) {
+            const lockOwned = await isEventLockStillOwned(lockHandle);
+            if (!lockOwned) {
+              const latestValue = await state.readEvent(eventId);
+              syncLog.skipped = true;
+              syncLog.reason = "locked";
+              return buildSkippedSyncResponse({
                 eventId,
-                "thirdPlaceMatch",
-                thirdPlaceMatch,
-              ),
+                reason: "locked",
+                event: latestValue,
+              });
+            }
+            await state.commitEventPlan(
+              (0, eventCommands_js_1.mergeEventPlans)(updates),
             );
           }
-        }
-        if (roundsChanged || thirdPlaceMatchChanged || prizeStateChanged) {
-          updates.push(
-            (0, eventCommands_js_1.eventField)(eventId, "updatedAtMs", nowMs),
+          if (eventPrizeAssignmentsForProjectionCleanup) {
+            if (!(await isEventLockStillOwned(lockHandle))) {
+              throw new HttpsError(
+                "aborted",
+                "Event lock expired while projecting prizes.",
+              );
+            }
+            const projectionResult =
+              await reconcileProfileEventPrizeAssignments({
+                event,
+                eventId,
+                assignments: eventPrizeAssignmentsForProjectionCleanup,
+                ownershipSnapshot,
+              });
+            if (projectionResult.didChange) didChange = true;
+          }
+          const projectionCleanupRequest = (0,
+          eventPrizeProjectionState_js_1.getCompletedEventPrizeProjectionCleanupRequest)(
+            {
+              eventId,
+              eventStatus: event.status,
+              assignments: eventPrizeAssignmentsForProjectionCleanup,
+            },
           );
-          didChange = true;
-        }
-      }
-      if (didChange) {
-        const lockOwned = await isEventLockStillOwned(lockHandle);
-        if (!lockOwned) {
-          const latestValue = await state.readEvent(eventId);
-          syncLog.skipped = true;
-          syncLog.reason = "locked";
-          return buildSkippedSyncResponse({
+          if (projectionCleanupRequest) {
+            if (!(await isEventLockStillOwned(lockHandle))) {
+              throw new HttpsError(
+                "aborted",
+                "Event lock expired while cleaning prize projections.",
+              );
+            }
+            await removeCompletedEventPrizeProjections({
+              ...projectionCleanupRequest,
+              event,
+              ownershipSnapshot,
+            });
+          }
+          const refreshedValue = await state.readEvent(eventId);
+          syncLog.didChange = didChange;
+          return {
+            ok: true,
             eventId,
-            reason: "locked",
-            event: latestValue,
-          });
-        }
-        await state.commitEventPlan(
-          (0, eventCommands_js_1.mergeEventPlans)(updates),
-        );
-      }
-      if (eventPrizeAssignmentsForProjectionCleanup) {
-        if (!(await isEventLockStillOwned(lockHandle))) {
-          throw new HttpsError(
-            "aborted",
-            "Event lock expired while projecting prizes.",
-          );
-        }
-        const projectionResult = await reconcileProfileEventPrizeAssignments({
-          event,
-          eventId,
-          assignments: eventPrizeAssignmentsForProjectionCleanup,
-          ownershipSnapshot,
-        });
-        if (projectionResult.didChange) didChange = true;
-      }
-      const projectionCleanupRequest = (0,
-      eventPrizeProjectionState_js_1.getCompletedEventPrizeProjectionCleanupRequest)(
-        {
-          eventId,
-          eventStatus: event.status,
-          assignments: eventPrizeAssignmentsForProjectionCleanup,
+            didChange,
+            event: refreshedValue,
+          };
         },
       );
-      if (projectionCleanupRequest) {
-        if (!(await isEventLockStillOwned(lockHandle))) {
-          throw new HttpsError(
-            "aborted",
-            "Event lock expired while cleaning prize projections.",
-          );
-        }
-        await removeCompletedEventPrizeProjections({
-          ...projectionCleanupRequest,
-          event,
-          ownershipSnapshot,
-        });
-      }
-      const refreshedValue = await state.readEvent(eventId);
-      syncLog.didChange = didChange;
-      return {
-        ok: true,
-        eventId,
-        didChange,
-        event: refreshedValue,
-      };
     } catch (error) {
       if (!syncLog.reason) {
         syncLog.reason =
@@ -1282,11 +1311,6 @@ const createEventRuntime = (dependencies) => {
             : "error";
       }
       throw error;
-    } finally {
-      if (lockHandle) {
-        stopLockHeartbeat();
-        await releaseEventLock(lockHandle);
-      }
     }
   };
   const syncEventState = async (request) => {

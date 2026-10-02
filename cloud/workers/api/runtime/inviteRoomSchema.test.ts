@@ -1,12 +1,15 @@
 import { env } from "cloudflare:workers";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ensureInviteRoomSchema } from "../src/inviteRoomSchema.ts";
 import { MatchStateStore } from "../src/matchStateStore.ts";
+import type { MatchSyncRoom } from "../src/matchSyncRoom.ts";
 import { LEGACY_INVITE_ROOM_SCHEMA } from "./legacyInviteRoomSchemaFixture.ts";
 import { seedRetainedMatchState } from "./retainedMatchStateFixture.ts";
 
 const VERSION_KEY = "invite-room:schema-version";
+const INDEX_KEY = "invite-room:match-sync-due-index";
+const INDEX_NAME = "match_sync_snapshots_due";
 
 function fixture() {
   return env.INVITE_REACTIONS.getByName(`schema-${crypto.randomUUID()}`);
@@ -78,8 +81,27 @@ function expectCompleteSchema(storage: DurableObjectStorage) {
   expect(objects.filter(({ type }) => type === "table")).toHaveLength(16);
   expect(
     objects.filter(({ type }) => type === "index").map(({ name }) => name),
-  ).toEqual(["match_state_effects_due"]);
+  ).toEqual(["match_state_effects_due", INDEX_NAME]);
   expect(storage.kv.get(VERSION_KEY)).toBe(1);
+  expect(storage.kv.get(INDEX_KEY)).toBe(1);
+}
+
+function expectIndexUpgrade(
+  storage: DurableObjectStorage,
+  before: ReturnType<typeof snapshot>,
+) {
+  const after = snapshot(storage);
+  expect(after.rows).toEqual(before.rows);
+  expect(after.schema.filter(({ name }) => name !== INDEX_NAME)).toEqual(
+    before.schema,
+  );
+  expect(after.schema.find(({ name }) => name === INDEX_NAME)).toEqual({
+    name: INDEX_NAME,
+    type: "index",
+    sql: `CREATE INDEX ${INDEX_NAME} ON match_sync_snapshots(next_at_ms)`,
+  });
+  expect(storage.kv.get(VERSION_KEY)).toBe(1);
+  expect(storage.kv.get(INDEX_KEY)).toBe(1);
 }
 
 function forbidInitializationWork(storage: DurableObjectStorage) {
@@ -154,8 +176,21 @@ describe("invite room schema initialization", () => {
 
       ensureInviteRoomSchema(storage);
 
-      expect(snapshot(storage)).toEqual(before);
-      expect(storage.kv.get(VERSION_KEY)).toBe(1);
+      expectIndexUpgrade(storage, before);
+      expect(storage.kv.get("unrelated-key")).toEqual({ retained: true });
+    });
+  });
+
+  it("upgrades a version 1 room without rewriting its schema or data", async () => {
+    await runInDurableObject(fixture(), async (_instance, { storage }) => {
+      await storage.deleteAll();
+      seedLegacyRows(storage);
+      storage.kv.put(VERSION_KEY, 1);
+      const before = snapshot(storage);
+
+      ensureInviteRoomSchema(storage);
+
+      expectIndexUpgrade(storage, before);
       expect(storage.kv.get("unrelated-key")).toEqual({ retained: true });
     });
   });
@@ -201,14 +236,13 @@ describe("invite room schema initialization", () => {
       async (_instance, { storage }) => {
         await storage.deleteAll();
         seedLegacyRows(storage);
-        ensureInviteRoomSchema(storage);
+        storage.kv.put(VERSION_KEY, 1);
         return snapshot(storage);
       },
     );
     await evictDurableObject(room);
     await runInDurableObject(room, (_instance, { storage }) => {
-      expect(snapshot(storage)).toEqual(before);
-      expect(storage.kv.get(VERSION_KEY)).toBe(1);
+      expectIndexUpgrade(storage, before);
     });
   });
 
@@ -222,6 +256,7 @@ describe("invite room schema initialization", () => {
 
       expect(snapshot(storage)).toEqual(before);
       expect(storage.kv.get(VERSION_KEY)).toBe(1);
+      expect(storage.kv.get(INDEX_KEY)).toBe(1);
     });
   });
 
@@ -242,6 +277,25 @@ describe("invite room schema initialization", () => {
     },
   );
 
+  it.each([0, 2, "1", null, false, { version: 1 }])(
+    "rejects an unsupported index marker %j without changing storage",
+    async (version) => {
+      await runInDurableObject(fixture(), async (_instance, { storage }) => {
+        await storage.deleteAll();
+        storage.kv.put(VERSION_KEY, 1);
+        storage.kv.put(INDEX_KEY, version);
+
+        expect(() =>
+          ensureInviteRoomSchema(forbidInitializationWork(storage)),
+        ).toThrow("invite-room-match-sync-index-version-unsupported");
+
+        expect(schema(storage)).toEqual([]);
+        expect(storage.kv.get(VERSION_KEY)).toBe(1);
+        expect(storage.kv.get(INDEX_KEY)).toEqual(version);
+      });
+    },
+  );
+
   it("rolls back partial DDL after a real SQL failure and allows retry", async () => {
     await runInDurableObject(fixture(), async (_instance, { storage }) => {
       await storage.deleteAll();
@@ -256,6 +310,7 @@ describe("invite room schema initialization", () => {
 
       expect(snapshot(storage)).toEqual(before);
       expect(storage.kv.get(VERSION_KEY)).toBeUndefined();
+      expect(storage.kv.get(INDEX_KEY)).toBeUndefined();
       expect(storage.kv.get("unrelated-key")).toBe("unchanged");
       storage.sql.exec("DROP TABLE match_state_effects_due");
       ensureInviteRoomSchema(storage);
@@ -263,24 +318,133 @@ describe("invite room schema initialization", () => {
     });
   });
 
-  it("rolls back the version marker together with DDL and retries cleanly", async () => {
-    await runInDurableObject(fixture(), async (_instance, { storage }) => {
-      await storage.deleteAll();
-      storage.kv.put("unrelated-key", "unchanged");
+  it.each([undefined, 1])(
+    "rolls back an index collision from version %s and allows retry",
+    async (version) => {
+      await runInDurableObject(fixture(), async (_instance, { storage }) => {
+        await storage.deleteAll();
+        if (version === 1) {
+          seedLegacyRows(storage);
+          storage.kv.put(VERSION_KEY, 1);
+        }
+        storage.sql.exec(`CREATE TABLE ${INDEX_NAME} (retained TEXT)`);
+        storage.sql.exec(`INSERT INTO ${INDEX_NAME} VALUES ('unchanged')`);
+        storage.kv.put("unrelated-key", "unchanged");
+        const before = snapshot(storage);
 
-      expect(() =>
-        storage.transactionSync(() => {
-          ensureInviteRoomSchema(storage);
-          expect(storage.kv.get(VERSION_KEY)).toBe(1);
-          throw new Error("injected-after-initialization");
-        }),
-      ).toThrow("injected-after-initialization");
+        expect(() => ensureInviteRoomSchema(storage)).toThrow();
 
-      expect(schema(storage)).toEqual([]);
-      expect(storage.kv.get(VERSION_KEY)).toBeUndefined();
-      expect(storage.kv.get("unrelated-key")).toBe("unchanged");
-      ensureInviteRoomSchema(storage);
-      expectCompleteSchema(storage);
+        expect(snapshot(storage)).toEqual(before);
+        expect(storage.kv.get(VERSION_KEY)).toBe(version);
+        expect(storage.kv.get(INDEX_KEY)).toBeUndefined();
+        expect(storage.kv.get("unrelated-key")).toBe("unchanged");
+        storage.sql.exec(`DROP TABLE ${INDEX_NAME}`);
+        ensureInviteRoomSchema(storage);
+        expect(storage.kv.get(VERSION_KEY)).toBe(1);
+        expect(storage.kv.get(INDEX_KEY)).toBe(1);
+        expect(
+          schema(storage).find(({ name }) => name === INDEX_NAME)?.type,
+        ).toBe("index");
+      });
+    },
+  );
+
+  it.each([undefined, 1])(
+    "rolls back new markers together with DDL from version %s and retries cleanly",
+    async (version) => {
+      await runInDurableObject(fixture(), async (_instance, { storage }) => {
+        await storage.deleteAll();
+        if (version === 1) {
+          seedLegacyRows(storage);
+          storage.kv.put(VERSION_KEY, 1);
+        }
+        storage.kv.put("unrelated-key", "unchanged");
+        const before = snapshot(storage);
+
+        expect(() =>
+          storage.transactionSync(() => {
+            ensureInviteRoomSchema(storage);
+            expect(storage.kv.get(VERSION_KEY)).toBe(1);
+            expect(storage.kv.get(INDEX_KEY)).toBe(1);
+            throw new Error("injected-after-initialization");
+          }),
+        ).toThrow("injected-after-initialization");
+
+        expect(snapshot(storage)).toEqual(before);
+        expect(storage.kv.get(VERSION_KEY)).toBe(version);
+        expect(storage.kv.get(INDEX_KEY)).toBeUndefined();
+        expect(storage.kv.get("unrelated-key")).toBe("unchanged");
+        ensureInviteRoomSchema(storage);
+        expect(storage.kv.get(VERSION_KEY)).toBe(1);
+        expect(storage.kv.get(INDEX_KEY)).toBe(1);
+      });
+    },
+  );
+
+  it("indexes the production alarm queries while preserving deadline selection", async () => {
+    await runInDurableObject(fixture(), async (instance, { storage }) => {
+      const { matchSync } = instance as unknown as { matchSync: MatchSyncRoom };
+      const now = Date.now();
+      storage.sql.exec(
+        "INSERT INTO match_sync_snapshots VALUES ('inactive', '{}', 3, NULL), ('due-first', '{}', 4, ?), ('due-now', '{}', 5, ?), ('future', '{}', 6, ?)",
+        now - 1_000,
+        now,
+        now + 60_000,
+      );
+      const exec = vi.spyOn(storage.sql, "exec");
+      let queries: Array<[string, ...unknown[]]>;
+      try {
+        expect(matchSync.nextAlarm()).toBe(now - 1_000);
+        await matchSync.alarm();
+        queries = exec.mock.calls.filter(([sql]) => sql.startsWith("SELECT"));
+      } finally {
+        exec.mockRestore();
+      }
+
+      expect(queries).toHaveLength(2);
+      const plans = queries.map(([sql, ...bindings]) =>
+        storage.sql
+          .exec<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, ...bindings)
+          .toArray()
+          .map(({ detail }) => detail)
+          .join("\n"),
+      );
+      expect(plans[0]).toContain(`USING COVERING INDEX ${INDEX_NAME}`);
+      expect(plans[1]).toContain(`USING INDEX ${INDEX_NAME}`);
+      expect(plans.join("\n")).not.toMatch(
+        /SCAN match_sync_snapshots|TEMP B-TREE/,
+      );
+      expect(
+        storage.sql
+          .exec("SELECT * FROM match_sync_snapshots ORDER BY match_id")
+          .toArray(),
+      ).toEqual([
+        {
+          match_id: "due-first",
+          snapshot_json: "{}",
+          revision: 4,
+          next_at_ms: null,
+        },
+        {
+          match_id: "due-now",
+          snapshot_json: "{}",
+          revision: 5,
+          next_at_ms: null,
+        },
+        {
+          match_id: "future",
+          snapshot_json: "{}",
+          revision: 6,
+          next_at_ms: now + 60_000,
+        },
+        {
+          match_id: "inactive",
+          snapshot_json: "{}",
+          revision: 3,
+          next_at_ms: null,
+        },
+      ]);
+      expect(matchSync.nextAlarm()).toBe(now + 60_000);
     });
   });
 });

@@ -39,6 +39,28 @@ export type EventLockManager = {
   releaseEventLock(handle: EventLockHandle): Promise<boolean>;
   startEventLockHeartbeat(handle: EventLockHandle): () => void;
 };
+
+export async function withEventLease<T>(
+  manager: Pick<
+    EventLockManager,
+    "startEventLockHeartbeat" | "releaseEventLock"
+  >,
+  handle: EventLockHandle,
+  work: () => Promise<T>,
+): Promise<T> {
+  let stopHeartbeat: (() => void) | undefined;
+  try {
+    stopHeartbeat = manager.startEventLockHeartbeat(handle);
+    return await work();
+  } finally {
+    try {
+      stopHeartbeat?.();
+    } finally {
+      await manager.releaseEventLock(handle);
+    }
+  }
+}
+
 type Signature_createEventLockManagerCore = (dependencies: {
   transactEventLease(
     key: EventLeaseKey,

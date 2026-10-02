@@ -4,7 +4,10 @@ import {
   isEventPrizeAssignmentWireRecord,
   isEventPrizeStandard,
 } from "@mons/shared/event-prizes";
-import { createEventLockManagerCore } from "../../../../runtime/events/lockManagerCore.js";
+import {
+  createEventLockManagerCore,
+  withEventLease,
+} from "../../../../runtime/events/lockManagerCore.js";
 import {
   createD1AuthRecoveryPrizeStore,
   type AuthRecoveryPrizeStore,
@@ -201,8 +204,7 @@ function createCanonicalAuthRecoveryService(
       AUTH_RECOVERY_EVENT_PRIZE_OWNER_UID,
     );
     if (!lock) throw new Error("auth-recovery-prize-lock-busy");
-    const stopHeartbeat = prizeLockManager.startEventLockHeartbeat(lock);
-    try {
+    return withEventLease(prizeLockManager, lock, async () => {
       const sourceAssignment = await prizeStore.readProfileEventPrizeAssignment(
         sourceProfileId,
         eventId,
@@ -264,10 +266,7 @@ function createCanonicalAuthRecoveryService(
         throw new Error("auth-recovery-prize-conflict");
       });
       await removeIfCompleted();
-    } finally {
-      stopHeartbeat();
-      await prizeLockManager.releaseEventLock(lock);
-    }
+    });
   };
 
   const recoverLogins = async (job: CanonicalRecoveryJob): Promise<boolean> => {

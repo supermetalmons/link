@@ -8,6 +8,20 @@ exports.resolveLockKind =
   exports.EVENT_LOCK_REFRESH_INTERVAL_MS =
   exports.EVENT_LOCK_ROOT =
     void 0;
+exports.withEventLease = withEventLease;
+async function withEventLease(manager, handle, work) {
+  let stopHeartbeat;
+  try {
+    stopHeartbeat = manager.startEventLockHeartbeat(handle);
+    return await work();
+  } finally {
+    try {
+      stopHeartbeat?.();
+    } finally {
+      await manager.releaseEventLock(handle);
+    }
+  }
+}
 const EVENT_LOCK_ROOT = "eventLocks";
 exports.EVENT_LOCK_ROOT = EVENT_LOCK_ROOT;
 const EVENT_LOCK_TTL_MS = 30_000;

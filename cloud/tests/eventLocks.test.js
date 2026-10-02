@@ -7,6 +7,7 @@ const {
   EVENT_LOCK_REFRESH_INTERVAL_MS,
   EVENT_LOCK_TTL_MS,
   createEventLockManagerCore,
+  withEventLease,
 } = require("../runtime/events/lockManagerCore");
 const {
   runStateDecisionTransaction,
@@ -105,6 +106,98 @@ const createManager = ({
       ),
   });
 };
+
+test("lease scopes preserve work outcomes and await release after stopping the heartbeat", async (t) => {
+  for (const outcome of ["returned", "thrown"]) {
+    await t.test(outcome, async () => {
+      const handle = { eventId: "event-1" };
+      const failure = new Error("work-failed");
+      const value = { status: "complete" };
+      const lifecycle = [];
+      const releaseStarted = Promise.withResolvers();
+      const releaseFinished = Promise.withResolvers();
+      const manager = {
+        startEventLockHeartbeat(actual) {
+          assert.equal(actual, handle);
+          lifecycle.push("start");
+          return () => lifecycle.push("stop");
+        },
+        async releaseEventLock(actual) {
+          assert.equal(actual, handle);
+          lifecycle.push("release");
+          releaseStarted.resolve();
+          return releaseFinished.promise;
+        },
+      };
+      let settled = false;
+      const pending = withEventLease(manager, handle, async () => {
+        lifecycle.push("work");
+        if (outcome === "thrown") throw failure;
+        return value;
+      }).then(
+        (result) => {
+          settled = true;
+          return { result };
+        },
+        (error) => {
+          settled = true;
+          return { error };
+        },
+      );
+      await releaseStarted.promise;
+      assert.equal(settled, false);
+      assert.deepEqual(lifecycle, ["start", "work", "stop", "release"]);
+      releaseFinished.resolve(false);
+      const result = await pending;
+      assert.equal(settled, true);
+      if (outcome === "thrown") assert.equal(result.error, failure);
+      else assert.equal(result.result, value);
+    });
+  }
+});
+
+test("lease scopes always attempt release and preserve cleanup error precedence", async (t) => {
+  for (const failurePoint of ["start", "stop", "release", "stop-and-release"]) {
+    await t.test(failurePoint, async () => {
+      const workFailure = new Error("work-failed");
+      const heartbeatFailure = new Error("heartbeat-failed");
+      const releaseFailure = new Error("release-failed");
+      const lifecycle = [];
+      const manager = {
+        startEventLockHeartbeat() {
+          lifecycle.push("start");
+          if (failurePoint === "start") throw heartbeatFailure;
+          return () => {
+            lifecycle.push("stop");
+            if (failurePoint.includes("stop")) throw heartbeatFailure;
+          };
+        },
+        async releaseEventLock() {
+          lifecycle.push("release");
+          if (failurePoint.includes("release")) throw releaseFailure;
+          return true;
+        },
+      };
+      await assert.rejects(
+        withEventLease(manager, { eventId: "event-1" }, async () => {
+          lifecycle.push("work");
+          throw workFailure;
+        }),
+        (error) =>
+          error ===
+          (failurePoint.includes("release")
+            ? releaseFailure
+            : heartbeatFailure),
+      );
+      assert.deepEqual(
+        lifecycle,
+        failurePoint === "start"
+          ? ["start", "release"]
+          : ["start", "work", "stop", "release"],
+      );
+    });
+  }
+});
 
 test("validates lease domains and preserves the core default", () => {
   for (const lockKind of [

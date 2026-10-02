@@ -233,6 +233,20 @@ const wagerControlStatement: D1PreparedStatement = {
       updated_at_ms: 1,
     }) as T,
 };
+const wagerBalanceStatement: D1PreparedStatement = {
+  all: d1Statement.all,
+  raw: d1Statement.raw,
+  run: d1Statement.run,
+  bind: () => wagerBalanceStatement,
+  first: async <T>() =>
+    ({
+      storage_mode: "d1",
+      freeze_generation: 0,
+      balance_player_uid: null,
+      frozen_json: null,
+      revision: null,
+    }) as T,
+};
 const wagerStateActivation = {
   activation_epoch: 1,
   verified_at_ms: 1,
@@ -265,7 +279,9 @@ const profileDb = {
     query.includes("wager_state_activation")
       ? wagerStateStatement
       : query.includes("wager_reservation_runtime_control")
-        ? wagerControlStatement
+        ? query.includes("wager_frozen_balances")
+          ? wagerBalanceStatement
+          : wagerControlStatement
         : query.includes("profile_canonical_control")
           ? canonicalControlStatement
           : d1Statement,

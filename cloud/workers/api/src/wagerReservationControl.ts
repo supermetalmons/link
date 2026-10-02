@@ -35,6 +35,25 @@ export function wagerReservationUnavailable(): AuthApiFailure {
   );
 }
 
+export function parseWagerReservationControlRow(
+  value: unknown,
+): WagerReservationControl {
+  const row = value as ControlRow | null | undefined;
+  if (
+    !row ||
+    (row.storage_mode !== "frozen" && row.storage_mode !== "d1") ||
+    typeof row.freeze_generation !== "number" ||
+    !Number.isSafeInteger(row.freeze_generation) ||
+    row.freeze_generation < 0
+  ) {
+    throw wagerReservationUnavailable();
+  }
+  return {
+    storageMode: row.storage_mode,
+    freezeGeneration: row.freeze_generation,
+  };
+}
+
 export async function readWagerReservationControl(
   db: D1Database,
 ): Promise<WagerReservationControl> {
@@ -49,19 +68,7 @@ export async function readWagerReservationControl(
   } catch {
     throw wagerReservationUnavailable();
   }
-  if (
-    !row ||
-    (row.storage_mode !== "frozen" && row.storage_mode !== "d1") ||
-    typeof row.freeze_generation !== "number" ||
-    !Number.isSafeInteger(row.freeze_generation) ||
-    row.freeze_generation < 0
-  ) {
-    throw wagerReservationUnavailable();
-  }
-  return {
-    storageMode: row.storage_mode,
-    freezeGeneration: row.freeze_generation,
-  };
+  return parseWagerReservationControlRow(row);
 }
 
 export function wagerReservationAdmissionGuards(

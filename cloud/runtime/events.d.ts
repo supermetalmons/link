@@ -1,5 +1,5 @@
 // Generated from src/events.ts. Run npm run generate:runtime.
-import type { EventLockManager } from "./events/lockManagerCore.js";
+import { type EventLockManager } from "./events/lockManagerCore.js";
 import type { EventRuntimeStore } from "./eventCommands.js";
 import type { EventMatchPairRequest } from "./events/bracket.js";
 import type { EventOwnershipSnapshot } from "./events/ownership.js";

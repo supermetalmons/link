@@ -1,4 +1,7 @@
-import { createEventLockManagerCore } from "../../../../runtime/events/lockManagerCore.js";
+import {
+  createEventLockManagerCore,
+  withEventLease,
+} from "../../../../runtime/events/lockManagerCore.js";
 import { HISTORICAL_MATCH_ARCHIVE_VERSION } from "../historicalMatches.ts";
 import type { RatingProfileGameProjectionRepository } from "../ratingContracts.ts";
 import { isSafeRecordKey } from "../recordKeys.ts";
@@ -187,8 +190,7 @@ export async function processEventProfileGameProjection(
   });
   const lock = await lockManager.acquireEventLock(task.eventId, ownerId);
   if (!lock) throw new Error("profile-game-projection-lock-busy");
-  const stopHeartbeat = lockManager.startEventLockHeartbeat(lock);
-  try {
+  return withEventLease(lockManager, lock, async () => {
     const outbox = parseEventProfileGameProjectionOutbox(
       await state.readEventProfileGameProjectionOutbox(task.eventId),
     );
@@ -209,10 +211,7 @@ export async function processEventProfileGameProjection(
     return (await settleEventProfileGameProjectionOutbox(task, state))
       ? result.status
       : "superseded";
-  } finally {
-    stopHeartbeat();
-    await lockManager.releaseEventLock(lock);
-  }
+  });
 }
 
 export async function processProfileLinkProfileGameProjection(

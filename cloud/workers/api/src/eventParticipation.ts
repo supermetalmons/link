@@ -29,6 +29,7 @@ import * as monsRules from "mons-rules";
 import type { EventReads, EventSnapshot } from "../../../runtime/eventReads.js";
 import {
   createEventLockManagerCore,
+  withEventLease,
   type EventLockManager,
 } from "../../../runtime/events/lockManagerCore.js";
 import { buildScheduledEventDueUpdatesCore } from "../../../runtime/events/startTransitionCore.js";
@@ -463,17 +464,13 @@ async function withParticipationLock<T>(
   if (!lockHandle) {
     throw new AuthApiFailure(503, "unavailable", message);
   }
-  const stopHeartbeat = lockManager.startEventLockHeartbeat(lockHandle);
-  try {
+  return withEventLease(lockManager, lockHandle, async () => {
     return await operation(async () => {
       if (!(await lockManager.isEventLockStillOwned(lockHandle))) {
         throw new AuthApiFailure(503, "unavailable", message);
       }
     });
-  } finally {
-    stopHeartbeat();
-    await lockManager.releaseEventLock(lockHandle);
-  }
+  });
 }
 
 export async function joinEvent(

@@ -151,7 +151,8 @@
     "EVENT_LOCK_TTL_MS",
     "createEventLockManagerCore",
     "getOwnershipDecision",
-    "resolveLockKind"
+    "resolveLockKind",
+    "withEventLease"
   ],
   "events/ownership.js": [
     "buildEventOwnershipQuery",

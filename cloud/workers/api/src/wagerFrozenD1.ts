@@ -17,11 +17,22 @@ import {
 } from "./wagerFrozenStore.ts";
 import { classifyD1Failure } from "./d1Failure.ts";
 import { runOptimisticTransaction } from "./optimisticTransaction.ts";
+import {
+  parseWagerReservationControlRow,
+  wagerReservationUnavailable,
+} from "./wagerReservationControl.ts";
 
 const MAX_TRANSACTION_ATTEMPTS = 25;
 const EMPTY_FROZEN_JSON = JSON.stringify(createEmptyMaterials());
 
 type BalanceRow = { frozen_json: string; revision: number };
+type BalanceSnapshotRow = {
+  storage_mode: unknown;
+  freeze_generation: unknown;
+  balance_player_uid: unknown;
+  frozen_json: unknown;
+  revision: unknown;
+};
 type ReservationRow = {
   frozen_json: string | null;
   revision: number | null;
@@ -50,6 +61,50 @@ function decodeBalance(row: BalanceRow | null): WagerFrozenBalance {
     throw new Error("wager-operation-unavailable");
   }
   return { frozen, revision: row.revision };
+}
+
+export async function readWagerReservationBalance(
+  db: D1Database,
+  playerUid: string,
+): Promise<WagerFrozenBalance> {
+  assertWagerFrozenKey(playerUid);
+  let row: BalanceSnapshotRow | null;
+  try {
+    row = await db
+      .withSession("first-primary")
+      .prepare(
+        `SELECT control.storage_mode, control.freeze_generation,
+           balance.player_uid AS balance_player_uid,
+           balance.frozen_json, balance.revision
+         FROM wager_reservation_runtime_control AS control
+         LEFT JOIN wager_frozen_balances AS balance ON balance.player_uid = ?
+         WHERE control.singleton = 1`,
+      )
+      .bind(playerUid)
+      .first<BalanceSnapshotRow>();
+  } catch {
+    throw wagerReservationUnavailable();
+  }
+  if (!row) throw wagerReservationUnavailable();
+  parseWagerReservationControlRow(row);
+  if (
+    row.balance_player_uid === null &&
+    row.frozen_json === null &&
+    row.revision === null
+  ) {
+    return decodeBalance(null);
+  }
+  if (
+    row.balance_player_uid !== playerUid ||
+    typeof row.frozen_json !== "string" ||
+    typeof row.revision !== "number"
+  ) {
+    throw new Error("wager-operation-unavailable");
+  }
+  return decodeBalance({
+    frozen_json: row.frozen_json,
+    revision: row.revision,
+  });
 }
 
 export function createWagerFrozenD1Store(
