@@ -6,10 +6,7 @@ import React, {
   useState,
 } from "react";
 import styled from "styled-components";
-import {
-  fetchNftsForIdentity,
-  getNftIdentityKey,
-} from "../services/nftService";
+import { useInventory } from "./useInventory";
 import {
   getActiveInventoryItemSelection,
   setOwnershipVerifiedIdCardEmoji,
@@ -33,7 +30,6 @@ import {
   SWAGPACK_INVENTORY_IMAGE_BASE_URL,
   type InventoryApplicableItem,
   type InventoryPreviewItem,
-  type SwagAvatarItem,
 } from "./inventoryItems";
 
 const SWAGPACK_ITEM_COUNT = 467;
@@ -509,20 +505,13 @@ export const InventoryModal = React.forwardRef<
   InventoryModalProps
 >(({ id, onDismiss, onPreviewOutsideDismiss, authState }, ref) => {
   const isAuthenticated = authState.authStatus === "authenticated";
-  const [avatars, setAvatars] = useState<SwagAvatarItem[]>([]);
-  const [specials, setSpecials] = useState<SwagAvatarItem[]>([]);
+  const { avatars, specials, isLoading, dataOk, canApplyInventoryItem } =
+    useInventory(authState);
   const [eventPrizes, setEventPrizes] = useState<EventPrizeAssignment[]>([]);
   const [areEventPrizesLoading, setAreEventPrizesLoading] = useState(true);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [dataOk, setDataOk] = useState<boolean | null>(null);
-  const [loadedInventory, setLoadedInventory] = useState<{
-    ownerKey: string;
-    expiresAtMs: number;
-  } | null>(null);
   const [activeItemSelection, setActiveItemSelection] = useState(
     getActiveInventoryItemSelection,
   );
-  const [inventoryRefreshVersion, setInventoryRefreshVersion] = useState(0);
   const [previewItem, setPreviewItem] = useState<InventoryPreviewItem | null>(
     null,
   );
@@ -536,7 +525,6 @@ export const InventoryModal = React.forwardRef<
     },
     [],
   );
-  const ownerKey = isAuthenticated ? getNftIdentityKey(authState) : null;
   useEffect(() => {
     setEventPrizes([]);
     if (!isAuthenticated || !authState.profileId) {
@@ -562,82 +550,6 @@ export const InventoryModal = React.forwardRef<
       },
     );
   }, [authState.profileId, isAuthenticated]);
-
-  useEffect(() => {
-    let isCancelled = false;
-    const fetchCurrentInventory = () => fetchNftsForIdentity(authState);
-    const fetchTokens = async () => {
-      setIsLoading(true);
-      setAvatars([]);
-      setSpecials([]);
-      setDataOk(null);
-      setLoadedInventory(null);
-      try {
-        let snapshot = await fetchCurrentInventory();
-        if (isCancelled) {
-          return;
-        }
-        let isSnapshotFresh = snapshot.expiresAtMs > Date.now();
-        if (
-          snapshot.data.ok === true &&
-          snapshot.expiresAtMs > 0 &&
-          !isSnapshotFresh
-        ) {
-          snapshot = await fetchCurrentInventory();
-          if (isCancelled) {
-            return;
-          }
-          isSnapshotFresh = snapshot.expiresAtMs > Date.now();
-        }
-        const data = isSnapshotFresh ? snapshot.data : { ok: false as const };
-        const ok = data.ok === true;
-        setDataOk(ok);
-        setLoadedInventory(
-          ok && ownerKey
-            ? { ownerKey, expiresAtMs: snapshot.expiresAtMs }
-            : null,
-        );
-        setAvatars(data.ok ? data.swagpack_avatars : []);
-        setSpecials(data.ok ? data.specials : []);
-      } catch {
-        if (isCancelled) {
-          return;
-        }
-        setAvatars([]);
-        setSpecials([]);
-        setDataOk(false);
-        setLoadedInventory(null);
-      } finally {
-        if (!isCancelled) {
-          setIsLoading(false);
-        }
-      }
-    };
-    fetchTokens();
-    return () => {
-      isCancelled = true;
-    };
-  }, [authState, inventoryRefreshVersion, ownerKey]);
-
-  const canApplyInventoryItem = () => {
-    if (
-      !isAuthenticated ||
-      !ownerKey ||
-      loadedInventory?.ownerKey !== ownerKey
-    ) {
-      return false;
-    }
-    const hasCurrentStoredOwner =
-      getNftIdentityKey(storage.getAuthIdentity()) === ownerKey;
-    if (!hasCurrentStoredOwner) {
-      return false;
-    }
-    if (loadedInventory.expiresAtMs <= Date.now()) {
-      setInventoryRefreshVersion((current) => current + 1);
-      return false;
-    }
-    return true;
-  };
 
   const desiredPreviewAvatarAura =
     previewItem?.kind === "avatar" && previewItem.item.count >= 3

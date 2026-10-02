@@ -22,6 +22,10 @@ export const environment = {
   aura: '',
   writes: [],
   nftRequests: [],
+  nftResponses: [],
+  pendingNftRequests: [],
+  deferNfts: false,
+  hasEventPrizes: window.inventoryFixtureOptions?.eventPrizes ?? true,
   withdrawals: [],
   outsideDismissals: 0,
   inventoryDismissals: 0,
@@ -29,6 +33,13 @@ export const environment = {
 };
 export const fetchNftsForIdentity = async identity => {
   environment.nftRequests.push(identity);
+  if (environment.deferNfts) {
+    const requestId = environment.nftRequests.length - 1;
+    return new Promise((resolve, reject) => environment.pendingNftRequests.push({ identity, requestId, resolve, reject }));
+  }
+  const response = environment.nftResponses.shift();
+  if (response?.error) throw new Error(response.error);
+  if (response) return response;
   return {
     data: { ok: true, swagpack_avatars: [{ id: 9, count: 3 }, { id: 10, count: 1 }], specials: [{ id: 1, count: 1 }] },
     expiresAtMs: environment.now + 10000,
@@ -55,7 +66,9 @@ export const setOwnershipVerifiedSpecialItem = id => {
   environment.selection = { ...environment.selection, specialIds: new Set([id]) };
 };
 export const subscribeToProfileEventPrizes = (profileId, update) => {
-  update({ prize: { eventId: 'NN3eRzoZo80', prizeId: '1092', profileId, place: 1, assignedAtMs: 100 } });
+  update(environment.hasEventPrizes
+    ? { prize: { eventId: 'NN3eRzoZo80', prizeId: '1092', profileId, place: 1, assignedAtMs: 100 } }
+    : {});
   return () => {};
 };
 export const withdrawProfileEventPrize = (eventId, prizeId, address) =>
@@ -91,12 +104,19 @@ window.harness = {
   reject(index, code, message = '') {
     environment.withdrawals[index].reject({ code, message });
   },
+  async resolveNfts(profileId, snapshot, requestId) {
+    const matches = request => request.identity.profileId === profileId && (requestId === undefined || request.requestId === requestId);
+    const requests = environment.pendingNftRequests.filter(matches);
+    environment.pendingNftRequests = environment.pendingNftRequests.filter(request => !matches(request));
+    for (const request of requests) request.resolve(snapshot);
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  },
   dispose() { flushSync(() => root.unmount()); },
 };
 window.harness.render();
 `;
 
-async function fixture(run) {
+async function fixture(run, { eventPrizes = true } = {}) {
   const stubbedModules = new Set(
     [
       "services/nftService",
@@ -170,6 +190,12 @@ async function fixture(run) {
       viewport: { width: 1000, height: 760 },
       reducedMotion: "reduce",
     });
+    await context.addInitScript(
+      (options) => {
+        window.inventoryFixtureOptions = options;
+      },
+      { eventPrizes },
+    );
     context.setDefaultTimeout(10000);
     await context.route("**/*", (route) => {
       const url = new URL(route.request().url());
@@ -209,6 +235,16 @@ const openPrize = async (page) => {
   await page.getByRole("button", { name: "Withdraw", exact: true }).click();
   await page.getByRole("textbox", { name: "Solana address" }).waitFor();
 };
+
+const nftSnapshot = (avatars, expiresAtMs = 1010000) => ({
+  data: {
+    ok: true,
+    swagpack_avatars: avatars,
+    specials: [],
+    swagpack_reactions: [],
+  },
+  expiresAtMs,
+});
 
 test(
   "inventory preview preserves apply rules, focus, Escape capture, and outside dismissal",
@@ -571,5 +607,264 @@ test(
         true,
       );
     });
+  },
+);
+
+test(
+  "late inventory responses cannot overwrite a newer request for the same mounted identity",
+  { timeout: 60000 },
+  async () => {
+    await fixture(
+      async (page) => {
+        await page.evaluate(() => {
+          window.harness.environment.deferNfts = true;
+          window.harness.render();
+        });
+        await page.waitForFunction(
+          () => window.harness.environment.pendingNftRequests.length === 1,
+        );
+        const olderRequest = await page.evaluate(
+          () => window.harness.environment.pendingNftRequests[0].requestId,
+        );
+        await page.evaluate(() => window.harness.render());
+        await page.waitForFunction(
+          () => window.harness.environment.pendingNftRequests.length === 2,
+        );
+        const newerRequest = await page.evaluate(
+          () => window.harness.environment.pendingNftRequests[1].requestId,
+        );
+        await page.evaluate(
+          ({ snapshot, requestId }) =>
+            window.harness.resolveNfts("a", snapshot, requestId),
+          {
+            snapshot: nftSnapshot([{ id: 12, count: 1 }]),
+            requestId: newerRequest,
+          },
+        );
+        await page
+          .getByRole("button", { name: "View avatar 1012", exact: true })
+          .waitFor();
+        await page.evaluate(
+          ({ snapshot, requestId }) =>
+            window.harness.resolveNfts("a", snapshot, requestId),
+          {
+            snapshot: nftSnapshot([{ id: 11, count: 1 }]),
+            requestId: olderRequest,
+          },
+        );
+        assert.equal(
+          await page
+            .getByRole("button", { name: "View avatar 1012", exact: true })
+            .count(),
+          1,
+        );
+        assert.equal(
+          await page
+            .getByRole("button", { name: "View avatar 1011", exact: true })
+            .count(),
+          0,
+        );
+      },
+      { eventPrizes: false },
+    );
+  },
+);
+
+test(
+  "late inventory responses cannot replace a new identity's items or update an unmounted modal",
+  { timeout: 60000 },
+  async () => {
+    await fixture(
+      async (page) => {
+        await page.evaluate(() => {
+          window.harness.environment.deferNfts = true;
+          window.harness.render();
+        });
+        await page.getByText("LOADING...", { exact: true }).waitFor();
+        await page.waitForFunction(() =>
+          window.harness.environment.pendingNftRequests.some(
+            (request) => request.identity.profileId === "a",
+          ),
+        );
+        await page.evaluate(() => window.harness.render("b"));
+        await page.waitForFunction(() =>
+          window.harness.environment.pendingNftRequests.some(
+            (request) => request.identity.profileId === "b",
+          ),
+        );
+        await page.evaluate(
+          (snapshot) => window.harness.resolveNfts("b", snapshot),
+          nftSnapshot([{ id: 11, count: 1 }]),
+        );
+        await page
+          .getByRole("button", { name: "View avatar 1011", exact: true })
+          .waitFor();
+        await page.evaluate(
+          (snapshot) => window.harness.resolveNfts("a", snapshot),
+          nftSnapshot([{ id: 9, count: 3 }]),
+        );
+        assert.equal(
+          await page
+            .getByRole("button", { name: "View avatar 1011", exact: true })
+            .count(),
+          1,
+        );
+        assert.equal(
+          await page
+            .getByRole("button", { name: "View avatar 1009", exact: true })
+            .count(),
+          0,
+        );
+        await page.evaluate(() => window.harness.render("b"));
+        await page.getByText("LOADING...", { exact: true }).waitFor();
+        await page.waitForFunction(() =>
+          window.harness.environment.pendingNftRequests.some(
+            (request) => request.identity.profileId === "b",
+          ),
+        );
+        const requestsAtUnmount = await page.evaluate(() => {
+          window.harness.dispose();
+          return window.harness.environment.nftRequests.length;
+        });
+        await page.evaluate(
+          (snapshot) => window.harness.resolveNfts("b", snapshot),
+          nftSnapshot([{ id: 12, count: 1 }], 999999),
+        );
+        assert.equal(
+          await page.evaluate(
+            () => window.harness.environment.nftRequests.length,
+          ),
+          requestsAtUnmount,
+        );
+        assert.equal(await page.locator("#root").innerHTML(), "");
+        assert.deepEqual(
+          await page.evaluate(() => window.harness.environment.writes),
+          [],
+        );
+      },
+      { eventPrizes: false },
+    );
+  },
+);
+
+test(
+  "inventory retries an expired positive snapshot once and displays the fresh result",
+  { timeout: 60000 },
+  async () => {
+    await fixture(
+      async (page) => {
+        const requests = await page.evaluate(
+          (responses) => {
+            const environment = window.harness.environment;
+            const requests = environment.nftRequests.length;
+            environment.nftResponses = responses;
+            window.harness.render();
+            return requests;
+          },
+          [
+            nftSnapshot([{ id: 11, count: 1 }], 999999),
+            nftSnapshot([{ id: 12, count: 1 }]),
+          ],
+        );
+        await page
+          .getByRole("button", { name: "View avatar 1012", exact: true })
+          .waitFor();
+        assert.equal(
+          await page.evaluate(
+            () => window.harness.environment.nftRequests.length,
+          ),
+          requests + 2,
+        );
+        assert.equal(
+          await page
+            .getByRole("button", { name: "View avatar 1011", exact: true })
+            .count(),
+          0,
+        );
+      },
+      { eventPrizes: false },
+    );
+  },
+);
+
+test(
+  "inventory rejects snapshots that remain expired or were invalidated",
+  { timeout: 60000 },
+  async () => {
+    await fixture(
+      async (page) => {
+        const expired = nftSnapshot([{ id: 11, count: 1 }], 999999);
+        const invalidated = nftSnapshot([{ id: 11, count: 1 }], 0);
+        for (const responses of [[expired, expired], [invalidated]]) {
+          const requests = await page.evaluate((responses) => {
+            const environment = window.harness.environment;
+            const requests = environment.nftRequests.length;
+            environment.nftResponses = responses;
+            window.harness.render();
+            return requests;
+          }, responses);
+          await page.waitForFunction(
+            (count) => window.harness.environment.nftRequests.length >= count,
+            requests + responses.length,
+          );
+          await page.getByText("Failed to load.", { exact: true }).waitFor();
+          assert.equal(
+            await page.evaluate(
+              () => window.harness.environment.nftRequests.length,
+            ),
+            requests + responses.length,
+          );
+          assert.equal(
+            await page.getByRole("button", { name: /^View avatar / }).count(),
+            0,
+          );
+          assert.equal(
+            await page.getByRole("link", { name: "Get Swag Pack" }).count(),
+            0,
+          );
+        }
+      },
+      { eventPrizes: false },
+    );
+  },
+);
+
+test(
+  "inventory distinguishes a failed request from a successful empty inventory",
+  { timeout: 60000 },
+  async () => {
+    await fixture(
+      async (page) => {
+        await page.evaluate(() => {
+          window.harness.environment.nftResponses = [
+            { error: "Inventory unavailable" },
+          ];
+          window.harness.render();
+        });
+        await page.getByText("Failed to load.", { exact: true }).waitFor();
+        assert.equal(
+          await page.getByText("LOADING...", { exact: true }).count(),
+          0,
+        );
+        assert.equal(
+          await page.getByRole("button", { name: /^View avatar / }).count(),
+          0,
+        );
+        await page.evaluate((snapshot) => {
+          window.harness.environment.nftResponses = [snapshot];
+          window.harness.render();
+        }, nftSnapshot([]));
+        await page.getByRole("link", { name: "Get Swag Pack" }).waitFor();
+        assert.equal(
+          await page.getByText("Failed to load.", { exact: true }).count(),
+          0,
+        );
+        assert.equal(
+          await page.getByText("LOADING...", { exact: true }).count(),
+          0,
+        );
+      },
+      { eventPrizes: false },
+    );
   },
 );
