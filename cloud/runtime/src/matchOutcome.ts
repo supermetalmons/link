@@ -93,13 +93,3 @@ export async function resolveMatchWinner(
     reason: resolution.kind === "invalid" ? "invalid-game" : "pending",
   };
 }
-
-export const resolveMatchResult = async (
-  matchData: MatchOutcomeRecord | null | undefined,
-  opponentMatchData: MatchOutcomeRecord | null | undefined,
-): Promise<{ result: "win" | "gg" | "none" }> => {
-  const { winner } = await resolveMatchWinner(matchData, opponentMatchData);
-  const result =
-    winner === "player" ? "win" : winner === "opponent" ? "gg" : "none";
-  return { result };
-};

@@ -18,41 +18,12 @@ export type MatchStateControl = {
   activatedAtMs: number | null;
 };
 
-export type MatchStateAdmission = {
-  admissionId: string;
-  backend: MatchStateControl["backend"];
-  epoch: number;
-  freezeGeneration: number;
-  kind: string;
-  resources: string[];
-  transitionId: string | null;
-  createdAtMs: number;
-};
-
-export type MatchStateAdmissionInput = {
-  kind: string;
-  resources: readonly string[];
-  transitionId?: string | null;
-  admissionId?: string;
-  nowMs?: number;
-};
-
 export type MatchStateRoute = {
   actorUid: string;
   matchId: string;
   kind: "durable" | "legacy";
   inviteId: string | null;
   epoch: number;
-};
-
-export type LegacyMatchStateRecord = {
-  actorUid: string;
-  matchId: string;
-  value: unknown;
-  sourceDigest: string;
-  importId: string;
-  disposition:
-    "missing-invite" | "ambiguous-invite" | "nonparticipant" | "malformed";
 };
 
 type ControlRow = {
@@ -132,212 +103,6 @@ function parseMatchStateControl(
     verifiedAtMs: row.verified_at_ms,
     activatedAtMs: row.activated_at_ms,
   };
-}
-
-export async function acquireMatchStateAdmission(
-  db: D1Database,
-  input: MatchStateAdmissionInput,
-): Promise<MatchStateAdmission> {
-  const resources = [...new Set(input.resources)].sort();
-  const admissionId = input.admissionId || crypto.randomUUID();
-  const createdAtMs = input.nowMs ?? Date.now();
-  const transitionId = input.transitionId ?? null;
-  safeKey(admissionId);
-  if (transitionId !== null) safeKey(transitionId);
-  if (
-    !input.kind ||
-    input.kind.length > 120 ||
-    !safeInteger(createdAtMs) ||
-    resources.length > 256 ||
-    resources.some((key) => !key || key.length > 1024) ||
-    JSON.stringify(resources).length > 32 * 1024
-  )
-    throw new MatchStateD1Failure("invalid-admission");
-  let row: {
-    backend: MatchStateControl["backend"];
-    epoch: number;
-    freeze_generation: number;
-  } | null;
-  try {
-    row = await db
-      .prepare(
-        `INSERT INTO match_state_write_admissions
-          (admission_id, backend, epoch, freeze_generation, kind, resources_json, transition_id, created_at_ms)
-         SELECT ?, backend, epoch, freeze_generation, ?, ?, ?, ?
-         FROM match_state_control AS control WHERE singleton = 1 AND
-           (state = 'active' OR (state = 'draining' AND EXISTS (
-             SELECT 1 FROM match_state_recovery_ids WHERE transition_id = ?
-               AND freeze_generation = control.freeze_generation)))
-         RETURNING backend, epoch, freeze_generation`,
-      )
-      .bind(
-        admissionId,
-        input.kind,
-        JSON.stringify(resources),
-        transitionId,
-        createdAtMs,
-        transitionId,
-      )
-      .first();
-  } catch {
-    throw new MatchStateD1Failure("admission-unconfirmed");
-  }
-  if (!row) throw new MatchStateD1Failure("writes-disabled");
-  return {
-    admissionId,
-    backend: row.backend,
-    epoch: row.epoch,
-    freezeGeneration: row.freeze_generation,
-    kind: input.kind,
-    resources,
-    transitionId,
-    createdAtMs,
-  };
-}
-
-export function matchStateAdmissionGuardStatements(
-  db: D1Database,
-  admission: MatchStateAdmission,
-): D1PreparedStatement[] {
-  return [
-    db
-      .prepare(
-        `INSERT INTO match_state_guards (singleton)
-         SELECT 0 WHERE NOT EXISTS (
-           SELECT 1 FROM match_state_write_admissions AS admission
-           JOIN match_state_control AS control ON control.singleton = 1
-           WHERE admission.admission_id = ? AND admission.backend = ?
-             AND admission.epoch = ? AND admission.freeze_generation = ?
-             AND admission.kind = ? AND admission.resources_json = ?
-             AND admission.transition_id IS ? AND admission.created_at_ms = ?
-             AND admission.phase = 'admitted'
-             AND control.backend = admission.backend AND control.epoch = admission.epoch
-             AND control.freeze_generation = admission.freeze_generation
-             AND control.state IN ('active', 'draining'))`,
-      )
-      .bind(
-        admission.admissionId,
-        admission.backend,
-        admission.epoch,
-        admission.freezeGeneration,
-        admission.kind,
-        JSON.stringify(admission.resources),
-        admission.transitionId,
-        admission.createdAtMs,
-      ),
-  ];
-}
-
-export async function assertMatchStateAdmission(
-  db: D1Database,
-  admission: MatchStateAdmission,
-): Promise<void> {
-  try {
-    await db.batch(matchStateAdmissionGuardStatements(db, admission));
-  } catch {
-    throw new MatchStateD1Failure("admission-lost");
-  }
-}
-
-export async function extendMatchStateAdmissionResources(
-  db: D1Database,
-  admission: MatchStateAdmission,
-  resources: readonly string[],
-): Promise<void> {
-  const next = [...new Set([...admission.resources, ...resources])].sort();
-  if (
-    next.length > 256 ||
-    next.some((key) => !key || key.length > 1024) ||
-    JSON.stringify(next).length > 32 * 1024
-  )
-    throw new MatchStateD1Failure("invalid-admission-resources");
-  const previous = JSON.stringify(admission.resources);
-  const encoded = JSON.stringify(next);
-  if (previous === encoded) {
-    await assertMatchStateAdmission(db, admission);
-    return;
-  }
-  try {
-    const results = await db.batch([
-      ...matchStateAdmissionGuardStatements(db, admission),
-      db
-        .prepare(
-          `UPDATE match_state_write_admissions SET resources_json = ?
-        WHERE admission_id = ? AND resources_json = ? AND phase = 'admitted'`,
-        )
-        .bind(encoded, admission.admissionId, previous),
-    ]);
-    if (results[1].meta.changes !== 1)
-      throw new MatchStateD1Failure("admission-resources-unconfirmed");
-  } catch {
-    const current = await db
-      .withSession("first-primary")
-      .prepare(
-        `SELECT resources_json FROM match_state_write_admissions
-      WHERE admission_id = ? AND backend = ? AND epoch = ? AND freeze_generation = ?
-        AND kind = ? AND transition_id IS ? AND created_at_ms = ? AND phase = 'admitted'`,
-      )
-      .bind(
-        admission.admissionId,
-        admission.backend,
-        admission.epoch,
-        admission.freezeGeneration,
-        admission.kind,
-        admission.transitionId,
-        admission.createdAtMs,
-      )
-      .first<{ resources_json: string }>();
-    if (current?.resources_json !== encoded)
-      throw new MatchStateD1Failure("admission-resources-unconfirmed");
-  }
-  admission.resources = next;
-  await assertMatchStateAdmission(db, admission);
-}
-
-export async function completeMatchStateAdmission(
-  db: D1Database,
-  admission: MatchStateAdmission,
-): Promise<void> {
-  const result = await db
-    .prepare(
-      `DELETE FROM match_state_write_admissions WHERE admission_id = ?
-       AND backend = ? AND epoch = ? AND freeze_generation = ?
-       AND kind = ? AND resources_json = ? AND transition_id IS ?
-       AND created_at_ms = ? AND phase = 'admitted'`,
-    )
-    .bind(
-      admission.admissionId,
-      admission.backend,
-      admission.epoch,
-      admission.freezeGeneration,
-      admission.kind,
-      JSON.stringify(admission.resources),
-      admission.transitionId,
-      admission.createdAtMs,
-    )
-    .run();
-  if (result.meta.changes !== 1)
-    throw new MatchStateD1Failure("admission-release-unconfirmed");
-}
-
-export async function markMatchStateAdmissionUncertain(
-  db: D1Database,
-  admission: MatchStateAdmission,
-): Promise<void> {
-  await db
-    .prepare(
-      `UPDATE match_state_write_admissions SET phase = 'uncertain'
-       WHERE admission_id = ? AND backend = ? AND epoch = ?
-         AND freeze_generation = ? AND created_at_ms = ?`,
-    )
-    .bind(
-      admission.admissionId,
-      admission.backend,
-      admission.epoch,
-      admission.freezeGeneration,
-      admission.createdAtMs,
-    )
-    .run();
 }
 
 export function buildMatchStateRouteStatements(
@@ -430,19 +195,6 @@ function parseMatchStateRoute(
     : null;
 }
 
-export async function readMatchStateRoute(
-  db: D1Database,
-  actorUid: string,
-  matchId: string,
-): Promise<MatchStateRoute | null> {
-  const row = await prepareMatchStateRouteRead(
-    db.withSession("first-primary"),
-    actorUid,
-    matchId,
-  ).first<MatchStateRouteRow>();
-  return parseMatchStateRoute(row);
-}
-
 export async function readMatchStateRoutes(
   db: D1Database,
   inputs: readonly { playerId: string; matchId: string }[],
@@ -501,17 +253,6 @@ export async function readMatchStateRouteSnapshot(
         ),
       ),
   };
-}
-
-export async function readLegacyMatchState(
-  db: D1Database,
-  actorUid: string,
-  matchId: string,
-  signal?: AbortSignal,
-): Promise<unknown | null> {
-  return (
-    await readLegacyMatchStates(db, [{ playerId: actorUid, matchId }], signal)
-  )[0];
 }
 
 export async function readLegacyMatchStates(

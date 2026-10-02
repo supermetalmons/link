@@ -62,7 +62,6 @@ import {
 
 const EVENT_TRANSITION_APPLICATION_LOCK_TTL_MS = 5 * 60 * 1_000;
 const EVENT_TRANSITION_APPLICATION_LOCK_OWNER = "event-transition-applier";
-export const EVENT_TRANSITION_RECEIPT_ROOT = "eventTransitionReceipts";
 export type EventGameplayRepository = GameplayRepository & EventStore;
 export type EventStateRepository = MatchStatePort & EventStore;
 type EventRepositoryOptions = {

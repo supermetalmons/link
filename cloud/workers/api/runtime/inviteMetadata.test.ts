@@ -1,11 +1,3 @@
-import { socketTestSessionHeaders } from "../test/socketTestSession.ts";
-import { env } from "cloudflare:workers";
-import {
-  evictDurableObject,
-  runDurableObjectAlarm,
-  runInDurableObject,
-} from "cloudflare:test";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   INVITE_METADATA_REFRESH_MS,
   INVITE_METADATA_SOCKET_PROTOCOL,
@@ -14,9 +6,17 @@ import {
 import {
   REACTION_HEARTBEAT_REQUEST,
   REACTION_HEARTBEAT_RESPONSE,
-  REACTION_SOCKET_PROTOCOL,
 } from "@mons/shared/reactions";
+import {
+  evictDurableObject,
+  runDurableObjectAlarm,
+  runInDurableObject,
+} from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InviteChannelsRoom } from "../src/inviteChannelsRoom.ts";
+import { socketTestSessionHeaders } from "../test/socketTestSession.ts";
+import { reactionSocketTestHeaders } from "./presentationStorageFixture.ts";
 
 type Room = DurableObjectStub<
   import("../src/inviteReactions.ts").InviteReactions
@@ -80,7 +80,8 @@ async function fixture(value: unknown = invite) {
   const source: Source = { value, reads: 0, wagerReads: 0 };
   rooms.push(room);
   await installSource(room, source);
-  return { inviteId, room, source };
+  const reactionHeaders = await reactionSocketTestHeaders(room, inviteId);
+  return { inviteId, room, source, reactionHeaders };
 }
 
 function acceptSocket(response: Response) {
@@ -485,12 +486,15 @@ describe("durable invite metadata", () => {
   });
 
   it("keeps recovery scheduled across upstream failures, then stops after the final metadata subscriber closes", async () => {
-    const { room, inviteId, source } = await fixture();
+    const { room, inviteId, source, reactionHeaders } = await fixture();
     const client = acceptSocket(await metadataResponse(room, inviteId));
     await client.read();
     const reaction = acceptSocket(
       await room.fetch("https://room.internal/socket", {
-        headers: { Upgrade: "websocket" },
+        headers: {
+          ...reactionHeaders,
+          Upgrade: "websocket",
+        },
       }),
     );
     await reaction.read();
@@ -555,14 +559,14 @@ describe("durable invite metadata", () => {
   });
 
   it("keeps reactions and presentations out of metadata sockets and answers their receive-only heartbeat", async () => {
-    const { room, inviteId, source } = await fixture();
+    const { room, inviteId, source, reactionHeaders } = await fixture();
     const metadata = acceptSocket(await metadataResponse(room, inviteId));
     await metadata.read();
     const reactions = acceptSocket(
       await room.fetch("https://room.internal/socket", {
         headers: {
+          ...reactionHeaders,
           Upgrade: "websocket",
-          "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL,
         },
       }),
     );
@@ -596,7 +600,7 @@ describe("durable invite metadata", () => {
   });
 
   it("reserves participant capacity even when only legacy channels are connected", async () => {
-    const { room, inviteId } = await fixture();
+    const { room, inviteId, reactionHeaders } = await fixture();
     const metadata = await Promise.all(
       Array.from({ length: 248 }, async (_, index) =>
         acceptSocket(
@@ -611,6 +615,7 @@ describe("durable invite metadata", () => {
         acceptSocket(
           await room.fetch("https://room.internal/socket", {
             headers: {
+              ...reactionHeaders,
               Upgrade: "websocket",
               "X-Mons-Reaction-IP": `192.0.2.${Math.floor(index / 8)}`,
             },
@@ -638,6 +643,7 @@ describe("durable invite metadata", () => {
           acceptSocket(
             await room.fetch("https://room.internal/socket", {
               headers: {
+                ...reactionHeaders,
                 Upgrade: "websocket",
                 "X-Mons-Reaction-Role": role,
                 ...socketTestSessionHeaders(),
@@ -661,7 +667,10 @@ describe("durable invite metadata", () => {
     expect(
       (
         await room.fetch("https://room.internal/socket", {
-          headers: { Upgrade: "websocket" },
+          headers: {
+            ...reactionHeaders,
+            Upgrade: "websocket",
+          },
         })
       ).status,
     ).toBe(429);

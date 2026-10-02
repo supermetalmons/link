@@ -35,7 +35,6 @@ import type { EventPrizeSelection } from "./useEventPrizeSelection";
 export type EventModalActionsOptions = {
   modalState: EventModalState;
   eventRecord: EventRecord | null;
-  devStubRecord: EventRecord | null;
   isEventFresh: boolean;
   isLoading: boolean;
   nowMs: number;
@@ -52,7 +51,6 @@ export type EventModalActionsOptions = {
 export function useEventModalActions({
   modalState,
   eventRecord,
-  devStubRecord,
   isEventFresh,
   isLoading,
   nowMs,
@@ -181,7 +179,6 @@ export function useEventModalActions({
   const handlePrizeSelectionClick = useCallback(
     (prizeId: EventPrizeId) => {
       if (
-        devStubRecord ||
         !eventPrizeConfig ||
         !isEventFresh ||
         isLoading ||
@@ -199,7 +196,6 @@ export function useEventModalActions({
     },
     [
       currentProfileId,
-      devStubRecord,
       eventRecord,
       eventPrizeConfig,
       isEventFresh,
@@ -303,7 +299,6 @@ export function useEventModalActions({
       !modalState.isOpen ||
       getEventModalState() !== modalState ||
       eventRecord?.eventId !== modalState.eventId ||
-      devStubRecord ||
       !isEventFresh ||
       isResolvingEventProfileIds ||
       isLoading ||
@@ -346,7 +341,6 @@ export function useEventModalActions({
       }
     }
   }, [
-    devStubRecord,
     eventRecord,
     eventProfileIds,
     isEventFresh,
@@ -375,7 +369,6 @@ export function useEventModalActions({
       !modalState.eventId ||
       !eventRecord ||
       eventRecord.status !== "active" ||
-      devStubRecord ||
       isDisqualifying
     ) {
       return;
@@ -434,7 +427,6 @@ export function useEventModalActions({
       });
   }, [
     canManageDisqualifications,
-    devStubRecord,
     eventRecord,
     isDisqualifying,
     modalState.eventId,
@@ -444,7 +436,6 @@ export function useEventModalActions({
     if (
       !modalState.eventId ||
       !eventRecord ||
-      devStubRecord ||
       eventRecord.status !== "scheduled" ||
       nowMs >= eventRecord.startAtMs ||
       !isLocalEventCreator(eventRecord) ||
@@ -490,13 +481,12 @@ export function useEventModalActions({
       .finally(() => {
         setIsPostponing(false);
       });
-  }, [devStubRecord, eventRecord, isPostponing, modalState.eventId, nowMs]);
+  }, [eventRecord, isPostponing, modalState.eventId, nowMs]);
 
   const handleRemoveParticipantClick = useCallback(() => {
     if (
       !modalState.eventId ||
       !eventRecord ||
-      devStubRecord ||
       eventRecord.status !== "scheduled" ||
       nowMs >= eventRecord.startAtMs ||
       !isLocalEventCreator(eventRecord) ||
@@ -548,7 +538,6 @@ export function useEventModalActions({
         setIsRemovingParticipant(false);
       });
   }, [
-    devStubRecord,
     eventRecord,
     isRemovingParticipant,
     modalState.eventId,

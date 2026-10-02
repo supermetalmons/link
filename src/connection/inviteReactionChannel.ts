@@ -1,8 +1,7 @@
 import {
   REACTION_HEARTBEAT_REQUEST,
   REACTION_HEARTBEAT_RESPONSE,
-  REACTION_MAX_MESSAGE_BYTES,
-  REACTION_SOCKET_PROTOCOL_V2,
+  REACTION_SOCKET_PROTOCOL,
   isInviteReactionForInvite,
   isInviteRoomMessage,
   type InviteReaction,
@@ -35,7 +34,7 @@ type ReactionSocket = Pick<
 
 type InviteReactionChannelDependencies = {
   inviteId: string;
-  matchId?: string;
+  matchId: string;
   createSocket: (url: string, protocols?: string[]) => ReactionSocket;
   getProtocols?: (forceRefresh: boolean) => Promise<string[]>;
   getTokenRemainingMs?: (token: string) => number;
@@ -156,7 +155,7 @@ export class InviteReactionChannel {
     }, delayMs);
   }
 
-  private fail(socket: ReactionSocket | null, error: unknown): void {
+  private fail(socket: ReactionSocket | null, _error: unknown): void {
     if (!this.isActive() || this.socket !== socket) return;
     this.disconnect();
     this.dependencies.onError(new Error("reaction-channel-unavailable"));
@@ -206,16 +205,10 @@ export class InviteReactionChannel {
         const url = new URL(
           getInviteReactionSocketUrl(this.dependencies.inviteId),
         );
-        if (this.dependencies.matchId) {
-          url.searchParams.set("matchId", this.dependencies.matchId);
-          protocols = [
-            REACTION_SOCKET_PROTOCOL_V2,
-            ...(protocols?.slice(1) ?? []),
-          ];
-        }
+        url.searchParams.set("matchId", this.dependencies.matchId);
         const socket = this.dependencies.createSocket(
           url.toString(),
-          protocols,
+          protocols ?? [REACTION_SOCKET_PROTOCOL],
         );
         if (!isPreparing()) {
           socket.close();
@@ -223,7 +216,7 @@ export class InviteReactionChannel {
         }
         this.socket = socket;
         const authDelay = socketSessionRefreshDelay(
-          protocols,
+          protocols ?? [REACTION_SOCKET_PROTOCOL],
           this.dependencies.getTokenRemainingMs,
         );
         this.authRefreshAt = authDelay === null ? null : this.now() + authDelay;
@@ -290,18 +283,13 @@ export class InviteReactionChannel {
       if (
         typeof data !== "string" ||
         new TextEncoder().encode(data).byteLength >
-          (this.dependencies.matchId
-            ? PRESENTATION_MAX_MESSAGE_BYTES
-            : REACTION_MAX_MESSAGE_BYTES)
+          PRESENTATION_MAX_MESSAGE_BYTES
       ) {
         throw new Error("invalid-reaction-message");
       }
       const message: unknown = JSON.parse(data);
       if (!isInviteRoomMessage(message))
         throw new Error("invalid-reaction-message");
-      if (this.dependencies.matchId && message.schemaVersion !== 2) {
-        throw new Error("invalid-room-version");
-      }
       if (message.type === "snapshot") {
         if (
           this.receivedSnapshot ||
@@ -315,13 +303,11 @@ export class InviteReactionChannel {
         this.connecting = false;
         this.failures = 0;
         this.clearTimer("responseTimer");
-        if (message.schemaVersion === 2) {
-          if (message.presentation.matchId !== this.dependencies.matchId) {
-            throw new Error("invalid-presentation-match");
-          }
-          this.dependencies.onPresentationSnapshot?.(message.presentation);
-          if (!this.isCurrent(socket)) return;
+        if (message.presentation.matchId !== this.dependencies.matchId) {
+          throw new Error("invalid-presentation-match");
         }
+        this.dependencies.onPresentationSnapshot?.(message.presentation);
+        if (!this.isCurrent(socket)) return;
         if (!this.initialized) {
           this.initialized = true;
           this.dependencies.onInitialSnapshot(message.reactions);

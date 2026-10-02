@@ -390,22 +390,6 @@ function parseProjectionRecord(row: {
   };
 }
 
-export async function getProfileGameProjection(
-  db: D1Database,
-  profileId: string,
-  projectionId: string,
-): Promise<ProjectionRecord | null> {
-  const row = await db
-    .prepare(
-      `SELECT payload_json, version
-       FROM profile_game_projections
-       WHERE profile_id = ? AND projection_id = ?`,
-    )
-    .bind(profileId, projectionId)
-    .first<{ payload_json: string; version: number }>();
-  return row ? parseProjectionRecord(row) : null;
-}
-
 export async function getProfileGameProjections(
   db: D1Database,
   profileId: string,

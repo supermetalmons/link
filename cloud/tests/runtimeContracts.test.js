@@ -117,7 +117,7 @@ test("preserves event command identities, replacement order, and serialized plan
   assert.equal(getEventField(merged, "missing", "status"), undefined);
 });
 
-test("preserves Telegram task identities and both compatibility call forms", () => {
+test("preserves Telegram task identities and stored payloads", () => {
   const fixture = JSON.parse(
     fs.readFileSync(
       path.join(__dirname, "fixtures/runtime-wire-compatibility.json"),
@@ -132,15 +132,7 @@ test("preserves Telegram task identities and both compatibility call forms", () 
     assert.equal(buildTelegramDeliveryTaskId(payload), taskId);
     assert.deepEqual(normalizeTaskPayload(payload), payload);
   }
-  const { payload, taskId } = fixture.telegramTasks[0];
-  assert.equal(
-    buildTelegramDeliveryTaskId(
-      payload.messageKey,
-      payload.revision,
-      payload.generation,
-    ),
-    taskId,
-  );
+  const { payload } = fixture.telegramTasks[0];
   assert.throws(
     () => normalizeTaskPayload({ ...payload, taskKind: "rate-limit-proof" }),
     { message: "complete rate-limit proof is required" },

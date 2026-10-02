@@ -89,10 +89,7 @@ function createRuntime(env: Env, dependencies: EventControlDependencies) {
     dependencies.signal || AbortSignal.timeout(EVENT_CONTROL_TIMEOUT_MS);
   const repository =
     dependencies.repository ||
-    createEventGameplayRepository(
-      env,
-      createGameplayRepository(env, { timeoutMs: EVENT_CONTROL_TIMEOUT_MS }),
-    );
+    createEventGameplayRepository(env, createGameplayRepository(env));
   return createWorkerEventRuntime({
     repository,
     signal,

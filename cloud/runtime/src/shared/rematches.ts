@@ -193,30 +193,6 @@ const deriveLatestMatchId = (
   return maxIndex > 0 ? `${inviteId}${maxIndex}` : inviteId;
 };
 
-const getHistoricalMatchIds = (
-  inviteId: string,
-  inviteData: RematchInviteData | null | undefined,
-): string[] => {
-  const normalizedInviteId = normalizeString(inviteId);
-  if (!normalizedInviteId || !inviteData || typeof inviteData !== "object") {
-    return [];
-  }
-  const approvedIndices = Array.from(
-    new Set(getApprovedRematchIndices(inviteData)),
-  );
-  const latestProposedIndex = getLatestRematchIndex(inviteData);
-  if (latestProposedIndex === 0) {
-    return rematchSeriesEnded(inviteData) ? [normalizedInviteId] : [];
-  }
-  const candidateIndices = [0, ...approvedIndices];
-  const historicalIndices = rematchSeriesEnded(inviteData)
-    ? candidateIndices
-    : candidateIndices.filter((index) => index < latestProposedIndex);
-  return historicalIndices.map((index) =>
-    index === 0 ? normalizedInviteId : `${normalizedInviteId}${index}`,
-  );
-};
-
 export {
   parseRematchIndices,
   rematchSeriesEnded,
@@ -228,5 +204,4 @@ export {
   getLatestApprovedRematchIndex,
   selectInviteMatch,
   deriveLatestMatchId,
-  getHistoricalMatchIds,
 };

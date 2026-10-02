@@ -1,7 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { AuthVerificationResponse } from "@mons/shared/auth";
-import { normalizeProfileEmojiId } from "@mons/shared/profiles";
-import type { PlayerProfile } from "./connectionModels";
 import { connection } from "./connection";
 import { handleLoginSuccess } from "./loginSuccess";
 import { applyVerifiedProfile } from "./verifiedProfile";
@@ -25,17 +23,10 @@ import { formatAuthCooldownErrorMessage } from "./authCooldownErrors";
 import { formatXAuthErrorMessage } from "./xAuthErrors";
 import { publishXAuthUiFeedback } from "./xAuthUiFeedback";
 import { storage, type AuthIdentity } from "../utils/storage";
-import { setupLoggedInPlayerProfile } from "../game/board";
-import { didAttemptAuthentication, isWatchOnly } from "../game/gameController";
-import {
-  setSignInInlineAuthError,
-  updateProfileDisplayName,
-} from "../ui/identity/profileUiPort";
-import { flushPendingOwnProfileMiningState } from "../services/ownProfileMiningHydration";
+import { didAttemptAuthentication } from "../game/gameController";
+import { setSignInInlineAuthError } from "../ui/identity/profileUiPort";
 import type { AuthState, AuthStatus } from "./authModels";
-import { ProfileApiError } from "../services/profileApi";
 import { sessionAuth } from "../session/sessionAuth";
-import { markAuthIdentityReady } from "../session/authRestoreTiming";
 
 export type { AuthState, AuthStatus } from "./authModels";
 
@@ -429,9 +420,7 @@ export function useAuthStatus() {
             scheduleDidAttemptAuthentication();
             return;
           }
-          if (identity.status !== "legacy") {
-            throw new AuthApiError("unavailable", "Profile is unavailable.");
-          }
+          throw new AuthApiError("unavailable", "Profile is unavailable.");
         } catch (error) {
           if (!isStillValid()) return;
           if (
@@ -453,192 +442,6 @@ export function useAuthStatus() {
           }
           return;
         }
-
-        const storedLoginId = storage.getLoginId("");
-        const storedEthAddress = storage.getEthAddress("");
-        const storedSolAddress = storage.getSolAddress("");
-        const storedUsername = storage.getUsername("");
-        const profileId = storage.getProfileId("");
-        if (profileId === "" || storedLoginId !== uid) {
-          setAuthStatus("unauthenticated");
-          scheduleDidAttemptAuthentication();
-          return;
-        }
-        let resolvedProfileId = profileId;
-        let resolvedUsername = storedUsername;
-        let resolvedEthAddress = storedEthAddress;
-        let resolvedSolAddress = storedSolAddress;
-        const storedEmojiRaw = Number.parseInt(
-          storage.getPlayerEmojiId("1"),
-          10,
-        );
-        let resolvedEmoji =
-          Number.isFinite(storedEmojiRaw) && storedEmojiRaw > 0
-            ? storedEmojiRaw
-            : 1;
-        let resolvedAura = storage.getPlayerEmojiAura("");
-        let isIdentityVerified = false;
-        let shouldRetry = false;
-        let didLoadAuthoritativeProfile = false;
-        let loadedProfile: PlayerProfile | null = null;
-        const resetResolvedIdentityToFallback = (
-          nextProfileId: string,
-        ): void => {
-          resolvedProfileId = nextProfileId;
-          resolvedUsername = "";
-          resolvedEthAddress = "";
-          resolvedSolAddress = "";
-          resolvedEmoji = 1;
-          resolvedAura = "";
-          storage.setProfileId(nextProfileId);
-          storage.setUsername("");
-          storage.setEthAddress("");
-          storage.setSolAddress("");
-          storage.setPlayerEmojiId("1");
-          storage.setPlayerEmojiAura("");
-          flushPendingOwnProfileMiningState();
-        };
-        const applyAuthoritativeProfile = (
-          authoritativeProfile: PlayerProfile,
-        ): boolean => {
-          const authoritativeProfileId =
-            typeof authoritativeProfile?.id === "string"
-              ? authoritativeProfile.id
-              : "";
-          if (!authoritativeProfileId) {
-            return false;
-          }
-          resolvedProfileId = authoritativeProfileId;
-          resolvedUsername = authoritativeProfile.username ?? "";
-          resolvedEthAddress = authoritativeProfile.eth ?? "";
-          resolvedSolAddress = authoritativeProfile.sol ?? "";
-          const normalizedAuthoritativeEmoji = normalizeProfileEmojiId(
-            authoritativeProfile.emoji,
-            0,
-          );
-          const authoritativeEmoji =
-            normalizedAuthoritativeEmoji > 0
-              ? normalizedAuthoritativeEmoji
-              : resolvedEmoji;
-          resolvedEmoji = authoritativeEmoji;
-          resolvedAura = authoritativeProfile.aura ?? "";
-          didLoadAuthoritativeProfile = true;
-          loadedProfile = authoritativeProfile;
-          return true;
-        };
-        const loadAuthoritativeProfile =
-          async (): Promise<PlayerProfile | null> => {
-            try {
-              const authoritativeProfile =
-                await connection.getProfileByLoginId(uid);
-              if (!isStillValid()) {
-                return null;
-              }
-              return authoritativeProfile;
-            } catch (error) {
-              if (!isStillValid()) {
-                return null;
-              }
-              shouldRetry =
-                !(error instanceof ProfileApiError) ||
-                ["unavailable", "resource-exhausted", "aborted"].includes(
-                  error.code,
-                );
-              return null;
-            }
-          };
-
-        try {
-          const profileSyncResult = await connection.syncProfile();
-          if (!isStillValid()) {
-            return;
-          }
-          const syncedProfileId =
-            typeof profileSyncResult?.profileId === "string"
-              ? profileSyncResult.profileId
-              : "";
-          if (!syncedProfileId) {
-            setAuthStatus("unauthenticated");
-            scheduleDidAttemptAuthentication();
-            return;
-          }
-          if (syncedProfileId !== profileId) {
-            resetResolvedIdentityToFallback(syncedProfileId);
-            const authoritativeProfile = await loadAuthoritativeProfile();
-            if (!isStillValid()) {
-              return;
-            }
-            if (authoritativeProfile) {
-              applyAuthoritativeProfile(authoritativeProfile);
-            }
-          }
-          isIdentityVerified = true;
-        } catch {
-          if (!isStillValid()) {
-            return;
-          }
-          const authoritativeProfile = await loadAuthoritativeProfile();
-          if (!isStillValid()) {
-            return;
-          }
-          if (authoritativeProfile) {
-            isIdentityVerified =
-              applyAuthoritativeProfile(authoritativeProfile);
-          }
-        }
-
-        if (!isStillValid()) {
-          return;
-        }
-        if (!isIdentityVerified) {
-          setAuthStatus("unauthenticated");
-          scheduleDidAttemptAuthentication();
-          if (shouldRetry) scheduleRetry(retryCurrentUser);
-          return;
-        }
-        if (isWatchOnly && !didLoadAuthoritativeProfile) {
-          const authoritativeProfile = await loadAuthoritativeProfile();
-          if (!isStillValid()) {
-            return;
-          }
-          if (authoritativeProfile) {
-            applyAuthoritativeProfile(authoritativeProfile);
-          }
-        }
-        const profile = {
-          id: resolvedProfileId,
-          username: resolvedUsername,
-          eth: resolvedEthAddress,
-          sol: resolvedSolAddress,
-          rating: undefined,
-          nonce: undefined,
-          win: undefined,
-          emoji: resolvedEmoji,
-          aura: resolvedAura,
-          cardBackgroundId: undefined,
-          cardSubtitleId: undefined,
-          profileCounter: undefined,
-          profileMons: undefined,
-          cardStickers: undefined,
-          completedProblemIds: undefined,
-          isTutorialCompleted: undefined,
-        };
-        markAuthIdentityReady();
-        if (loadedProfile) {
-          applyVerifiedProfile(loadedProfile, uid, {
-            deferPresentationCache: true,
-          });
-        } else {
-          updateProfileDisplayName(
-            resolvedUsername,
-            resolvedEthAddress,
-            resolvedSolAddress,
-          );
-          const resolvedLoginUid = connection.getSameProfilePlayerUid() ?? uid;
-          setupLoggedInPlayerProfile(profile, resolvedLoginUid);
-        }
-        setAuthStatus("authenticated");
-        scheduleDidAttemptAuthentication();
       })().finally(() => {
         if (!isCancelled && isCurrentAuthChange() && !sessionGuard()) {
           scheduleRetry(retryCurrentUser);

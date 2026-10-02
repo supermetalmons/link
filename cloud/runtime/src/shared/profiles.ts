@@ -123,17 +123,6 @@ const LEADERBOARD_READ_TYPES: readonly LeaderboardReadType[] = Object.freeze([
   "mp",
   ...MATERIAL_KEYS,
 ]);
-const PROFILE_CUSTOMIZATION_FIELDS: readonly ProfileCustomizationField[] =
-  Object.freeze([
-    "emojiAndAura",
-    "cardBackgroundId",
-    "cardSubtitleId",
-    "profileCounter",
-    "profileMons",
-    "cardStickers",
-    "completedProblems",
-    "tutorialCompleted",
-  ]);
 const PROFILE_STICKER_CATALOG: Readonly<Record<string, readonly string[]>> =
   Object.freeze({
     "big-mon-top-right": Object.freeze([
@@ -403,7 +392,6 @@ const cropAddress = (address: string): string =>
 
 export {
   LEADERBOARD_READ_TYPES,
-  PROFILE_CUSTOMIZATION_FIELDS,
   PROFILE_STICKER_CATALOG,
   PROFILE_FALLBACK_EMOJI_COUNT,
   getProfileFallbackEmojiId,

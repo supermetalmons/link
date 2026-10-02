@@ -9,9 +9,6 @@ export interface AutomatchTelegramSourceInput {
   timestamp: SessionTimestamp;
 }
 declare const TELEGRAM_AUTOMATCH_VERSION = 2;
-declare const TELEGRAM_AUTOMATCH_ROOT = "telegramAutomatches";
-declare const TELEGRAM_AUTOMATCH_PROJECTION_OUTBOX_ROOT =
-  "telegramProjectionOutbox/automatch";
 declare const buildAutomatchTelegramProjectionChanges: (input: {
   inviteId: string;
   requestId: string;
@@ -36,8 +33,6 @@ declare const buildAutomatchTelegramLifecycleChanges: (
   },
 ) => GameSessionChange[];
 export {
-  TELEGRAM_AUTOMATCH_ROOT,
-  TELEGRAM_AUTOMATCH_PROJECTION_OUTBOX_ROOT,
   TELEGRAM_AUTOMATCH_VERSION,
   buildAutomatchTelegramProjectionChanges,
   buildAutomatchTelegramLifecycleChanges,

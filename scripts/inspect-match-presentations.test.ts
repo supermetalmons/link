@@ -1,33 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  parseArgs,
-  execute,
-  manageMatchPresentations,
-} from "./manage-match-presentations.ts";
-test("retired commands reject before credentials or provider requests", async (t) => {
-  let requests = 0;
-  t.mock.method(globalThis, "fetch", async () => {
-    requests++;
-    throw new Error("unexpected provider request");
-  });
-  for (const flag of [
-    "--preflight",
-    "--enable-capture",
-    "--export",
-    "--import",
-    "--verify",
-    "--activate",
-  ]) {
-    assert.throws(() => parseArgs([flag]), /retired/);
-    await assert.rejects(execute([flag]), /retired/);
-  }
-  assert.equal(requests, 0);
-  assert.deepEqual(parseArgs(["--status"]).operation, "status");
-  assert.throws(() =>
-    parseArgs(["--status", "--firebase-credentials", "/missing"]),
-  );
-});
+import { inspectMatchPresentations } from "./operator/inspect/matchPresentations.ts";
+
 test("appearance status preserves authority and both registration and source-exception counts", async () => {
   const queries: string[] = [];
   const logs: Record<string, unknown>[] = [];
@@ -41,7 +15,7 @@ test("appearance status preserves authority and both registration and source-exc
     { disposition: "alias", count: 6 },
     { disposition: "archive", count: 6 },
   ];
-  await manageMatchPresentations(parseArgs(["--status"]), {
+  await inspectMatchPresentations({
     run: async (sql, database) => {
       queries.push(sql);
       assert.equal(database, "mons-link-profile-games");
@@ -60,7 +34,7 @@ test("appearance status preserves authority and both registration and source-exc
 });
 test("appearance status rejects invalid authority without initializing any records", async () => {
   await assert.rejects(
-    manageMatchPresentations(parseArgs(["--status"]), {
+    inspectMatchPresentations({
       run: async () => [{ phase: "invalid" }],
       log: () => assert.fail("unexpected success"),
     }),

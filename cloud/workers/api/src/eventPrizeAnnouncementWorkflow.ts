@@ -138,5 +138,3 @@ export async function runEventAnnouncementWorkflow(
   );
   return result;
 }
-
-export const runEventPrizeAnnouncementWorkflow = runEventAnnouncementWorkflow;

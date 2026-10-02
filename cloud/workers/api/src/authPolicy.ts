@@ -1,14 +1,9 @@
 import {
   AUTH_COOLDOWN_REASONS,
-  AUTH_METHOD_FIELD_BY_TYPE,
   AUTH_METHOD_REUSE_COOLDOWN_MS,
-  getLinkedAuthMethodsFromProfile,
   getAuthCooldownScope,
-  normalizeAuthMethod,
-  resolveAuthCooldownRetryAtMs,
   type AuthMethodKey,
 } from "@mons/shared/auth";
-import { base64url } from "jose";
 import { createHash } from "node:crypto";
 import { AuthApiFailure } from "./authErrors.ts";
 
@@ -60,18 +55,6 @@ export function finiteNumber(value: unknown, fallback: number): number {
   return Number.isFinite(numeric) ? numeric : fallback;
 }
 
-export function assertAuthMethod(value: unknown): AuthMethodKey {
-  const method = normalizeAuthMethod(value);
-  if (!method) {
-    throw new AuthApiFailure(
-      400,
-      "invalid-argument",
-      "Unsupported auth method.",
-    );
-  }
-  return method;
-}
-
 export function normalizeMethodValue(
   method: AuthMethodKey,
   value: unknown,
@@ -114,17 +97,6 @@ export function normalizeMethodValue(
   return input;
 }
 
-export function getMethodField(method: AuthMethodKey): string {
-  return AUTH_METHOD_FIELD_BY_TYPE[method];
-}
-
-export function getMethodKey(
-  method: AuthMethodKey,
-  normalizedValue: string,
-): string {
-  return `${method}:${base64url.encode(normalizedValue)}`;
-}
-
 export function hashMethodValue(
   method: AuthMethodKey,
   normalizedValue: string,
@@ -135,37 +107,6 @@ export function hashMethodValue(
   return createHash("sha256")
     .update(`${method}:${normalizedValue}`)
     .digest("hex");
-}
-
-export function normalizeProfileMethod(
-  method: AuthMethodKey,
-  profile: Record<string, unknown>,
-): string {
-  const value = cleanString(profile[getMethodField(method)]);
-  if (!value) {
-    return "";
-  }
-  try {
-    return normalizeMethodValue(method, value);
-  } catch {
-    return "";
-  }
-}
-
-export function linkedMethodCount(profile: Record<string, unknown>): number {
-  return Object.values(getLinkedAuthMethodsFromProfile(profile)).filter(Boolean)
-    .length;
-}
-
-export function profileMethodCooldownId(
-  profileId: string,
-  method: AuthMethodKey,
-): string {
-  const normalizedProfileId = cleanString(profileId);
-  if (!normalizedProfileId) {
-    throw new AuthApiFailure(400, "invalid-argument", "profileId is required.");
-  }
-  return `${normalizedProfileId}:${method}`;
 }
 
 export function throwMethodCooldown(
@@ -196,8 +137,4 @@ export function throwProfileMethodCooldown(
     cooldownMs: AUTH_METHOD_REUSE_COOLDOWN_MS,
     profileId: cleanString(profileId) || null,
   });
-}
-
-export function cooldownRetryAtMs(value: unknown): number {
-  return resolveAuthCooldownRetryAtMs(value);
 }

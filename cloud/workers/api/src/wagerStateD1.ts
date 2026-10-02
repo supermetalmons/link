@@ -58,18 +58,6 @@ function requireActivation(row: ActivationRow | null): void {
   }
 }
 
-export async function assertWagerStateActivated(db: D1Database): Promise<void> {
-  requireActivation(
-    await db
-      .withSession("first-primary")
-      .prepare(
-        `SELECT activation_epoch, verified_at_ms, activated_at_ms
-         FROM wager_state_activation WHERE singleton = 1`,
-      )
-      .first<ActivationRow>(),
-  );
-}
-
 function requireKey(key: WagerStateKey): void {
   if (!isSafeRecordKey(key.inviteId) || !isSafeRecordKey(key.matchId)) {
     throw new TypeError("invalid-wager-state-key");

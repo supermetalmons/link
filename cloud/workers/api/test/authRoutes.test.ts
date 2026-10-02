@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { AuthApiFailure } from "../src/authErrors.ts";
+import { AUTH_PATHS } from "../src/authHttp.ts";
 import {
   AuthProfileRepositoryFailure,
   type AuthProfileRepository,
 } from "../src/authProfileRepository.ts";
+import { handleAuthRoute } from "../src/authRoutes.ts";
+import { handleRequest } from "../src/router.ts";
 import type {
   AuthIntentDocument,
   AuthIntentRecord,
@@ -11,9 +15,6 @@ import type {
   XRedirectFlowDocument,
 } from "../src/authStateD1.ts";
 import { AuthStateFailure } from "../src/authStateD1.ts";
-import { handleAuthRoute } from "../src/authRoutes.ts";
-import { AUTH_PATHS } from "../src/authHttp.ts";
-import { AuthApiFailure } from "../src/authErrors.ts";
 import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
 
 const ctx = {
@@ -222,7 +223,6 @@ test("profile control blocks POST auth work while preserving reads", async () =>
     "/auth/methods/sol/verify",
     "/auth/methods/unlink",
     "/auth/profile/sync",
-    "/auth/profile-claim/sync",
     "/auth/x/flows",
     "/auth/x/flows/complete",
   ]) {
@@ -442,7 +442,7 @@ test("returns linked methods using the verified UID", async () => {
   });
 });
 
-for (const syncPath of ["/auth/profile/sync", "/auth/profile-claim/sync"]) {
+for (const syncPath of ["/auth/profile/sync"]) {
   test(`requires authentication and active auth mutations for ${syncPath}`, async () => {
     assert.ok(AUTH_PATHS.has(syncPath));
     let reads = 0;
@@ -959,4 +959,23 @@ test("rate limits and dispatches auth mutations after session authentication", a
     linkedMethods: { apple: false, eth: true, sol: false, x: false },
     appleLinked: false,
   });
+});
+
+test("rejects the retired profile claim alias before authentication or mutation", async () => {
+  assert.equal(AUTH_PATHS.has("/auth/profile-claim/sync"), false);
+  const response = await handleRequest(
+    new Request("https://api.mons.link/auth/profile-claim/sync", {
+      method: "POST",
+      body: "{}",
+    }),
+    env,
+    {
+      auth: {
+        verifyIdentity: async () =>
+          assert.fail("retired alias must not authenticate"),
+      },
+    },
+    ctx,
+  );
+  assert.equal(response.status, 404);
 });

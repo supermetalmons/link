@@ -48,7 +48,7 @@ import type {
   ProfileLinkCatchupJob,
   ProfileLinkCatchupStore,
 } from "../src/profileLinkCatchupD1.ts";
-import { buildTransitionHistoricalMatchPair } from "../src/historicalMatches.ts";
+import { classifyTransitionHistoricalMatchPair } from "../src/historicalMatches.ts";
 import worker from "../src/workerHandler.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
@@ -562,48 +562,50 @@ test("transition archives require complete terminal consistent pairs", () => {
     hostMatch,
     guestMatch,
   };
-  assert.ok(buildTransitionHistoricalMatchPair(input));
-  assert.equal(
-    buildTransitionHistoricalMatchPair({ ...input, guestMatch: null }),
-    null,
+  assert.equal(classifyTransitionHistoricalMatchPair(input).status, "ready");
+  assert.notEqual(
+    classifyTransitionHistoricalMatchPair({ ...input, guestMatch: null })
+      .status,
+    "ready",
   );
-  assert.equal(
-    buildTransitionHistoricalMatchPair({
+  assert.notEqual(
+    classifyTransitionHistoricalMatchPair({
       ...input,
       hostMatch: { ...hostMatch, status: "" },
-    }),
-    null,
+    }).status,
+    "ready",
   );
-  assert.equal(
-    buildTransitionHistoricalMatchPair({
+  assert.notEqual(
+    classifyTransitionHistoricalMatchPair({
       ...input,
       guestMatch: { ...guestMatch, color: "white" },
-    }),
-    null,
+    }).status,
+    "ready",
   );
-  const normalizedVariant = buildTransitionHistoricalMatchPair({
+  const normalizedVariant = classifyTransitionHistoricalMatchPair({
     ...input,
     guestMatch: { ...guestMatch, gameVariant: "SwappedManaRows" },
   });
-  assert.equal(normalizedVariant?.hostMatch?.gameVariant, "Classic");
-  assert.equal(normalizedVariant?.guestMatch?.gameVariant, "Classic");
+  assert.equal(normalizedVariant.status, "ready");
+  assert.equal(normalizedVariant.pair.hostMatch?.gameVariant, "Classic");
+  assert.equal(normalizedVariant.pair.guestMatch?.gameVariant, "Classic");
 
   const unrelatedGame = new Game();
   const unrelatedMove = unrelatedGame.suggestMove("fast");
   assert.ok(unrelatedMove);
   unrelatedGame.playFen(unrelatedMove.inputFen);
-  assert.equal(
-    buildTransitionHistoricalMatchPair({
+  assert.notEqual(
+    classifyTransitionHistoricalMatchPair({
       ...input,
       guestMatch: { ...guestMatch, fen: unrelatedGame.toFen() },
-    }),
-    null,
+    }).status,
+    "ready",
   );
 
   const swappedFen = new Game({
     variant: GameVariant.SwappedManaRows,
   }).toFen();
-  const canonicalVariant = buildTransitionHistoricalMatchPair({
+  const canonicalVariant = classifyTransitionHistoricalMatchPair({
     ...input,
     hostMatch: {
       ...hostMatch,
@@ -617,11 +619,15 @@ test("transition archives require complete terminal consistent pairs", () => {
     },
   });
   assert.equal(
-    canonicalVariant?.hostMatch?.gameVariant,
+    canonicalVariant.status === "ready"
+      ? canonicalVariant.pair.hostMatch?.gameVariant
+      : null,
     GameVariant.SwappedManaRows,
   );
   assert.equal(
-    canonicalVariant?.guestMatch?.gameVariant,
+    canonicalVariant.status === "ready"
+      ? canonicalVariant.pair.guestMatch?.gameVariant
+      : null,
     GameVariant.SwappedManaRows,
   );
 
@@ -643,8 +649,8 @@ test("transition archives require complete terminal consistent pairs", () => {
     }
   }
   assert.notEqual(completedGame.winner, undefined);
-  assert.equal(
-    buildTransitionHistoricalMatchPair({
+  assert.notEqual(
+    classifyTransitionHistoricalMatchPair({
       ...input,
       hostMatch: {
         ...hostMatch,
@@ -655,11 +661,11 @@ test("transition archives require complete terminal consistent pairs", () => {
         ...guestMatch,
         flatMovesString: moves.black.join("-"),
       },
-    }),
-    null,
+    }).status,
+    "ready",
   );
-  assert.ok(
-    buildTransitionHistoricalMatchPair({
+  assert.equal(
+    classifyTransitionHistoricalMatchPair({
       ...input,
       hostMatch: {
         ...hostMatch,
@@ -672,7 +678,8 @@ test("transition archives require complete terminal consistent pairs", () => {
         fen: blackFen,
         flatMovesString: moves.black.join("-"),
       },
-    }),
+    }).status,
+    "ready",
   );
 });
 

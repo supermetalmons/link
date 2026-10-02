@@ -1,19 +1,12 @@
-import {
-  attachEventTestPorts,
-  type EventTestSource,
-} from "./eventTestPorts.ts";
-import assert from "node:assert/strict";
-import test from "node:test";
-import type { EventJsonRecord } from "../../../runtime/eventReads.js";
-import {
-  buildEventPrizeAnnouncementPlan,
-  buildSundayMonsReminderPlan,
-} from "../src/eventPrizeAnnouncementSchedule.ts";
 import type {
   WorkflowEvent,
   WorkflowInstanceStatus,
   WorkflowStep,
 } from "cloudflare:workers";
+import assert from "node:assert/strict";
+import test from "node:test";
+import type { EventJsonRecord } from "../../../runtime/eventReads.js";
+import { buildEventAnnouncementPlan } from "../src/eventPrizeAnnouncementSchedule.ts";
 import {
   buildEventProgressPlan,
   EVENT_PROGRESS_OUTBOX_DEAD_ROOT,
@@ -24,7 +17,6 @@ import {
   type EventProgressSweepRepository,
   type EventProgressWorkflowParams,
 } from "../src/eventProgress.ts";
-import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 import {
   SCHEDULED_EVENT_RECOVERY_PAGE_SIZE,
   SCHEDULED_EVENT_RECOVERY_URGENT_LIMIT,
@@ -32,6 +24,11 @@ import {
   type ScheduledEventRecoveryCandidate,
   type ScheduledEventRecoveryCursor,
 } from "../src/eventScheduledRecoveryD1.ts";
+import {
+  attachEventTestPorts,
+  type EventTestSource,
+} from "./eventTestPorts.ts";
+import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 function scheduledRecovery(
   events: Record<string, { startAtMs: number; isSundayMons?: boolean }>,
@@ -428,10 +425,11 @@ for (const kind of ["start", "reminder"] as const) {
               },
               100,
             )
-          : await buildSundayMonsReminderPlan(
+          : await buildEventAnnouncementPlan(
               eventId,
               { ...event, status: "scheduled" },
               100,
+              "reminder",
             );
       assert.ok(plan);
       const providerStarted = Promise.withResolvers<void>();
@@ -536,7 +534,12 @@ test(
       isSundayMons: true,
       startAtMs: nowMs + 14_400_000 + 30_000,
     };
-    const plan = await buildSundayMonsReminderPlan(eventId, event, nowMs);
+    const plan = await buildEventAnnouncementPlan(
+      eventId,
+      event,
+      nowMs,
+      "reminder",
+    );
     assert.ok(plan);
     const published = Promise.withResolvers<void>();
     const malformed = { schemaVersion: 2 };
@@ -602,8 +605,18 @@ test("scheduled-event sweep discovers both announcements and retains their first
     ratingRepository: null,
     scheduledRecovery: recovery,
   });
-  const plan = await buildEventPrizeAnnouncementPlan(eventId, event, nowMs);
-  const reminder = await buildSundayMonsReminderPlan(eventId, event, nowMs);
+  const plan = await buildEventAnnouncementPlan(
+    eventId,
+    event,
+    nowMs,
+    "prizes",
+  );
+  const reminder = await buildEventAnnouncementPlan(
+    eventId,
+    event,
+    nowMs,
+    "reminder",
+  );
   assert.ok(plan);
   assert.ok(reminder);
   assert.deepEqual(
@@ -1042,8 +1055,18 @@ test("both announcements survive slow start dispatch and all three jobs can fail
     let failedId: string | undefined;
     const records = new Map<string, unknown>();
     const created: string[] = [];
-    const prize = await buildEventPrizeAnnouncementPlan(eventId, event, nowMs);
-    const reminder = await buildSundayMonsReminderPlan(eventId, event, nowMs);
+    const prize = await buildEventAnnouncementPlan(
+      eventId,
+      event,
+      nowMs,
+      "prizes",
+    );
+    const reminder = await buildEventAnnouncementPlan(
+      eventId,
+      event,
+      nowMs,
+      "reminder",
+    );
     assert.ok(prize);
     assert.ok(reminder);
     const failureReason =

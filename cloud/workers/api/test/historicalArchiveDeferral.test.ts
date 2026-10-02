@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Game, GameVariant } from "mons-rules";
-import {
-  buildTransitionHistoricalMatchPair,
-  classifyTransitionHistoricalMatchPair,
-} from "../src/historicalMatches.ts";
+import { classifyTransitionHistoricalMatchPair } from "../src/historicalMatches.ts";
 import {
   parseAutomatchProfileGameProjectionOutbox,
   salvageHistoricalMatchDescriptors,
@@ -158,7 +155,6 @@ test("transition classification distinguishes initial, missing and terminal sour
   assert.deepEqual(classifyTransitionHistoricalMatchPair(input), {
     status: "unready",
   });
-  assert.equal(buildTransitionHistoricalMatchPair(input), null);
   assert.deepEqual(
     classifyTransitionHistoricalMatchPair({ ...input, guestMatch: null }),
     { status: "unavailable" },
@@ -168,13 +164,6 @@ test("transition classification distinguishes initial, missing and terminal sour
     hostMatch: match("black", true),
   });
   assert.equal(ready.status, "ready");
-  assert.deepEqual(
-    buildTransitionHistoricalMatchPair({
-      ...input,
-      hostMatch: match("black", true),
-    }),
-    ready.status === "ready" ? ready.pair : null,
-  );
 });
 
 test("unready history retains its descriptor and duplicate deliveries do no work until recovery", async () => {

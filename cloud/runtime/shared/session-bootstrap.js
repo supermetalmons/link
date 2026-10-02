@@ -10,14 +10,11 @@ exports.isSessionIdentityBootstrap = isSessionIdentityBootstrap;
 exports.isSessionBootstrapTarget = isSessionBootstrapTarget;
 exports.isSessionBootstrapFailure = isSessionBootstrapFailure;
 exports.isSessionBootstrap = isSessionBootstrap;
-exports.isSessionBootstrapResponse = isSessionBootstrapResponse;
 exports.isSessionEventBootstrapTarget = isSessionEventBootstrapTarget;
 exports.isSessionEventBootstrap = isSessionEventBootstrap;
-exports.isSessionEventBootstrapResponse = isSessionEventBootstrapResponse;
 const ids_js_1 = require("./ids.js");
 const game_bootstrap_js_1 = require("./game-bootstrap.js");
 const rematches_js_1 = require("./rematches.js");
-const session_auth_js_1 = require("./session-auth.js");
 const profiles_js_1 = require("./profiles.js");
 const events_js_1 = require("./events.js");
 const SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES =
@@ -90,16 +87,6 @@ function isSessionBootstrap(value) {
     selected.hasPendingProposal === value.result.hasPendingProposal
   );
 }
-function isSessionBootstrapResponse(value) {
-  if (!record(value)) return false;
-  const { gameBootstrap, identityBootstrap, ...session } = value;
-  return (
-    (0, session_auth_js_1.isSessionTokenResponse)(session) &&
-    isSessionBootstrap(gameBootstrap) &&
-    (!Object.hasOwn(value, "identityBootstrap") ||
-      isSessionIdentityBootstrap(identityBootstrap))
-  );
-}
 function isSessionIdentityBootstrap(value) {
   return (
     (0, profiles_js_1.isProfileLookupResponse)(value) ||
@@ -125,15 +112,5 @@ function isSessionEventBootstrap(value) {
     (isSessionBootstrapFailure(value.result) ||
       ((0, events_js_1.isEventSnapshotSeed)(value.result) &&
         value.result.snapshot.eventId === value.eventId))
-  );
-}
-function isSessionEventBootstrapResponse(value) {
-  if (!record(value)) return false;
-  const { eventBootstrap, identityBootstrap, ...session } = value;
-  return (
-    (0, session_auth_js_1.isSessionTokenResponse)(session) &&
-    isSessionEventBootstrap(eventBootstrap) &&
-    (!Object.hasOwn(value, "identityBootstrap") ||
-      isSessionIdentityBootstrap(identityBootstrap))
   );
 }

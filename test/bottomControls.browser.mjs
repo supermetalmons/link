@@ -65,11 +65,8 @@ export const puzzleMode = false;
 export let isOnlineGame = false;
 export const setOnlineGame = value => { isOnlineGame = value; updateGameControlsContext({ isOnlineGame: value }); };
 export const isWatchOnly = false;
-export const isMatchOver = () => false;
-export const getBoardViewMode = () => 'activeLive';
 export const getRematchSeriesNavigatorItems = () => environment.rematchItems;
 export const preloadRematchSeriesScores = () => new Promise((resolve, reject) => environment.rematchPreloads.push({ resolve, reject }));
-export const getSelectedPuzzleId = () => null;
 export const didClickUndoButton = () => invoke('undo');
 export const didClickAutomoveButton = () => invoke('automove');
 export const didClickHomeButton = () => invoke('home');
@@ -388,7 +385,7 @@ async function fixture(run, { realNavigation = false, mobile = false } = {}) {
     ["./controls/menuPort", "export const closeMenuAndInfoIfAny = () => {};"],
     [
       "./BoardStylePicker",
-      "import React from 'react'; export default () => React.createElement('div', { 'data-testid': 'appearance-picker', style: { position: 'fixed', top: 150, left: 10 } }, React.createElement('button', null, 'Appearance contents')); export const preloadPangchiuBoardPreview = () => {};",
+      "import React from 'react'; export default () => React.createElement('div', { 'data-testid': 'appearance-picker', style: { position: 'fixed', top: 150, left: 10 } }, React.createElement('button', null, 'Appearance contents'));",
     ],
     ["../utils/gameModels", "export const Sound = {};"],
     [

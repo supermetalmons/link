@@ -42,7 +42,7 @@ before(async () => {
             if (request.url !== "/__event-modal") return next();
             response.setHeader("Content-Type", "text/html");
             response.end(
-              '<div id="root"></div><script type="module" src="/test/fixtures/eventModalHarness.tsx"></script>',
+              '<link rel="stylesheet" href="/src/index.css"><div id="root"></div><script type="module" src="/test/fixtures/eventModalHarness.tsx"></script>',
             );
           });
         },
@@ -77,6 +77,16 @@ async function fixture(run) {
   const page = await browser.newPage();
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
+  await page.route("**/*", (route) => {
+    if (new URL(route.request().url()).origin === origin)
+      return route.continue();
+    if (route.request().resourceType() === "image")
+      return route.fulfill({
+        contentType: "image/svg+xml",
+        body: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="blue"/></svg>',
+      });
+    return route.abort();
+  });
   await page.goto(`${origin}/__event-modal`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => !!window.eventHarness);
   try {
@@ -96,6 +106,228 @@ async function openEvent(page, id = "event-a", patch = {}) {
 }
 
 mounted(
+  "the live event view keeps creator actions visible and responsive without simulation controls",
+  async (page) => {
+    await call(page, "mount", {
+      mode: "view",
+      profileId: "p1",
+      loginUid: "p1-login",
+    });
+    await call(page, "receive", "event-a");
+    const administration = page.getByRole("group", {
+      name: "Event administration",
+    });
+    await administration.waitFor();
+    assert.equal(
+      await administration
+        .getByRole("button", { name: "Postpone", exact: true })
+        .count(),
+      1,
+    );
+    assert.equal(
+      await administration
+        .getByRole("button", { name: "Remove Participant", exact: true })
+        .count(),
+      1,
+    );
+    assert.equal(
+      await page.getByRole("button", { name: "Bracket stub helper" }).count(),
+      0,
+    );
+    assert.equal(
+      await page.getByRole("button", { name: "Generate", exact: true }).count(),
+      0,
+    );
+    assert.equal(
+      await page.getByRole("button", { name: "Live", exact: true }).count(),
+      0,
+    );
+    for (const viewport of [
+      { width: 1200, height: 900 },
+      { width: 360, height: 740 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await page.waitForFunction(() => {
+        const row = document.querySelector(
+          '[aria-label="Event administration"]',
+        );
+        const bounds = row?.getBoundingClientRect();
+        return (
+          bounds &&
+          bounds.width > 0 &&
+          bounds.x >= 0 &&
+          bounds.right <= innerWidth + 1 &&
+          bounds.bottom <= innerHeight
+        );
+      });
+      const rowBounds = await administration.boundingBox();
+      assert.ok(rowBounds && rowBounds.height > 0);
+      const bottomTop = await administration.evaluate(
+        (element) => element.parentElement.getBoundingClientRect().top,
+      );
+      const participant = await page
+        .locator('button[data-player-card-trigger="true"]')
+        .filter({ hasText: "P2" })
+        .boundingBox();
+      assert.ok(participant && participant.y + participant.height <= bottomTop);
+      if (process.env.MONS_EVENT_SCREENSHOT_DIRECTORY) {
+        await page.screenshot({
+          path: `${process.env.MONS_EVENT_SCREENSHOT_DIRECTORY}/event-admin-${viewport.width}.png`,
+        });
+      }
+    }
+    await call(page, "responses", ["5"], [true]);
+    await administration
+      .getByRole("button", { name: "Postpone", exact: true })
+      .click();
+    assert.deepEqual(await calls(page, "postpone"), [["event-a", 5]]);
+    assert.equal(
+      await administration
+        .getByRole("button", { name: "...", exact: true })
+        .isDisabled(),
+      true,
+    );
+    await call(page, "complete", "postpone");
+    await call(page, "responses", ["1"], [true]);
+    await administration
+      .getByRole("button", { name: "Remove Participant", exact: true })
+      .click();
+    assert.deepEqual(await calls(page, "remove"), [["event-a", "p2"]]);
+    assert.equal(
+      await administration
+        .getByRole("button", { name: "...", exact: true })
+        .isDisabled(),
+      true,
+    );
+    await call(page, "complete", "remove");
+    await page.mouse.click(5, 5);
+    assert.equal((await snapshot(page)).modalState.isOpen, false);
+  },
+);
+
+mounted(
+  "crowded mobile event participants stay above the administration controls",
+  async (page) => {
+    await page.setViewportSize({ width: 320, height: 568 });
+    await call(page, "mount", {
+      mode: "view",
+      profileId: "p1",
+      loginUid: "p1-login",
+    });
+    const participants = await page.evaluate(() =>
+      Object.fromEntries(
+        Array.from({ length: 22 }, (_, index) => {
+          const id = `p${index + 1}`;
+          const name = `Participant${String(index + 1).padStart(3, "0")}`;
+          return [
+            id,
+            {
+              ...window.eventHarness.participant(id),
+              username: name,
+              displayName: name,
+              joinedAtMs: index + 1,
+            },
+          ];
+        }),
+      ),
+    );
+    await call(page, "receive", "event-a", { participants });
+    const administration = page.getByRole("group", {
+      name: "Event administration",
+    });
+    await administration.waitFor();
+    await page.evaluate(
+      () =>
+        new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        ),
+    );
+    const bottomTop = await administration.evaluate(
+      (element) => element.parentElement.getBoundingClientRect().top,
+    );
+    const last = page.locator('button[data-player-card-trigger="true"]').last();
+    const bounds = await last.boundingBox();
+    assert.ok(bounds && bounds.y + bounds.height <= bottomTop);
+    assert.equal(
+      await last.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return element.contains(
+          document.elementFromPoint(
+            rect.x + rect.width / 2,
+            rect.y + rect.height / 2,
+          ),
+        );
+      }),
+      true,
+    );
+  },
+);
+
+mounted(
+  "the live event view hides administration from ordinary viewers and retains admin disqualification",
+  async (page) => {
+    await call(page, "mount", {
+      mode: "view",
+      profileId: "viewer",
+      loginUid: "viewer-login",
+    });
+    await call(page, "receive", "event-a");
+    await page.getByRole("button", { name: "Join", exact: true }).waitFor();
+    assert.equal(
+      await page.getByRole("group", { name: "Event administration" }).count(),
+      0,
+    );
+    if (process.env.MONS_EVENT_SCREENSHOT_DIRECTORY) {
+      await page.screenshot({
+        path: `${process.env.MONS_EVENT_SCREENSHOT_DIRECTORY}/event-viewer.png`,
+      });
+    }
+    await call(page, "mount", {
+      mode: "view",
+      profileId: "admin",
+      loginUid: "admin-login",
+      username: "ivan",
+    });
+    await call(page, "receive", "event-a", {
+      status: "active",
+      startedAtMs: 999_000,
+      currentRoundIndex: 0,
+      bracketSize: 2,
+      roundCount: 1,
+      rounds: {
+        0: {
+          roundIndex: 0,
+          status: "active",
+          createdAtMs: 999_000,
+          completedAtMs: null,
+          matches: {
+            "0_0": {
+              matchKey: "0_0",
+              inviteId: "match-a",
+              status: "pending",
+              hostProfileId: "p1",
+              guestProfileId: "p2",
+              hostDisplayName: "Host",
+              guestDisplayName: "Guest",
+            },
+          },
+        },
+      },
+    });
+    const disqualify = page.getByRole("button", {
+      name: "Disqualify",
+      exact: true,
+    });
+    await disqualify.waitFor();
+    assert.equal(await disqualify.isEnabled(), true);
+    await call(page, "responses", ["1"], [true]);
+    await disqualify.click();
+    assert.deepEqual(await calls(page, "disqualify"), [["event-a", "0_0"]]);
+    await call(page, "complete", "disqualify");
+  },
+);
+
+mounted(
   "leaving is one click and suppresses duplicate pending requests",
   async (page) => {
     await mountActions(page);
@@ -110,13 +342,12 @@ mounted(
 );
 
 mounted(
-  "leaving rechecks the start boundary and blocks stale or simulated events",
+  "leaving rechecks the start boundary and blocks stale events",
   async (page) => {
     for (const overrides of [
       { isEventFresh: false },
       { isLoading: true },
       { isResolvingEventProfileIds: true },
-      { devStubRecord: {} },
       { eventRecord: { eventId: "old-event", startAtMs: 1_100_000 } },
     ]) {
       await mountActions(page, overrides);
@@ -555,7 +786,7 @@ mounted(
 );
 
 mounted(
-  "event recovery retains freshness, creator, delay, attempt limits and dev suppression",
+  "event recovery retains freshness, creator, delay and attempt limits",
   async (page) => {
     await call(page, "mount", {
       profileId: "p1",
@@ -578,11 +809,6 @@ mounted(
     await call(page, "complete", "sync", 1);
     await call(page, "advance", 10000);
     assert.equal((await calls(page, "sync")).length, 2);
-    await call(page, "mount", { profileId: "p1", loginUid: "p1-login" });
-    await call(page, "receive", "event-a", { startAtMs: 999_000 });
-    await call(page, "dev", true);
-    await call(page, "advance", 1000);
-    assert.deepEqual(await calls(page, "sync"), []);
     await call(page, "mount");
     await call(page, "receive", "event-a", { startAtMs: 999_000 });
     await call(page, "advance", 1000);

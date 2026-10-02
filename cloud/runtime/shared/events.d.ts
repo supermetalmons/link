@@ -15,7 +15,6 @@ export type EventTelegramAnnouncements = {
 };
 export type EventCreateOptions = {
   isSundayMons?: boolean;
-  announceOnTelegram?: boolean;
   telegramAnnouncements?: EventTelegramAnnouncements;
 };
 export type CreateEventRequest = EventCreateOptions &
@@ -185,11 +184,6 @@ declare function parseEventMatchKey(
 ): EventMatchKeyParts | null;
 declare function getEventBracketSize(participantCount: number): number;
 declare function buildEventSeedOrder(bracketSize: number): number[];
-declare function getFirstRoundByeSeeds(
-  participantCount: number,
-  bracketSize: number,
-  seedOrder: readonly number[],
-): number[];
 declare function isJoinEventRequest(value: unknown): value is JoinEventRequest;
 declare function isLeaveEventRequest(
   value: unknown,
@@ -271,7 +265,6 @@ export {
   buildEventParticipantSnapshot,
   buildEventSeedOrder,
   getEventBracketSize,
-  getFirstRoundByeSeeds,
   isCreateEventRequest,
   isCreateEventResponse,
   isDisqualifyEventMatchWinnersRequest,

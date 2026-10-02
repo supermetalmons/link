@@ -6,17 +6,6 @@ declare const normalizeEventPrizeAssignments: (
   value: unknown,
   eventId: unknown,
 ) => Record<string, EventPrizeAssignmentRecord>;
-declare const buildProfileEventPrizeMergeCopies: ({
-  targetProfileId,
-  sourceProfileId,
-  targetPrizes,
-  sourcePrizes,
-}: {
-  targetProfileId: unknown;
-  sourceProfileId: unknown;
-  targetPrizes: unknown;
-  sourcePrizes: unknown;
-}) => Record<string, EventPrizeAssignmentRecord>;
 declare const buildEventPrizeAssignments: ({
   eventId,
   placements,
@@ -30,7 +19,6 @@ declare const buildEventPrizeAssignments: ({
 }) => Record<string, EventPrizeAssignmentRecord>;
 export {
   EVENT_PRIZE_PLACES,
-  buildProfileEventPrizeMergeCopies,
   buildEventPrizeAssignments,
   isEventPrizeId,
   normalizeEventPrizeAssignments,

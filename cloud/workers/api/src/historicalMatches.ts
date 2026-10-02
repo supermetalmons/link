@@ -145,10 +145,3 @@ export function classifyTransitionHistoricalMatchPair(input: {
     ? { status: "ready", pair: stablePair }
     : { status: "unready" };
 }
-
-export function buildTransitionHistoricalMatchPair(
-  input: Parameters<typeof classifyTransitionHistoricalMatchPair>[0],
-): HistoricalMatchPair | null {
-  const result = classifyTransitionHistoricalMatchPair(input);
-  return result.status === "ready" ? result.pair : null;
-}

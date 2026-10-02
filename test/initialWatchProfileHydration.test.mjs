@@ -99,13 +99,8 @@ test("initial spectator skips mining already applied by verified profile consump
   assert.deepEqual(h.reads, ["login"]);
 });
 
-test("legacy, unavailable and invalidated identity fall back to fresh own-profile reads", async () => {
-  for (const value of [
-    null,
-    { ok: false, status: "legacy" },
-    { ok: false, status: 503 },
-    "invalidated",
-  ]) {
+test("missing, unavailable and invalidated identity fall back to fresh own-profile reads", async () => {
+  for (const value of [null, { ok: false, status: 503 }, "invalidated"]) {
     const gate = deferred();
     const h = harness({ pending: value === null ? null : gate.promise });
     h.enter(true);

@@ -9,20 +9,20 @@ import {
   type EventBracketRuntime,
 } from "../../../runtime/events/bracket.js";
 import type {
-  EVENT_LOCK_TTL_MS,
   EVENT_LOCK_REFRESH_INTERVAL_MS,
+  EVENT_LOCK_TTL_MS,
 } from "../../../runtime/events/lockManagerCore.js";
 import type { EventOwnershipSnapshot } from "../../../runtime/events/ownership.js";
+import type {
+  TelegramFailure,
+  TelegramResult,
+  TelegramSuccess,
+} from "../../../runtime/telegram/client.js";
 import {
   buildTelegramDeliveryTaskId,
   normalizeTaskPayload,
   type TelegramTaskPayload,
 } from "../../../runtime/telegram/taskIdentity.js";
-import type {
-  TelegramResult,
-  TelegramFailure,
-  TelegramSuccess,
-} from "../../../runtime/telegram/client.js";
 
 type Assert<T extends true> = T;
 type Equal<Left, Right> =
@@ -124,10 +124,8 @@ export function supportedBracketCalls(ownership: EventOwnershipSnapshot) {
   return { bracket, reconciliation };
 }
 
-export const taskIdentityOverloads: {
-  (payload: TelegramTaskPayload): string;
-  (messageKey: string, revision: string, generation: string): string;
-} = buildTelegramDeliveryTaskId;
+export const taskIdentitySignature: (payload: TelegramTaskPayload) => string =
+  buildTelegramDeliveryTaskId;
 export type NormalizedTelegramPayloadIsChecked = Assert<
   Equal<IsAny<ReturnType<typeof normalizeTaskPayload>>, false>
 >;

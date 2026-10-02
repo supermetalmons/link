@@ -1,33 +1,30 @@
-import type { WagerFrozenStore } from "./wagerFrozenStore.ts";
-import {
-  notifyInviteSessionCommitted,
-  notifyInviteSourceChanged,
-} from "./inviteWagersNotifications.ts";
-import {
-  createAutomatchPersistence,
-  type AutomatchPersistence,
-} from "./automatchPersistence.ts";
-import { prepareCreatedMatchPresentations } from "./matchPresentationRegistry.ts";
-import { measureAutomatchPhase } from "./automatchTelemetry.ts";
-import {
-  createWagerStateReader,
-  type WagerReader,
-  type WagerWriter,
-} from "./wagerStateRepository.ts";
-import { createMatchStateSource } from "./matchStateSource.ts";
 import type {
   MiningMaterialName,
   MiningMaterials,
   MiningSnapshot,
 } from "@mons/shared/mining";
-import type { MatchStatePort } from "./repositoryContracts.ts";
+import {
+  createAutomatchPersistence,
+  type AutomatchPersistence,
+} from "./automatchPersistence.ts";
+import { measureAutomatchPhase } from "./automatchTelemetry.ts";
 import type { GameSessionPort } from "./gameSessionContracts.ts";
 import { createCanonicalGameplayRepository } from "./gameplayCanonicalRepository.ts";
 import { createGameplayRepositoryFailure } from "./gameplayRepositoryPolicy.ts";
+import { notifyInviteSessionCommitted } from "./inviteWagersNotifications.ts";
+import { prepareCreatedMatchPresentations } from "./matchPresentationRegistry.ts";
+import { createMatchStateSource } from "./matchStateSource.ts";
 import type {
   ProfileOwnershipProfile,
   ProfileOwnershipReader,
 } from "./profileOwnership.ts";
+import type { MatchStatePort } from "./repositoryContracts.ts";
+import type { WagerFrozenStore } from "./wagerFrozenStore.ts";
+import {
+  createWagerStateReader,
+  type WagerReader,
+  type WagerWriter,
+} from "./wagerStateRepository.ts";
 
 const MAX_WAGER_TRANSFER_TRANSACTION_ATTEMPTS = 5;
 
@@ -77,10 +74,8 @@ export type GameplayRepository = ProfileOwnershipReader &
 type GameplayRepositoryDependencies = {
   wagerFrozen?: WagerFrozenStore;
   d1?: D1Database;
-  fetcher?: typeof fetch;
   now?: () => number;
   stateClient?: MatchStatePort;
-  timeoutMs?: number;
 };
 
 export function createGameplayRepository(
@@ -99,14 +94,7 @@ export function createGameplayRepository(
       prepareCreatedMatchPresentations(env, creations),
     onCommitted: (inviteId) =>
       measureAutomatchPhase("notification", async () => {
-        if (env.AUTOMATCH_DELIVERY_MODE === "bootstrap") {
-          await notifyInviteSessionCommitted(env, [inviteId]);
-          return;
-        }
-        await notifyInviteSourceChanged(env, {
-          metadataInviteIds: [inviteId],
-          wagerInviteIds: [inviteId],
-        });
+        await notifyInviteSessionCommitted(env, [inviteId]);
       }),
   });
   return {

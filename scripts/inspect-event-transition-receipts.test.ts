@@ -1,14 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  parseArgs,
-  execute,
   createProvider,
   createSqlDependencies,
   listWorkflows,
-  manageEventTransitionReceipts,
+  inspectEventReceipts,
   type Dependencies,
-} from "./manage-event-transition-receipts.ts";
+} from "./operator/inspect/eventReceipts.ts";
 const VERSION = "11111111-1111-4111-8111-111111111111";
 function fixture() {
   const logs: Record<string, unknown>[] = [];
@@ -47,34 +45,10 @@ function fixture() {
   };
   return { deps, logs, queries };
 }
-test("retired commands reject before credentials or provider requests", async (t) => {
-  let requests = 0;
-  t.mock.method(globalThis, "fetch", async () => {
-    requests++;
-    throw new Error("unexpected provider request");
-  });
-  for (const flag of [
-    "--preflight",
-    "--freeze",
-    "--export",
-    "--import",
-    "--verify",
-    "--activate",
-    "--resume",
-    "--abort",
-  ]) {
-    assert.throws(() => parseArgs([flag]), /retired/);
-    await assert.rejects(execute([flag]), /retired/);
-  }
-  assert.equal(requests, 0);
-  assert.deepEqual(parseArgs(["--status"]).operation, "status");
-  assert.throws(() =>
-    parseArgs(["--status", "--firebase-credentials", "/missing"]),
-  );
-});
+
 test("receipt status reports pinned Workflows and lock ownership without taking the lock or changing controls", async () => {
   const f = fixture();
-  await manageEventTransitionReceipts(parseArgs(["--status"]), f.deps);
+  await inspectEventReceipts(f.deps);
   assert.equal(f.logs[0].state, "active");
   assert.equal(f.logs[0].workflows, 1);
   assert.equal(f.logs[0].versionId, VERSION);

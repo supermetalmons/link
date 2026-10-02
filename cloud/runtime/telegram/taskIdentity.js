@@ -162,22 +162,8 @@ const normalizeTaskPayload = (input) => {
   return payload;
 };
 exports.normalizeTaskPayload = normalizeTaskPayload;
-const buildTelegramDeliveryTaskId = (
-  inputOrMessageKey,
-  revision,
-  generation,
-) => {
-  const payload = normalizeTaskPayload(
-    typeof inputOrMessageKey === "object" && inputOrMessageKey !== null
-      ? inputOrMessageKey
-      : {
-          messageKey: inputOrMessageKey,
-          revision,
-          taskKind: taskKinds_js_1.TELEGRAM_DESIRED_TASK_KIND,
-          retrySequence: 0,
-          generation,
-        },
-  );
+const buildTelegramDeliveryTaskId = (input) => {
+  const payload = normalizeTaskPayload(input);
   const cleanupIdentity =
     payload.safeRejectedAttemptId || payload.pendingDeleteId || "none";
   return `tg_${crypto

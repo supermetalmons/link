@@ -19,7 +19,6 @@ test("delayed profile hydration updates metadata without publishing stale match 
   assert.ok(declaration);
   let finishProfile;
   const profileRead = new Promise((resolve) => (finishProfile = resolve));
-  const mutations = [];
   const displays = [];
   let completions = 0;
   const profiles = {};
@@ -36,7 +35,6 @@ test("delayed profile hydration updates metadata without publishing stale match 
     isPlayerMetadataWatchOnly: () => false,
     updatePlayerProfileDisplayName: () => {},
     updatePlayerEmojiAndAura: (...args) => displays.push(args),
-    updatePlayerEmoji: (...args) => mutations.push(args),
     normalizeProfileEmojiId: Number,
     storage: new Proxy(
       {},
@@ -68,5 +66,4 @@ test("delayed profile hydration updates metadata without publishing stale match 
   assert.equal(completions, 1);
   assert.deepEqual(profiles.actor, fetched);
   assert.deepEqual(displays, [["1", "", false]]);
-  assert.deepEqual(mutations, []);
 });

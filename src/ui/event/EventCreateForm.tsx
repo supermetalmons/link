@@ -1,4 +1,3 @@
-import React from "react";
 import {
   EVENT_SCHEDULE_TIMEZONE_OPTIONS,
   MAX_STARTS_IN_MINUTES,

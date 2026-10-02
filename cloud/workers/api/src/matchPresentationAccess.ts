@@ -9,13 +9,12 @@ import {
   rematchSeriesEnded,
 } from "@mons/shared/rematches";
 import { AuthApiFailure } from "./authErrors.ts";
-import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
-import type { InviteReactions } from "./inviteReactions.ts";
 import {
   readMatchPresentationControl,
   readRegisteredMatchPresentations,
 } from "./matchPresentationRegistry.ts";
+import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 
 export type MatchPresentationReadDependencies = {
   readPresentationControl?: (
@@ -133,15 +132,13 @@ function requireRegisteredPresentationMatch(
 
 export async function readMatchPresentationSnapshot(
   env: Env,
-  _repository: GameplayRepository,
   inviteId: string,
   matchId: string,
   invite: PresentationInvite,
   dependencies: MatchPresentationReadDependencies & {
-    room: Partial<Pick<InviteReactions, "ensurePresentations">>;
     requiredActorUid?: string;
   },
-): Promise<{ canonical: boolean; snapshot: MatchPresentationSnapshot }> {
+): Promise<MatchPresentationSnapshot> {
   requireRegisteredPresentationMatch(inviteId, matchId, invite);
   const control = await (
     dependencies.readPresentationControl || readMatchPresentationControl
@@ -161,10 +158,7 @@ export async function readMatchPresentationSnapshot(
   if (!Object.keys(players).length)
     throw new AuthApiFailure(404, "not-found", "match-not-found");
   requirePresentationActor(Object.keys(players), dependencies.requiredActorUid);
-  return {
-    canonical: true,
-    snapshot: { matchId, players },
-  };
+  return { matchId, players };
 }
 
 function requirePresentationActor(

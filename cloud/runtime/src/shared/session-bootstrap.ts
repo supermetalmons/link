@@ -8,7 +8,6 @@ import {
   isReadGameBootstrapResponse,
 } from "./game-bootstrap.js";
 import { selectInviteMatch } from "./rematches.js";
-import { isSessionTokenResponse } from "./session-auth.js";
 import { isProfileLookupResponse } from "./profiles.js";
 import {
   isEventSnapshotSeed,
@@ -124,19 +123,6 @@ function isSessionBootstrap(value: unknown): value is SessionBootstrap {
   );
 }
 
-function isSessionBootstrapResponse(
-  value: unknown,
-): value is SessionBootstrapResponse {
-  if (!record(value)) return false;
-  const { gameBootstrap, identityBootstrap, ...session } = value;
-  return (
-    isSessionTokenResponse(session) &&
-    isSessionBootstrap(gameBootstrap) &&
-    (!Object.hasOwn(value, "identityBootstrap") ||
-      isSessionIdentityBootstrap(identityBootstrap))
-  );
-}
-
 function isSessionIdentityBootstrap(
   value: unknown,
 ): value is SessionIdentityBootstrap {
@@ -173,19 +159,6 @@ function isSessionEventBootstrap(
   );
 }
 
-function isSessionEventBootstrapResponse(
-  value: unknown,
-): value is SessionEventBootstrapResponse {
-  if (!record(value)) return false;
-  const { eventBootstrap, identityBootstrap, ...session } = value;
-  return (
-    isSessionTokenResponse(session) &&
-    isSessionEventBootstrap(eventBootstrap) &&
-    (!Object.hasOwn(value, "identityBootstrap") ||
-      isSessionIdentityBootstrap(identityBootstrap))
-  );
-}
-
 export {
   SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES,
   SESSION_BOOTSTRAP_REQUEST_TIMEOUT_MS,
@@ -195,8 +168,6 @@ export {
   isSessionBootstrapTarget,
   isSessionBootstrapFailure,
   isSessionBootstrap,
-  isSessionBootstrapResponse,
   isSessionEventBootstrapTarget,
   isSessionEventBootstrap,
-  isSessionEventBootstrapResponse,
 };

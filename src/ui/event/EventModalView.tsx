@@ -11,7 +11,6 @@ import {
   EventMatch,
   EventPrizeAssignment,
   EventPrizeId,
-  EventRecord,
 } from "../../connection/connectionModels";
 import { BottomPillButton } from "../BottomControlsStyles";
 import {
@@ -24,13 +23,6 @@ import {
   canRenderSymmetricalBracket,
   computeSymmetricalBracket,
 } from "./bracketGeometry";
-import {
-  DEV_STUB_DEFAULT_PLAYERS,
-  DEV_STUB_MAX_PLAYERS,
-  DEV_STUB_MIN_PLAYERS,
-  clampDevStubPlayerCount,
-  createStubEventRecord,
-} from "./devFixtures";
 import { EventAvatar } from "./EventAvatar";
 import {
   BRACKET_AVATAR_PX,
@@ -62,11 +54,6 @@ import {
   ButtonRow,
   ClassicConnectorSvg,
   ClassicMatchCard,
-  DevBracketHelper,
-  DevHelperAction,
-  DevHelperPanel,
-  DevHelperSelect,
-  DevHelperToggle,
   EndedAwardColumn,
   EndedAwardPrize,
   EndedAwardSparkles,
@@ -148,11 +135,6 @@ const getViewportSize = (): { width: number; height: number } => {
 };
 
 const EventModal: React.FC = () => {
-  const [devStubRecord, setDevStubRecord] = useState<EventRecord | null>(null);
-  const [showDevHelperPanel, setShowDevHelperPanel] = useState(false);
-  const [devStubPlayerCount, setDevStubPlayerCount] = useState(
-    DEV_STUB_DEFAULT_PLAYERS,
-  );
   const [endedAwardsHeight, setEndedAwardsHeight] = useState(0);
   const [viewportSize, setViewportSize] = useState(getViewportSize);
   const [bracketInsets, setBracketInsets] = useState({ top: 0, bottom: 0 });
@@ -166,15 +148,9 @@ const EventModal: React.FC = () => {
   const bottomBarRef = useRef<HTMLDivElement | null>(null);
   const participantsCloudRef = useRef<HTMLDivElement | null>(null);
   const endedAwardsRowRef = useRef<HTMLDivElement | null>(null);
-  const controller = useEventModalController(devStubRecord);
-  const {
-    modalState,
-    eventRecord,
-    displayedEventRecord,
-    isLoading,
-    isEventFresh,
-    nowMs,
-  } = controller.session;
+  const controller = useEventModalController();
+  const { modalState, eventRecord, isLoading, isEventFresh, nowMs } =
+    controller.session;
   const {
     currentProfileId,
     currentLoginUid,
@@ -242,11 +218,6 @@ const EventModal: React.FC = () => {
   );
 
   useEffect(() => {
-    setDevStubRecord(null);
-    setShowDevHelperPanel(false);
-  }, [modalState.eventId, modalState.isOpen]);
-
-  useEffect(() => {
     if (modalState.isOpen && modalState.eventId) return;
     ignoreNextBackdropClickRef.current = false;
     ignoreBackdropMouseDownUntilMsRef.current = 0;
@@ -309,7 +280,6 @@ const EventModal: React.FC = () => {
     const sy = availH / naturalH;
     let scale = Math.min(1, sx, sy);
     if (!Number.isFinite(scale)) scale = 1;
-    scale = Math.max(0.4, scale);
     setParticipantsScale((prev) =>
       Math.abs(prev - scale) < 0.002 ? prev : scale,
     );
@@ -320,7 +290,7 @@ const EventModal: React.FC = () => {
   }, [
     bracketInsets.top,
     bracketInsets.bottom,
-    displayedEventRecord?.participants,
+    eventRecord?.participants,
     modalState.eventId,
     modalState.isOpen,
     viewportSize.width,
@@ -375,23 +345,17 @@ const EventModal: React.FC = () => {
     };
   }, [measureBracketInsets, modalState.isOpen]);
 
-  const rounds = useMemo(
-    () => getSortedRounds(displayedEventRecord),
-    [displayedEventRecord],
-  );
+  const rounds = useMemo(() => getSortedRounds(eventRecord), [eventRecord]);
   const eventPrizeAssignments = useMemo(
     () =>
       PRIZE_DISPLAY_PLACES.flatMap((place) => {
-        const assignment = displayedEventRecord?.prizeAssignments?.[`${place}`];
+        const assignment = eventRecord?.prizeAssignments?.[`${place}`];
         return assignment ? [assignment] : [];
       }),
-    [displayedEventRecord],
+    [eventRecord],
   );
   const displayedEventPrizes = useMemo(() => {
-    if (
-      displayedEventRecord?.status !== "ended" ||
-      eventPrizeAssignments.length === 0
-    ) {
+    if (eventRecord?.status !== "ended" || eventPrizeAssignments.length === 0) {
       return eventPrizes.map((prize) => ({
         prize,
         assignment: null as EventPrizeAssignment | null,
@@ -419,13 +383,7 @@ const EventModal: React.FC = () => {
           assignment: null as EventPrizeAssignment | null,
         })),
     ];
-  }, [displayedEventRecord?.status, eventPrizeAssignments, eventPrizes]);
-  useEffect(() => {
-    if (displayedEventRecord?.status === "dismissed") {
-      setShowDevHelperPanel(false);
-    }
-  }, [displayedEventRecord]);
-
+  }, [eventRecord?.status, eventPrizeAssignments, eventPrizes]);
   const canRenderBracket = useMemo(
     () => canRenderSymmetricalBracket(rounds),
     [rounds],
@@ -437,8 +395,8 @@ const EventModal: React.FC = () => {
     return computeSymmetricalBracket(rounds);
   }, [canRenderBracket, rounds]);
   const thirdPlaceMatch = useMemo(
-    () => getThirdPlaceMatch(displayedEventRecord),
-    [displayedEventRecord],
+    () => getThirdPlaceMatch(eventRecord),
+    [eventRecord],
   );
   const thirdPlaceLayout = useMemo<ThirdPlaceMatchLayout | null>(() => {
     if (!bracketLayout || !thirdPlaceMatch) {
@@ -467,12 +425,8 @@ const EventModal: React.FC = () => {
   }, [bracketLayout, thirdPlaceMatch]);
   const resolvedWinnerPodiumEntries = useMemo(
     () =>
-      getEndedEventWinnerPodiumEntries(
-        displayedEventRecord,
-        rounds,
-        participantsById,
-      ),
-    [displayedEventRecord, rounds, participantsById],
+      getEndedEventWinnerPodiumEntries(eventRecord, rounds, participantsById),
+    [eventRecord, rounds, participantsById],
   );
   const winnerPodiumEntries = useMemo(() => {
     if (eventPrizeAssignments.length > 0) {
@@ -495,7 +449,7 @@ const EventModal: React.FC = () => {
   }, [eventPrizeAssignments, participantsById, resolvedWinnerPodiumEntries]);
   const showWinnerPodium = !!(
     bracketLayout &&
-    displayedEventRecord?.status === "ended" &&
+    eventRecord?.status === "ended" &&
     winnerPodiumEntries.length > 0
   );
   const endedAwardEntries = useMemo(
@@ -642,9 +596,9 @@ const EventModal: React.FC = () => {
     viewportSize.width,
   ]);
   const isJoinWindowOpen =
-    !!displayedEventRecord &&
-    displayedEventRecord.status === "scheduled" &&
-    nowMs < displayedEventRecord.startAtMs;
+    !!eventRecord &&
+    eventRecord.status === "scheduled" &&
+    nowMs < eventRecord.startAtMs;
   const isJoinPending =
     eventRecord?.eventId !== modalState.eventId ||
     isLoading ||
@@ -717,14 +671,6 @@ const EventModal: React.FC = () => {
         ignoreBackdropMouseDownUntilMsRef.current = nowMs + 1200;
         const shouldKeepVisible = shouldKeepVisibleForOutsideDismiss();
         ignoreNextBackdropClickRef.current = shouldKeepVisible;
-        if (showDevHelperPanel) {
-          pendingBackdropTouchDismissTouchIdRef.current = null;
-          ignoreNextBackdropClickRef.current = false;
-          setShowDevHelperPanel(false);
-          event.preventDefault();
-          event.stopPropagation();
-          return;
-        }
         if (shouldKeepVisible) {
           pendingBackdropTouchDismissTouchIdRef.current = null;
           return;
@@ -748,7 +694,7 @@ const EventModal: React.FC = () => {
       }
       ignoreNextBackdropClickRef.current = shouldKeepVisibleForOutsideDismiss();
     },
-    [showDevHelperPanel, shouldKeepVisibleForOutsideDismiss],
+    [shouldKeepVisibleForOutsideDismiss],
   );
 
   const handleBackdropTouchEnd = useCallback(
@@ -820,11 +766,6 @@ const EventModal: React.FC = () => {
         ignoreNextBackdropClickRef.current = false;
         return;
       }
-      if (showDevHelperPanel) {
-        ignoreNextBackdropClickRef.current = false;
-        setShowDevHelperPanel(false);
-        return;
-      }
       const shouldKeepVisibleForOutsideDismissNow =
         ignoreNextBackdropClickRef.current ||
         shouldKeepVisibleForOutsideDismiss();
@@ -835,7 +776,7 @@ const EventModal: React.FC = () => {
       didDismissSomethingWithOutsideTapJustNow();
       void closeEventModal();
     },
-    [showDevHelperPanel, shouldKeepVisibleForOutsideDismiss],
+    [shouldKeepVisibleForOutsideDismiss],
   );
 
   const handleBracketMatchAction = useCallback(
@@ -851,45 +792,27 @@ const EventModal: React.FC = () => {
     [handleParticipantClick, openMatch],
   );
 
-  const handleCreateStubBracket = useCallback(() => {
-    const normalizedPlayerCount = clampDevStubPlayerCount(devStubPlayerCount);
-    setDevStubPlayerCount(normalizedPlayerCount);
-    setDevStubRecord(
-      createStubEventRecord({
-        source: eventRecord,
-        playerCount: normalizedPlayerCount,
-        fallbackEventId: modalState.eventId,
-      }),
-    );
-  }, [devStubPlayerCount, eventRecord, modalState.eventId]);
-
-  const handleResetStubBracket = useCallback(() => {
-    setDevStubRecord(null);
-  }, []);
-
   if (!modalState.isOpen) {
     return null;
   }
 
   const hasBracket =
-    (displayedEventRecord?.status === "active" ||
-      displayedEventRecord?.status === "ended") &&
+    (eventRecord?.status === "active" || eventRecord?.status === "ended") &&
     bracketLayout !== null;
-  const isDismissedState = displayedEventRecord?.status === "dismissed";
-  const displayedParticipantCount = displayedEventRecord
-    ? Object.keys(displayedEventRecord.participants ?? {}).length
+  const isDismissedState = eventRecord?.status === "dismissed";
+  const displayedParticipantCount = eventRecord
+    ? Object.keys(eventRecord.participants ?? {}).length
     : 0;
   const isPendingDismissState =
-    displayedEventRecord?.status === "scheduled" &&
-    nowMs >= displayedEventRecord.startAtMs &&
+    eventRecord?.status === "scheduled" &&
+    nowMs >= eventRecord.startAtMs &&
     displayedParticipantCount < 2;
   const isBracketStatus =
-    displayedEventRecord?.status === "active" ||
-    displayedEventRecord?.status === "ended";
+    eventRecord?.status === "active" || eventRecord?.status === "ended";
   const showBracketFallbackGrid =
     isBracketStatus && !hasBracket && bracketFallbackRounds.length > 0;
   const showParticipantsPanel =
-    !!displayedEventRecord &&
+    !!eventRecord &&
     !isBracketStatus &&
     !isDismissedState &&
     !isPendingDismissState;
@@ -921,36 +844,28 @@ const EventModal: React.FC = () => {
     (bracketInsets.top - bracketInsets.bottom) / 2,
   );
   const canDisqualifyFromLiveBracket =
-    canManageDisqualifications &&
-    !devStubRecord &&
-    eventRecord?.status === "active";
+    canManageDisqualifications && eventRecord?.status === "active";
   const canPostponeScheduledEvent =
-    !devStubRecord &&
     eventRecord?.status === "scheduled" &&
     nowMs < eventRecord.startAtMs &&
     isLocalEventCreator(eventRecord);
   const canRemoveScheduledParticipant =
-    !devStubRecord && removableScheduledParticipants.length > 0;
+    removableScheduledParticipants.length > 0;
   const disableDisqualifyButton =
     isDisqualifying || livePendingMatches.length <= 0;
   const showEventPrizes =
-    !!eventPrizeConfig && !!displayedEventRecord && !isDismissedState;
+    !!eventPrizeConfig && !!eventRecord && !isDismissedState;
   const showTopBarEventPrizes = showEventPrizes && !showEndedAwards;
   const canSelectEventPrize = !!(
     showEventPrizes &&
-    !devStubRecord &&
     !isLoading &&
     !isJoining &&
     !isLeaving &&
     isEventFresh &&
     isEventPrizeSelectionAvailable(eventRecord, currentProfileId, nowMs)
   );
-  const topBarTitleText = devStubRecord
-    ? ""
-    : formatRelativeStart(displayedEventRecord, nowMs);
-  const topBarSubtitleText = devStubRecord
-    ? ""
-    : formatAbsoluteStart(displayedEventRecord);
+  const topBarTitleText = formatRelativeStart(eventRecord, nowMs);
+  const topBarSubtitleText = formatAbsoluteStart(eventRecord);
   const pendingCreateStatusText =
     modalState.isPendingCreate && !modalState.eventId
       ? modalState.pendingCreateError || "CREATING"
@@ -961,14 +876,14 @@ const EventModal: React.FC = () => {
       ? "EVENT DISMISSED"
       : isPendingDismissState
         ? "LOADING"
-        : !displayedEventRecord
+        : !eventRecord
           ? isLoading
             ? "LOADING"
             : null
           : !hasBracket && !showBracketFallbackGrid
-            ? displayedEventRecord.status === "active"
+            ? eventRecord.status === "active"
               ? "building bracket..."
-              : displayedEventRecord.status === "ended"
+              : eventRecord.status === "ended"
                 ? "no bracket yet"
                 : null
             : null;
@@ -981,76 +896,6 @@ const EventModal: React.FC = () => {
       onTouchCancelCapture={handleBackdropTouchCancel}
       onClick={handleBackdropClick}
     >
-      {modalState.eventId && !isDismissedState && (
-        <DevBracketHelper>
-          <DevHelperToggle
-            type="button"
-            aria-label="Bracket stub helper"
-            onClick={() => setShowDevHelperPanel((current) => !current)}
-          >
-            *
-          </DevHelperToggle>
-          {showDevHelperPanel && (
-            <DevHelperPanel>
-              <DevHelperSelect
-                value={devStubPlayerCount}
-                onChange={(event) =>
-                  setDevStubPlayerCount(
-                    clampDevStubPlayerCount(Number(event.target.value)),
-                  )
-                }
-              >
-                {Array.from(
-                  {
-                    length: DEV_STUB_MAX_PLAYERS - DEV_STUB_MIN_PLAYERS + 1,
-                  },
-                  (_, index) => DEV_STUB_MIN_PLAYERS + index,
-                ).map((count) => (
-                  <option key={count} value={count}>
-                    {count} players
-                  </option>
-                ))}
-              </DevHelperSelect>
-              <DevHelperAction type="button" onClick={handleCreateStubBracket}>
-                Generate
-              </DevHelperAction>
-              {canPostponeScheduledEvent && (
-                <DevHelperAction
-                  type="button"
-                  onClick={handlePostponeClick}
-                  disabled={isPostponing}
-                >
-                  {isPostponing ? "..." : "Postpone"}
-                </DevHelperAction>
-              )}
-              {canRemoveScheduledParticipant && (
-                <DevHelperAction
-                  type="button"
-                  onClick={handleRemoveParticipantClick}
-                  disabled={isRemovingParticipant}
-                >
-                  {isRemovingParticipant ? "..." : "Remove Participant"}
-                </DevHelperAction>
-              )}
-              {canDisqualifyFromLiveBracket && (
-                <DevHelperAction
-                  type="button"
-                  onClick={handleDisqualifyClick}
-                  disabled={disableDisqualifyButton}
-                >
-                  {isDisqualifying ? "..." : "Disqualify"}
-                </DevHelperAction>
-              )}
-              {devStubRecord && (
-                <DevHelperAction type="button" onClick={handleResetStubBracket}>
-                  Live
-                </DevHelperAction>
-              )}
-            </DevHelperPanel>
-          )}
-        </DevBracketHelper>
-      )}
-
       {!isDismissedState && (topBarTitleText || showTopBarEventPrizes) && (
         <TopBar ref={topBarRef}>
           <TopBarStack>
@@ -1068,7 +913,7 @@ const EventModal: React.FC = () => {
                 participants={participants}
                 participantsById={participantsById}
                 currentProfileId={currentProfileId}
-                eventStatus={displayedEventRecord.status}
+                eventStatus={eventRecord.status}
                 concealed={areEventPrizesConcealed}
                 canSelect={canSelectEventPrize}
                 selection={prizeSelection}
@@ -1472,23 +1317,22 @@ const EventModal: React.FC = () => {
               </BottomPillButton>
             )}
 
-            {!devStubRecord &&
-              canLeaveEvent(
-                eventRecord,
-                currentProfileId,
-                nowMs,
-                currentLoginUid,
-                eventProfileIds,
-              ) && (
-                <BottomPillButton
-                  type="button"
-                  onClick={() => void handleLeaveClick()}
-                  disabled={isLeavePending}
-                  $isViewOnly={isLeavePending}
-                >
-                  Leave
-                </BottomPillButton>
-              )}
+            {canLeaveEvent(
+              eventRecord,
+              currentProfileId,
+              nowMs,
+              currentLoginUid,
+              eventProfileIds,
+            ) && (
+              <BottomPillButton
+                type="button"
+                onClick={() => void handleLeaveClick()}
+                disabled={isLeavePending}
+                $isViewOnly={isLeavePending}
+              >
+                Leave
+              </BottomPillButton>
+            )}
 
             {eventUiState.playableMatch && (
               <BottomPillButton
@@ -1501,7 +1345,7 @@ const EventModal: React.FC = () => {
               </BottomPillButton>
             )}
 
-            {displayedEventRecord?.status === "active" &&
+            {eventRecord?.status === "active" &&
               !eventUiState.playableMatch &&
               watchableMatch && (
                 <BottomPillButton
@@ -1514,6 +1358,39 @@ const EventModal: React.FC = () => {
                 </BottomPillButton>
               )}
           </ButtonRow>
+          {(canPostponeScheduledEvent ||
+            canRemoveScheduledParticipant ||
+            canDisqualifyFromLiveBracket) && (
+            <ButtonRow role="group" aria-label="Event administration">
+              {canPostponeScheduledEvent && (
+                <BottomPillButton
+                  type="button"
+                  onClick={handlePostponeClick}
+                  disabled={isPostponing}
+                >
+                  {isPostponing ? "..." : "Postpone"}
+                </BottomPillButton>
+              )}
+              {canRemoveScheduledParticipant && (
+                <BottomPillButton
+                  type="button"
+                  onClick={handleRemoveParticipantClick}
+                  disabled={isRemovingParticipant}
+                >
+                  {isRemovingParticipant ? "..." : "Remove Participant"}
+                </BottomPillButton>
+              )}
+              {canDisqualifyFromLiveBracket && (
+                <BottomPillButton
+                  type="button"
+                  onClick={handleDisqualifyClick}
+                  disabled={disableDisqualifyButton}
+                >
+                  {isDisqualifying ? "..." : "Disqualify"}
+                </BottomPillButton>
+              )}
+            </ButtonRow>
+          )}
         </BottomBar>
       )}
     </Overlay>

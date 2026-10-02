@@ -1,15 +1,15 @@
-import assert from "node:assert/strict";
-import test from "node:test";
+import { eventSnapshotEtag, type EventSnapshotSeed } from "@mons/shared/events";
 import {
   buildSessionRefreshToken,
   isSessionTokenResponse,
 } from "@mons/shared/session-auth";
 import {
-  isSessionBootstrapResponse,
-  isSessionEventBootstrapResponse,
+  isSessionBootstrap,
+  isSessionEventBootstrap,
   type SessionBootstrapResponse,
 } from "@mons/shared/session-bootstrap";
-import { eventSnapshotEtag, type EventSnapshotSeed } from "@mons/shared/events";
+import assert from "node:assert/strict";
+import test from "node:test";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { normalizeInviteMetadata } from "../src/inviteMetadata.ts";
@@ -146,16 +146,23 @@ function setup(source: Record<string, unknown> = {}) {
   return { env, dependencies, bootstrap, calls, raw, request, read };
 }
 
+async function responseBody(
+  response: Response,
+): Promise<Record<string, unknown>> {
+  const body = await response.json();
+  assert.ok(body !== null && typeof body === "object" && !Array.isArray(body));
+  return body as Record<string, unknown>;
+}
+
 async function composed(response: Response): Promise<SessionBootstrapResponse> {
   assert.equal(response.status, 200);
-  const body = await response.json();
-  assert.equal(isSessionBootstrapResponse(body), true);
-  if (!isSessionBootstrapResponse(body)) throw new Error("invalid-response");
-  const { gameBootstrap: _bootstrap, ...session } = body;
-  assert.equal(isSessionTokenResponse(session), true);
+  const body = await responseBody(response);
+  const { gameBootstrap, ...session } = body;
+  assert.ok(isSessionBootstrap(gameBootstrap));
+  assert.ok(isSessionTokenResponse(session));
   assert.ok(!JSON.stringify(body).includes(input.refreshSecret));
   assert.ok(!JSON.stringify(body).includes(input.revokeSecret));
-  return body;
+  return { ...session, gameBootstrap };
 }
 
 test("creation and refresh compose a bootstrap with independent limits and timing", async () => {
@@ -197,9 +204,9 @@ test("event creation and refresh bootstrap snapshots without game reads", async 
     const response = await h.read(
       h.request(endpoint, "bootstrapEventId=event-one"),
     );
-    const body = await response.json();
+    const body = await responseBody(response);
     assert.equal(response.status, 200);
-    assert.ok(isSessionEventBootstrapResponse(body));
+    assert.ok(isSessionEventBootstrap(body.eventBootstrap));
     assert.deepEqual(body.eventBootstrap.result, eventSeed);
     assert.equal(h.calls.admission, 0);
     assert.deepEqual(h.calls.pairs, []);
@@ -256,11 +263,11 @@ test("identity enrichment runs alongside game and event bootstrap without changi
     }
     const response = await responsePromise;
     assert.equal(response.status, 200);
-    const body = await response.json();
+    const body = await responseBody(response);
     assert.equal(
       kind === "game"
-        ? isSessionBootstrapResponse(body)
-        : isSessionEventBootstrapResponse(body),
+        ? isSessionBootstrap(body.gameBootstrap)
+        : isSessionEventBootstrap(body.eventBootstrap),
       true,
     );
     assert.deepEqual(
@@ -278,9 +285,9 @@ test("event bootstrap failures preserve valid issued tokens", async () => {
   const response = await h.read(
     h.request("anonymous", "bootstrapEventId=event-one"),
   );
-  const body = await response.json();
+  const body = await responseBody(response);
   assert.equal(response.status, 200);
-  assert.ok(isSessionEventBootstrapResponse(body));
+  assert.ok(isSessionEventBootstrap(body.eventBootstrap));
   assert.deepEqual(body.eventBootstrap, {
     eventId: "event-one",
     result: { ok: false, status: 503 },
@@ -318,8 +325,8 @@ test("event bootstrap timeout returns its already issued token", async (t) => {
   t.mock.timers.tick(1_000);
   const response = await pending;
   assert.equal(response.status, 200);
-  const body = await response.json();
-  assert.ok(isSessionEventBootstrapResponse(body));
+  const body = await responseBody(response);
+  assert.ok(isSessionEventBootstrap(body.eventBootstrap));
   assert.deepEqual(body.eventBootstrap.result, { ok: false, status: 503 });
 });
 

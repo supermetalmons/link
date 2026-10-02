@@ -5,6 +5,8 @@ const test = require("node:test");
 const {
   MAX_STARTS_IN_MINUTES,
   MIN_STARTS_IN_MINUTES,
+  isCreateEventRequest,
+  resolveEventTelegramAnnouncements,
 } = require("@mons/shared/events");
 const {
   assertScheduledStartWindow,
@@ -14,6 +16,42 @@ const {
   resolveRequestedScheduleTimezone,
   resolveScheduledDateTimeStartAtMs,
 } = require("../runtime/events/scheduling");
+
+test("new event requests reject the retired announcement flag while stored events remain readable", () => {
+  const request = { startsInMinutes: MIN_STARTS_IN_MINUTES };
+  assert.equal(isCreateEventRequest(request), true);
+  for (const announceOnTelegram of [true, false, undefined]) {
+    assert.equal(
+      isCreateEventRequest({ ...request, announceOnTelegram }),
+      false,
+    );
+  }
+  const telegramAnnouncements = { invite: true, matches: false, results: true };
+  assert.equal(
+    isCreateEventRequest({ ...request, telegramAnnouncements }),
+    true,
+  );
+  assert.deepEqual(resolveEventTelegramAnnouncements({}), {
+    invite: false,
+    matches: false,
+    results: false,
+  });
+  assert.deepEqual(
+    resolveEventTelegramAnnouncements({ announceOnTelegram: true }),
+    {
+      invite: true,
+      matches: true,
+      results: true,
+    },
+  );
+  assert.deepEqual(
+    resolveEventTelegramAnnouncements({
+      announceOnTelegram: true,
+      telegramAnnouncements,
+    }),
+    telegramAnnouncements,
+  );
+});
 
 test("parses complete calendar dates and 24-hour wall times", () => {
   assert.deepEqual(parseScheduledDateParts("2028-02-29"), {

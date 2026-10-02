@@ -35,10 +35,7 @@ type StoredPresentationSeed = {
   source_id: string;
 };
 
-export type MatchPresentationSeeds = Record<
-  string,
-  { emojiId: number; aura: string }
->;
+type MatchPresentationSeeds = Record<string, { emojiId: number; aura: string }>;
 export type MatchPresentationUpdateResult = {
   status: "updated" | "duplicate" | "conflict";
   presentation: MatchPresentation;
@@ -132,19 +129,6 @@ export class MatchPresentationStore {
         seed.aura,
       );
     }
-    return this.readPresentations(matchId);
-  }
-
-  ensurePresentations(
-    matchId: string,
-    seeds: MatchPresentationSeeds,
-  ): MatchPresentationSnapshot {
-    return this.storage.transactionSync(() =>
-      this.initializePresentations(matchId, seeds),
-    );
-  }
-
-  getPresentationSnapshot(matchId: string): MatchPresentationSnapshot {
     return this.readPresentations(matchId);
   }
 
@@ -305,27 +289,6 @@ export class MatchPresentationStore {
             value.revision,
           );
         }
-      }
-      return this.readPresentations(matchId, true);
-    });
-  }
-
-  freezePresentations(
-    matchId: string,
-    seeds: MatchPresentationSeeds,
-  ): MatchPresentationSnapshot {
-    return this.storage.transactionSync(() => {
-      const current = this.initializePresentations(matchId, seeds);
-      for (const actorUid of Object.keys(seeds)) {
-        const presentation = current.players[actorUid];
-        this.storage.sql.exec(
-          "INSERT OR IGNORE INTO frozen_match_presentations (match_id, actor_uid, emoji_id, aura, revision) VALUES (?, ?, ?, ?, ?)",
-          matchId,
-          actorUid,
-          presentation.emojiId,
-          presentation.aura,
-          presentation.revision,
-        );
       }
       return this.readPresentations(matchId, true);
     });

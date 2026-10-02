@@ -3,11 +3,6 @@ import type { PlayerProfile } from "../connection/connectionModels";
 export type PlayerMetadataRuntime = {
   createSessionGuard(): () => boolean;
   getProfileByLoginId(loginId: string): Promise<PlayerProfile>;
-  updateEmoji(
-    newId: number,
-    matchOnly: boolean,
-    aura: string | null | undefined,
-  ): void;
   updateEmojiAndAuraIfNeeded(
     emojiId: string,
     aura: string | null | undefined,
@@ -47,12 +42,6 @@ export const createPlayerMetadataSessionGuard = (): (() => boolean) =>
 export const getPlayerProfileByLoginId = (
   loginId: string,
 ): Promise<PlayerProfile> => getRuntime().getProfileByLoginId(loginId);
-
-export const updatePlayerEmoji = (
-  newId: number,
-  matchOnly: boolean,
-  aura: string | null | undefined,
-): void => getRuntime().updateEmoji(newId, matchOnly, aura);
 
 export const updatePlayerEmojiAndAura = (
   emojiId: string,

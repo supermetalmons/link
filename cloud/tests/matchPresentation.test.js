@@ -9,10 +9,7 @@ const {
   isUpdateMatchPresentationResponse,
   isMatchPresentationConflictResponse,
 } = require("../runtime/shared/match-presentation");
-const {
-  isInviteReactionMessage,
-  isInviteRoomMessage,
-} = require("../runtime/shared/reactions");
+const { isInviteRoomMessage } = require("../runtime/shared/reactions");
 
 const presentation = {
   matchId: "invite-one",
@@ -119,7 +116,7 @@ test("presentation writes reuse profile cosmetic constraints and require exact U
     assert.equal(isUpdateMatchPresentationRequest(value), false);
 });
 
-test("v2 room messages require appearance snapshots while preserving strict v1 validation", () => {
+test("room messages require schema 2 and appearance snapshots", () => {
   const v1 = { schemaVersion: 1, type: "snapshot", reactions: {} };
   const v2 = {
     schemaVersion: 2,
@@ -127,9 +124,7 @@ test("v2 room messages require appearance snapshots while preserving strict v1 v
     reactions: {},
     presentation: snapshot,
   };
-  assert.equal(isInviteReactionMessage(v1), true);
-  assert.equal(isInviteRoomMessage(v1), true);
-  assert.equal(isInviteReactionMessage(v2), false);
+  assert.equal(isInviteRoomMessage(v1), false);
   assert.equal(isInviteRoomMessage(v2), true);
   assert.equal(isInviteRoomMessage({ ...v1, schemaVersion: 2 }), false);
   assert.equal(

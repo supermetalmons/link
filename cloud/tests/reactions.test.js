@@ -3,10 +3,9 @@ const test = require("node:test");
 const {
   FIXED_STICKER_IDS,
   STICKER_ID_WHITELIST,
-  isReaction,
   isInviteReaction,
   isInviteReactionForInvite,
-  isInviteReactionMessage,
+  isInviteRoomMessage,
   isSendInviteReactionResponse,
 } = require("../runtime/shared/reactions");
 const { VALID_REACTION_IDS } = require("../runtime/shared/nfts");
@@ -27,19 +26,28 @@ test("accepts existing voice variations and every available sticker", () => {
     slurp: 1,
   })) {
     for (let variation = 1; variation <= max; variation++) {
-      assert.equal(isReaction({ ...reaction, kind, variation }), true);
+      assert.equal(
+        isInviteReaction({ ...inviteReaction, kind, variation }),
+        true,
+      );
     }
-    assert.equal(isReaction({ ...reaction, kind, variation: max + 1 }), false);
+    assert.equal(
+      isInviteReaction({ ...inviteReaction, kind, variation: max + 1 }),
+      false,
+    );
   }
   assert.deepEqual(
     new Set(STICKER_ID_WHITELIST),
     new Set([...FIXED_STICKER_IDS, ...VALID_REACTION_IDS]),
   );
   for (const variation of STICKER_ID_WHITELIST) {
-    assert.equal(isReaction({ ...reaction, kind: "sticker", variation }), true);
+    assert.equal(
+      isInviteReaction({ ...inviteReaction, kind: "sticker", variation }),
+      true,
+    );
   }
   assert.equal(
-    isReaction({ ...reaction, kind: "sticker", variation: 42 }),
+    isInviteReaction({ ...inviteReaction, kind: "sticker", variation: 42 }),
     false,
   );
 });
@@ -49,17 +57,17 @@ test("rejects malformed payloads and client-supplied identity fields", () => {
     null,
     [],
     {},
-    { ...reaction, uuid: "invalid" },
-    { ...reaction, kind: "../voice" },
-    { ...reaction, kind: "constructor" },
-    { ...reaction, variation: 0 },
-    { ...reaction, variation: 1.5 },
-    { ...reaction, variation: Infinity },
-    { ...reaction, senderUid: "host" },
+    { ...inviteReaction, uuid: "invalid" },
+    { ...inviteReaction, kind: "../voice" },
+    { ...inviteReaction, kind: "constructor" },
+    { ...inviteReaction, variation: 0 },
+    { ...inviteReaction, variation: 1.5 },
+    { ...inviteReaction, variation: Infinity },
+    { ...inviteReaction, senderUid: "host" },
   ]) {
-    assert.equal(isReaction(value), false);
+    assert.equal(isInviteReaction(value), false);
   }
-  assert.equal(isReaction(inviteReaction), false);
+  assert.equal(isInviteReaction(inviteReaction), true);
   assert.equal(isInviteReaction(reaction), false);
   assert.equal(
     isInviteReaction({ ...inviteReaction, senderUid: "host" }),
@@ -100,21 +108,22 @@ test("restricts reactions to the invite and canonical rematch IDs", () => {
 
 test("validates protocol version, sender keys, and bounded latest-player snapshots", () => {
   const snapshot = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     type: "snapshot",
     reactions: { host: inviteReaction },
+    presentation: { matchId: "invite123", players: {} },
   };
   const event = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     type: "reaction",
     senderUid: "host",
     reaction: inviteReaction,
   };
-  assert.equal(isInviteReactionMessage(snapshot), true);
-  assert.equal(isInviteReactionMessage({ ...snapshot, reactions: {} }), true);
-  assert.equal(isInviteReactionMessage(event), true);
+  assert.equal(isInviteRoomMessage(snapshot), true);
+  assert.equal(isInviteRoomMessage({ ...snapshot, reactions: {} }), true);
+  assert.equal(isInviteRoomMessage(event), true);
   for (const value of [
-    { ...event, schemaVersion: 2 },
+    { ...event, schemaVersion: 1 },
     { ...event, senderUid: "host/other" },
     { ...event, type: "publish" },
     { ...event, extra: true },
@@ -129,7 +138,7 @@ test("validates protocol version, sender keys, and bounded latest-player snapsho
       },
     },
   ]) {
-    assert.equal(isInviteReactionMessage(value), false);
+    assert.equal(isInviteRoomMessage(value), false);
   }
   assert.equal(isSendInviteReactionResponse({ ok: true }), true);
   assert.equal(isSendInviteReactionResponse({ ok: false }), false);

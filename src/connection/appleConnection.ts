@@ -117,20 +117,6 @@ const buildAppleStateEnvelope = (record: ApplePendingIntentRecord): string => {
   return `${APPLE_STATE_ENVELOPE_PREFIX}${stateTokenPart}.${intentIdPart}.${expiresAtMsPart}.${consentSourcePart}`;
 };
 
-const decodeBase64Url = (value: string): string => {
-  if (typeof window === "undefined" || typeof window.atob !== "function") {
-    return "";
-  }
-  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-  const padding =
-    normalized.length % 4 === 0 ? "" : "=".repeat(4 - (normalized.length % 4));
-  try {
-    return window.atob(normalized + padding);
-  } catch {
-    return "";
-  }
-};
-
 const parseCompactAppleStateEnvelope = (
   payloadRaw: string,
 ): AppleStateEnvelope | null => {
@@ -156,40 +142,6 @@ const parseCompactAppleStateEnvelope = (
   };
 };
 
-const parseLegacyAppleStateEnvelope = (
-  payloadRaw: string,
-): AppleStateEnvelope | null => {
-  const decoded = decodeBase64Url(payloadRaw);
-  if (!decoded) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(decoded);
-    const stateToken = typeof parsed?.state === "string" ? parsed.state : "";
-    const intentId =
-      typeof parsed?.intentId === "string" ? parsed.intentId : "";
-    const consentSource =
-      typeof parsed?.consentSource === "string"
-        ? parsed.consentSource
-        : "signin";
-    const expiresAtMs =
-      typeof parsed?.expiresAtMs === "number"
-        ? parsed.expiresAtMs
-        : Number(parsed?.expiresAtMs);
-    if (!stateToken || !intentId || !Number.isFinite(expiresAtMs)) {
-      return null;
-    }
-    return {
-      stateToken,
-      intentId,
-      consentSource,
-      expiresAtMs: Math.floor(expiresAtMs),
-    };
-  } catch {
-    return null;
-  }
-};
-
 const parseAppleStateEnvelope = (state: string): AppleStateEnvelope | null => {
   if (!state || !state.startsWith(APPLE_STATE_ENVELOPE_PREFIX)) {
     return null;
@@ -198,10 +150,7 @@ const parseAppleStateEnvelope = (state: string): AppleStateEnvelope | null => {
   if (!payloadRaw) {
     return null;
   }
-  return (
-    parseCompactAppleStateEnvelope(payloadRaw) ||
-    parseLegacyAppleStateEnvelope(payloadRaw)
-  );
+  return parseCompactAppleStateEnvelope(payloadRaw);
 };
 
 const loadAppleScript = async (): Promise<void> => {

@@ -553,12 +553,6 @@ const EVENT_PRIZE_CONFIGS: Readonly<
   }),
 });
 
-const EVENT_PRIZE_IDS: readonly EventPrizeId[] = Object.freeze(
-  Object.values(EVENT_PRIZE_CONFIGS).flatMap((config) =>
-    config.prizes.map((prize) => prize.id),
-  ),
-);
-
 const normalizeString = (value: unknown) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 
@@ -773,18 +767,11 @@ const isEventPrizeWithdrawalCompletedResponse = (
   value.transactionSignature.trim() === value.transactionSignature &&
   value.transactionSignature.length > 0;
 
-const isEventPrizeWithdrawalResponse = (
-  value: unknown,
-): value is EventPrizeWithdrawalResponse =>
-  isEventPrizeWithdrawalProcessingResponse(value) ||
-  isEventPrizeWithdrawalCompletedResponse(value);
-
 export {
   ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID,
   ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID,
   COMPRESSED_PRIZES_EVENT_ID,
   EVENT_PRIZE_CONFIGS,
-  EVENT_PRIZE_IDS,
   EVENT_PRIZE_REVEAL_WINDOW_MS,
   LEGACY_CORE_PRIZES_EVENT_ID,
   PLANET_PEPPA_PRIZES_EVENT_ID,
@@ -806,7 +793,6 @@ export {
   isEventPrizeWithdrawalOperationId,
   isEventPrizeWithdrawalProcessingResponse,
   isEventPrizeWithdrawalRequest,
-  isEventPrizeWithdrawalResponse,
   isEventPrizeWithdrawalStatusRequest,
   isProfileEventPrizesResponse,
   isToggleEventPrizeSelectionRequest,

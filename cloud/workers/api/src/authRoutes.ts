@@ -371,10 +371,7 @@ export async function handleAuthRoute(
         corsHeaders,
       );
     }
-    if (
-      pathname === "/auth/profile/sync" ||
-      pathname === "/auth/profile-claim/sync"
-    ) {
+    if (pathname === "/auth/profile/sync") {
       await enforceAuthRateLimit(env, `auth-profile-claim:${identity.uid}`);
       return respond(
         await measure("profile_sync", () =>

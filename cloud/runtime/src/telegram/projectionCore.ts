@@ -317,17 +317,6 @@ const shouldProjectRatingTelegramUpdate: (
   normalizeString(ratingUpdate.matchId) !== "" &&
   normalizeString(ratingUpdate.updateRatingMessage) !== "";
 
-const shouldRequestEventRatingProgress: (
-  ratingUpdate: Record<string, unknown> | null,
-) => boolean = (ratingUpdate) =>
-  !!ratingUpdate &&
-  ratingUpdate.status === "done" &&
-  ratingUpdate.isEventMatch === true &&
-  ratingUpdate.eventOwned === true &&
-  normalizeString(ratingUpdate.eventId) !== "" &&
-  normalizeString(ratingUpdate.inviteId) !== "" &&
-  normalizeString(ratingUpdate.matchId) !== "";
-
 const mergeRatingResultFragment: (
   source: unknown,
   ratingUpdate: Record<string, unknown>,
@@ -397,5 +386,4 @@ export {
   renderMatchedAutomatchTelegramText,
   resolveAutomatchTelegramLifecycle,
   shouldProjectRatingTelegramUpdate,
-  shouldRequestEventRatingProgress,
 };

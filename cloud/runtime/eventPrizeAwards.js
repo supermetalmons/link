@@ -4,7 +4,6 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.normalizeEventPrizeAssignments =
   exports.isEventPrizeId =
   exports.buildEventPrizeAssignments =
-  exports.buildProfileEventPrizeMergeCopies =
   exports.EVENT_PRIZE_PLACES =
     void 0;
 const event_prizes_1 = require("@mons/shared/event-prizes");
@@ -59,67 +58,6 @@ const normalizeEventPrizeAssignments = (value, eventId) => {
   return assignments;
 };
 exports.normalizeEventPrizeAssignments = normalizeEventPrizeAssignments;
-const normalizeProfileEventPrizes = (value, profileId) => {
-  if (!value || typeof value !== "object") {
-    return {};
-  }
-  const normalizedProfileId = normalizeString(profileId);
-  if (!normalizedProfileId) {
-    return {};
-  }
-  const prizes = {};
-  for (const [eventIdValue, rawAssignment] of Object.entries(value)) {
-    const eventId = normalizeString(eventIdValue);
-    const place = Number(rawAssignment?.place);
-    if (!eventId || !EVENT_PRIZE_PLACES.includes(place)) {
-      continue;
-    }
-    const assignment = normalizeEventPrizeAssignments(
-      { [String(place)]: rawAssignment },
-      eventId,
-    )[String(place)];
-    if (assignment?.profileId === normalizedProfileId) {
-      prizes[eventId] = assignment;
-    }
-  }
-  return prizes;
-};
-const buildProfileEventPrizeMergeCopies = ({
-  targetProfileId,
-  sourceProfileId,
-  targetPrizes,
-  sourcePrizes,
-}) => {
-  const normalizedTargetProfileId = normalizeString(targetProfileId);
-  const normalizedSourceProfileId = normalizeString(sourceProfileId);
-  if (
-    !normalizedTargetProfileId ||
-    !normalizedSourceProfileId ||
-    normalizedTargetProfileId === normalizedSourceProfileId
-  ) {
-    return {};
-  }
-  const existingTargetPrizes = normalizeProfileEventPrizes(
-    targetPrizes,
-    normalizedTargetProfileId,
-  );
-  const normalizedSourcePrizes = normalizeProfileEventPrizes(
-    sourcePrizes,
-    normalizedSourceProfileId,
-  );
-  const copies = {};
-  for (const [eventId, assignment] of Object.entries(normalizedSourcePrizes)) {
-    if (existingTargetPrizes[eventId]) {
-      continue;
-    }
-    copies[eventId] = {
-      ...assignment,
-      profileId: normalizedTargetProfileId,
-    };
-  }
-  return copies;
-};
-exports.buildProfileEventPrizeMergeCopies = buildProfileEventPrizeMergeCopies;
 const buildEventPrizeAssignments = ({
   eventId,
   placements,

@@ -16,8 +16,7 @@ import {
 
 export type InitialIdentityRead = {
   readonly user: SessionUser;
-  readonly read: () =>
-    SessionIdentityBootstrap | { ok: false; status: "legacy" };
+  readonly read: () => SessionIdentityBootstrap;
 };
 
 type Dependencies = {
@@ -65,11 +64,10 @@ export function createInitialIdentityBootstrap(dependencies: Dependencies) {
     };
     const promise = dependencies.auth
       .prepareInitialIdentity()
-      .then(async ({ user, bootstrap, support }) => {
+      .then(async ({ user, bootstrap }) => {
         assertCurrent(user);
         let value: ReturnType<InitialIdentityRead["read"]>;
-        if (support === "legacy") value = { ok: false, status: "legacy" };
-        else if (bootstrap?.ok || bootstrap?.status === 409) value = bootstrap;
+        if (bootstrap?.ok || bootstrap?.status === 409) value = bootstrap;
         else {
           try {
             value = await dependencies.read(

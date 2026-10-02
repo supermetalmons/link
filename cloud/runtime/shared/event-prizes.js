@@ -5,7 +5,6 @@ exports.isToggleEventPrizeSelectionResponse =
   exports.isToggleEventPrizeSelectionRequest =
   exports.isProfileEventPrizesResponse =
   exports.isEventPrizeWithdrawalStatusRequest =
-  exports.isEventPrizeWithdrawalResponse =
   exports.isEventPrizeWithdrawalRequest =
   exports.isEventPrizeWithdrawalProcessingResponse =
   exports.isEventPrizeWithdrawalOperationId =
@@ -27,7 +26,6 @@ exports.isToggleEventPrizeSelectionResponse =
   exports.PLANET_PEPPA_PRIZES_EVENT_ID =
   exports.LEGACY_CORE_PRIZES_EVENT_ID =
   exports.EVENT_PRIZE_REVEAL_WINDOW_MS =
-  exports.EVENT_PRIZE_IDS =
   exports.EVENT_PRIZE_CONFIGS =
   exports.COMPRESSED_PRIZES_EVENT_ID =
   exports.ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID =
@@ -467,12 +465,6 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
   }),
 });
 exports.EVENT_PRIZE_CONFIGS = EVENT_PRIZE_CONFIGS;
-const EVENT_PRIZE_IDS = Object.freeze(
-  Object.values(EVENT_PRIZE_CONFIGS).flatMap((config) =>
-    config.prizes.map((prize) => prize.id),
-  ),
-);
-exports.EVENT_PRIZE_IDS = EVENT_PRIZE_IDS;
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 const getEventPrizeConfig = (eventId) => {
@@ -654,7 +646,3 @@ const isEventPrizeWithdrawalCompletedResponse = (value) =>
   value.transactionSignature.length > 0;
 exports.isEventPrizeWithdrawalCompletedResponse =
   isEventPrizeWithdrawalCompletedResponse;
-const isEventPrizeWithdrawalResponse = (value) =>
-  isEventPrizeWithdrawalProcessingResponse(value) ||
-  isEventPrizeWithdrawalCompletedResponse(value);
-exports.isEventPrizeWithdrawalResponse = isEventPrizeWithdrawalResponse;

@@ -1,18 +1,18 @@
-import { env } from "cloudflare:workers";
-import type { D1Migration } from "cloudflare:test";
 import {
   COMPRESSED_PRIZES_EVENT_ID,
   LEGACY_CORE_PRIZES_EVENT_ID,
 } from "@mons/shared/event-prizes";
 import type { EventParticipantSnapshot } from "@mons/shared/events";
+import type { D1Migration } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { beforeAll, describe, expect, it } from "vitest";
-import { handleEventRoute } from "../src/eventRoute.ts";
+import { EventNotUpcoming } from "../src/eventD1.ts";
+import { createEventMutationRepository } from "../src/eventMutationRepository.ts";
 import {
   createEventGameplayRepository,
   type EventGameplayRepository,
 } from "../src/eventRepository.ts";
-import { EventNotUpcoming } from "../src/eventD1.ts";
-import { createEventMutationRepository } from "../src/eventMutationRepository.ts";
+import { handleEventRoute } from "../src/eventRoute.ts";
 import {
   commitCanonicalPlan,
   materializeCanonicalProfile,
@@ -23,7 +23,7 @@ import {
   parseProfileGameProjectionTask,
   type EventProfileGameProjectionTask,
 } from "../src/profileGameProjectionTasks.ts";
-import { getProfileGameProjection } from "../src/profileGamesD1.ts";
+import { getProfileGameProjections } from "../src/profileGamesD1.ts";
 import {
   parseTelegramProjectionTask,
   type EventTelegramProjectionTask,
@@ -311,11 +311,9 @@ describe("leave event D1 integration", () => {
     ).toBeNull();
     expect(
       (
-        await getProfileGameProjection(
-          testEnv.PROFILE_GAMES_DB,
-          creatorId,
+        await getProfileGameProjections(testEnv.PROFILE_GAMES_DB, creatorId, [
           `event_${eventId}`,
-        )
+        ]).then((rows) => rows.get(`event_${eventId}`) ?? null)
       )?.data,
     ).toMatchObject({ participantCount: 1 });
 
@@ -343,11 +341,9 @@ describe("leave event D1 integration", () => {
     for (const profileId of [creatorId, guestId]) {
       expect(
         (
-          await getProfileGameProjection(
-            testEnv.PROFILE_GAMES_DB,
-            profileId,
+          await getProfileGameProjections(testEnv.PROFILE_GAMES_DB, profileId, [
             `event_${eventId}`,
-          )
+          ]).then((rows) => rows.get(`event_${eventId}`) ?? null)
         )?.data,
       ).toMatchObject({ participantCount: 2 });
     }

@@ -77,8 +77,6 @@ bindTutorialPersistence({
 bindPlayerMetadataRuntime({
   createSessionGuard: () => connection.createSessionGuard(),
   getProfileByLoginId: (loginId) => connection.getProfileByLoginId(loginId),
-  updateEmoji: (newId, matchOnly, aura) =>
-    connection.updateEmoji(newId, matchOnly, aura),
   updateEmojiAndAuraIfNeeded,
   isWatchOnly: () => isWatchOnly,
   updateProfileDisplayName,

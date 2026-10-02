@@ -53,12 +53,6 @@ export function createMainGameLoadState(dependencies: Dependencies) {
   return {
     getSnapshot: () => state,
     isLoaded: () => state.settled,
-    subscribe: (listener: Listener) => {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
     onLoaded: (listener: Listener) => {
       if (state.settled) {
         listener();
@@ -108,7 +102,6 @@ const mainGameLoadState = createMainGameLoadState({
 
 export const getMainGameLoadState = mainGameLoadState.getSnapshot;
 export const isMainGameLoaded = mainGameLoadState.isLoaded;
-export const subscribeMainGameLoadState = mainGameLoadState.subscribe;
 export const onMainGameLoaded = mainGameLoadState.onLoaded;
 export const markMainGameRoutePrepared = mainGameLoadState.markRoutePrepared;
 export const markMainGameContentReady = mainGameLoadState.markContentReady;

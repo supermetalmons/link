@@ -22,7 +22,6 @@ export type EventTelegramAnnouncements = {
 
 export type EventCreateOptions = {
   isSundayMons?: boolean;
-  announceOnTelegram?: boolean;
   telegramAnnouncements?: EventTelegramAnnouncements;
 };
 
@@ -262,30 +261,6 @@ function buildEventSeedOrder(bracketSize: number): number[] {
   return next;
 }
 
-function getFirstRoundByeSeeds(
-  participantCount: number,
-  bracketSize: number,
-  seedOrder: readonly number[],
-): number[] {
-  if (participantCount <= 0 || participantCount >= bracketSize) {
-    return [];
-  }
-
-  const byeSeeds = [];
-  const firstRoundMatchCount = bracketSize / 2;
-  for (let matchIndex = 0; matchIndex < firstRoundMatchCount; matchIndex += 1) {
-    const hostSeed = seedOrder[matchIndex * 2];
-    const guestSeed = seedOrder[matchIndex * 2 + 1];
-    const hostHasParticipant = hostSeed <= participantCount;
-    const guestHasParticipant = guestSeed <= participantCount;
-    if (hostHasParticipant === guestHasParticipant) {
-      continue;
-    }
-    byeSeeds.push(hostHasParticipant ? hostSeed : guestSeed);
-  }
-  return byeSeeds;
-}
-
 function isExactRecord(
   value: unknown,
   keys: readonly string[],
@@ -465,8 +440,6 @@ function isCreateEventRequest(value: unknown): value is CreateEventRequest {
   if (
     (Object.hasOwn(value, "isSundayMons") &&
       typeof record.isSundayMons !== "boolean") ||
-    (record.announceOnTelegram !== undefined &&
-      typeof record.announceOnTelegram !== "boolean") ||
     (record.telegramAnnouncements !== undefined &&
       !isEventTelegramAnnouncements(record.telegramAnnouncements))
   ) {
@@ -476,7 +449,7 @@ function isCreateEventRequest(value: unknown): value is CreateEventRequest {
     hasExactOptionalKeys(
       value,
       ["startsInMinutes"],
-      ["isSundayMons", "announceOnTelegram", "telegramAnnouncements"],
+      ["isSundayMons", "telegramAnnouncements"],
     )
   ) {
     return (
@@ -489,12 +462,7 @@ function isCreateEventRequest(value: unknown): value is CreateEventRequest {
     !hasExactOptionalKeys(
       value,
       ["scheduledDate", "scheduledTime", "scheduledTimezone"],
-      [
-        "isSundayMons",
-        "announceOnTelegram",
-        "telegramAnnouncements",
-        "localTimezoneIana",
-      ],
+      ["isSundayMons", "telegramAnnouncements", "localTimezoneIana"],
     )
   ) {
     return false;
@@ -703,7 +671,6 @@ export {
   buildEventParticipantSnapshot,
   buildEventSeedOrder,
   getEventBracketSize,
-  getFirstRoundByeSeeds,
   isCreateEventRequest,
   isCreateEventResponse,
   isDisqualifyEventMatchWinnersRequest,

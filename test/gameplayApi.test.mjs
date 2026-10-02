@@ -886,7 +886,7 @@ test("validates optional Sunday Mons response flags while accepting legacy event
   }
 });
 
-test("validates complete Telegram preferences and preserves legacy request compatibility", () => {
+test("validates current Telegram preferences and rejects retired request flags while retaining stored normalization", () => {
   const allOff = { invite: false, matches: false, results: false };
   const allOn = { invite: true, matches: true, results: true };
   const delayedInvite = { invite: false, matches: true, results: true };
@@ -921,21 +921,26 @@ test("validates complete Telegram preferences and preserves legacy request compa
       scheduledTimezone: "ET",
     },
   ]) {
+    assert.equal(isCreateEventRequest(schedule), true);
+    for (const telegramAnnouncements of [allOff, allOn, delayedInvite]) {
+      assert.equal(
+        isCreateEventRequest({ ...schedule, telegramAnnouncements }),
+        true,
+      );
+    }
     for (const announceOnTelegram of [undefined, false, true]) {
       assert.equal(
         isCreateEventRequest({ ...schedule, announceOnTelegram }),
-        true,
+        false,
       );
-      for (const telegramAnnouncements of [allOff, allOn, delayedInvite]) {
-        assert.equal(
-          isCreateEventRequest({
-            ...schedule,
-            announceOnTelegram,
-            telegramAnnouncements,
-          }),
-          true,
-        );
-      }
+      assert.equal(
+        isCreateEventRequest({
+          ...schedule,
+          announceOnTelegram,
+          telegramAnnouncements: allOn,
+        }),
+        false,
+      );
     }
     for (const telegramAnnouncements of [
       null,

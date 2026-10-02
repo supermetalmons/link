@@ -412,10 +412,7 @@ async function persistRemoval(
   );
 }
 
-function createDueUpdatesBuilder(
-  dependencies: EventParticipationDependencies,
-  repository: EventParticipationRepository,
-) {
+function createDueUpdatesBuilder(dependencies: EventParticipationDependencies) {
   const random = dependencies.random || secureRandom;
   return async (
     input: Parameters<
@@ -484,8 +481,7 @@ export async function joinEvent(
   const eventId = request.eventId.trim();
   const now = dependencies.now || Date.now;
   const buildDueUpdates =
-    dependencies.buildDueUpdates ||
-    createDueUpdatesBuilder(dependencies, repository);
+    dependencies.buildDueUpdates || createDueUpdatesBuilder(dependencies);
   const lockManager =
     dependencies.lockManager || createDefaultLockManager(repository, signal);
   await readEvent(eventId, repository, signal);
@@ -755,8 +751,7 @@ async function removeEventParticipation(
     : "This event can no longer remove participants.";
   const now = dependencies.now || Date.now;
   const buildDueUpdates =
-    dependencies.buildDueUpdates ||
-    createDueUpdatesBuilder(dependencies, repository);
+    dependencies.buildDueUpdates || createDueUpdatesBuilder(dependencies);
   const lockManager =
     dependencies.lockManager || createDefaultLockManager(repository, signal);
   await readEvent(eventId, repository, signal);

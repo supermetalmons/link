@@ -14,7 +14,9 @@
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true,
     "strict": true,
-    "types": ["node", "@cloudflare/vitest-plugin/types"]
+    "types": ["node", "@cloudflare/vitest-plugin/types"],
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
   },
   "include": [
     "../../../src/glicko2.d.ts",

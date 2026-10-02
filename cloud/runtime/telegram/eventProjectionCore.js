@@ -71,7 +71,6 @@ exports.renderUpcomingMessage =
   exports.buildEventSignature =
   exports.buildEndedState =
   exports.addEventTelegramProjectionGuard =
-  exports.EVENT_TELEGRAM_PROJECTION_ROOT =
   exports.EVENT_TELEGRAM_PROJECTION_LOCK_ROOT =
   exports.EVENT_TELEGRAM_PROJECTION_GUARD_FIELD =
   exports.EVENT_TELEGRAM_DELIVERY_VERSION =
@@ -85,8 +84,6 @@ const bracket_js_1 = require("../events/bracket.js");
 const events_1 = require("@mons/shared/events");
 const objectProperties = (value) =>
   value && typeof value === "object" ? value : {};
-const EVENT_TELEGRAM_PROJECTION_ROOT = "eventTelegramProjections";
-exports.EVENT_TELEGRAM_PROJECTION_ROOT = EVENT_TELEGRAM_PROJECTION_ROOT;
 const EVENT_TELEGRAM_PROJECTION_LOCK_ROOT = "eventTelegramProjectionLocks";
 exports.EVENT_TELEGRAM_PROJECTION_LOCK_ROOT =
   EVENT_TELEGRAM_PROJECTION_LOCK_ROOT;

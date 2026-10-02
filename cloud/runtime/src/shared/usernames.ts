@@ -6,7 +6,6 @@ export type UsernameEditResponse =
   { ok: true } | { ok: false; validationError?: string };
 
 const USERNAME_MAX_LENGTH = 14;
-const USERNAME_LOOKUP_KEY_FIELD = "usernameLookupKey";
 const USERNAME_ALLOWED_RE = /^[a-zA-Z0-9]+$/;
 const USERNAME_VALIDATION_MESSAGES: Readonly<{
   reserved: "This name is reserved.";
@@ -69,7 +68,6 @@ const isUsernameEditResponse = (
 
 export {
   USERNAME_MAX_LENGTH,
-  USERNAME_LOOKUP_KEY_FIELD,
   USERNAME_VALIDATION_MESSAGES,
   cleanUsername,
   buildUsernameLookupKey,

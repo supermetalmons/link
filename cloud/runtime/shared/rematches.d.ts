@@ -45,10 +45,6 @@ declare const deriveLatestMatchId: (
   inviteData: RematchInviteData | null | undefined,
   latestMatchIdHint?: unknown,
 ) => string;
-declare const getHistoricalMatchIds: (
-  inviteId: string,
-  inviteData: RematchInviteData | null | undefined,
-) => string[];
 export {
   parseRematchIndices,
   rematchSeriesEnded,
@@ -60,5 +56,4 @@ export {
   getLatestApprovedRematchIndex,
   selectInviteMatch,
   deriveLatestMatchId,
-  getHistoricalMatchIds,
 };

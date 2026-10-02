@@ -8,7 +8,6 @@ const {
   isSessionBootstrapTarget,
   isSessionBootstrapFailure,
   isSessionBootstrap,
-  isSessionBootstrapResponse,
   isSessionIdentityBootstrap,
   SESSION_IDENTITY_BOOTSTRAP_MAX_RESPONSE_BYTES,
 } = require("../runtime/shared/session-bootstrap");
@@ -80,22 +79,19 @@ test("session bootstrap targets preserve exact invite and selection identity", (
     assert.equal(isSessionBootstrapTarget(value), false);
 });
 
-test("composed session responses keep legacy token validation strict", () => {
+test("session tokens and game seeds retain independent validation", () => {
   for (const selection of ["current", "approved"]) {
     const value = { ...session, gameBootstrap: bootstrap(selection) };
-    assert.equal(isSessionBootstrapResponse(value), true);
+    assert.equal(isSessionBootstrap(value.gameBootstrap), true);
     assert.equal(isSessionTokenResponse(value), false);
     assert.equal(
-      isSessionBootstrapResponse({ ...value, refreshSecret: "secret" }),
+      isSessionTokenResponse({ ...session, refreshSecret: "secret" }),
       false,
     );
-    assert.equal(
-      isSessionBootstrapResponse({ ...value, uid: "invalid" }),
-      false,
-    );
+    assert.equal(isSessionTokenResponse({ ...session, uid: "invalid" }), false);
   }
   assert.equal(isSessionTokenResponse(session), true);
-  assert.equal(isSessionBootstrapResponse(session), false);
+  assert.equal(isSessionBootstrap(undefined), false);
   assert.equal(
     SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES,
     GAME_BOOTSTRAP_MAX_RESPONSE_BYTES + 16_384,
@@ -115,14 +111,6 @@ test("identity seeds compose independently while preserving exact token and publ
       isSessionTokenResponse({ ...session, identityBootstrap }),
       false,
     );
-    assert.equal(
-      isSessionBootstrapResponse({
-        ...session,
-        gameBootstrap: bootstrap(),
-        identityBootstrap,
-      }),
-      true,
-    );
   }
   for (const identityBootstrap of [
     { ok: true },
@@ -133,14 +121,6 @@ test("identity seeds compose independently while preserving exact token and publ
     undefined,
   ]) {
     assert.equal(isSessionIdentityBootstrap(identityBootstrap), false);
-    assert.equal(
-      isSessionBootstrapResponse({
-        ...session,
-        gameBootstrap: bootstrap(),
-        identityBootstrap,
-      }),
-      false,
-    );
   }
 });
 
@@ -163,10 +143,7 @@ test("game failures are bounded public data independent of successful authentica
     const result = { ok: false, status, retryAfterMs: 60_000 };
     assert.equal(isSessionBootstrapFailure(result), true);
     assert.equal(
-      isSessionBootstrapResponse({
-        ...session,
-        gameBootstrap: { inviteId: "invite", selection: "current", result },
-      }),
+      isSessionBootstrap({ inviteId: "invite", selection: "current", result }),
       true,
     );
   }

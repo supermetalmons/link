@@ -66,7 +66,6 @@ export type EventTelegramProjectionChanges = {
   state: Record<string, unknown>;
   desired: EventTelegramDesiredChange[];
 };
-declare const EVENT_TELEGRAM_PROJECTION_ROOT = "eventTelegramProjections";
 declare const EVENT_TELEGRAM_PROJECTION_LOCK_ROOT =
   "eventTelegramProjectionLocks";
 declare const EVENT_TELEGRAM_PROJECTION_GUARD_FIELD =
@@ -143,7 +142,6 @@ export {
   EVENT_TELEGRAM_DELIVERY_VERSION,
   EVENT_TELEGRAM_PROJECTION_GUARD_FIELD,
   EVENT_TELEGRAM_PROJECTION_LOCK_ROOT,
-  EVENT_TELEGRAM_PROJECTION_ROOT,
   addEventTelegramProjectionGuard,
   buildEndedState,
   buildEventSignature,

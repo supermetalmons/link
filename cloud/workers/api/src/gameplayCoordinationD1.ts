@@ -600,12 +600,3 @@ export function createMatchTimerStartStore(
     },
   };
 }
-
-export function createGameplayCoordinationStores(
-  db: Pick<D1Database, "batch" | "prepare">,
-): GameplayCoordinationStores {
-  return {
-    mutationLocks: createGameSessionMutationLockStore(db),
-    timerStarts: createMatchTimerStartStore(db),
-  };
-}

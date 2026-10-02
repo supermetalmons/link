@@ -16,31 +16,25 @@ const profile: ProfileCustomizationProfile = {
 
 test("maps protected customizations to their inventory requirements", () => {
   assert.deepEqual(
-    inventoryRequirement(
-      {
-        field: "emojiAndAura",
-        value: { emoji: 1009, aura: "rainbow" },
-      },
-      profile,
-    ),
+    inventoryRequirement({
+      field: "emojiAndAura",
+      value: { emoji: 1009, aura: "rainbow" },
+    }),
     { collection: "swagpack_avatars", id: 9, count: 3 },
   );
   assert.deepEqual(
-    inventoryRequirement({ field: "cardBackgroundId", value: 100 }, profile),
+    inventoryRequirement({ field: "cardBackgroundId", value: 100 }),
     { collection: "specials", id: 1, count: 1 },
   );
   assert.deepEqual(
-    inventoryRequirement({ field: "profileMons", value: "0,0,5,0,0" }, profile),
+    inventoryRequirement({ field: "profileMons", value: "0,0,5,0,0" }),
     { collection: "specials", id: 0, count: 1 },
   );
   assert.deepEqual(
-    inventoryRequirement(
-      {
-        field: "cardStickers",
-        value: '{"big-mon-top-right":"gate"}',
-      },
-      profile,
-    ),
+    inventoryRequirement({
+      field: "cardStickers",
+      value: '{"big-mon-top-right":"gate"}',
+    }),
     { collection: "specials", id: 2, count: 1 },
   );
 });

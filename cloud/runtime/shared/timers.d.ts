@@ -32,9 +32,6 @@ declare const formatMatchTimer: (
   targetTimestamp: number,
 ) => string;
 declare const parseMatchTimer: (value: unknown) => ParsedMatchTimer | null;
-declare const isMatchTimerTerminal: (
-  value: unknown,
-) => value is typeof MATCH_TIMER_TERMINAL;
 declare const parseStrictMatchTimer: (
   value: unknown,
 ) => ParsedMatchTimer | null;
@@ -58,7 +55,6 @@ export {
   formatMatchTimer,
   parseMatchTimer,
   parseStrictMatchTimer,
-  isMatchTimerTerminal,
   isClaimMatchVictoryByTimerRequest,
   isClaimMatchVictoryByTimerResponse,
   isStartMatchTimerRequest,

@@ -10,11 +10,11 @@ import type {
   EventParticipant,
   EventPrizeId,
   EventPrizeSelections,
+  EventRecord,
 } from "../../src/connection/connectionModels";
 import { useEventPrizeSelection } from "../../src/ui/event/useEventPrizeSelection";
 import { EventPrizePanel } from "../../src/ui/event/EventPrizePanel";
 import EventModal from "../../src/ui/event/EventModalView";
-import { createStubEventRecord } from "../../src/ui/event/devFixtures";
 import { openEventModal, closeEventModal } from "../../src/ui/event/modalState";
 import { TopBarStack } from "../../src/ui/event/EventModal.styles";
 import { storage } from "../../src/utils/storage";
@@ -42,6 +42,73 @@ const participant = (index: number): EventParticipant => ({
   eliminatedRoundIndex: null,
   eliminatedByProfileId: null,
 });
+
+const finishedEvent = (): EventRecord => {
+  const now = Date.now();
+  const host = {
+    ...participant(1),
+    displayName: "Finalist 1",
+    state: "winner" as const,
+  };
+  const guest = {
+    ...participant(2),
+    displayName: "Finalist 2",
+    state: "eliminated" as const,
+    eliminatedRoundIndex: 0,
+    eliminatedByProfileId: host.profileId,
+  };
+  return {
+    schemaVersion: 2,
+    eventId: catalog.eventId,
+    isSundayMons: false,
+    status: "ended",
+    createdAtMs: now - 240_000,
+    updatedAtMs: now,
+    startAtMs: now - 180_000,
+    startedAtMs: now - 180_000,
+    endedAtMs: now - 10_000,
+    createdByProfileId: host.profileId,
+    createdByLoginUid: host.loginUid,
+    createdByUsername: host.username,
+    winnerProfileId: host.profileId,
+    winnerDisplayName: host.displayName,
+    currentRoundIndex: 0,
+    bracketSize: 2,
+    roundCount: 1,
+    participants: { [host.profileId]: host, [guest.profileId]: guest },
+    rounds: {
+      "0": {
+        roundIndex: 0,
+        status: "completed",
+        createdAtMs: now - 120_000,
+        completedAtMs: now - 60_000,
+        matches: {
+          "0_0": {
+            matchKey: "0_0",
+            inviteId: null,
+            status: "host",
+            resolvedAtMs: now - 60_000,
+            winnerDisqualified: false,
+            winnerProfileId: host.profileId,
+            loserProfileId: guest.profileId,
+            hostSlotBlocked: false,
+            hostProfileId: host.profileId,
+            hostLoginUid: host.loginUid,
+            hostDisplayName: host.displayName,
+            hostEmojiId: host.emojiId,
+            hostAura: host.aura,
+            guestSlotBlocked: false,
+            guestProfileId: guest.profileId,
+            guestLoginUid: guest.loginUid,
+            guestDisplayName: guest.displayName,
+            guestEmojiId: guest.emojiId,
+            guestAura: guest.aura,
+          },
+        },
+      },
+    },
+  };
+};
 
 const motions: {
   bodyChild: boolean;
@@ -202,11 +269,7 @@ Object.assign(window, {
         if (animation.playState !== "idle") animation.finish();
       }),
     mountModal: () => {
-      const ended = createStubEventRecord({
-        source: null,
-        playerCount: 2,
-        fallbackEventId: catalog.eventId,
-      });
+      const ended = finishedEvent();
       const people = Object.values(ended.participants);
       people.forEach((p, index) => {
         p.displayName = `Finalist ${index + 1}`;
@@ -232,11 +295,7 @@ Object.assign(window, {
       );
     },
     finishEvent: () => {
-      const ended = createStubEventRecord({
-        source: null,
-        playerCount: 2,
-        fallbackEventId: catalog.eventId,
-      });
+      const ended = finishedEvent();
       const people = Object.values(ended.participants);
       people.forEach((p, index) => {
         p.displayName = `Finalist ${index + 1}`;

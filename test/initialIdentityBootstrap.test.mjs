@@ -26,7 +26,6 @@ const deferred = () => {
 };
 const make = ({
   bootstrap = { ok: true, profile: null },
-  support = "supported",
   fetch = async () => ({ ok: true, profile: null }),
 } = {}) => {
   const user = {
@@ -41,7 +40,7 @@ const make = ({
     currentUser: user,
     prepareInitialIdentity: async () => {
       preparations++;
-      return { user: auth.currentUser, bootstrap, support };
+      return { user: auth.currentUser, bootstrap };
     },
   };
   const helper = createInitialIdentityBootstrap({
@@ -69,13 +68,7 @@ test("startup and simultaneous consumers share a verified seed until successful 
   assert.equal(h.counts().preparations, 2);
 });
 
-test("unsupported marker avoids GET while missing, unavailable and malformed seeds use read-only fallback", async () => {
-  const legacy = make({ bootstrap: undefined, support: "legacy" });
-  assert.deepEqual((await legacy.helper.read()).read(), {
-    ok: false,
-    status: "legacy",
-  });
-  assert.equal(legacy.counts().reads, 0);
+test("missing and unavailable seeds use read-only identity fallback", async () => {
   for (const bootstrap of [null, { ok: false, status: 503 }]) {
     const h = make({ bootstrap });
     assert.deepEqual((await h.helper.read()).read(), {
@@ -145,7 +138,6 @@ test("repair is shared and refreshes authoritative identity even after the origi
   h.auth.prepareInitialIdentity = async () => ({
     user: h.user,
     bootstrap: undefined,
-    support: "supported",
   });
   gate.resolve();
   const repaired = await first;

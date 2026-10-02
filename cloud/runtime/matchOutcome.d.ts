@@ -22,9 +22,3 @@ export declare function resolveMatchWinner(
   matchData: MatchOutcomeRecord | null | undefined,
   opponentMatchData: MatchOutcomeRecord | null | undefined,
 ): Promise<MatchWinnerResolution>;
-export declare const resolveMatchResult: (
-  matchData: MatchOutcomeRecord | null | undefined,
-  opponentMatchData: MatchOutcomeRecord | null | undefined,
-) => Promise<{
-  result: "win" | "gg" | "none";
-}>;

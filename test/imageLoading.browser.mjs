@@ -25,7 +25,7 @@ const previewImage =
 const harnessSource = `import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
-import BoardStylePicker, { preloadPangchiuBoardPreview } from '/src/ui/BoardStylePicker.tsx';
+import BoardStylePicker from '/src/ui/BoardStylePicker.tsx';
 import { getImageResource } from '/src/resources/imageResources.ts';
 const root = createRoot(document.getElementById('root'));
 const resource = getImageResource(${JSON.stringify(previewUrl)});
@@ -47,7 +47,6 @@ window.harness = {
     flushSync(() => root.render(React.createElement(React.StrictMode, null,
       visible ? React.createElement(BoardStylePicker) : null)));
   },
-  preload: preloadPangchiuBoardPreview,
   observeLoad() {
     void resource.load().then(value => loadResults.push(value));
   },
@@ -219,13 +218,11 @@ const waitForDecodedPreview = (page) =>
   });
 
 test(
-  "board preview shares preload and mount fetches, keeps its placeholder until decode, and reuses its warm cache",
+  "board preview deduplicates mounted fetches, keeps its placeholder until decode, and reuses its warm cache",
   { timeout: 60000 },
   async (t) => {
     await fixture(t, async ({ page, requests, nextRequest }) => {
       await page.evaluate(() => {
-        window.harness.preload();
-        window.harness.preload();
         window.harness.render();
       });
       const request = await nextRequest();
@@ -252,7 +249,6 @@ test(
       const reopened = await page.evaluate(() => {
         const h = window.harness;
         h.render(false);
-        h.preload();
         h.render();
         return { state: h.snapshot(), decodes: h.decodeRequests.length };
       });
@@ -299,12 +295,11 @@ test(
 );
 
 test(
-  "board preview retries failed decoding from the same cached blob during a later preload and mount",
+  "board preview retries failed decoding from the same cached blob when the picker remounts",
   { timeout: 60000 },
   async (t) => {
     await fixture(t, async ({ page, requests, nextRequest }) => {
       await page.evaluate(() => {
-        window.harness.preload();
         window.harness.render();
       });
       await fulfillImage(await nextRequest());
@@ -325,7 +320,6 @@ test(
 
       await page.evaluate(() => {
         window.harness.render(false);
-        window.harness.preload();
         window.harness.render();
       });
       await page.waitForFunction(
@@ -349,7 +343,6 @@ test(
     await fixture(t, async ({ page, requests, nextRequest }) => {
       await page.evaluate(() => {
         window.harness.useOnloadFallback();
-        window.harness.preload();
         window.harness.render();
       });
       await fulfillImage(await nextRequest());

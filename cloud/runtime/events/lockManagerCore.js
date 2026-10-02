@@ -6,7 +6,6 @@ exports.resolveLockKind =
   exports.createEventLockManagerCore =
   exports.EVENT_LOCK_TTL_MS =
   exports.EVENT_LOCK_REFRESH_INTERVAL_MS =
-  exports.EVENT_LOCK_ROOT =
     void 0;
 exports.withEventLease = withEventLease;
 async function withEventLease(manager, handle, work) {
@@ -22,8 +21,6 @@ async function withEventLease(manager, handle, work) {
     }
   }
 }
-const EVENT_LOCK_ROOT = "eventLocks";
-exports.EVENT_LOCK_ROOT = EVENT_LOCK_ROOT;
 const EVENT_LOCK_TTL_MS = 30_000;
 exports.EVENT_LOCK_TTL_MS = EVENT_LOCK_TTL_MS;
 const EVENT_LOCK_REFRESH_INTERVAL_MS = 10_000;

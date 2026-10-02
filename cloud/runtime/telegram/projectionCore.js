@@ -1,8 +1,7 @@
 // Generated from src/telegram/projectionCore.ts. Run npm run generate:runtime.
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.shouldRequestEventRatingProgress =
-  exports.shouldProjectRatingTelegramUpdate =
+exports.shouldProjectRatingTelegramUpdate =
   exports.resolveAutomatchTelegramLifecycle =
   exports.renderMatchedAutomatchTelegramText =
   exports.normalizeString =
@@ -257,15 +256,6 @@ const shouldProjectRatingTelegramUpdate = (ratingUpdate) =>
   normalizeString(ratingUpdate.matchId) !== "" &&
   normalizeString(ratingUpdate.updateRatingMessage) !== "";
 exports.shouldProjectRatingTelegramUpdate = shouldProjectRatingTelegramUpdate;
-const shouldRequestEventRatingProgress = (ratingUpdate) =>
-  !!ratingUpdate &&
-  ratingUpdate.status === "done" &&
-  ratingUpdate.isEventMatch === true &&
-  ratingUpdate.eventOwned === true &&
-  normalizeString(ratingUpdate.eventId) !== "" &&
-  normalizeString(ratingUpdate.inviteId) !== "" &&
-  normalizeString(ratingUpdate.matchId) !== "";
-exports.shouldRequestEventRatingProgress = shouldRequestEventRatingProgress;
 const mergeRatingResultFragment = (source, ratingUpdate) => {
   const record = source || {};
   if (

@@ -5,11 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
-const { batchReadWithRetry } = require("../runtime/batchRead");
-const {
-  resolveMatchResult,
-  resolveMatchWinner,
-} = require("../runtime/matchOutcome");
+const { resolveMatchWinner } = require("../runtime/matchOutcome");
 const {
   getDisplayNameFromAddress,
   getTelegramEmojiTag,
@@ -62,45 +58,7 @@ test("Telegram display formatting preserves name, rating, and emoji rules", () =
   );
 });
 
-test("batch reads retry only failed initial reads", async () => {
-  const recoveredSnapshot = { value: "recovered" };
-  const stableSnapshot = { value: "stable" };
-  const calls = [0, 0];
-  const references = [
-    {
-      once: async () => {
-        calls[0] += 1;
-        if (calls[0] === 1) {
-          throw new Error("initial failure");
-        }
-        return recoveredSnapshot;
-      },
-    },
-    {
-      once: async () => {
-        calls[1] += 1;
-        return stableSnapshot;
-      },
-    },
-  ];
-  const originalConsoleError = console.error;
-  const errors = [];
-  console.error = (...args) => errors.push(args);
-  try {
-    assert.deepEqual(
-      await batchReadWithRetry(references.map((reference) => reference.once)),
-      [recoveredSnapshot, stableSnapshot],
-    );
-  } finally {
-    console.error = originalConsoleError;
-  }
-
-  assert.deepEqual(calls, [2, 1]);
-  assert.equal(errors.length, 1);
-  assert.equal(errors[0][0], "Error in initial batch read:");
-});
-
-test("match outcome exposes the folded result mapping asynchronously", async () => {
+test("match outcome preserves winner and incomplete-state resolution", async () => {
   assert.deepEqual(await resolveMatchWinner(null, {}), {
     winner: null,
     reason: "missing-match",
@@ -117,13 +75,14 @@ test("match outcome exposes the folded result mapping asynchronously", async () 
     { winner: null, reason: "missing-fen" },
   );
 
-  const resultPromise = resolveMatchResult({ status: "surrendered" }, {});
-  assert.equal(typeof resultPromise.then, "function");
-  assert.deepEqual(await resultPromise, { result: "gg" });
-  assert.deepEqual(await resolveMatchResult({}, { status: "surrendered" }), {
-    result: "win",
+  assert.deepEqual(await resolveMatchWinner({ status: "surrendered" }, {}), {
+    winner: "opponent",
+    reason: "surrender-or-timer",
   });
-  assert.deepEqual(await resolveMatchResult(null, null), { result: "none" });
+  assert.deepEqual(await resolveMatchWinner({}, { status: "surrendered" }), {
+    winner: "player",
+    reason: "surrender-or-timer",
+  });
   assert.equal(
     fs.existsSync(path.resolve(__dirname, "../runtime/matchResult.js")),
     false,

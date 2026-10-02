@@ -3845,7 +3845,7 @@ function pickAndDisplayDifferentEmoji(metadataIsOpponent: boolean) {
 
 export function didClickAndChangePlayerEmoji(
   newId: string,
-  newEmojiUrl: string,
+  _newEmojiUrl: string,
   aura?: string,
 ) {
   storage.setPlayerEmojiId(newId);

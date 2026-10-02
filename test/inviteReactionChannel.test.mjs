@@ -35,13 +35,14 @@ const reaction = (id = 1, overrides = {}) => ({
   variation: 1,
   ...overrides,
 });
-const snapshot = (reactions = {}) => ({
-  schemaVersion: 1,
+const snapshot = (reactions = {}, matchId = "invite") => ({
+  schemaVersion: 2,
   type: "snapshot",
   reactions,
+  presentation: { matchId, players: {} },
 });
 const event = (value = reaction(), senderUid = "guest") => ({
-  schemaVersion: 1,
+  schemaVersion: 2,
   type: "reaction",
   senderUid,
   reaction: value,
@@ -49,7 +50,7 @@ const event = (value = reaction(), senderUid = "guest") => ({
 
 function harness({
   inviteId = "invite",
-  matchId,
+  matchId = "invite",
   online = true,
   paired = true,
   createError = false,
@@ -160,9 +161,9 @@ test("first connection baselines latest reactions silently, then delivers both v
   const socket = h.sockets[0];
   assert.equal(
     socket.url,
-    "wss://api.mons.link/invites/invite/reactions/socket",
+    "wss://api.mons.link/invites/invite/reactions/socket?matchId=invite",
   );
-  assert.equal(socket.protocols, undefined);
+  assert.deepEqual(socket.protocols, ["mons-reactions-v2"]);
   socket.receive(snapshot({ host: reaction() }));
   assert.deepEqual(h.initial, [{ host: reaction() }]);
   assert.equal(h.updates.length, 0);
@@ -298,10 +299,10 @@ test("session or auth invalidation drops all callbacks even before explicit clea
 test("rejects invalid, oversized, foreign-match and out-of-order socket frames", () => {
   for (const badFrame of [
     "invalid-json",
-    "x".repeat(4097),
+    "x".repeat(16385),
     event(),
     snapshot({ host: reaction(1, { matchId: "other" }) }),
-    { ...snapshot(), schemaVersion: 2 },
+    { ...snapshot(), schemaVersion: 1 },
   ]) {
     const h = harness();
     h.next();
@@ -577,7 +578,7 @@ test("v2 spectators receive persistent appearance on initial connection and reco
 
 test("v2 participants preserve bearer protocols and reject missing, foreign, premature or oversized presentation frames", async () => {
   for (const frame of [
-    snapshot(),
+    { ...snapshot(), presentation: undefined },
     roomSnapshot(presentation(1, { matchId: "invite1" })),
     { schemaVersion: 2, type: "presentation", presentation: presentation() },
     " ".repeat(16385),
@@ -631,7 +632,7 @@ test("v2 rematch contexts discard old socket callbacks and reject foreign presen
   next.channel.stop();
 });
 
-test("v2 accepts maximal escaped match keys without relaxing the v1 frame limit", () => {
+test("v2 accepts maximal escaped match keys within the bounded room frame size", () => {
   const matchId = '"'.repeat(768);
   const host = "h".repeat(128);
   const guest = "g".repeat(128);
@@ -659,17 +660,12 @@ test("v2 accepts maximal escaped match keys without relaxing the v1 frame limit"
   assert.equal(h.errors.length, 0);
   assert.equal(h.presentationSnapshots.length, 1);
   h.channel.stop();
-  const legacy = harness();
-  legacy.next();
-  legacy.sockets[0].receive(" ".repeat(4097));
-  assert.equal(legacy.errors.length, 1);
-  legacy.channel.stop();
 });
 
 test("participant sockets await auth protocols and force-refresh authentication on reconnect", async () => {
   const pending = deferred();
   const refreshes = [];
-  const protocols = ["mons-reactions-v1", "bearer.header.payload.signature"];
+  const protocols = ["mons-reactions-v2", "bearer.header.payload.signature"];
   const h = harness({
     getProtocols: (forceRefresh) => {
       refreshes.push(forceRefresh);
@@ -708,7 +704,7 @@ test("stopping or invalidating the auth user while token preparation is pending 
     const h = harness({ getProtocols: () => pending.promise });
     h.next();
     invalidate(h);
-    pending.resolve(["mons-reactions-v1", "bearer.old.user.token"]);
+    pending.resolve(["mons-reactions-v2", "bearer.old.user.token"]);
     await flush();
     assert.equal(h.sockets.length, 0);
     assert.equal(h.errors.length, 0);
@@ -733,10 +729,10 @@ test("the handshake deadline includes token preparation and ignores late tokens 
   assert.equal(h.errors.length, 1);
   assert.equal(h.next(), 500);
   assert.deepEqual(refreshes, [false, true]);
-  first.resolve(["mons-reactions-v1", "bearer.stale.payload.signature"]);
+  first.resolve(["mons-reactions-v2", "bearer.stale.payload.signature"]);
   await flush();
   assert.equal(h.sockets.length, 0);
-  second.resolve(["mons-reactions-v1", "bearer.fresh.payload.signature"]);
+  second.resolve(["mons-reactions-v2", "bearer.fresh.payload.signature"]);
   await flush();
   assert.equal(h.sockets.length, 1);
   assert.equal(h.sockets[0].protocols[1], "bearer.fresh.payload.signature");
@@ -751,7 +747,7 @@ test("rejects tokens resolved beyond the handshake deadline even when the timer 
   const h = harness({ getProtocols: () => pending.promise });
   h.next();
   now += REACTION_HEARTBEAT_TIMEOUT_MS;
-  pending.resolve(["mons-reactions-v1", "bearer.late.payload.signature"]);
+  pending.resolve(["mons-reactions-v2", "bearer.late.payload.signature"]);
   await flush();
   assert.equal(h.sockets.length, 0);
   assert.equal(h.errors.length, 1);
@@ -777,7 +773,7 @@ test("sanitizes token preparation and native socket errors before reporting fail
   const h = harness({
     createError: true,
     getProtocols: async () => [
-      "mons-reactions-v1",
+      "mons-reactions-v2",
       "bearer.secret.payload.signature",
     ],
   });
@@ -800,7 +796,7 @@ test("stale rejected tokens cannot cancel a newer connection attempt", async () 
   first.reject(new Error("stale-auth-error"));
   await flush();
   assert.equal(h.errors.length, 1);
-  second.resolve(["mons-reactions-v1", "bearer.current.payload.signature"]);
+  second.resolve(["mons-reactions-v2", "bearer.current.payload.signature"]);
   await flush();
   assert.equal(h.sockets.length, 1);
   h.channel.stop();

@@ -127,7 +127,6 @@ declare const REVERIE_BANNERS_PRIZES_EVENT_ID = "PCTotuzfUPu";
 declare const EVENT_PRIZE_CONFIGS: Readonly<
   Record<EventPrizeEventId, EventPrizeConfig>
 >;
-declare const EVENT_PRIZE_IDS: readonly EventPrizeId[];
 declare const getEventPrizeConfig: (
   eventId: unknown,
 ) => EventPrizeConfig | null;
@@ -183,15 +182,11 @@ declare const isEventPrizeWithdrawalProcessingResponse: (
 declare const isEventPrizeWithdrawalCompletedResponse: (
   value: unknown,
 ) => value is EventPrizeWithdrawalCompletedResponse;
-declare const isEventPrizeWithdrawalResponse: (
-  value: unknown,
-) => value is EventPrizeWithdrawalResponse;
 export {
   ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID,
   ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID,
   COMPRESSED_PRIZES_EVENT_ID,
   EVENT_PRIZE_CONFIGS,
-  EVENT_PRIZE_IDS,
   EVENT_PRIZE_REVEAL_WINDOW_MS,
   LEGACY_CORE_PRIZES_EVENT_ID,
   PLANET_PEPPA_PRIZES_EVENT_ID,
@@ -213,7 +208,6 @@ export {
   isEventPrizeWithdrawalOperationId,
   isEventPrizeWithdrawalProcessingResponse,
   isEventPrizeWithdrawalRequest,
-  isEventPrizeWithdrawalResponse,
   isEventPrizeWithdrawalStatusRequest,
   isProfileEventPrizesResponse,
   isToggleEventPrizeSelectionRequest,

@@ -6,9 +6,7 @@ import {
   getLoginProfileId,
   getOwnershipProfile,
   getProfileLoginUids,
-  loginOwnsProfile,
   loginsShareProfile,
-  profilesShareCanonicalProfile,
   requireProfileOwnershipSnapshot,
   type ProfileOwnershipReader,
   type ProfileOwnershipSnapshot,
@@ -94,10 +92,15 @@ test("reads and compares one normalized ownership snapshot", async () => {
   ]);
   assert.equal(loginsShareProfile(snapshot, "first", "second"), true);
   assert.equal(
-    profilesShareCanonicalProfile(snapshot, "source-profile", "target-profile"),
+    getCanonicalProfileId(snapshot, "source-profile") ===
+      getCanonicalProfileId(snapshot, "target-profile"),
     true,
   );
-  assert.equal(loginOwnsProfile(snapshot, "first", "source-profile"), true);
+  assert.equal(
+    getLoginProfileId(snapshot, "first") ===
+      getCanonicalProfileId(snapshot, "source-profile"),
+    true,
+  );
 });
 
 test("invalid ownership snapshots map to availability failure", async () => {

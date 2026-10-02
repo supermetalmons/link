@@ -1,17 +1,7 @@
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
-import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
-import {
-  createWranglerRunner,
-  resolveCloudflareToken,
-  readResponseJson,
-  type SqlRunner,
-} from "./operator/runtime.ts";
+import { readOperatorConfiguration } from "../configuration.ts";
+import { readResponseJson, type SqlRunner } from "../runtime.ts";
 
 type JsonRecord = Record<string, unknown>;
-
-type Arguments = { operation: "status" };
 
 type Gate = { storageMode: "d1" | "frozen"; freezeGeneration: number };
 
@@ -46,8 +36,6 @@ type Dependencies = {
   ): Promise<{ rows: Workflow[]; totalPages: number; totalCount: number }>;
 };
 
-const ROOT = resolve(import.meta.dirname, "..");
-
 const GAMEPLAY_DB = "mons-link-profile-games";
 
 const EVENT_DB = "mons-link-events";
@@ -64,14 +52,6 @@ function record(value: unknown): JsonRecord | null {
 
 function integer(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) >= 0;
-}
-
-function parseArgs(argv: string[]): Arguments {
-  if (argv.length !== 1 || argv[0] !== "--status")
-    throw new Error(
-      "event transition receipts supports only --status; initial migration commands are retired",
-    );
-  return { operation: "status" };
 }
 
 async function listWorkflows(deps: Dependencies): Promise<Workflow[]> {
@@ -118,12 +98,7 @@ function parseWorkflow(value: unknown): Workflow {
   return row as Workflow;
 }
 
-async function manageEventTransitionReceipts(
-  args: Arguments,
-  deps: Dependencies,
-): Promise<void> {
-  if (args.operation !== "status")
-    throw new Error("initial receipt migration commands are retired");
+async function inspectEventReceipts(deps: Dependencies): Promise<void> {
   const maintenance = await deps.maintenance(),
     control = await deps.control(),
     versionId = await deps.deployment();
@@ -250,9 +225,7 @@ function createSqlDependencies(
         )
       )[0];
       if (!row || !["importing", "active"].includes(String(row.state)))
-        throw new Error(
-          "receipt migration control is missing; apply the additive schema first",
-        );
+        throw new Error("receipt control is missing or invalid");
       return row as Control;
     },
   };
@@ -267,19 +240,12 @@ function createProvider({
 > {
   if (!apiToken)
     throw new Error("Cloudflare authentication is required for receipt status");
-  const require = createRequire(import.meta.url),
-    typescript = require("typescript") as typeof import("typescript");
-  const parsed = typescript.parseConfigFileTextToJson(
-    resolve(ROOT, "cloud/workers/api/wrangler.jsonc"),
-    readFileSync(resolve(ROOT, "cloud/workers/api/wrangler.jsonc"), "utf8"),
-  );
-  const config = record(parsed.config),
-    accountId = config?.account_id;
+  const config = readOperatorConfiguration();
+  const accountId = config.account_id;
   if (
-    parsed.error ||
     typeof accountId !== "string" ||
     !/^[a-f0-9]{32}$/.test(accountId) ||
-    config?.name !== "mons-link-api"
+    config.name !== "mons-link-api"
   )
     throw new Error("invalid tracked API configuration");
   const base = `https://api.cloudflare.com/client/v4/accounts/${accountId}`,
@@ -350,40 +316,10 @@ function createProvider({
   };
 }
 
-async function execute(argv = process.argv.slice(2)): Promise<void> {
-  const args = parseArgs(argv);
-  const apiToken = resolveCloudflareToken();
-  await manageEventTransitionReceipts(
-    args,
-    createSqlDependencies(
-      createWranglerRunner({ apiToken }),
-      createProvider({ apiToken }),
-    ),
-  );
-}
-
 export {
-  parseArgs,
-  parseWorkflow,
-  listWorkflows,
-  createProvider,
-  createSqlDependencies,
-  manageEventTransitionReceipts,
-  execute,
-  type Arguments,
+  inspectEventReceipts,
   type Dependencies,
-  type Workflow,
+  createSqlDependencies,
+  createProvider,
+  listWorkflows,
 };
-
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(resolve(process.argv[1])).href
-)
-  execute().catch((error: unknown) => {
-    console.error(
-      error instanceof Error
-        ? error.message
-        : "receipt status operation failed; inspect status",
-    );
-    process.exitCode = 1;
-  });

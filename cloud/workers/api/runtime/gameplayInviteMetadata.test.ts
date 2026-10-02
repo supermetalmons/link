@@ -1,11 +1,11 @@
-import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { createGameSessionMutationLockStore } from "../src/gameplayCoordinationD1.ts";
+import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { normalizeInviteMetadata } from "../src/inviteMetadata.ts";
-import type { MatchStatePort } from "../src/repositoryContracts.ts";
 import { composeInviteWagerSource } from "../src/inviteWagerSource.ts";
+import type { MatchStatePort } from "../src/repositoryContracts.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 
@@ -213,14 +213,10 @@ describe("gameplay invite metadata reads", () => {
     expect(await repository().readInviteMetadata(inviteId)).toBeNull();
   });
 
-  it.each([
-    ["legacy", "notifyMetadataChanged"],
-    ["bootstrap", "notifySessionCommitted"],
-  ])("notifies a committed %s session once", async (mode, method) => {
+  it("notifies a committed session once", async () => {
     const notifications: string[][] = [];
     const workerEnv = new Proxy(env, {
       get(target, property, receiver) {
-        if (property === "AUTOMATCH_DELIVERY_MODE") return mode;
         if (property === "INVITE_REACTIONS") {
           return {
             getByName: (roomId: string) => {
@@ -262,7 +258,9 @@ describe("gameplay invite metadata reads", () => {
       await locks.release(lock, "notification-owner");
     }
     expect(await gameplay.readInviteMetadata(inviteId)).toEqual(source);
-    expect(notifications).toEqual([[method, inviteId, inviteId]]);
+    expect(notifications).toEqual([
+      ["notifySessionCommitted", inviteId, inviteId],
+    ]);
   });
 
   it("preserves explicit password presence and malformed field values", async () => {

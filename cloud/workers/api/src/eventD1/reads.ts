@@ -62,7 +62,7 @@ export async function readSelections(
     prize_id: string;
     profile_id: string;
   }>();
-  return selectionsFromRows(eventId, rows.results);
+  return selectionsFromRows(rows.results);
 }
 
 export function prepareSelectionsRead(
@@ -124,7 +124,6 @@ export async function readEventPrizeSelections(
 }
 
 export function selectionsFromRows(
-  eventId: string,
   rows: Array<{ prize_id: string; profile_id: string }>,
 ): Record<string, string> {
   const selections: Record<string, string> = {};
@@ -227,7 +226,6 @@ export async function readStoredEventSnapshotIfChanged(
       eventId: normalizedEventId,
       pendingTransitionId: state.pendingTransitionId,
       prizeSelections: selectionsFromRows(
-        normalizedEventId,
         results[1].results as Array<{ prize_id: string; profile_id: string }>,
       ),
       revision: state.revision,

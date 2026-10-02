@@ -6,15 +6,15 @@ const { parseArgs, smokeReactions } =
     parseArgs: (argv: string[]) => {
       baseUrl: string;
       inviteId: string;
-      matchId?: string;
+      matchId: string;
     };
     smokeReactions: (
-      options: { baseUrl: string; inviteId: string; matchId?: string },
+      options: { baseUrl: string; inviteId: string; matchId: string },
       dependencies: {
         connect: (
           url: string,
           options: import("ws").ClientOptions,
-          protocol?: string,
+          protocol: string,
         ) => import("ws").WebSocket;
         log: (message: string) => void;
         setTimeout: typeof setTimeout;
@@ -23,7 +23,11 @@ const { parseArgs, smokeReactions } =
     ) => Promise<void>;
   };
 
-const OPTIONS = { baseUrl: "https://api.mons.link", inviteId: "invite1" };
+const OPTIONS = {
+  baseUrl: "https://api.mons.link",
+  inviteId: "invite1",
+  matchId: "invite1",
+};
 const REACTION = {
   uuid: "12345678-1234-4000-8000-123456789012",
   kind: "yo",
@@ -31,9 +35,10 @@ const REACTION = {
   matchId: "invite1",
 };
 const SNAPSHOT = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   type: "snapshot",
   reactions: { host: REACTION },
+  presentation: { matchId: "invite1", players: {} },
 };
 
 class FakeSocket extends EventEmitter {
@@ -66,7 +71,7 @@ function harness(
   const requests: {
     url: string;
     options: import("ws").ClientOptions;
-    protocol?: string;
+    protocol: string;
   }[] = [];
   const logs: string[] = [];
   const timers = new Map<NodeJS.Timeout, () => void>();
@@ -74,7 +79,7 @@ function harness(
     connect: (
       url: string,
       options: import("ws").ClientOptions,
-      protocol?: string,
+      protocol: string,
     ) => {
       requests.push({ url, options, protocol });
       const socket = new FakeSocket();
@@ -97,12 +102,24 @@ function harness(
   return { dependencies, sockets, requests, logs, timers };
 }
 
-test("requires an explicit paired invite and limits smoke targets", () => {
+test("requires an explicit paired invite and match and limits smoke targets", () => {
+  assert.throws(
+    () =>
+      parseArgs([
+        "--base-url",
+        OPTIONS.baseUrl,
+        "--invite-id",
+        OPTIONS.inviteId,
+      ]),
+    /Usage:/,
+  );
   assert.deepEqual(
     parseArgs([
       "--base-url",
       "https://api.mons.link/",
       "--invite-id",
+      "invite1",
+      "--match-id",
       "invite1",
     ]),
     OPTIONS,
@@ -113,6 +130,8 @@ test("requires an explicit paired invite and limits smoke targets", () => {
       "invite1",
       "--base-url",
       "https://abcd1234-mons-link-api.lil-org.workers.dev",
+      "--match-id",
+      "invite1",
     ]).baseUrl,
     "https://abcd1234-mons-link-api.lil-org.workers.dev",
   );
@@ -148,7 +167,10 @@ test("requires an explicit paired invite and limits smoke targets", () => {
     ],
     ["--base-url", "https://api.mons.link:443/path", "--invite-id", "invite1"],
   ]) {
-    assert.throws(() => parseArgs(args), /Usage:/);
+    assert.throws(
+      () => parseArgs([...args, "--match-id", "invite1"]),
+      /Usage:/,
+    );
   }
 });
 
@@ -159,7 +181,7 @@ test("verifies a public snapshot, heartbeat and reconnect without publishing", a
       "message",
       Buffer.from(
         JSON.stringify({
-          schemaVersion: 1,
+          schemaVersion: 2,
           type: "reaction",
           senderUid: "guest",
           reaction: REACTION,
@@ -173,13 +195,13 @@ test("verifies a public snapshot, heartbeat and reconnect without publishing", a
   for (const request of state.requests) {
     assert.equal(
       request.url,
-      "wss://api.mons.link/invites/invite1/reactions/socket",
+      "wss://api.mons.link/invites/invite1/reactions/socket?matchId=invite1",
     );
     assert.deepEqual(request.options, {
       origin: "https://mons.link",
       followRedirects: false,
       handshakeTimeout: 10_000,
-      maxPayload: 4096,
+      maxPayload: 16_384,
       perMessageDeflate: false,
     });
   }
@@ -215,12 +237,12 @@ test("rejects malformed, binary, oversized and out-of-order messages", async () 
   for (const fixture of [
     { value: "not-json" },
     { value: "pong" },
-    { value: JSON.stringify({ ...SNAPSHOT, schemaVersion: 2 }) },
+    { value: JSON.stringify({ ...SNAPSHOT, schemaVersion: 1 }) },
     { value: JSON.stringify(SNAPSHOT), binary: true },
-    { value: "x".repeat(4097) },
+    { value: "x".repeat(16_385) },
     {
       value: JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         type: "reaction",
         senderUid: "host",
         reaction: REACTION,
@@ -417,7 +439,13 @@ test("rejects foreign presentation, missing v2 negotiation, and v1 downgrade", a
       },
       protocol: "",
     },
-    { message: SNAPSHOT },
+    {
+      message: {
+        schemaVersion: 1,
+        type: "snapshot",
+        reactions: SNAPSHOT.reactions,
+      },
+    },
   ]) {
     const state = harness((socket) => {
       if (fixture.protocol !== undefined) socket.protocol = fixture.protocol;

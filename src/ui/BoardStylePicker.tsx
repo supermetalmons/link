@@ -116,25 +116,6 @@ const decodeBoardPreview = (styleSet: PictureBoardStyleSet, url: string) => {
   return cache.promise;
 };
 
-const preloadBoardPreview = (styleSet: PictureBoardStyleSet) => {
-  if (
-    boardPreviewDecodeCaches[styleSet].decoded ||
-    typeof window === "undefined"
-  ) {
-    return;
-  }
-  getBoardPreviewUrl(styleSet)
-    .then((url) => {
-      if (!url) return;
-      return decodeBoardPreview(styleSet, url);
-    })
-    .catch(() => {});
-};
-
-export const preloadPangchiuBoardPreview = () => {
-  PICTURE_BOARD_STYLE_SETS.forEach(preloadBoardPreview);
-};
-
 const BoardStylePicker = styled.div`
   position: fixed;
   bottom: calc(

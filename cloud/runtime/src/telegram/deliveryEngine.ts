@@ -1228,7 +1228,6 @@ const createTelegramDeliveryEngine: (input: TelegramEngineOptions) => {
     ownerToken,
     revision,
     requestedGeneration,
-    apiGateReclaimOwner,
   }: {
     messageKey: string;
     ownerToken: string;

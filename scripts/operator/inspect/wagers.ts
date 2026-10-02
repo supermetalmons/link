@@ -1,10 +1,6 @@
-import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
-import { createWranglerRunner, type SqlRunner } from "./operator/runtime.ts";
+import type { SqlRunner } from "../runtime.ts";
 
 type JsonRecord = Record<string, unknown>;
-
-type Arguments = { operation: "status" };
 
 type Counts = {
   rowCount: number;
@@ -58,20 +54,7 @@ function integer(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) >= 0;
 }
 
-function parseArgs(argv: string[]): Arguments {
-  if (argv.length !== 1 || argv[0] !== "--status")
-    throw new Error(
-      "wager state supports only --status; initial migration commands are retired",
-    );
-  return { operation: "status" };
-}
-
-async function manageWagerState(
-  args: Arguments,
-  dependencies: Dependencies,
-): Promise<void> {
-  if (args.operation !== "status")
-    throw new Error("initial wager migration commands are retired");
+async function inspectWagers(dependencies: Dependencies): Promise<void> {
   dependencies.log({
     operation: "status",
     maintenance: await dependencies.readMaintenance(),
@@ -83,9 +66,7 @@ async function manageWagerState(
 function parseActivation(value: unknown): Activation {
   const row = record(value);
   if (!row || (row.activation_epoch !== 0 && row.activation_epoch !== 1))
-    throw new Error(
-      "missing or invalid wager state activation control; apply the reviewed schema while frozen first",
-    );
+    throw new Error("missing or invalid wager state activation control");
   const nullableString = (key: string) => {
     if (row[key] === null) return null;
     if (typeof row[key] !== "string" || !row[key])
@@ -188,31 +169,9 @@ function createSqlDependencies(run: SqlRunner, now = Date.now): Dependencies {
   };
 }
 
-async function execute(argv = process.argv.slice(2)): Promise<void> {
-  const args = parseArgs(argv);
-  await manageWagerState(args, createSqlDependencies(createWranglerRunner()));
-}
-
 export {
-  parseArgs,
-  parseActivation,
-  createSqlDependencies,
-  manageWagerState,
-  execute,
-  type Arguments,
+  inspectWagers,
   type Dependencies,
-  type Activation,
+  createSqlDependencies,
+  parseActivation,
 };
-
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(resolve(process.argv[1])).href
-)
-  execute().catch((error: unknown) => {
-    console.error(
-      error instanceof Error
-        ? error.message
-        : "wager state operation failed; inspect status",
-    );
-    process.exitCode = 1;
-  });

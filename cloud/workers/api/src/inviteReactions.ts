@@ -1,34 +1,38 @@
-import { DurableObject } from "cloudflare:workers";
-import { ensureInviteRoomSchema } from "./inviteRoomSchema.ts";
+import type {
+  MatchPresentationSnapshot,
+  UpdateMatchPresentationRequest,
+} from "@mons/shared/match-presentation";
 import {
   REACTION_HEARTBEAT_REQUEST,
   REACTION_HEARTBEAT_RESPONSE,
   type InviteReaction,
 } from "@mons/shared/reactions";
-import type {
-  MatchPresentationSnapshot,
-  UpdateMatchPresentationRequest,
-} from "@mons/shared/match-presentation";
+import { DurableObject } from "cloudflare:workers";
+import { canReceiveInvite, InviteChannelsRoom } from "./inviteChannelsRoom.ts";
 import type { InviteMetadataReadResult } from "./inviteMetadata.ts";
+import { ensureInviteRoomSchema } from "./inviteRoomSchema.ts";
 import type { InviteWagersReadResult } from "./inviteWagers.ts";
-import { InviteChannelsRoom, canReceiveInvite } from "./inviteChannelsRoom.ts";
 import {
   MatchPresentationStore,
-  type MatchPresentationSeeds,
   type MatchPresentationUpdateResult,
 } from "./matchPresentationStore.ts";
 
+import { createMatchTimerStartStore } from "./gameplayCoordinationD1.ts";
+import { InviteAlarmCoordinator } from "./inviteAlarmCoordinator.ts";
 import { createInviteSourceReader } from "./inviteSource.ts";
-import {
-  createWagerStateD1Store,
-  type WagerStateSnapshot,
-} from "./wagerStateD1.ts";
-import { MatchSyncRoom } from "./matchSyncRoom.ts";
-import type { MatchSyncReadResult } from "./matchSync.ts";
-import { MatchStateStore } from "./matchStateStore.ts";
 import { parseNewMatchTimerStorage } from "./localMatchTimerStore.ts";
+import {
+  createMatchEffectDelivery,
+  MatchEffectsDispatcher,
+} from "./matchEffectsDispatcher.ts";
+import {
+  listMatchPresentationRegistrations,
+  type MatchPresentationRegistration,
+  type MatchPresentationSeedRegistration,
+  type RegisteredMatchPresentationSnapshot,
+} from "./matchPresentationRegistry.ts";
 import { captureMatchStateRpc, type MatchStateRpc } from "./matchStateRpc.ts";
-import { MAX_MATCH_STATE_RECORD_READS } from "./matchStateTypes.ts";
+import { MatchStateStore } from "./matchStateStore.ts";
 import type {
   MatchStateClaimTimerRequest,
   MatchStateCreateRequest,
@@ -40,31 +44,23 @@ import type {
   MatchStateStartTimerRequest,
   MatchStateSurrenderRequest,
 } from "./matchStateTypes.ts";
-import { createMatchTimerStartStore } from "./gameplayCoordinationD1.ts";
-import {
-  createMatchEffectDelivery,
-  MatchEffectsDispatcher,
-} from "./matchEffectsDispatcher.ts";
-import {
-  listMatchPresentationRegistrations,
-  type MatchPresentationRegistration,
-  type MatchPresentationSeedRegistration,
-  type RegisteredMatchPresentationSnapshot,
-} from "./matchPresentationRegistry.ts";
-import { SocketSessions } from "./socketSession.ts";
-import { socketCapacityFull } from "./socketCapacity.ts";
-import { InviteAlarmCoordinator } from "./inviteAlarmCoordinator.ts";
+import { MAX_MATCH_STATE_RECORD_READS } from "./matchStateTypes.ts";
+import type { MatchSyncReadResult } from "./matchSync.ts";
+import { MatchSyncRoom } from "./matchSyncRoom.ts";
 import {
   ReactionChannel,
   type InviteReactionPublishResult,
 } from "./reactionChannel.ts";
+import { socketCapacityFull } from "./socketCapacity.ts";
+import { SocketSessions } from "./socketSession.ts";
+import {
+  createWagerStateD1Store,
+  type WagerStateSnapshot,
+} from "./wagerStateD1.ts";
 
 export type { InviteReactionPublishResult } from "./reactionChannel.ts";
 
-export type {
-  MatchPresentationSeeds,
-  MatchPresentationUpdateResult,
-} from "./matchPresentationStore.ts";
+export type { MatchPresentationUpdateResult } from "./matchPresentationStore.ts";
 
 export const MAX_INVITE_REACTION_SOCKETS = 256;
 export const MAX_INVITE_REACTION_SPECTATORS = 248;
@@ -387,19 +383,6 @@ export class InviteReactions
     return this.reactions.publish(senderUid, reaction);
   }
 
-  async ensurePresentations(
-    matchId: string,
-    seeds: MatchPresentationSeeds,
-  ): Promise<MatchPresentationSnapshot> {
-    return this.presentations.ensurePresentations(matchId, seeds);
-  }
-
-  async getPresentationSnapshot(
-    matchId: string,
-  ): Promise<MatchPresentationSnapshot> {
-    return this.presentations.getPresentationSnapshot(matchId);
-  }
-
   async registerPresentationSeeds(
     inviteId: string,
     seeds: MatchPresentationSeedRegistration[],
@@ -424,13 +407,6 @@ export class InviteReactions
     actorUids: string[],
   ): Promise<MatchPresentationSnapshot> {
     return this.presentations.freezeRegisteredPresentations(matchId, actorUids);
-  }
-
-  async freezePresentations(
-    matchId: string,
-    seeds: MatchPresentationSeeds,
-  ): Promise<MatchPresentationSnapshot> {
-    return this.presentations.freezePresentations(matchId, seeds);
   }
 
   async updatePresentation(

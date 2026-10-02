@@ -48,9 +48,6 @@ declare function isSessionBootstrapFailure(
   value: unknown,
 ): value is SessionBootstrapFailure;
 declare function isSessionBootstrap(value: unknown): value is SessionBootstrap;
-declare function isSessionBootstrapResponse(
-  value: unknown,
-): value is SessionBootstrapResponse;
 declare function isSessionIdentityBootstrap(
   value: unknown,
 ): value is SessionIdentityBootstrap;
@@ -60,9 +57,6 @@ declare function isSessionEventBootstrapTarget(
 declare function isSessionEventBootstrap(
   value: unknown,
 ): value is SessionEventBootstrap;
-declare function isSessionEventBootstrapResponse(
-  value: unknown,
-): value is SessionEventBootstrapResponse;
 export {
   SESSION_BOOTSTRAP_MAX_RESPONSE_BYTES,
   SESSION_BOOTSTRAP_REQUEST_TIMEOUT_MS,
@@ -72,8 +66,6 @@ export {
   isSessionBootstrapTarget,
   isSessionBootstrapFailure,
   isSessionBootstrap,
-  isSessionBootstrapResponse,
   isSessionEventBootstrapTarget,
   isSessionEventBootstrap,
-  isSessionEventBootstrapResponse,
 };

@@ -112,3 +112,5 @@ export const showShinyCard = async (profile: PlayerProfile, name: string) => {
 };
 export const getStashedPlayerProfile = (id: string) =>
   environment.stashedProfiles[id];
+
+export const showsShinyCardSomewhere = false;

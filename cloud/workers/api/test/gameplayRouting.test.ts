@@ -1,16 +1,18 @@
-import { gameplayTestPort } from "./gameSessionTestPorts.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import {
-  readGameplayBody,
-  type GameplayRouteDependencies,
-} from "../src/gameplayRoute.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import { type GameplayRouteDependencies } from "../src/gameplayRoute.ts";
+import { prepareGameplayRoute } from "../src/gameplayRoutes/definition.ts";
+import { matchRoutes } from "../src/gameplayRoutes/matches.ts";
+import { ratingRoutes } from "../src/gameplayRoutes/ratings.ts";
+import { navigationRoutes } from "../src/gameplayRoutes/navigation.ts";
+import { wagerRoutes } from "../src/gameplayRoutes/wagers.ts";
 import type { RatingRepository } from "../src/ratingContracts.ts";
 import { handleRequest } from "../src/router.ts";
-import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
 import { createAutomatchPersistenceStub } from "./automatchPersistenceTestUtils.ts";
+import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
+import { gameplayTestPort } from "./gameSessionTestPorts.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const operationId = "00000000-0000-4000-8000-000000000001";
@@ -887,7 +889,17 @@ test("gameplay request normalization preserves trimmed identifiers and domain pa
         ]),
       );
       assert.deepEqual(
-        await readGameplayBody(request(entry.path, padded), entry.path),
+        (
+          await prepareGameplayRoute(
+            request(entry.path, padded),
+            [
+              ...matchRoutes,
+              ...ratingRoutes,
+              ...navigationRoutes,
+              ...wagerRoutes,
+            ].find((route) => route.path === entry.path)!,
+          )
+        ).body,
         entry.body,
       );
     });

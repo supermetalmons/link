@@ -3,15 +3,15 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
-  EVENT_LOCK_ROOT,
   EVENT_LOCK_REFRESH_INTERVAL_MS,
   EVENT_LOCK_TTL_MS,
   createEventLockManagerCore,
   withEventLease,
 } = require("../runtime/events/lockManagerCore");
 const {
+  EVENT_LOCK_ROOT,
   runStateDecisionTransaction,
-} = require("../runtime/stateDecisionTransaction");
+} = require("./legacyStateFixture");
 
 const { eventTestLeasePath } = require("../workers/api/test/eventTestPorts.ts");
 

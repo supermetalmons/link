@@ -25,7 +25,6 @@ type ProfileCustomizationPolicyDependencies = {
 
 function inventoryRequirement(
   request: ProfileCustomizationUpdateRequest,
-  profile: ProfileCustomizationProfile,
 ): InventoryRequirement | null {
   if (request.field === "emojiAndAura" && request.value.emoji >= 1000) {
     return {
@@ -73,7 +72,7 @@ export async function authorizeProfileCustomization(
   dependencies: ProfileCustomizationPolicyDependencies = {},
 ): Promise<void> {
   dependencies.signal?.throwIfAborted();
-  const requirement = inventoryRequirement(request, profile);
+  const requirement = inventoryRequirement(request);
   if (!requirement) {
     return;
   }

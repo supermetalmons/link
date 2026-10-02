@@ -16,7 +16,7 @@ Preserve existing login IDs, applied SQL migrations, immutable snapshots, import
 
 ## Browser sessions and profile recovery
 
-Persistent browser sessions use five-minute Worker access tokens. Refresh and revocation are coordinated in D1. Session creation and refresh accept `bootstrapIdentity=1`, independently of game or event bootstrap parameters, to return the full verified public profile from one read-only canonical lookup. An authoritative missing owner returns `profile: null`; unavailable enrichment preserves the session token. `GET /auth/identity` retries profile reads without repair writes. `POST /auth/profile/sync` retains explicit repair and legacy restoration behavior, including the exceptional Apple/X missing-username repair. The legacy `POST /auth/profile-claim/sync` URL remains a compatibility alias.
+Persistent browser sessions use five-minute Worker access tokens. Refresh and revocation are coordinated in D1. Session creation and refresh accept `bootstrapIdentity=1`, independently of game or event bootstrap parameters, to return the full verified public profile from one read-only canonical lookup. An authoritative missing owner returns `profile: null`; unavailable enrichment preserves the session token. `GET /auth/identity` retries profile reads without repair writes. `POST /auth/profile/sync` provides explicit canonical profile repair and restoration, including the exceptional Apple/X missing-username repair.
 
 Browser DevTools exposes `auth:restore-start`, `auth:local-ready`, `auth:session-ready`, `auth:identity-ready`, and `auth:name-committed` marks. `auth:name-visible` is a guarded two-animation-frame approximation after the verified label commits, not an exact paint measurement. Session responses expose `session`, `identity` when requested, and `total` in `Server-Timing`, alongside existing game/event phases. No timing telemetry is uploaded.
 
@@ -43,7 +43,7 @@ JOIN profile_auth_recovery_jobs AS jobs USING (profile_id)
 ORDER BY quarantine.quarantined_at_ms, quarantine.profile_id;
 ```
 
-Apply migration `0017_auth_recovery_quarantine.sql` with canonical profile writes frozen. Repair quarantined data only under the canonical profile maintenance procedure below, preserving job IDs, source IDs, and existing replay cursors. A reviewed repair must bump the canonical job revision so recovery can reconsider it; do not manually edit active rows or clear markers to force retries.
+Repair quarantined data only under the canonical profile maintenance procedure below, preserving job IDs, source IDs, and existing replay cursors. A reviewed repair must bump the canonical job revision so recovery can reconsider it; do not manually edit active rows or clear markers to force retries.
 
 ## Setup
 
@@ -90,10 +90,10 @@ npm run manage:match-state -- --status
 npm run manage:match-state -- --inspect-admissions --directory <new-private-output-directory>
 npm run manage:invite-source -- --status
 npm run manage:automatch-state -- --status
-npm run manage:login-match-discovery -- --status
-npm run manage:match-presentations -- --status
-npm run manage:wager-state -- --status
-npm run manage:event-transition-receipts -- --status
+npm run inspect:state -- --domain match-discovery
+npm run inspect:state -- --domain match-presentations
+npm run inspect:state -- --domain wagers
+npm run inspect:state -- --domain event-receipts
 ```
 
 Match inspection reads its import identity from D1 and writes an immutable protected report; original migration files are not required. Completed migration phases and source-proof operations are rejected. Invite and automatch inspection/reconciliation retain exact canonical-record evidence and current D1 recovery safeguards. Do not clear unexplained admissions or locks.
@@ -104,7 +104,7 @@ Invite metadata uses `/invites/:inviteId/metadata` and its `mons-invite-metadata
 
 Paired invites allow spectators. Pending open invites require authentication; pending private invites require canonical host ownership. Metadata never exposes passwords, another login's operation ID, or private wager bookkeeping. The browser discards stale revisions and recovers through bounded HTTP reads when sockets are unavailable.
 
-Reaction v1 and presentation v2 retain their protocol contracts and hibernating attachments. Registered actor existence and canonical Durable Object state are required for appearance reads. Appearance updates preserve operation-ID replay and expected revisions; immutable historical appearances do not change when live cosmetics change.
+Reaction and presentation sockets use `mons-reactions-v2` with an explicit match ID. Existing v2 hibernating attachments remain valid; retired v1 reaction sockets close on their next room wake without changing stored reactions. Metadata, wager, and match sockets retain their separate protocols. Registered actor existence and canonical Durable Object state are required for appearance reads. Appearance updates preserve operation-ID replay and expected revisions; immutable historical appearances do not change when live cosmetics change.
 
 Match mutations notify subscribers immediately; the server checks for missed match notifications every five seconds. HTTP cache freshness and browser fallback retain their one-second interval. The shared alarm handles session expiry and socket refreshes before delivering pending durable effects. Timer claims return after their durable commit and notification scheduling; downstream delivery runs through the alarm. Preserve its namespace, records, revisions, and per-channel ownership. `smoke:invite-lifecycle`, `smoke:reactions`, and `smoke:invite-metadata` verify the corresponding canonical behavior. Lifecycle checks own their temporary sessions and games and clean them up.
 
@@ -128,7 +128,7 @@ Prize withdrawals retain D1 leases, destination identity, signed transaction byt
 
 Event Telegram projection runs through `mons-link-telegram-projection`. Every supported API or Workflow mutation writes `EVENT_DB.event_telegram_projection_outboxes` and increments the generation in `event_telegram_projection_state` atomically with the event update. The five-minute Worker schedule recovers pending markers; all event mutations pass through the canonical Worker repository.
 
-Event creation accepts `telegramAnnouncements` with three required booleans: `invite` sends the initial invite, `matches` sends event start and match updates, and `results` sends final results. The creation UI defaults all three to false. These settings take precedence over the legacy `announceOnTelegram` boolean, which still maps to all three options for older requests and records. Release API support before the frontend that sends these settings; no database migration is needed.
+Event creation accepts `telegramAnnouncements` with three required booleans: `invite` sends the initial invite, `matches` sends event start and match updates, and `results` sends final results. The creation UI defaults all three to false. Omitting the settings defaults all three to false. New requests reject `announceOnTelegram`; historical stored records still decode that boolean when the current settings are absent.
 
 When `invite` is false, joins and postponements cannot send an invite. A confirmed delivery receipt for `event:<event-id>:upcoming`, with instance `event:<event-id>:upcoming:v2` and destination `community`, permits edit-only updates; a missing message is never replaced automatically. Manual invite sending remains a separate future operation. That sender must record the canonical delivery receipt and enqueue event projection after confirmation to refresh participants immediately; otherwise the next event mutation picks it up. Start/match updates and final results work independently of invite delivery.
 

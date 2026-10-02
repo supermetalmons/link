@@ -1,20 +1,7 @@
-import type { TransactionDecision } from "./transactions.js";
-
-const asCurrentValue = <T>(value: T | undefined) =>
-  value === undefined ? null : value;
-
-type DecisionOutput<T> =
-  | { commit: false; decision?: string }
-  | { commit: true; value: T | null; decision?: string };
-
-const validateDecisionOutput = <T>(
-  input: TransactionDecision<T>,
-): DecisionOutput<T> => {
-  const output = input as {
-    commit?: unknown;
-    value?: T | null;
-    decision?: string;
-  };
+"use strict";
+const asCurrentValue = (value) => (value === undefined ? null : value);
+const validateDecisionOutput = (input) => {
+  const output = input;
   if (!output || typeof output !== "object" || Array.isArray(output)) {
     throw new TypeError("State transaction decision must return an object");
   }
@@ -37,25 +24,14 @@ const validateDecisionOutput = <T>(
     decision: output.decision,
   };
 };
-
-export type StateTransactionReference<T> = {
-  transaction(
-    update: (current: T | null | undefined) => T | null,
-  ): Promise<{ committed?: boolean; value?: T | null } | null | undefined>;
-};
-
-export const runStateDecisionTransaction = async <T>(
-  reference: StateTransactionReference<T>,
-  decide: (current: T | null) => TransactionDecision<T>,
-) => {
+const runStateDecisionTransaction = async (reference, decide) => {
   if (!reference || typeof reference.transaction !== "function") {
     throw new TypeError("reference.transaction is required");
   }
   if (typeof decide !== "function") {
     throw new TypeError("transaction decision callback is required");
   }
-
-  let finalOutput: DecisionOutput<T> | undefined;
+  let finalOutput;
   const result = await reference.transaction((current) => {
     const normalizedCurrent = asCurrentValue(current);
     finalOutput = validateDecisionOutput(decide(normalizedCurrent));
@@ -70,3 +46,4 @@ export const runStateDecisionTransaction = async <T>(
     value: result?.value ?? null,
   };
 };
+module.exports = { runStateDecisionTransaction, EVENT_LOCK_ROOT: "eventLocks" };

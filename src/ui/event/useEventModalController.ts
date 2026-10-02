@@ -4,7 +4,6 @@ import {
 } from "@mons/shared/event-prizes";
 import { isMonsLinkAdmin } from "@mons/shared/events";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { EventRecord } from "../../connection/connectionModels";
 import { storage } from "../../utils/storage";
 import { EMPTY_EVENT_PRIZES } from "./eventLayout";
 import {
@@ -21,28 +20,27 @@ import { useEventParticipantCard } from "./useEventParticipantCard";
 import { useEventPrizeSelection } from "./useEventPrizeSelection";
 import { useEventProfileIds } from "./useEventProfileIds";
 
-export function useEventModalController(devStubRecord: EventRecord | null) {
+export function useEventModalController() {
   const [modalState, setModalState] = useState(() => getEventModalState());
   const participantLookupModalStateRef = useRef(modalState);
-  const lifecycle = useEventModalLifecycle({ modalState, devStubRecord });
+  const lifecycle = useEventModalLifecycle({ modalState });
   const { eventRecord, isLoading, isEventFresh, nowMs } = lifecycle;
-  const displayedEventRecord = devStubRecord ?? eventRecord;
   const eventPrizeConfig = getEventPrizeConfig(modalState.eventId);
   const eventPrizes = eventPrizeConfig?.prizes ?? EMPTY_EVENT_PRIZES;
   const areEventPrizesConcealed = !isEventPrizeRevealOpen(
-    displayedEventRecord?.status,
-    displayedEventRecord?.startAtMs,
+    eventRecord?.status,
+    eventRecord?.startAtMs,
     nowMs,
   );
   const currentProfileId = storage.getProfileId("");
   const currentLoginUid = storage.getLoginId("");
   const participantsById = useMemo(
-    () => displayedEventRecord?.participants ?? {},
-    [displayedEventRecord],
+    () => eventRecord?.participants ?? {},
+    [eventRecord],
   );
   const participants = useMemo(
-    () => getSortedParticipants(displayedEventRecord),
-    [displayedEventRecord],
+    () => getSortedParticipants(eventRecord),
+    [eventRecord],
   );
   const prizeSelection = useEventPrizeSelection({
     eventId: modalState.eventId,
@@ -59,9 +57,7 @@ export function useEventModalController(devStubRecord: EventRecord | null) {
   } = prizeSelection;
   const { profileIds: eventProfileIds, pending: isResolvingEventProfileIds } =
     useEventProfileIds(
-      !devStubRecord && eventRecord?.status === "scheduled"
-        ? eventRecord
-        : null,
+      eventRecord?.status === "scheduled" ? eventRecord : null,
       currentProfileId,
       currentLoginUid,
       modalState,
@@ -93,17 +89,16 @@ export function useEventModalController(devStubRecord: EventRecord | null) {
   const eventUiState = useMemo(
     () =>
       getCurrentUiState(
-        displayedEventRecord,
+        eventRecord,
         currentProfileId,
         currentLoginUid,
         eventProfileIds,
       ),
-    [currentLoginUid, currentProfileId, displayedEventRecord, eventProfileIds],
+    [currentLoginUid, currentProfileId, eventRecord, eventProfileIds],
   );
   const watchableMatch = useMemo(
-    () =>
-      getWatchableMatch(displayedEventRecord, currentProfileId, eventUiState),
-    [currentProfileId, displayedEventRecord, eventUiState],
+    () => getWatchableMatch(eventRecord, currentProfileId, eventUiState),
+    [currentProfileId, eventRecord, eventUiState],
   );
   const currentUsername = storage.getUsername("").trim().toLowerCase();
   const canManageDisqualifications = isMonsLinkAdmin(currentUsername);
@@ -116,7 +111,6 @@ export function useEventModalController(devStubRecord: EventRecord | null) {
   const actions = useEventModalActions({
     modalState,
     eventRecord,
-    devStubRecord,
     isEventFresh,
     isLoading,
     nowMs,
@@ -152,7 +146,7 @@ export function useEventModalController(devStubRecord: EventRecord | null) {
   ]);
 
   return {
-    session: { modalState, ...lifecycle, displayedEventRecord },
+    session: { modalState, ...lifecycle },
     identity: {
       currentProfileId,
       currentLoginUid,

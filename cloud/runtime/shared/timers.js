@@ -5,7 +5,6 @@ exports.isStartMatchTimerResponse =
   exports.isStartMatchTimerRequest =
   exports.isClaimMatchVictoryByTimerResponse =
   exports.isClaimMatchVictoryByTimerRequest =
-  exports.isMatchTimerTerminal =
   exports.parseStrictMatchTimer =
   exports.parseMatchTimer =
   exports.formatMatchTimer =
@@ -54,8 +53,6 @@ const parseMatchTimer = (value) => {
   };
 };
 exports.parseMatchTimer = parseMatchTimer;
-const isMatchTimerTerminal = (value) => value === MATCH_TIMER_TERMINAL;
-exports.isMatchTimerTerminal = isMatchTimerTerminal;
 const parseStrictMatchTimer = (value) => {
   if (typeof value !== "string" || !/^\d+;\d+$/.test(value)) {
     return null;

@@ -122,7 +122,6 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   assert.deepEqual(Object.keys(config.vars || {}).sort(), [
     "APPLE_AUDIENCES",
     "AUTH_MUTATIONS_DISABLED",
-    "AUTOMATCH_DELIVERY_MODE",
     "EVENT_DB_BOOKMARK_EPOCH",
     "NEW_MATCH_TIMER_STORAGE",
   ]);
@@ -134,10 +133,6 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   assert.equal(config.vars?.APPLE_AUDIENCES, "link.mons");
   assert.match(config.vars?.AUTH_MUTATIONS_DISABLED || "", /^(?:true|false)$/);
   assert.match(config.vars?.NEW_MATCH_TIMER_STORAGE || "", /^(?:d1|local)$/);
-  assert.match(
-    config.vars?.AUTOMATCH_DELIVERY_MODE || "",
-    /^(?:legacy|bootstrap)$/,
-  );
   assert.equal(config.vars?.FIREBASE_RTDB_URL, undefined);
   assert.deepEqual(config.d1_databases, [
     {
@@ -427,6 +422,7 @@ test("package manifests preserve public scripts and deployment command vectors",
     "check:all",
     "recover:telegram",
     "repo-clean",
+    "inspect:state",
     "format",
     "format:check",
     "deploy",
@@ -739,6 +735,7 @@ test("operations documentation keeps candidate releases and canonical recovery e
   );
   for (const command of [
     "manage:events",
+    "inspect:state",
     "manage:wager-reservations",
     "manage:event-prize-withdrawals",
     "manage:profile-canonical",
@@ -757,14 +754,14 @@ test("operations documentation keeps candidate releases and canonical recovery e
     );
 });
 
-test("profile synchronization uses the D1 Worker route and preserves the legacy alias", () => {
+test("profile synchronization uses only the canonical Worker route", () => {
   const authApi = readText("src/services/authApi.ts");
   const authRoutes = readText("cloud/workers/api/src/authRoutes.ts");
 
   assert.match(authApi, /\/auth\/profile\/sync/);
   assert.doesNotMatch(authApi, /\/auth\/profile-claim\/sync/);
   assert.match(authRoutes, /pathname === "\/auth\/profile\/sync"/);
-  assert.match(authRoutes, /pathname === "\/auth\/profile-claim\/sync"/);
+  assert.doesNotMatch(authRoutes, /\/auth\/profile-claim\/sync/);
 });
 
 test("browser customization and prize selection mutations use Worker routes", () => {

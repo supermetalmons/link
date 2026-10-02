@@ -1,34 +1,38 @@
-import { gameplayTestPort } from "../test/gameSessionTestPorts.ts";
-import { socketTestIdentity } from "../test/socketTestSession.ts";
-import { env } from "cloudflare:workers";
+import {
+  PRESENTATION_MAX_MESSAGE_BYTES,
+  isMatchPresentationSnapshot,
+  type UpdateMatchPresentationRequest,
+} from "@mons/shared/match-presentation";
+import {
+  REACTION_AUTH_PROTOCOL_PREFIX,
+  REACTION_HEARTBEAT_REQUEST,
+  REACTION_HEARTBEAT_RESPONSE,
+  REACTION_SOCKET_PROTOCOL,
+  isInviteRoomMessage,
+} from "@mons/shared/reactions";
 import {
   applyD1Migrations,
   evictDurableObject,
   runInDurableObject,
   type D1Migration,
 } from "cloudflare:test";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import {
-  REACTION_AUTH_PROTOCOL_PREFIX,
-  REACTION_HEARTBEAT_REQUEST,
-  REACTION_HEARTBEAT_RESPONSE,
-  REACTION_SOCKET_PROTOCOL,
-  REACTION_SOCKET_PROTOCOL_V2,
-  isInviteRoomMessage,
-} from "@mons/shared/reactions";
-import {
-  PRESENTATION_MAX_MESSAGE_BYTES,
-  isMatchPresentationSnapshot,
-  type UpdateMatchPresentationRequest,
-} from "@mons/shared/match-presentation";
+import { env } from "cloudflare:workers";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
-import { handleRequest } from "../src/router.ts";
-import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
-import { activateDurableMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
 import {
   buildMatchPresentationRegistrationStatements,
   prepareCreatedMatchPresentations,
 } from "../src/matchPresentationRegistry.ts";
+import { handleRequest } from "../src/router.ts";
+import { gameplayTestPort } from "../test/gameSessionTestPorts.ts";
+import { socketTestIdentity } from "../test/socketTestSession.ts";
+import { activateDurableMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
+import {
+  readStoredPresentations,
+  registerTestPresentations,
+  reactionSocketTestHeaders,
+} from "./presentationStorageFixture.ts";
+import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
 beforeAll(async () => {
   const testEnv = env as Env & {
@@ -53,7 +57,10 @@ beforeAll(async () => {
 });
 
 const sockets: WebSocket[] = [];
-const matchId = "invite-one";
+let matchId = "invite-one";
+beforeEach(() => {
+  matchId = `presentation-${crypto.randomUUID()}`;
+});
 const seeds = {
   "host-login": { emojiId: 1, aura: "" },
   "guest-login": { emojiId: 1000, aura: "rainbow" },
@@ -67,8 +74,7 @@ const update = (
   aura: "rainbow",
   ...overrides,
 });
-const room = () =>
-  env.INVITE_REACTIONS.getByName(`presentation-${crypto.randomUUID()}`);
+const room = () => env.INVITE_REACTIONS.get(env.INVITE_REACTIONS.newUniqueId());
 
 async function registeredRepository(
   inviteId: string,
@@ -135,7 +141,6 @@ function acceptSocket(response: Response) {
 
 async function connect(
   stub: ReturnType<typeof room>,
-  version = 2,
   selectedMatchId = matchId,
 ) {
   return acceptSocket(
@@ -143,13 +148,7 @@ async function connect(
       headers: {
         Upgrade: "websocket",
         "X-Mons-Reaction-IP": crypto.randomUUID(),
-        "Sec-WebSocket-Protocol":
-          version === 2
-            ? REACTION_SOCKET_PROTOCOL_V2
-            : REACTION_SOCKET_PROTOCOL,
-        ...(version === 2
-          ? { "X-Mons-Presentation-Match": encodeURIComponent(selectedMatchId) }
-          : {}),
+        ...(await reactionSocketTestHeaders(stub, matchId, selectedMatchId)),
       },
     }),
   );
@@ -173,40 +172,67 @@ afterEach(async () => {
 });
 
 describe("durable match presentation", () => {
-  it("seeds once, enforces two canonical actors and persists after eviction", async () => {
+  const invalidPresentationAdmissions: Record<string, string>[] = [
+    {},
+    { "X-Mons-Presentation-Canonical": "0" },
+    { "X-Mons-Presentation-Canonical": "1" },
+    { "X-Mons-Presentation-Canonical": "1", "X-Mons-Presentation-Actors": "%" },
+    {
+      "X-Mons-Presentation-Canonical": "1",
+      "X-Mons-Presentation-Actors": "[]",
+    },
+  ];
+  it.each(invalidPresentationAdmissions)(
+    "requires canonical presentation admission for every current socket %j",
+    async (headers) => {
+      const response = await room().fetch("https://reactions.internal/socket", {
+        headers: {
+          Upgrade: "websocket",
+          "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL,
+          "X-Mons-Presentation-Match": matchId,
+          ...headers,
+        },
+      });
+      expect(response.status).toBe(400);
+    },
+  );
+
+  it("registers immutable seeds once, enforces two actors and persists after eviction", async () => {
     const stub = room();
-    const first = await stub.ensurePresentations(matchId, seeds);
-    expect(isMatchPresentationSnapshot(first)).toBe(true);
-    expect(first.players["host-login"]).toEqual({
+    const first = await registerTestPresentations(
+      stub,
       matchId,
-      actorUid: "host-login",
-      ...seeds["host-login"],
-      revision: 0,
-    });
+      matchId,
+      seeds,
+    );
+    expect(isMatchPresentationSnapshot(first)).toBe(true);
     expect(
-      await stub.ensurePresentations(matchId, {
-        "host-login": { emojiId: -55, aura: "legacy" },
-      }),
+      await registerTestPresentations(stub, matchId, matchId, seeds),
     ).toEqual(first);
     await runInDurableObject(stub, async (instance) => {
       await expect(
-        instance.ensurePresentations(matchId, {
+        registerTestPresentations(instance, matchId, matchId, {
+          "host-login": { emojiId: 2, aura: "" },
+        }),
+      ).rejects.toThrow();
+      await expect(
+        registerTestPresentations(instance, matchId, matchId, {
           "third-login": { emojiId: 2, aura: "" },
         }),
-      ).rejects.toThrow("presentation-participant-limit");
+      ).rejects.toThrow();
       await expect(
-        instance.ensurePresentations(matchId, {
+        registerTestPresentations(instance, matchId, matchId, {
           "invalid/uid": { emojiId: 2, aura: "" },
         }),
-      ).rejects.toThrow("invalid-presentation-seeds");
+      ).rejects.toThrow();
     });
     await evictDurableObject(stub);
-    expect(await stub.getPresentationSnapshot(matchId)).toEqual(first);
+    expect(await readStoredPresentations(stub, matchId)).toEqual(first);
   });
 
   it("commits CAS operations once and rejects modified or stale operation retries", async () => {
     const stub = room();
-    await stub.ensurePresentations(matchId, seeds);
+    await registerTestPresentations(stub, matchId, matchId, seeds);
     const request = update();
     const first = await stub.updatePresentation("host-login", matchId, request);
     expect(first.status).toBe("updated");
@@ -235,7 +261,7 @@ describe("durable match presentation", () => {
     ).toEqual({ ...second, status: "conflict" });
     await evictDurableObject(stub);
     expect(
-      (await stub.getPresentationSnapshot(matchId)).players["host-login"],
+      (await readStoredPresentations(stub, matchId)).players["host-login"],
     ).toEqual(second.presentation);
     await runInDurableObject(stub, async (instance) => {
       await expect(
@@ -250,8 +276,8 @@ describe("durable match presentation", () => {
 
   it("serializes competing writes and keeps rematches independent", async () => {
     const stub = room();
-    await stub.ensurePresentations(matchId, seeds);
-    await stub.ensurePresentations(`${matchId}1`, seeds);
+    await registerTestPresentations(stub, matchId, matchId, seeds);
+    await registerTestPresentations(stub, matchId, `${matchId}1`, seeds);
     const results = await Promise.all([
       stub.updatePresentation("host-login", matchId, update()),
       stub.updatePresentation("host-login", matchId, update({ emojiId: 1002 })),
@@ -262,26 +288,29 @@ describe("durable match presentation", () => {
     ]);
     expect(results[0].presentation).toEqual(results[1].presentation);
     expect(
-      (await stub.getPresentationSnapshot(`${matchId}1`)).players["host-login"]
+      (await readStoredPresentations(stub, `${matchId}1`)).players["host-login"]
         .revision,
     ).toBe(0);
     expect(
-      (await stub.getPresentationSnapshot(matchId)).players["guest-login"]
+      (await readStoredPresentations(stub, matchId)).players["guest-login"]
         .revision,
     ).toBe(0);
   });
 
   it("freezes each archived actor once while live finished-match appearance can continue", async () => {
     const stub = room();
-    await stub.ensurePresentations(matchId, seeds);
+    await registerTestPresentations(stub, matchId, matchId, seeds);
     const first = await stub.updatePresentation(
       "host-login",
       matchId,
       update(),
     );
-    const frozen = await stub.freezePresentations(matchId, {
-      "host-login": seeds["host-login"],
-    });
+    const frozen = await stub.freezeRegisteredPresentations(
+      matchId,
+      Object.keys({
+        "host-login": seeds["host-login"],
+      }),
+    );
     expect(frozen.players["host-login"]).toEqual(first.presentation);
     expect(Object.keys(frozen.players)).toEqual(["host-login"]);
     const latest = await stub.updatePresentation(
@@ -294,32 +323,36 @@ describe("durable match presentation", () => {
       matchId,
       update({ emojiId: 1002 }),
     );
-    const completed = await stub.freezePresentations(matchId, seeds);
+    const completed = await stub.freezeRegisteredPresentations(
+      matchId,
+      Object.keys(seeds),
+    );
     expect(completed.players).toEqual({
       "host-login": first.presentation,
       "guest-login": guest.presentation,
     });
     await evictDurableObject(stub);
-    expect(await stub.freezePresentations(matchId, seeds)).toEqual(completed);
     expect(
-      (await stub.getPresentationSnapshot(matchId)).players["host-login"],
+      await stub.freezeRegisteredPresentations(matchId, Object.keys(seeds)),
+    ).toEqual(completed);
+    expect(
+      (await readStoredPresentations(stub, matchId)).players["host-login"],
     ).toEqual(latest.presentation);
   });
 
-  it("sends v2 initial state and appearance only to matching sockets, preserving v1 reactions and heartbeat", async () => {
+  it("sends current initial state and appearance only to matching sockets and keeps reactions and heartbeat", async () => {
     const stub = room();
-    const snapshot = await stub.ensurePresentations(matchId, seeds);
-    await stub.ensurePresentations(`${matchId}1`, seeds);
-    const [legacy, current, other] = await Promise.all([
-      connect(stub, 1),
+    const snapshot = await registerTestPresentations(
+      stub,
+      matchId,
+      matchId,
+      seeds,
+    );
+    await registerTestPresentations(stub, matchId, `${matchId}1`, seeds);
+    const [current, other] = await Promise.all([
       connect(stub),
-      connect(stub, 2, `${matchId}1`),
+      connect(stub, `${matchId}1`),
     ]);
-    expect(JSON.parse(await legacy.read())).toEqual({
-      schemaVersion: 1,
-      type: "snapshot",
-      reactions: {},
-    });
     const initial = JSON.parse(await current.read());
     expect(initial).toEqual({
       schemaVersion: 2,
@@ -347,12 +380,6 @@ describe("durable match presentation", () => {
       matchId,
     };
     await stub.publish("host-login", reaction);
-    expect(JSON.parse(await legacy.read())).toEqual({
-      schemaVersion: 1,
-      type: "reaction",
-      senderUid: "host-login",
-      reaction,
-    });
     for (const client of [current, other])
       expect(JSON.parse(await client.read())).toEqual({
         schemaVersion: 2,
@@ -360,7 +387,6 @@ describe("durable match presentation", () => {
         senderUid: "host-login",
         reaction,
       });
-    expect(legacy.messages).toEqual([]);
     expect(other.messages).toEqual([]);
     current.socket.send(REACTION_HEARTBEAT_REQUEST);
     expect(await current.read()).toBe(REACTION_HEARTBEAT_RESPONSE);
@@ -370,15 +396,56 @@ describe("durable match presentation", () => {
     ).toEqual(result.presentation);
   });
 
-  it("treats old hibernated sockets without attachments as v1", async () => {
+  it.each([null, { schemaVersion: 1, authenticated: false }])(
+    "closes retired hibernated reaction attachments %j without changing stored reactions",
+    async (attachment) => {
+      const stub = room();
+      const client = await connect(stub);
+      await client.read();
+      const closed = new Promise<{ code: number; reason: string }>((resolve) =>
+        client.socket.addEventListener(
+          "close",
+          (event) => resolve({ code: event.code, reason: event.reason }),
+          { once: true },
+        ),
+      );
+      await runInDurableObject(stub, (_instance, state) => {
+        for (const socket of state.getWebSockets())
+          socket.serializeAttachment(attachment);
+      });
+      await evictDurableObject(stub);
+      const reaction = {
+        uuid: crypto.randomUUID(),
+        kind: "gg",
+        variation: 2,
+        matchId,
+      };
+      await stub.publish("host-login", reaction);
+      expect(await closed).toEqual({
+        code: 1008,
+        reason: "Unsupported reaction protocol",
+      });
+      const current = await connect(stub);
+      expect(JSON.parse(await current.read()).reactions).toEqual({
+        "host-login": reaction,
+      });
+    },
+  );
+
+  it("preserves hibernated v2 reactions without a channel marker", async () => {
     const stub = room();
-    const legacy = await connect(stub, 1);
-    await legacy.read();
+    const client = await connect(stub);
+    await client.read();
     await runInDurableObject(stub, (_instance, state) => {
-      for (const socket of state.getWebSockets())
-        socket.serializeAttachment(null);
+      for (const socket of state.getWebSockets()) {
+        const attachment = socket.deserializeAttachment();
+        delete attachment.channel;
+        socket.serializeAttachment(attachment);
+      }
     });
     await evictDurableObject(stub);
+    client.socket.send(REACTION_HEARTBEAT_REQUEST);
+    expect(await client.read()).toBe(REACTION_HEARTBEAT_RESPONSE);
     const reaction = {
       uuid: crypto.randomUUID(),
       kind: "gg",
@@ -386,7 +453,10 @@ describe("durable match presentation", () => {
       matchId,
     };
     await stub.publish("host-login", reaction);
-    expect(JSON.parse(await legacy.read()).schemaVersion).toBe(1);
+    expect(JSON.parse(await client.read())).toMatchObject({
+      schemaVersion: 2,
+      reaction,
+    });
   });
 
   it("integrates participant updates and anonymous v2 hydration through the public router", async () => {
@@ -406,8 +476,8 @@ describe("durable match presentation", () => {
             "CF-Connecting-IP": crypto.randomUUID(),
             Upgrade: "websocket",
             "Sec-WebSocket-Protocol": authenticated
-              ? `${REACTION_SOCKET_PROTOCOL_V2}, ${REACTION_AUTH_PROTOCOL_PREFIX}host-login.payload.signature`
-              : REACTION_SOCKET_PROTOCOL_V2,
+              ? `${REACTION_SOCKET_PROTOCOL}, ${REACTION_AUTH_PROTOCOL_PREFIX}host-login.payload.signature`
+              : REACTION_SOCKET_PROTOCOL,
           },
         },
       );
@@ -418,7 +488,7 @@ describe("durable match presentation", () => {
       ctx,
     );
     expect(response.headers.get("Sec-WebSocket-Protocol")).toBe(
-      REACTION_SOCKET_PROTOCOL_V2,
+      REACTION_SOCKET_PROTOCOL,
     );
     const host = acceptSocket(response);
     const spectator = acceptSocket(
@@ -501,7 +571,7 @@ describe("durable match presentation", () => {
               Origin: "https://mons.link",
               "CF-Connecting-IP": crypto.randomUUID(),
               Upgrade: "websocket",
-              "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL_V2,
+              "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL,
             },
           },
         ),

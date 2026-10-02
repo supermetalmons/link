@@ -8,13 +8,10 @@ exports.isUsernameEditResponse =
   exports.buildUsernameLookupKey =
   exports.cleanUsername =
   exports.USERNAME_VALIDATION_MESSAGES =
-  exports.USERNAME_LOOKUP_KEY_FIELD =
   exports.USERNAME_MAX_LENGTH =
     void 0;
 const USERNAME_MAX_LENGTH = 14;
 exports.USERNAME_MAX_LENGTH = USERNAME_MAX_LENGTH;
-const USERNAME_LOOKUP_KEY_FIELD = "usernameLookupKey";
-exports.USERNAME_LOOKUP_KEY_FIELD = USERNAME_LOOKUP_KEY_FIELD;
 const USERNAME_ALLOWED_RE = /^[a-zA-Z0-9]+$/;
 const USERNAME_VALIDATION_MESSAGES = Object.freeze({
   reserved: "This name is reserved.",

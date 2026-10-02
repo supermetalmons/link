@@ -1,35 +1,35 @@
-import { createEventProgressOutboxWriter } from "../src/eventRepository.ts";
-import { matchTestPort } from "../test/gameSessionTestPorts.ts";
-import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CompletePlayerProfile } from "@mons/shared/profiles";
-import type { StateRepository } from "../test/stateRepositoryTestTypes.ts";
+import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { loadEndedMatchResults } from "../../../runtime/telegram/eventProjectionCore.js";
+import { ProfileWritesDisabledFailure } from "../src/authErrors.ts";
+import { createEventProgressOutboxWriter } from "../src/eventRepository.ts";
 import {
   canonicalProfileFields,
   createCanonicalGameplayRepository,
 } from "../src/gameplayCanonicalRepository.ts";
-import { createCanonicalRatingRepository } from "../src/ratingCanonicalRepository.ts";
-import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
-import { createRatingRepository } from "../src/ratingRepository.ts";
 import { GameplayRepositoryFailure } from "../src/gameplayRepositoryPolicy.ts";
+import { createMiningRepository } from "../src/miningRepository.ts";
 import {
+  CanonicalProfileConflict,
+  CanonicalProfileCorruption,
   commitCanonicalPlan,
   materializeCanonicalProfile,
   readCanonicalLoginOwner,
   readCanonicalProfile,
   readCanonicalWagerSettlement,
-  CanonicalProfileConflict,
-  CanonicalProfileCorruption,
   type CanonicalRatingUpdateValue,
 } from "../src/profileCanonicalD1.ts";
-import { ProfileWritesDisabledFailure } from "../src/authErrors.ts";
-import { observeD1FailureDatabase } from "./d1FailureTestUtils.ts";
 import { createProfileGameProjectionRuntime } from "../src/profileGameProjectionRepository.ts";
-import { createMiningRepository } from "../src/miningRepository.ts";
-import { getProfileGameProjection } from "../src/profileGamesD1.ts";
-import { loadEndedMatchResults } from "../../../runtime/telegram/eventProjectionCore.js";
+import { getProfileGameProjections } from "../src/profileGamesD1.ts";
+import { createCanonicalRatingRepository } from "../src/ratingCanonicalRepository.ts";
+import { createRatingRepository } from "../src/ratingRepository.ts";
+import { matchTestPort } from "../test/gameSessionTestPorts.ts";
+import type { StateRepository } from "../test/stateRepositoryTestTypes.ts";
+import { observeD1FailureDatabase } from "./d1FailureTestUtils.ts";
+import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
@@ -3731,11 +3731,11 @@ describe("canonical gameplay repositories", () => {
       { eventTimestampMs: 5_000 },
     );
     expect(
-      await getProfileGameProjection(
+      await getProfileGameProjections(
         testEnv.PROFILE_GAMES_DB,
         "d1-project-host",
-        "auto_bbbbbbbbbbb",
-      ),
+        ["auto_bbbbbbbbbbb"],
+      ).then((rows) => rows.get("auto_bbbbbbbbbbb") ?? null),
     ).not.toBeNull();
   });
 });

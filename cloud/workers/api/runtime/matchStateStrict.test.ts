@@ -1,12 +1,12 @@
-import { env } from "cloudflare:workers";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { createMatchStateSource } from "../src/matchStateSource.ts";
-import { canonicalMatchOperations } from "../src/matchStateClient.ts";
-import { readMatchStateRecord } from "../src/matchStateRouting.ts";
-import { readMatchStateRoute } from "../src/matchStateD1.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
+import { canonicalMatchOperations } from "../src/matchStateClient.ts";
+import { readMatchStateRoutes } from "../src/matchStateD1.ts";
+import { readMatchStateRecord } from "../src/matchStateRouting.ts";
 import { getMatchStateRpc, unwrapMatchStateRpc } from "../src/matchStateRpc.ts";
+import { createMatchStateSource } from "../src/matchStateSource.ts";
 
 const db = env.PROFILE_GAMES_DB;
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
@@ -446,7 +446,9 @@ describe("strict match runtime", () => {
     const source = createMatchStateSource(workerEnv);
     await expect(source.createMatchRecords!(creation)).rejects.toThrow();
     expect(
-      await readMatchStateRoute(db, request.playerId, request.matchId),
+      await readMatchStateRoutes(db, [
+        { playerId: request.playerId, matchId: request.matchId },
+      ]).then((rows) => rows[0]),
     ).toBeNull();
     expect(await admissions()).toEqual(before);
     freeze = false;
@@ -458,7 +460,9 @@ describe("strict match runtime", () => {
     await source.createMatchRecords!(creation);
     expect(calls).toBe(2);
     expect(
-      await readMatchStateRoute(db, request.playerId, request.matchId),
+      await readMatchStateRoutes(db, [
+        { playerId: request.playerId, matchId: request.matchId },
+      ]).then((rows) => rows[0]),
     ).toMatchObject({ kind: "durable", epoch: 2, inviteId: request.inviteId });
     expect(await admissions()).toEqual(before);
   });

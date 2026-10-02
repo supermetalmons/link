@@ -58,13 +58,6 @@ export const resolveProfileMergeTargetPath = async ({
   }
 };
 
-export const resolveProfileMergeTargetId = async (
-  options: ProfileMergeTargetOptions,
-): Promise<string> => {
-  const profileIds = await resolveProfileMergeTargetPath(options);
-  return profileIds[profileIds.length - 1] || "";
-};
-
 export const orderProfileMergeCleanupIds = (
   profileIds: readonly unknown[] | null | undefined,
   canonicalProfileIds: readonly unknown[] | null | undefined,

@@ -1,38 +1,38 @@
-import {
-  attachGameplayTestPorts,
-  type LegacyGameplayTestMethods,
-} from "./gameSessionTestPorts.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
+import { AuthApiFailure } from "../src/authErrors.ts";
 import {
   AUTOMATCH_TOTAL_TIMEOUT_MS,
   cancelQueuedAutomatch as cancelQueuedAutomatchImpl,
   emptyAutomatchProfile,
-  findOwnedQueuedAutomatch,
+  findOwnedQueuedAutomatches,
   getFirstQueuedAutomatch,
   startAutomatch as startAutomatchImpl,
   type AutomatchDependencies,
 } from "../src/automatch.ts";
-import { AuthApiFailure } from "../src/authErrors.ts";
 import { GameSessionMutationLeaseReleaseFailure } from "../src/gameSessionMutations.ts";
+import type { AutomatchRepository } from "../src/gameplayContracts.ts";
 import { GameSessionMutationLockFailure } from "../src/gameplayCoordinationD1.ts";
+import type { GameplayProfile } from "../src/gameplayRepository.ts";
 import { cancelAutomatch as cancelAutomatchImpl } from "../src/gameplayRoute.ts";
+import type {
+  ProfileOwnershipQuery,
+  ProfileOwnershipSnapshot,
+} from "../src/profileOwnership.ts";
 import type { RequestIdentity } from "../src/requestIdentity.ts";
 import {
   STATE_SERVER_TIMESTAMP,
   stateIncrement,
 } from "../test/stateRepositoryTestTypes.ts";
-import type { GameplayProfile } from "../src/gameplayRepository.ts";
-import type { AutomatchRepository } from "../src/gameplayContracts.ts";
-import type {
-  ProfileOwnershipQuery,
-  ProfileOwnershipSnapshot,
-} from "../src/profileOwnership.ts";
-import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
 import {
   createAutomatchPersistenceStub,
   createAutomatchQueueLookup,
 } from "./automatchPersistenceTestUtils.ts";
+import {
+  attachGameplayTestPorts,
+  type LegacyGameplayTestMethods,
+} from "./gameSessionTestPorts.ts";
+import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
 
 const identity: RequestIdentity = {
   uid: "guest-uid",
@@ -1039,7 +1039,7 @@ test("does not receipt a canceled pending shortcut", async () => {
 
 test("uses the supplied ownership snapshot without revalidation", async () => {
   let ownershipReads = 0;
-  const result = await findOwnedQueuedAutomatch(
+  const result = await findOwnedQueuedAutomatches(
     [identity.uid, "former-alias"],
     repository({
       readProfileOwnershipSnapshot: async () => {
@@ -1057,14 +1057,14 @@ test("uses the supplied ownership snapshot without revalidation", async () => {
             }
           : null,
     }),
-  );
+  ).then((rows) => rows[0] ?? null);
 
   assert.equal(result?.inviteId, "auto_foreign");
   assert.equal(ownershipReads, 0);
 });
 
 test("selects the newest queue across owned logins", async () => {
-  const result = await findOwnedQueuedAutomatch(
+  const result = await findOwnedQueuedAutomatches(
     [identity.uid, "first-alias", "second-alias"],
     repository({
       getStatePath: async (_path, query) => {
@@ -1081,13 +1081,13 @@ test("selects the newest queue across owned logins", async () => {
         return null;
       },
     }),
-  );
+  ).then((rows) => rows[0] ?? null);
 
   assert.equal(result?.inviteId, "auto_newer");
 });
 
 test("breaks equal queue timestamps deterministically per login", async () => {
-  const result = await findOwnedQueuedAutomatch(
+  const result = await findOwnedQueuedAutomatches(
     [identity.uid],
     repository({
       getStatePath: async () => ({
@@ -1096,7 +1096,7 @@ test("breaks equal queue timestamps deterministically per login", async () => {
         auto_old: { uid: identity.uid, timestamp: 1 },
       }),
     }),
-  );
+  ).then((rows) => rows[0] ?? null);
 
   assert.equal(result?.inviteId, "auto_a");
 });
@@ -1110,7 +1110,7 @@ test("reads every bounded owner alias and selects the newest queue", async () =>
     ),
   ];
   let aliasReads = 0;
-  const result = await findOwnedQueuedAutomatch(
+  const result = await findOwnedQueuedAutomatches(
     loginUids,
     repository({
       getStatePath: async (_path, query) => {
@@ -1126,7 +1126,7 @@ test("reads every bounded owner alias and selects the newest queue", async () =>
         };
       },
     }),
-  );
+  ).then((rows) => rows[0] ?? null);
 
   assert.equal(result?.inviteId, "auto_511");
   assert.equal(aliasReads, 511);

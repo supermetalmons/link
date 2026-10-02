@@ -1,11 +1,7 @@
+import { INVITE_METADATA_MAX_MESSAGE_BYTES } from "@mons/shared/invite-metadata";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { INVITE_METADATA_MAX_MESSAGE_BYTES } from "@mons/shared/invite-metadata";
-import {
-  createInviteMetadataReader,
-  normalizeInviteMetadata,
-} from "../src/inviteMetadata.ts";
-import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+import { normalizeInviteMetadata } from "../src/inviteMetadata.ts";
 
 const inviteId = "metadata-invite";
 const invite = {
@@ -67,34 +63,4 @@ test("metadata normalization distinguishes missing sources from invalid and over
       status: "invalid",
     });
   }
-});
-
-test("metadata reads normalize each fresh source and recover after read failures", async () => {
-  let value: unknown = invite;
-  let fail = false;
-  const inviteIds: string[] = [];
-  const read = createInviteMetadataReader(TELEGRAM_TEST_ENV, {
-    readSource: async (id) => {
-      inviteIds.push(id);
-      if (fail) throw new Error("source-unavailable");
-      return value;
-    },
-  });
-  assert.deepEqual(
-    await read(inviteId),
-    normalizeInviteMetadata(inviteId, invite),
-  );
-  value = { ...invite, hostRematches: "1", password: "private" };
-  assert.deepEqual(
-    await read(inviteId),
-    normalizeInviteMetadata(inviteId, value),
-  );
-  fail = true;
-  await assert.rejects(read(inviteId), /source-unavailable/);
-  fail = false;
-  value = null;
-  assert.deepEqual(await read(inviteId), { status: "missing" });
-  value = { ...invite, hostColor: "invalid" };
-  assert.deepEqual(await read(inviteId), { status: "invalid" });
-  assert.deepEqual(inviteIds, Array(5).fill(inviteId));
 });

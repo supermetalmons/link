@@ -1,24 +1,23 @@
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import type { NavigationGamesCursor } from "@mons/shared/navigation";
-import {
-  commitProfileGameProjectionWrites,
-  deleteD1NavigationGame,
-  encodeProfileGameProjection,
-  getInviteProfileGameProjections,
-  getProfileGameProjection,
-  getProfileGameProjections,
-  listProfileGameProjectionPage,
-  readProfileGamesPage,
-  reserveEventProfileGameProjectionFence,
-} from "../src/profileGamesD1.ts";
+import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   HistoricalMatchConflict,
   HistoricalMatchCorruption,
   readHistoricalMatchSnapshot,
   writeHistoricalMatchSnapshot,
 } from "../src/historicalMatchesD1.ts";
+import {
+  commitProfileGameProjectionWrites,
+  deleteD1NavigationGame,
+  encodeProfileGameProjection,
+  getInviteProfileGameProjections,
+  getProfileGameProjections,
+  listProfileGameProjectionPage,
+  readProfileGamesPage,
+  reserveEventProfileGameProjectionFence,
+} from "../src/profileGamesD1.ts";
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 
@@ -403,11 +402,11 @@ describe("profile game projection D1 repository", () => {
         data,
       },
     ]);
-    const projection = await getProfileGameProjection(
+    const projection = await getProfileGameProjections(
       env.PROFILE_GAMES_DB,
       "profile-1",
-      "invite-1",
-    );
+      ["invite-1"],
+    ).then((rows) => rows.get("invite-1") ?? null);
     expect(projection?.data.updatedAt).toBe(2_000);
     expect(projection?.version).toBe(1);
 
@@ -422,11 +421,9 @@ describe("profile game projection D1 repository", () => {
     ]);
     expect(
       (
-        await getProfileGameProjection(
-          env.PROFILE_GAMES_DB,
-          "profile-1",
+        await getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
           "invite-1",
-        )
+        ]).then((rows) => rows.get("invite-1") ?? null)
       )?.version,
     ).toBe(2);
   });
@@ -490,7 +487,9 @@ describe("profile game projection D1 repository", () => {
       }
       expect(batchCount).toBe(0);
       await expect(
-        getProfileGameProjection(env.PROFILE_GAMES_DB, "profile-1", "invite-1"),
+        getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
+          "invite-1",
+        ]).then((rows) => rows.get("invite-1") ?? null),
       ).resolves.toEqual({ data: gameData("invite-1", 1_000), version: 1 });
     },
   );
@@ -514,11 +513,9 @@ describe("profile game projection D1 repository", () => {
         .run();
       const reads = [
         () =>
-          getProfileGameProjection(
-            env.PROFILE_GAMES_DB,
-            "profile-1",
+          getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
             "invite-1",
-          ),
+          ]).then((rows) => rows.get("invite-1") ?? null),
         () =>
           getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
             "invite-1",
@@ -580,7 +577,9 @@ describe("profile game projection D1 repository", () => {
         ).rejects.toThrow();
       }
       await expect(
-        getProfileGameProjection(env.PROFILE_GAMES_DB, "profile-1", "invite-1"),
+        getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
+          "invite-1",
+        ]).then((rows) => rows.get("invite-1") ?? null),
       ).resolves.toEqual({ data: updated, version: 2 });
     },
   );
@@ -1155,11 +1154,11 @@ describe("profile game projection D1 repository", () => {
         data: gameData("invite-1", 1_000),
       },
     ]);
-    const stale = await getProfileGameProjection(
+    const stale = await getProfileGameProjections(
       env.PROFILE_GAMES_DB,
       "profile-1",
-      "invite-1",
-    );
+      ["invite-1"],
+    ).then((rows) => rows.get("invite-1") ?? null);
     await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
       {
         type: "merge",
@@ -1189,11 +1188,9 @@ describe("profile game projection D1 repository", () => {
     ).rejects.toThrow();
     expect(
       (
-        await getProfileGameProjection(
-          env.PROFILE_GAMES_DB,
-          "profile-1",
+        await getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
           "invite-1",
-        )
+        ]).then((rows) => rows.get("invite-1") ?? null)
       )?.data.listSortAt,
     ).toBe(9_000);
   });
@@ -1213,11 +1210,11 @@ describe("profile game projection D1 repository", () => {
         data: gameData("sibling", 1_000),
       },
     ]);
-    const stale = await getProfileGameProjection(
+    const stale = await getProfileGameProjections(
       env.PROFILE_GAMES_DB,
       "profile-1",
-      "invite-1",
-    );
+      ["invite-1"],
+    ).then((rows) => rows.get("invite-1") ?? null);
     await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
       {
         type: "merge",
@@ -1242,18 +1239,14 @@ describe("profile game projection D1 repository", () => {
       ]),
     ).rejects.toThrow();
     expect(
-      await getProfileGameProjection(
-        env.PROFILE_GAMES_DB,
-        "profile-1",
+      await getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
         "invite-1",
-      ),
+      ]).then((rows) => rows.get("invite-1") ?? null),
     ).not.toBeNull();
     expect(
-      await getProfileGameProjection(
-        env.PROFILE_GAMES_DB,
-        "profile-1",
+      await getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
         "sibling",
-      ),
+      ]).then((rows) => rows.get("sibling") ?? null),
     ).not.toBeNull();
   });
 
@@ -1305,7 +1298,9 @@ describe("profile game projection D1 repository", () => {
       ),
     ).rejects.toThrow();
     await expect(
-      getProfileGameProjection(env.PROFILE_GAMES_DB, "profile-1", projectionId),
+      getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
+        projectionId,
+      ]).then((rows) => rows.get(projectionId) ?? null),
     ).resolves.toBeNull();
   });
 
@@ -1328,11 +1323,9 @@ describe("profile game projection D1 repository", () => {
     ]);
     expect(
       (
-        await getProfileGameProjection(
-          env.PROFILE_GAMES_DB,
-          "profile-1",
+        await getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
           "invite-1",
-        )
+        ]).then((rows) => rows.get("invite-1") ?? null)
       )?.data.listSortAt,
     ).toBe(2_000);
     await expect(

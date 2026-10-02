@@ -1,32 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  parseArgs,
-  execute,
-  manageLoginMatchDiscovery,
-} from "./manage-login-match-discovery.ts";
-test("retired commands reject before credentials or provider requests", async (t) => {
-  let requests = 0;
-  t.mock.method(globalThis, "fetch", async () => {
-    requests++;
-    throw new Error("unexpected provider request");
-  });
-  for (const flag of [
-    "--preflight",
-    "--export",
-    "--import",
-    "--verify",
-    "--activate",
-  ]) {
-    assert.throws(() => parseArgs([flag]), /retired/);
-    await assert.rejects(execute([flag]), /retired/);
-  }
-  assert.equal(requests, 0);
-  assert.deepEqual(parseArgs(["--status"]).operation, "status");
-  assert.throws(() =>
-    parseArgs(["--status", "--firebase-credentials", "/missing"]),
-  );
-});
+import { inspectMatchDiscovery } from "./operator/inspect/matchDiscovery.ts";
+
 test("discovery status reports retained authority and provenance counts without source reads", async () => {
   const queries: string[] = [];
   const logs: Record<string, unknown>[] = [];
@@ -36,7 +11,7 @@ test("discovery status reports retained authority and provenance counts without 
     source_digest: "retained",
   };
   const counts = [{ provenance: "capture", resolution: "resolved", count: 7 }];
-  await manageLoginMatchDiscovery(parseArgs(["--status"]), {
+  await inspectMatchDiscovery({
     run: async (sql, database) => {
       queries.push(sql);
       assert.equal(database, "mons-link-profile-games");
@@ -50,7 +25,7 @@ test("discovery status reports retained authority and provenance counts without 
 });
 test("discovery status fails closed on a missing control", async () => {
   await assert.rejects(
-    manageLoginMatchDiscovery(parseArgs(["--status"]), {
+    inspectMatchDiscovery({
       run: async () => [],
       log: () => assert.fail("unexpected success"),
     }),

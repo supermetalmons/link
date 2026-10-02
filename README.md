@@ -18,7 +18,7 @@ mons.link is a browser game backed by Cloudflare sessions, D1, SQLite Durable Ob
 
 ## Runtime architecture
 
-The frontend Worker serves `mons.link`; the API Worker serves `api.mons.link`. Persistent sessions live in `AUTH_STATE_DB`, with five-minute Worker-issued access tokens. `PROFILE_DB.profile_login_owners` maps login IDs to canonical profiles. Startup requests `bootstrapIdentity=1` with session creation or refresh to read the verified profile alongside the token, before loading the main application. `GET /auth/identity` provides the same read-only profile lookup. `POST /auth/profile/sync` retains explicit repair and legacy restoration behavior; the legacy `POST /auth/profile-claim/sync` URL remains a compatibility alias.
+The frontend Worker serves `mons.link`; the API Worker serves `api.mons.link`. Persistent sessions live in `AUTH_STATE_DB`, with five-minute Worker-issued access tokens. `PROFILE_DB.profile_login_owners` maps login IDs to canonical profiles. Startup requests `bootstrapIdentity=1` with session creation or refresh to read the verified profile alongside the token, before loading the main application. `GET /auth/identity` provides the same read-only profile lookup. `POST /auth/profile/sync` provides explicit canonical profile repair and restoration. Startup uses the verified identity route; unavailable inline enrichment falls back to a read-only identity request.
 
 The existing per-invite `InviteReactions` Durable Object owns active matches, timer claims, reactions, and live appearance. It delivers revisioned match, metadata, wager, reaction, and presentation snapshots over HTTP and WebSockets. Match routes and immutable archived records remain in gameplay D1. A missing route returns `match: null`; an existing route with unavailable canonical state returns a retryable error.
 
@@ -54,6 +54,7 @@ Edit portable runtime code in `cloud/runtime/src/`, including shared rules in `c
 | `npm run check:runtime`                    | Lint runtime source, typecheck it, and reject stale, missing, or orphaned outputs.      |
 | `npm run watch:runtime`                    | Regenerate runtime outputs as source files change.                                      |
 | `npm run check:all`                        | Run the complete repository gate.                                                       |
+| `npm run inspect:state -- --domain wagers` | Inspect wager activation, maintenance, and retained state.                              |
 | `npm run manage:match-state -- --status`   | Inspect canonical gameplay authority and retained evidence.                             |
 | `npm run manage:invite-source -- --status` | Inspect invite authority and unresolved-work counts.                                    |
 | `npm run upload:api`                       | Upload an API candidate without sending production traffic.                             |
@@ -64,7 +65,7 @@ Production release and maintenance procedures are in [Cloudflare deployment](scr
 
 Routine releases have no overall time limit. Prepare validated candidates, promote exact versions, and verify affected behavior. Allow necessary provider propagation and retries, keep writes and Queues running, and finish after required checks pass. Do not add verification-only waits or observation windows longer than 60 seconds.
 
-No build or test command implies a release. Preserve public contracts for already-loaded clients. `repo-clean` deletes non-kept branches, worktrees, and stashes; inspect its documented policy before use.
+No build or test command implies a release. Public reaction sockets use `mons-reactions-v2` with an explicit match ID. Stored historical formats remain supported independently of retired client protocols. `repo-clean` deletes non-kept branches, worktrees, and stashes; inspect its documented policy before use.
 
 ## Package boundaries
 

@@ -1,19 +1,19 @@
-import assert from "node:assert/strict";
-import test from "node:test";
 import type {
   WorkflowEvent,
   WorkflowStep,
   WorkflowStepConfig,
 } from "cloudflare:workers";
-import { buildEventAnnouncementPlan } from "../src/eventPrizeAnnouncementSchedule.ts";
+import assert from "node:assert/strict";
+import test from "node:test";
 import type { EventAnnouncementKind } from "../src/eventAnnouncementKinds.ts";
-import { runEventPrizeAnnouncementWorkflow } from "../src/eventPrizeAnnouncementWorkflow.ts";
+import type { EventPrizeAnnouncementDeliveryResult } from "../src/eventPrizeAnnouncement.ts";
+import { buildEventAnnouncementPlan } from "../src/eventPrizeAnnouncementSchedule.ts";
+import { runEventAnnouncementWorkflow } from "../src/eventPrizeAnnouncementWorkflow.ts";
 import {
   buildEventProgressPlan,
   InvalidEventProgressPayloadError,
   type EventProgressWorkflowParams,
 } from "../src/eventProgress.ts";
-import type { EventPrizeAnnouncementDeliveryResult } from "../src/eventPrizeAnnouncement.ts";
 
 const EVENT_ID = "z3oj52Iiime";
 const RUN_AT_MS = 10_000_000;
@@ -86,7 +86,7 @@ async function harness(
     workflowName: "mons-link-event-progress",
   };
   const run = () =>
-    runEventPrizeAnnouncementWorkflow(event, step, {
+    runEventAnnouncementWorkflow(event, step, {
       now: () => nowMs,
       readOutbox: async (outboxId) => {
         assert.equal(outboxId, plan.outboxId);

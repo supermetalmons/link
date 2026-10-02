@@ -11,7 +11,6 @@ export type UsernameEditResponse =
       validationError?: string;
     };
 declare const USERNAME_MAX_LENGTH = 14;
-declare const USERNAME_LOOKUP_KEY_FIELD = "usernameLookupKey";
 declare const USERNAME_VALIDATION_MESSAGES: Readonly<{
   reserved: "This name is reserved.";
   tooLong: "Must be shorter than 15 characters.";
@@ -29,7 +28,6 @@ declare const isUsernameEditResponse: (
 ) => value is UsernameEditResponse;
 export {
   USERNAME_MAX_LENGTH,
-  USERNAME_LOOKUP_KEY_FIELD,
   USERNAME_VALIDATION_MESSAGES,
   cleanUsername,
   buildUsernameLookupKey,

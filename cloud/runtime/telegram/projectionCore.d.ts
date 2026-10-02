@@ -60,9 +60,6 @@ declare const isEventRatingUpdate: (
 declare const shouldProjectRatingTelegramUpdate: (
   ratingUpdate: Record<string, unknown> | null,
 ) => boolean;
-declare const shouldRequestEventRatingProgress: (
-  ratingUpdate: Record<string, unknown> | null,
-) => boolean;
 declare const mergeRatingResultFragment: (
   source: unknown,
   ratingUpdate: Record<string, unknown>,
@@ -80,5 +77,4 @@ export {
   renderMatchedAutomatchTelegramText,
   resolveAutomatchTelegramLifecycle,
   shouldProjectRatingTelegramUpdate,
-  shouldRequestEventRatingProgress,
 };

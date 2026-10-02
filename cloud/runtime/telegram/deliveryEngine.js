@@ -1178,7 +1178,6 @@ const createTelegramDeliveryEngine = ({
     ownerToken,
     revision,
     requestedGeneration,
-    apiGateReclaimOwner,
   }) => {
     const generation =
       normalizeString(requestedGeneration) || `direct:${revision}`;

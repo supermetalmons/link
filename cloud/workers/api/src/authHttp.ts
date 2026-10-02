@@ -37,7 +37,6 @@ export const AUTH_PATHS = new Set([
   "/auth/methods/sol/verify",
   "/auth/methods/unlink",
   "/auth/profile/sync",
-  "/auth/profile-claim/sync",
   "/auth/x/flows",
   "/auth/x/flows/complete",
 ]);

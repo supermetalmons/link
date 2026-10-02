@@ -11,9 +11,6 @@ export declare const resolveProfileMergeTargetPath: ({
   readMergeTarget,
   maxHops,
 }: ProfileMergeTargetOptions) => Promise<string[]>;
-export declare const resolveProfileMergeTargetId: (
-  options: ProfileMergeTargetOptions,
-) => Promise<string>;
 export declare const orderProfileMergeCleanupIds: (
   profileIds: readonly unknown[] | null | undefined,
   canonicalProfileIds: readonly unknown[] | null | undefined,

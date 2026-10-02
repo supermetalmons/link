@@ -1,19 +1,13 @@
-import {
-  attachEventTestPorts,
-  type EventTestSource,
-} from "./eventTestPorts.ts";
-import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { EventCommand } from "../../../runtime/eventCommands.js";
+import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
 import { commitPreparedEventMutation } from "../src/eventMutationCommit.ts";
 import {
-  buildEventPrizeAnnouncementPlan,
-  buildSundayMonsReminderPlan,
-  EVENT_PRIZE_ANNOUNCEMENT_REASON,
+  buildEventAnnouncementPlan,
   prepareEventAnnouncementSchedule,
+  scheduleEventAnnouncement,
   scheduleEventAnnouncements,
-  scheduleEventPrizeAnnouncement,
 } from "../src/eventPrizeAnnouncementSchedule.ts";
 import {
   buildEventProgressPlan,
@@ -21,6 +15,10 @@ import {
 } from "../src/eventProgress.ts";
 import type { EventGameplayRepository } from "../src/eventRepository.ts";
 import { eventReadFixture } from "./eventReadFixture.ts";
+import {
+  attachEventTestPorts,
+  type EventTestSource,
+} from "./eventTestPorts.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const EVENT_ID = "z3oj52Iiime";
@@ -134,8 +132,18 @@ test("event creation commits both announcement markers atomically before dispatc
   });
   const enqueued: EventProgressPlan[] = [];
   const event = scheduledEvent({ startAtMs: 30_000_000 });
-  const prize = await buildEventPrizeAnnouncementPlan(EVENT_ID, event, NOW_MS);
-  const reminder = await buildSundayMonsReminderPlan(EVENT_ID, event, NOW_MS);
+  const prize = await buildEventAnnouncementPlan(
+    EVENT_ID,
+    event,
+    NOW_MS,
+    "prizes",
+  );
+  const reminder = await buildEventAnnouncementPlan(
+    EVENT_ID,
+    event,
+    NOW_MS,
+    "reminder",
+  );
   assert.ok(prize);
   assert.ok(reminder);
   const expected = [prize, reminder];
@@ -181,7 +189,7 @@ test("event creation commits both announcement markers atomically before dispatc
     new Set(enqueued.map((plan) => plan.outboxId)),
     new Set(expected.map((plan) => plan.outboxId)),
   );
-  assert.equal(prize.params.reason, EVENT_PRIZE_ANNOUNCEMENT_REASON);
+  assert.equal(prize.params.reason, "event-prize-announcement");
   assert.equal(prize.params.runAtMs, 26_400_000);
   assert.equal(reminder.params.runAtMs, 15_600_000);
   assert.notEqual(prize.workflowId, reminder.workflowId);
@@ -226,10 +234,11 @@ test("dispatch failure leaves the committed marker available for sweep recovery"
     now: () => NOW_MS,
   };
   const event = scheduledEvent();
-  const expected = await buildEventPrizeAnnouncementPlan(
+  const expected = await buildEventAnnouncementPlan(
     EVENT_ID,
     event,
     NOW_MS,
+    "prizes",
   );
   assert.ok(expected);
 
@@ -250,7 +259,7 @@ test("dispatch failure leaves the committed marker available for sweep recovery"
       {
         event: "event_announcement_enqueue_failed",
         eventId: EVENT_ID,
-        reason: EVENT_PRIZE_ANNOUNCEMENT_REASON,
+        reason: "event-prize-announcement",
       },
     ],
   );
@@ -332,7 +341,12 @@ test("rediscovery preserves a persisted three-hour reminder without creating a f
     },
     NOW_MS,
   );
-  const current = await buildSundayMonsReminderPlan(EVENT_ID, event, NOW_MS);
+  const current = await buildEventAnnouncementPlan(
+    EVENT_ID,
+    event,
+    NOW_MS,
+    "reminder",
+  );
   assert.ok(current);
   assert.equal(current.workflowId, legacy.workflowId);
   assert.equal(current.outboxId, legacy.outboxId);
@@ -399,8 +413,18 @@ test("rediscovery preserves a persisted three-hour reminder without creating a f
 
 test("failure dispatching either kind leaves both markers and dispatches the other", async () => {
   const event = scheduledEvent({ startAtMs: 30_000_000 });
-  const prize = await buildEventPrizeAnnouncementPlan(EVENT_ID, event, NOW_MS);
-  const reminder = await buildSundayMonsReminderPlan(EVENT_ID, event, NOW_MS);
+  const prize = await buildEventAnnouncementPlan(
+    EVENT_ID,
+    event,
+    NOW_MS,
+    "prizes",
+  );
+  const reminder = await buildEventAnnouncementPlan(
+    EVENT_ID,
+    event,
+    NOW_MS,
+    "reminder",
+  );
   assert.ok(prize);
   assert.ok(reminder);
   const plans = [prize, reminder];
@@ -457,10 +481,15 @@ test("a Sunday Mons event without prizes schedules only its four-hour reminder",
       enqueued.push(plan);
     },
   };
-  const reminder = await buildSundayMonsReminderPlan(eventId, event, NOW_MS);
+  const reminder = await buildEventAnnouncementPlan(
+    eventId,
+    event,
+    NOW_MS,
+    "reminder",
+  );
   assert.ok(reminder);
   assert.equal(
-    await buildEventPrizeAnnouncementPlan(eventId, event, NOW_MS),
+    await buildEventAnnouncementPlan(eventId, event, NOW_MS, "prizes"),
     null,
   );
 
@@ -494,10 +523,11 @@ test("reminders require strict Sunday eligibility independently of prize metadat
     { startAtMs: 30_000_000.5 },
   ]) {
     assert.equal(
-      await buildSundayMonsReminderPlan(
+      await buildEventAnnouncementPlan(
         EVENT_ID,
         { ...event, ...overrides },
         NOW_MS,
+        "reminder",
       ),
       null,
     );
@@ -508,7 +538,7 @@ test("reminders require strict Sunday eligibility independently of prize metadat
     { invite: true, matches: true, results: true },
   ]) {
     assert.ok(
-      await buildSundayMonsReminderPlan(
+      await buildEventAnnouncementPlan(
         "sunday-without-prizes",
         {
           ...event,
@@ -516,6 +546,7 @@ test("reminders require strict Sunday eligibility independently of prize metadat
           announceOnTelegram: false,
         },
         NOW_MS,
+        "reminder",
       ),
     );
   }
@@ -524,17 +555,23 @@ test("reminders require strict Sunday eligibility independently of prize metadat
 test("missing the four-hour discovery cutoff still permits the independent prize album", async () => {
   const event = scheduledEvent({ startAtMs: 30_000_000 });
   const targetMs = 15_600_000;
-  const onTime = await buildSundayMonsReminderPlan(EVENT_ID, event, targetMs);
+  const onTime = await buildEventAnnouncementPlan(
+    EVENT_ID,
+    event,
+    targetMs,
+    "reminder",
+  );
   assert.ok(onTime);
   assert.equal(onTime.outbox.firstQueuedAtMs, targetMs);
   assert.equal(
-    await buildSundayMonsReminderPlan(EVENT_ID, event, targetMs + 1),
+    await buildEventAnnouncementPlan(EVENT_ID, event, targetMs + 1, "reminder"),
     null,
   );
-  const prize = await buildEventPrizeAnnouncementPlan(
+  const prize = await buildEventAnnouncementPlan(
     EVENT_ID,
     event,
     targetMs + 1,
+    "prizes",
   );
   assert.ok(prize);
   const memory = memoryRepository();
@@ -635,10 +672,11 @@ test("automatic prizes do not depend on any existing Telegram announcement toggl
     { invite: true, matches: false, results: true },
     undefined,
   ]) {
-    const plan = await buildEventPrizeAnnouncementPlan(
+    const plan = await buildEventAnnouncementPlan(
       EVENT_ID,
       scheduledEvent({ announceOnTelegram: false, telegramAnnouncements }),
       NOW_MS,
+      "prizes",
     );
     assert.ok(plan);
     assert.equal(plan.params.runAtMs, TARGET_MS);
@@ -647,17 +685,19 @@ test("automatic prizes do not depend on any existing Telegram announcement toggl
 
 test("first discovery at the target is accepted but a millisecond late is skipped", async () => {
   assert.ok(
-    await buildEventPrizeAnnouncementPlan(
+    await buildEventAnnouncementPlan(
       EVENT_ID,
       scheduledEvent(),
       TARGET_MS,
+      "prizes",
     ),
   );
   assert.equal(
-    await buildEventPrizeAnnouncementPlan(
+    await buildEventAnnouncementPlan(
       EVENT_ID,
       scheduledEvent(),
       TARGET_MS + 1,
+      "prizes",
     ),
     null,
   );
@@ -704,7 +744,7 @@ test("postponement creates a distinct schedule without overwriting the earlier m
   );
 
   const prizes = enqueued.filter(
-    (plan) => plan.params.reason === EVENT_PRIZE_ANNOUNCEMENT_REASON,
+    (plan) => plan.params.reason === "event-prize-announcement",
   );
   assert.equal(enqueued.length, 3);
   assert.equal(prizes.length, 2);
@@ -761,10 +801,11 @@ test("gameplay updates and existing progress markers pass through unchanged", as
 
 test("sweep scheduling persists before dispatch and preserves an existing first queue time", async () => {
   const memory = memoryRepository();
-  const candidate = await buildEventPrizeAnnouncementPlan(
+  const candidate = await buildEventAnnouncementPlan(
     EVENT_ID,
     scheduledEvent(),
     NOW_MS,
+    "prizes",
   );
   assert.ok(candidate);
   const requests: Array<{ id?: string; params?: unknown }> = [];
@@ -783,19 +824,21 @@ test("sweep scheduling persists before dispatch and preserves an existing first 
     },
   };
 
-  await scheduleEventPrizeAnnouncement(
+  await scheduleEventAnnouncement(
     env,
     memory.repository,
     EVENT_ID,
     scheduledEvent(),
     NOW_MS,
+    "prizes",
   );
-  await scheduleEventPrizeAnnouncement(
+  await scheduleEventAnnouncement(
     env,
     memory.repository,
     EVENT_ID,
     scheduledEvent(),
     NOW_MS + 1_000,
+    "prizes",
   );
 
   assert.equal(requests.length, 2);
@@ -809,10 +852,11 @@ test("sweep scheduling persists before dispatch and preserves an existing first 
 
 test("failed sweep dispatch retains its marker for another attempt", async () => {
   const memory = memoryRepository();
-  const candidate = await buildEventPrizeAnnouncementPlan(
+  const candidate = await buildEventAnnouncementPlan(
     EVENT_ID,
     scheduledEvent(),
     NOW_MS,
+    "prizes",
   );
   assert.ok(candidate);
   const env: Env = {
@@ -829,12 +873,13 @@ test("failed sweep dispatch retains its marker for another attempt", async () =>
   };
 
   await assert.rejects(
-    scheduleEventPrizeAnnouncement(
+    scheduleEventAnnouncement(
       env,
       memory.repository,
       EVENT_ID,
       scheduledEvent(),
       NOW_MS,
+      "prizes",
     ),
     /workflow-unavailable/,
   );

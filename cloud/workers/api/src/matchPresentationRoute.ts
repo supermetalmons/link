@@ -36,7 +36,7 @@ const PRESENTATION_ROUTE_PATTERN =
 export type MatchPresentationRouteDependencies =
   MatchPresentationReadDependencies & {
     repository?: GameplayRepository;
-    room?: Pick<InviteReactions, "ensurePresentations" | "updatePresentation">;
+    room?: Pick<InviteReactions, "updatePresentation">;
     verifyIdentity?: (
       request: Request,
       env: Env,
@@ -150,15 +150,13 @@ export async function handleMatchPresentationRoute(
         );
     }
     const room = dependencies.room || env.INVITE_REACTIONS.getByName(inviteId);
-    const { snapshot } = await readMatchPresentationSnapshot(
+    const snapshot = await readMatchPresentationSnapshot(
       env,
-      repository,
       inviteId,
       matchId,
       invite,
       {
         ...dependencies,
-        room,
         ...(request.method === "POST" && actorUid
           ? { requiredActorUid: actorUid }
           : {}),

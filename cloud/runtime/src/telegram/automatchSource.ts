@@ -8,9 +8,6 @@ export interface AutomatchTelegramSourceInput {
   timestamp: SessionTimestamp;
 }
 const TELEGRAM_AUTOMATCH_VERSION = 2;
-const TELEGRAM_AUTOMATCH_ROOT = "telegramAutomatches";
-const TELEGRAM_AUTOMATCH_PROJECTION_OUTBOX_ROOT =
-  "telegramProjectionOutbox/automatch";
 
 const buildAutomatchTelegramProjectionChanges: (input: {
   inviteId: string;
@@ -96,8 +93,6 @@ const buildAutomatchTelegramLifecycleChanges: (
 };
 
 export {
-  TELEGRAM_AUTOMATCH_ROOT,
-  TELEGRAM_AUTOMATCH_PROJECTION_OUTBOX_ROOT,
   TELEGRAM_AUTOMATCH_VERSION,
   buildAutomatchTelegramProjectionChanges,
   buildAutomatchTelegramLifecycleChanges,

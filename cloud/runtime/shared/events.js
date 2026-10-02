@@ -24,7 +24,6 @@ exports.buildEventMatchKey = buildEventMatchKey;
 exports.buildEventParticipantSnapshot = buildEventParticipantSnapshot;
 exports.buildEventSeedOrder = buildEventSeedOrder;
 exports.getEventBracketSize = getEventBracketSize;
-exports.getFirstRoundByeSeeds = getFirstRoundByeSeeds;
 exports.isCreateEventRequest = isCreateEventRequest;
 exports.isCreateEventResponse = isCreateEventResponse;
 exports.isDisqualifyEventMatchWinnersRequest =
@@ -167,24 +166,6 @@ function buildEventSeedOrder(bracketSize) {
     next.push(bracketSize + 1 - seed);
   }
   return next;
-}
-function getFirstRoundByeSeeds(participantCount, bracketSize, seedOrder) {
-  if (participantCount <= 0 || participantCount >= bracketSize) {
-    return [];
-  }
-  const byeSeeds = [];
-  const firstRoundMatchCount = bracketSize / 2;
-  for (let matchIndex = 0; matchIndex < firstRoundMatchCount; matchIndex += 1) {
-    const hostSeed = seedOrder[matchIndex * 2];
-    const guestSeed = seedOrder[matchIndex * 2 + 1];
-    const hostHasParticipant = hostSeed <= participantCount;
-    const guestHasParticipant = guestSeed <= participantCount;
-    if (hostHasParticipant === guestHasParticipant) {
-      continue;
-    }
-    byeSeeds.push(hostHasParticipant ? hostSeed : guestSeed);
-  }
-  return byeSeeds;
 }
 function isExactRecord(value, keys) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -333,8 +314,6 @@ function isCreateEventRequest(value) {
   if (
     (Object.hasOwn(value, "isSundayMons") &&
       typeof record.isSundayMons !== "boolean") ||
-    (record.announceOnTelegram !== undefined &&
-      typeof record.announceOnTelegram !== "boolean") ||
     (record.telegramAnnouncements !== undefined &&
       !isEventTelegramAnnouncements(record.telegramAnnouncements))
   ) {
@@ -344,7 +323,7 @@ function isCreateEventRequest(value) {
     hasExactOptionalKeys(
       value,
       ["startsInMinutes"],
-      ["isSundayMons", "announceOnTelegram", "telegramAnnouncements"],
+      ["isSundayMons", "telegramAnnouncements"],
     )
   ) {
     return (
@@ -357,12 +336,7 @@ function isCreateEventRequest(value) {
     !hasExactOptionalKeys(
       value,
       ["scheduledDate", "scheduledTime", "scheduledTimezone"],
-      [
-        "isSundayMons",
-        "announceOnTelegram",
-        "telegramAnnouncements",
-        "localTimezoneIana",
-      ],
+      ["isSundayMons", "telegramAnnouncements", "localTimezoneIana"],
     )
   ) {
     return false;

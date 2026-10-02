@@ -2,7 +2,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.orderProfileMergeCleanupIds =
-  exports.resolveProfileMergeTargetId =
   exports.resolveProfileMergeTargetPath =
   exports.getProfileMergeTargetId =
   exports.MAX_PROFILE_MERGE_TARGET_HOPS =
@@ -56,11 +55,6 @@ const resolveProfileMergeTargetPath = async ({
   }
 };
 exports.resolveProfileMergeTargetPath = resolveProfileMergeTargetPath;
-const resolveProfileMergeTargetId = async (options) => {
-  const profileIds = await (0, exports.resolveProfileMergeTargetPath)(options);
-  return profileIds[profileIds.length - 1] || "";
-};
-exports.resolveProfileMergeTargetId = resolveProfileMergeTargetId;
 const orderProfileMergeCleanupIds = (profileIds, canonicalProfileIds) => {
   const normalizedProfileIds = Array.from(
     new Set((profileIds || []).map(normalizeString).filter(Boolean)),

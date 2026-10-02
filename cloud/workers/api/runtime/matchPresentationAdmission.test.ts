@@ -1,29 +1,30 @@
-import { env } from "cloudflare:workers";
+import type { MatchPresentationSnapshot } from "@mons/shared/match-presentation";
+import {
+  REACTION_SOCKET_PROTOCOL,
+  isInviteRoomMessage,
+} from "@mons/shared/reactions";
 import {
   applyD1Migrations,
   runInDurableObject,
   type D1Migration,
 } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import {
-  REACTION_SOCKET_PROTOCOL_V2,
-  isInviteRoomMessage,
-} from "@mons/shared/reactions";
-import type { MatchPresentationSnapshot } from "@mons/shared/match-presentation";
-import { InviteReactions } from "../src/inviteReactions.ts";
+import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import {
   handleInviteReactionRoute,
   type InviteReactionRouteDependencies,
 } from "../src/inviteReactionRoute.ts";
-import { handleMatchPresentationRoute } from "../src/matchPresentationRoute.ts";
-import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import { InviteReactions } from "../src/inviteReactions.ts";
 import {
   buildMatchPresentationRegistrationStatements,
   prepareCreatedMatchPresentations,
   readRegisteredMatchPresentations,
 } from "../src/matchPresentationRegistry.ts";
+import { handleMatchPresentationRoute } from "../src/matchPresentationRoute.ts";
 import { socketTestIdentity } from "../test/socketTestSession.ts";
 import { resetMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
+import { readStoredPresentationsFromStorage } from "./presentationStorageFixture.ts";
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const db = env.PROFILE_GAMES_DB;
@@ -190,7 +191,7 @@ async function fixture() {
             Origin: "https://mons.link",
             Upgrade: "websocket",
             "CF-Connecting-IP": "192.0.2.45",
-            "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL_V2,
+            "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL,
           },
         },
       ),
@@ -365,8 +366,8 @@ describe("canonical presentation socket admission", () => {
       expect(intercepted.calls()).toBe(1);
       expect(Object.keys(snapshot.players)).toEqual([hostId]);
       expect(
-        (await instance.getPresentationSnapshot(f.matchId)).players[guestId]
-          .revision,
+        (await readStoredPresentationsFromStorage(state.storage, f.matchId))
+          .players[guestId].revision,
       ).toBe(0);
     });
   });

@@ -129,25 +129,8 @@ const normalizeTaskPayload: (input: unknown) => TelegramTaskPayload = (
   return payload as TelegramTaskPayload;
 };
 
-const buildTelegramDeliveryTaskId: {
-  (input: TelegramTaskPayload): string;
-  (messageKey: string, revision: string, generation: string): string;
-} = (
-  inputOrMessageKey: TelegramTaskPayload | string,
-  revision?: string,
-  generation?: string,
-) => {
-  const payload = normalizeTaskPayload(
-    typeof inputOrMessageKey === "object" && inputOrMessageKey !== null
-      ? inputOrMessageKey
-      : {
-          messageKey: inputOrMessageKey,
-          revision,
-          taskKind: TELEGRAM_DESIRED_TASK_KIND,
-          retrySequence: 0,
-          generation,
-        },
-  );
+const buildTelegramDeliveryTaskId = (input: TelegramTaskPayload): string => {
+  const payload = normalizeTaskPayload(input);
   const cleanupIdentity =
     payload.safeRejectedAttemptId || payload.pendingDeleteId || "none";
   return `tg_${crypto

@@ -1,23 +1,23 @@
-import { env } from "cloudflare:workers";
-import type { D1Migration } from "cloudflare:test";
-import { beforeAll, describe, expect, it } from "vitest";
 import type { CompletePlayerProfile } from "@mons/shared/profiles";
+import type { D1Migration } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { beforeAll, describe, expect, it } from "vitest";
+import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
+import { createEventGameplayRepository } from "../src/eventRepository.ts";
 import {
   commitCanonicalPlan,
   materializeCanonicalProfile,
 } from "../src/profileCanonicalD1.ts";
-import { createEventGameplayRepository } from "../src/eventRepository.ts";
-import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
-import { getProfileGameProjection } from "../src/profileGamesD1.ts";
 import {
   EVENT_PROFILE_GAME_PROJECTION_QUEUE_NAME,
   type EventProfileGameProjectionTask,
 } from "../src/profileGameProjectionTasks.ts";
+import { getProfileGameProjections } from "../src/profileGamesD1.ts";
 import worker from "../src/workerHandler.ts";
-import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
+import { TELEGRAM_TEST_ENV } from "../test/testEnv.ts";
 import { applyEventTestMigrations } from "./eventTestMigrations.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
-import { TELEGRAM_TEST_ENV } from "../test/testEnv.ts";
+import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
@@ -203,11 +203,11 @@ describe("dedicated event preview queue D1 integration", () => {
       );
       expect(retries).toEqual([]);
       expect(acknowledgements).toBe(1);
-      const preview = await getProfileGameProjection(
+      const preview = await getProfileGameProjections(
         testEnv.PROFILE_GAMES_DB,
         creatorId,
-        `event_${eventId}`,
-      );
+        [`event_${eventId}`],
+      ).then((rows) => rows.get(`event_${eventId}`) ?? null);
       expect(preview?.data.participantCount).toBe(index + 1);
       expect(preview?.data.participantPreview).toHaveLength(index + 1);
       expect(

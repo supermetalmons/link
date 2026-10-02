@@ -6,37 +6,7 @@ const test = require("node:test");
 const {
   buildOrderedMatchSubmissions,
   buildOrderedMoveHistory,
-  requireLaterGameFromMatchData,
 } = require("../runtime/gameplay/matchReconstruction");
-
-test("match reconstruction retains the strict timer selection policy", () => {
-  const playerGame = {
-    name: "player",
-    isLaterThan: (other) => other !== opponentGame,
-  };
-  const opponentGame = { name: "opponent" };
-  const mons = {
-    Game: {
-      fromFen: (fen) => ({ player: playerGame, opponent: opponentGame })[fen],
-    },
-  };
-
-  assert.strictEqual(
-    requireLaterGameFromMatchData(mons, { fen: "player" }, { fen: "opponent" }),
-    opponentGame,
-  );
-  assert.throws(
-    () =>
-      requireLaterGameFromMatchData(
-        mons,
-        { fen: "player" },
-        { fen: "missing" },
-      ),
-    (error) =>
-      error.code === "failed-precondition" &&
-      error.message === "something is wrong with the game state.",
-  );
-});
 
 test("match reconstruction preserves color ordering and move parsing", () => {
   const player = {

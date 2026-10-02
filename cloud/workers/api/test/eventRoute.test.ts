@@ -1,27 +1,28 @@
-import {
-  attachEventTestPorts,
-  type EventTestSource,
-} from "./eventTestPorts.ts";
-import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
-import assert from "node:assert/strict";
-import test from "node:test";
-import type { EventLockManager } from "../../../runtime/events/lockManagerCore.js";
 import { LEGACY_CORE_PRIZES_EVENT_ID } from "@mons/shared/event-prizes";
 import {
   eventSnapshotEtag,
   isSyncEventStateResponse,
   type EventSnapshotSeed,
 } from "@mons/shared/events";
+import assert from "node:assert/strict";
+import test from "node:test";
+import type { EventLockManager } from "../../../runtime/events/lockManagerCore.js";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import {
-  EVENT_PATHS,
-  handleEventRoute,
-  readEventBody,
-} from "../src/eventRoute.ts";
+import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
 import { EVENT_CONTROL_TIMEOUT_MS } from "../src/eventOperations.ts";
 import { EVENT_OPERATION_TIMEOUT_MS } from "../src/eventParticipation.ts";
 import type { EventGameplayRepository } from "../src/eventRepository.ts";
+import {
+  EVENT_PATHS,
+  handleEventRoute,
+  prepareEventRoute,
+} from "../src/eventRoute.ts";
+import { eventRoutes } from "../src/eventRouteDefinitions.ts";
 import { eventReadFixture } from "./eventReadFixture.ts";
+import {
+  attachEventTestPorts,
+  type EventTestSource,
+} from "./eventTestPorts.ts";
 import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
 
 const profileId = "creator-profile";
@@ -233,7 +234,12 @@ test("preserves all event request parsers and their strict body contracts", asyn
         body: value,
       });
     assert.deepEqual(
-      await readEventBody(request(JSON.stringify(body)), path),
+      (
+        await prepareEventRoute(
+          request(JSON.stringify(body)),
+          eventRoutes.get(path)!,
+        )
+      ).body,
       parsed,
       path,
     );
@@ -245,7 +251,7 @@ test("preserves all event request parsers and their strict body contracts", asyn
       JSON.stringify({ ...body, extra: true }),
     ]) {
       await assert.rejects(
-        readEventBody(request(invalid), path),
+        prepareEventRoute(request(invalid), eventRoutes.get(path)!),
         (error: unknown) =>
           error instanceof AuthApiFailure &&
           error.status === 400 &&
@@ -254,27 +260,6 @@ test("preserves all event request parsers and their strict body contracts", asyn
       );
     }
   }
-});
-
-test("readEventBody retains the removal parser fallback for unknown paths", async () => {
-  const path = "/events/unknown";
-  const request = (body: unknown) =>
-    new Request(`https://api.mons.link${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-  assert.deepEqual(
-    await readEventBody(
-      request({ eventId: " event-1 ", participantProfileId: " profile-1 " }),
-      path,
-    ),
-    { eventId: "event-1", participantProfileId: "profile-1" },
-  );
-  await assert.rejects(
-    readEventBody(request({ eventId: "event-1" }), path),
-    (error: unknown) => error instanceof AuthApiFailure && error.status === 400,
-  );
 });
 
 test("serves authenticated event CORS preflight", async () => {

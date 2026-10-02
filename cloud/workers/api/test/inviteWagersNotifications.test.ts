@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { notifyInviteRooms } from "../src/inviteRoomNotifications.ts";
 import {
-  notifyInviteWagersChanged,
-  notifyInviteSourceChanged,
   notifyInviteSessionCommitted,
+  notifyInviteSourceChanged,
 } from "../src/inviteWagersNotifications.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
@@ -24,19 +24,22 @@ function environment(notify: (inviteId: string) => Promise<void>): Env {
 
 test("wager invalidation validates and deduplicates explicit invite identities", async () => {
   const calls: string[] = [];
-  await notifyInviteWagersChanged(
+  await notifyInviteSourceChanged(
     environment(async (id) => {
       calls.push(id);
     }),
-    [
-      "proposal",
-      "agreement",
-      "settlement",
-      "proposal",
-      "",
-      "invalid/key",
-      " padded ",
-    ],
+    {
+      metadataInviteIds: [],
+      wagerInviteIds: [
+        "proposal",
+        "agreement",
+        "settlement",
+        "proposal",
+        "",
+        "invalid/key",
+        " padded ",
+      ],
+    },
   );
   assert.deepEqual(calls, ["proposal", "agreement", "settlement"]);
 });
@@ -91,12 +94,18 @@ test("failed or stuck room notifications are bounded and cannot reject committed
     () => new Promise<void>(() => undefined),
   ]) {
     let failures = 0;
-    await notifyInviteWagersChanged(environment(notify), ["invite"], {
-      timeoutMs: 1,
-      logFailure: () => {
-        failures++;
+    await notifyInviteRooms(
+      environment(notify),
+      ["invite"],
+      "notifyWagersChanged",
+      "invite_wagers_notify_failed",
+      {
+        timeoutMs: 1,
+        logFailure: () => {
+          failures++;
+        },
       },
-    });
+    );
     assert.equal(failures, 1);
   }
   await notifyInviteSourceChanged(

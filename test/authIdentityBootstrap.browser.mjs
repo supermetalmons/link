@@ -332,7 +332,7 @@ async function fixture(
         };
         if (
           url.searchParams.get("bootstrapIdentity") === "1" &&
-          identity !== "legacy"
+          identity !== "missing"
         )
           json.identityBootstrap = identity;
         if (url.searchParams.has("bootstrapInviteId"))
@@ -1415,37 +1415,23 @@ test(
 );
 
 test(
-  "a legacy API restores through the sequential sync and profile lookup compatibility path",
+  "missing inline identity uses the read-only identity route without profile synchronization",
   { timeout: 60_000 },
   async () => {
     await fixture(
       async ({ page, requests }) => {
-        await page
-          .getByRole("button", { name: profile.username, exact: true })
-          .waitFor({ state: "visible" });
-        assert.deepEqual(
-          requests
-            .filter(({ path }) =>
-              [
-                "/auth/session/refresh",
-                "/auth/profile/sync",
-                "/auth/identity",
-                "/profiles/lookup",
-              ].includes(path),
-            )
-            .map(({ path }) => path)
-            .filter(
-              (path, index, paths) => index === 0 || paths[index - 1] !== path,
-            )
-            .slice(0, 3),
-          ["/auth/session/refresh", "/auth/profile/sync", "/profiles/lookup"],
+        await assertVerifiedProfile(page);
+        assertSingleIdentitySession(requests);
+        assert.equal(
+          requests.filter(({ path }) => path === "/auth/identity").length,
+          1,
         );
         assert.equal(
-          requests.some(({ path }) => path === "/auth/identity"),
+          requests.some(({ path }) => path === "/auth/profile/sync"),
           false,
         );
       },
-      { identity: "legacy" },
+      { identity: "missing" },
     );
   },
 );

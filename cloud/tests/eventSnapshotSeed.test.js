@@ -10,7 +10,7 @@ const {
 } = require("../runtime/shared/events");
 const {
   isSessionEventBootstrapTarget,
-  isSessionEventBootstrapResponse,
+  isSessionEventBootstrap,
   SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES,
 } = require("../runtime/shared/session-bootstrap");
 
@@ -50,37 +50,21 @@ test("snapshot seeds require matching revisions and scoped bookmarks", () => {
   );
 });
 
-test("event bootstraps preserve exact target and token contracts", () => {
-  const token = {
-    ok: true,
-    uid: "a".repeat(28),
-    sessionId: epoch,
-    accessToken: "header.payload.signature",
-    accessExpiresAtMs: 1700000300000,
-  };
-  const response = {
-    ...token,
-    eventBootstrap: { eventId: "event-one", result: seed },
-  };
-  assert.equal(isSessionEventBootstrapResponse(response), true);
+test("event bootstraps preserve exact target and snapshot contracts", () => {
+  const bootstrap = { eventId: "event-one", result: seed };
+  assert.equal(isSessionEventBootstrap(bootstrap), true);
   assert.equal(
-    isSessionEventBootstrapResponse({ ...response, gameBootstrap: {} }),
+    isSessionEventBootstrap({ ...bootstrap, gameBootstrap: {} }),
     false,
   );
   assert.equal(
-    isSessionEventBootstrapResponse({
-      ...response,
-      eventBootstrap: { eventId: "event-two", result: seed },
-    }),
+    isSessionEventBootstrap({ eventId: "event-two", result: seed }),
     false,
   );
   assert.equal(
-    isSessionEventBootstrapResponse({
-      ...response,
-      eventBootstrap: {
-        eventId: "event-one",
-        result: { ok: false, status: 503 },
-      },
+    isSessionEventBootstrap({
+      eventId: "event-one",
+      result: { ok: false, status: 503 },
     }),
     true,
   );

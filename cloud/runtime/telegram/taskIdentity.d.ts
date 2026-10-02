@@ -33,10 +33,9 @@ export type TelegramTaskPayload = TelegramTaskFields &
   );
 declare const normalizeOptionalTimestamp: (value: unknown) => number;
 declare const normalizeTaskPayload: (input: unknown) => TelegramTaskPayload;
-declare const buildTelegramDeliveryTaskId: {
-  (input: TelegramTaskPayload): string;
-  (messageKey: string, revision: string, generation: string): string;
-};
+declare const buildTelegramDeliveryTaskId: (
+  input: TelegramTaskPayload,
+) => string;
 export {
   buildTelegramDeliveryTaskId,
   normalizeOptionalTimestamp,

@@ -27,20 +27,6 @@ export function notifyInviteSessionCommitted(
   );
 }
 
-export function notifyInviteWagersChanged(
-  env: Env,
-  inviteIds: readonly string[],
-  options: InviteRoomNotificationOptions = {},
-): Promise<void> {
-  return notifyInviteRooms(
-    env,
-    validIds(inviteIds),
-    "notifyWagersChanged",
-    "invite_wagers_notify_failed",
-    options,
-  );
-}
-
 export async function notifyInviteSourceChanged(
   env: Env,
   changes: InviteSourceChanges,

@@ -10,8 +10,4 @@ export type MatchDiscoveryPage = {
   hasMore: boolean;
 };
 declare function matchDiscoverySortKey(matchId: string): string;
-declare function resolveMatchDiscoveryInvite(
-  matchId: string,
-  hasInvite: (inviteId: string) => boolean | Promise<boolean>,
-): Promise<Pick<MatchDiscoveryEntry, "inviteId" | "resolution">>;
-export { matchDiscoverySortKey, resolveMatchDiscoveryInvite };
+export { matchDiscoverySortKey };

@@ -7,7 +7,6 @@ const {
   VEHICLE_WAMMIN_PRIZES_EVENT_ID,
 } = require("@mons/shared/event-prizes");
 const {
-  buildProfileEventPrizeMergeCopies,
   buildEventPrizeAssignments,
   isEventPrizeId,
   normalizeEventPrizeAssignments,
@@ -291,78 +290,4 @@ test("normalizes only complete valid unique assignment entries", () => {
   );
   assert.deepEqual(Object.keys(assignments), ["1"]);
   assert.equal(assignments["1"].assignedAtMs, 1234);
-});
-
-test("copies source profile prizes to a merged target profile", () => {
-  const copies = buildProfileEventPrizeMergeCopies({
-    targetProfileId: "target",
-    sourceProfileId: "source",
-    targetPrizes: {},
-    sourcePrizes: {
-      NN3eRzoZo80: {
-        eventId: "NN3eRzoZo80",
-        profileId: "source",
-        place: 2,
-        prizeId: "1111",
-        assignedAtMs: 1234,
-      },
-    },
-  });
-  assert.deepEqual(copies.NN3eRzoZo80, {
-    eventId: "NN3eRzoZo80",
-    profileId: "target",
-    place: 2,
-    prizeId: "1111",
-    assignedAtMs: 1234,
-  });
-});
-
-test("keeps an existing target prize when merged profiles share an event", () => {
-  const copies = buildProfileEventPrizeMergeCopies({
-    targetProfileId: "target",
-    sourceProfileId: "source",
-    targetPrizes: {
-      NN3eRzoZo80: {
-        eventId: "NN3eRzoZo80",
-        profileId: "target",
-        place: 1,
-        prizeId: "1092",
-        assignedAtMs: 1234,
-      },
-    },
-    sourcePrizes: {
-      NN3eRzoZo80: {
-        eventId: "NN3eRzoZo80",
-        profileId: "source",
-        place: 2,
-        prizeId: "1111",
-        assignedAtMs: 1234,
-      },
-    },
-  });
-  assert.deepEqual(copies, {});
-});
-
-test("copies a compressed event prize to a merged target profile", () => {
-  const copies = buildProfileEventPrizeMergeCopies({
-    targetProfileId: "target",
-    sourceProfileId: "source",
-    targetPrizes: {},
-    sourcePrizes: {
-      FRkdorMWaYW: {
-        eventId: "FRkdorMWaYW",
-        profileId: "source",
-        place: 1,
-        prizeId: "1866",
-        assignedAtMs: 5678,
-      },
-    },
-  });
-  assert.deepEqual(copies.FRkdorMWaYW, {
-    eventId: "FRkdorMWaYW",
-    profileId: "target",
-    place: 1,
-    prizeId: "1866",
-    assignedAtMs: 5678,
-  });
 });

@@ -1,44 +1,44 @@
-import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
-import { env } from "cloudflare:workers";
-import { parseNewMatchTimerStorage } from "../src/localMatchTimerStore.ts";
+import {
+  normalizeMatchSnapshot,
+  type ReadMatchSnapshotResponse,
+} from "@mons/shared/game-sessions";
+import { createEmptyMaterials } from "@mons/shared/mining";
+import type { CompletePlayerProfile } from "@mons/shared/profiles";
+import {
+  MATCH_TIMER_TERMINAL,
+  parseStrictMatchTimer,
+} from "@mons/shared/timers";
 import {
   applyD1Migrations,
   runDurableObjectAlarm,
   runInDurableObject,
   type D1Migration,
 } from "cloudflare:test";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { env } from "cloudflare:workers";
 import { Game } from "mons-rules";
-import { createEmptyMaterials } from "@mons/shared/mining";
-import type { CompletePlayerProfile } from "@mons/shared/profiles";
-import {
-  normalizeMatchSnapshot,
-  type ReadMatchSnapshotResponse,
-} from "@mons/shared/game-sessions";
-import {
-  MATCH_TIMER_TERMINAL,
-  parseStrictMatchTimer,
-} from "@mons/shared/timers";
-import { createGameplayRepository } from "../src/gameplayRepository.ts";
-import { createRatingRepository } from "../src/ratingRepository.ts";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
+import { readEventSnapshot } from "../src/eventD1.ts";
 import { createEventGameplayRepository } from "../src/eventRepository.ts";
+import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { handleGameplayRoute } from "../src/gameplayRoute.ts";
+import { readHistoricalMatch } from "../src/historicalMatchRoute.ts";
+import { parseNewMatchTimerStorage } from "../src/localMatchTimerStore.ts";
 import { handleMatchSnapshotRoute } from "../src/matchSnapshotRoute.ts";
-import { readMatchStateRoute } from "../src/matchStateD1.ts";
+import { readMatchStateRoutes } from "../src/matchStateD1.ts";
 import { getMatchStateRpc, unwrapMatchStateRpc } from "../src/matchStateRpc.ts";
 import { resolveMatchTimerGame } from "../src/matchTimer.ts";
-import { readEventSnapshot } from "../src/eventD1.ts";
 import {
   commitCanonicalPlan,
   materializeCanonicalProfile,
 } from "../src/profileCanonicalD1.ts";
 import { handleProfileGameProjectionMessage } from "../src/profileGameProjection.ts";
-import { readHistoricalMatch } from "../src/historicalMatchRoute.ts";
-import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
+import { createRatingRepository } from "../src/ratingRepository.ts";
+import { TELEGRAM_TEST_ENV } from "../test/testEnv.ts";
 import { applyEventTestMigrations } from "./eventTestMigrations.ts";
 import { resetEventReceiptTestState } from "./eventTransitionTestFixture.ts";
 import { resetMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
-import { TELEGRAM_TEST_ENV } from "../test/testEnv.ts";
+import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
@@ -365,7 +365,11 @@ describe("gameplay with canonical Durable Object storage", () => {
     expect(await snapshot(workerEnv, host, inviteId)).toEqual(
       normalizeMatchSnapshot(initial.playerMatch),
     );
-    expect(await readMatchStateRoute(db, host, inviteId)).toEqual({
+    expect(
+      await readMatchStateRoutes(db, [
+        { playerId: host, matchId: inviteId },
+      ]).then((rows) => rows[0]),
+    ).toEqual({
       actorUid: host,
       matchId: inviteId,
       inviteId,
@@ -606,7 +610,11 @@ describe("gameplay with canonical Durable Object storage", () => {
     expect(finished.playerMatch).toMatchObject({ timer: MATCH_TIMER_TERMINAL });
     expect(finished.claim).toBeNull();
     expect(finished.revision).toBeGreaterThan(original.revision);
-    expect(await readMatchStateRoute(db, guest, inviteId)).toMatchObject({
+    expect(
+      await readMatchStateRoutes(db, [
+        { playerId: guest, matchId: inviteId },
+      ]).then((rows) => rows[0]),
+    ).toMatchObject({
       kind: "durable",
       inviteId,
       epoch: 2,

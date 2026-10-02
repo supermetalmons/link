@@ -1,20 +1,21 @@
-import { socketTestSessionHeaders } from "../test/socketTestSession.ts";
-import { env } from "cloudflare:workers";
+import { INVITE_METADATA_SOCKET_PROTOCOL } from "@mons/shared/invite-metadata";
+import { INVITE_WAGERS_SOCKET_PROTOCOL } from "@mons/shared/invite-wagers";
+import { MATCH_SYNC_SOCKET_PROTOCOL } from "@mons/shared/match-sync";
 import {
   evictDurableObject,
   runDurableObjectAlarm,
   runInDurableObject,
 } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MATCH_SYNC_SOCKET_PROTOCOL } from "@mons/shared/match-sync";
-import { INVITE_METADATA_SOCKET_PROTOCOL } from "@mons/shared/invite-metadata";
-import { INVITE_WAGERS_SOCKET_PROTOCOL } from "@mons/shared/invite-wagers";
 import type { InviteReactions } from "../src/inviteReactions.ts";
 import type {
   MatchStateSyncReadRequest,
   MatchStateSyncReadResult,
 } from "../src/matchStateTypes.ts";
 import { MAX_CACHED_MATCH_SYNC_STATES } from "../src/matchSyncRoom.ts";
+import { socketTestSessionHeaders } from "../test/socketTestSession.ts";
+import { reactionSocketTestHeaders } from "./presentationStorageFixture.ts";
 
 type Room = DurableObjectStub<InviteReactions>;
 type Source = {
@@ -88,7 +89,8 @@ async function fixture(paired = true) {
   };
   rooms.push(room);
   await install(room, source);
-  return { room, inviteId, source };
+  const reactionHeaders = await reactionSocketTestHeaders(room, inviteId);
+  return { room, inviteId, source, reactionHeaders };
 }
 
 function request(
@@ -308,7 +310,7 @@ describe("live match socket admission", () => {
   });
 
   it("reserves match participant capacity when all legacy channel spectator and participant slots are occupied", async () => {
-    const { room, inviteId } = await fixture();
+    const { room, inviteId, reactionHeaders } = await fixture();
     const inviteRequest = (
       channel: "metadata" | "wagers",
       role: "host" | "guest" | "spectator",
@@ -340,6 +342,7 @@ describe("live match socket admission", () => {
         accept(
           await room.fetch("https://room.internal/socket", {
             headers: {
+              ...reactionHeaders,
               Upgrade: "websocket",
               "X-Mons-Reaction-IP": `192.0.2.${Math.floor(index / 8)}`,
             },
@@ -367,6 +370,7 @@ describe("live match socket admission", () => {
           accept(
             await room.fetch("https://room.internal/socket", {
               headers: {
+                ...reactionHeaders,
                 Upgrade: "websocket",
                 "X-Mons-Reaction-Role": role,
                 ...socketTestSessionHeaders(),

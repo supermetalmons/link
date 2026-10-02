@@ -2,35 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createSqlDependencies,
-  manageWagerState,
-  parseArgs,
-  execute,
-} from "./manage-wager-state.ts";
+  inspectWagers,
+} from "./operator/inspect/wagers.ts";
 import type { SqlRunner } from "./operator/runtime.ts";
 
-test("retired commands reject before credentials or provider requests", async (t) => {
-  let requests = 0;
-  t.mock.method(globalThis, "fetch", async () => {
-    requests++;
-    throw new Error("unexpected provider request");
-  });
-  for (const flag of [
-    "--preflight",
-    "--export",
-    "--import",
-    "--verify",
-    "--activate",
-    "--resume",
-  ]) {
-    assert.throws(() => parseArgs([flag]), /retired/);
-    await assert.rejects(execute([flag]), /retired/);
-  }
-  assert.equal(requests, 0);
-  assert.deepEqual(parseArgs(["--status"]).operation, "status");
-  assert.throws(() =>
-    parseArgs(["--status", "--firebase-credentials", "/missing"]),
-  );
-});
 test("wager status preserves activation, maintenance and row-count diagnostics using read-only SQL", async () => {
   const queries: string[] = [];
   const activation: Record<string, unknown> = { activation_epoch: 1 };
@@ -77,7 +52,7 @@ test("wager status preserves activation, maintenance and row-count diagnostics u
   const deps = createSqlDependencies(run, () => 100);
   const logs: Record<string, unknown>[] = [];
   deps.log = (value) => logs.push(value);
-  await manageWagerState(parseArgs(["--status"]), deps);
+  await inspectWagers(deps);
   assert.equal(queries.length, 4);
   assert.deepEqual(logs[0].destination, {
     rowCount: 3,

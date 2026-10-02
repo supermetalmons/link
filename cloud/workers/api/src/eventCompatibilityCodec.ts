@@ -320,12 +320,6 @@ export function decodeEventUpdates(
     throw new Error("unsupported-event-path");
   });
 }
-export function eventMatchMarkerPath(
-  playerId: string,
-  matchId: string,
-): string {
-  return `players/${playerId}/matches/${matchId}`;
-}
 
 export function decodeCanonicalEventUpdates(
   updates: Readonly<Record<string, unknown>>,

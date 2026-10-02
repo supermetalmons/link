@@ -195,16 +195,6 @@ async function didClearOwnedQueuedAutomatches(
   }
 }
 
-export async function findOwnedQueuedAutomatch(
-  loginUids: readonly string[],
-  repository: AutomatchRepository,
-  signal?: AbortSignal,
-): Promise<QueuedAutomatch | null> {
-  return (
-    (await findOwnedQueuedAutomatches(loginUids, repository, signal))[0] || null
-  );
-}
-
 export async function readAutomatchRequesterSnapshot(
   uid: string,
   repository: AutomatchRepository,

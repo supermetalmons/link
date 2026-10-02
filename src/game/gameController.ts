@@ -768,12 +768,6 @@ const syncInviteBotIntoLocalGameButton = () => {
   syncBotStrengthControlButton();
 };
 
-export const isMatchOver = () => {
-  return isGameOver;
-};
-
-export const getBoardViewMode = () => boardViewMode;
-
 const setWatchOnlyState = (value: boolean) => {
   if (isWatchOnly === value) {
     return;
@@ -5458,13 +5452,6 @@ function showPuzzleInstructions() {
 
 export function cleanupCurrentInputs() {
   currentInputs = [];
-}
-
-export function getSelectedPuzzleId(): string | null {
-  if (!puzzleMode || !selectedProblem) {
-    return null;
-  }
-  return selectedProblem.id;
 }
 
 export function didSelectPuzzle(

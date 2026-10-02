@@ -1,26 +1,30 @@
-import { socketTestSessionHeaders } from "../test/socketTestSession.ts";
-import { env } from "cloudflare:workers";
 import {
-  evictDurableObject,
-  runDurableObjectAlarm,
-  runInDurableObject,
-} from "cloudflare:test";
-import { afterEach, describe, expect, it, vi } from "vitest";
+  INVITE_METADATA_REFRESH_MS,
+  INVITE_METADATA_SOCKET_PROTOCOL,
+} from "@mons/shared/invite-metadata";
 import {
   INVITE_WAGERS_REFRESH_MS,
   INVITE_WAGERS_SOCKET_PROTOCOL,
   isInviteWagersMessage,
 } from "@mons/shared/invite-wagers";
 import {
-  INVITE_METADATA_REFRESH_MS,
-  INVITE_METADATA_SOCKET_PROTOCOL,
-} from "@mons/shared/invite-metadata";
-import {
   REACTION_HEARTBEAT_REQUEST,
   REACTION_HEARTBEAT_RESPONSE,
-  REACTION_SOCKET_PROTOCOL_V2,
+  REACTION_SOCKET_PROTOCOL,
 } from "@mons/shared/reactions";
+import {
+  evictDurableObject,
+  runDurableObjectAlarm,
+  runInDurableObject,
+} from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WagerStateSnapshot } from "../src/wagerStateD1.ts";
+import { socketTestSessionHeaders } from "../test/socketTestSession.ts";
+import {
+  seedHistoricalPresentations,
+  reactionSocketTestHeaders,
+} from "./presentationStorageFixture.ts";
 
 type Room = DurableObjectStub<
   import("../src/inviteReactions.ts").InviteReactions
@@ -119,6 +123,7 @@ async function fixture() {
   };
   rooms.push(room);
   await installSource(room, source);
+  await reactionSocketTestHeaders(room, inviteId);
   return { inviteId, room, source };
 }
 
@@ -939,25 +944,24 @@ describe("durable invite wagers", () => {
     });
   });
 
-  it("recovers after eviction, isolates legacy reactions and presentations, and keeps the heartbeat receive-only", async () => {
+  it("recovers after eviction, isolates reactions and presentations, and keeps the heartbeat receive-only", async () => {
     const { room, inviteId, source } = await fixture();
     const wager = acceptSocket(await room.fetch(request(inviteId)));
-    const legacy = acceptSocket(
-      await room.fetch("https://room.internal/socket", {
-        headers: { Upgrade: "websocket" },
-      }),
-    );
     const modern = acceptSocket(
       await room.fetch("https://room.internal/socket", {
         headers: {
+          "X-Mons-Presentation-Canonical": "1",
+          "X-Mons-Presentation-Actors": encodeURIComponent(
+            JSON.stringify(["host-login", "guest-login"]),
+          ),
           Upgrade: "websocket",
-          "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL_V2,
+          "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL,
           "X-Mons-Presentation-Match": inviteId,
         },
       }),
     );
-    await Promise.all([wager.read(), legacy.read(), modern.read()]);
-    await room.ensurePresentations(inviteId, {
+    await Promise.all([wager.read(), modern.read()]);
+    await seedHistoricalPresentations(room, inviteId, {
       "host-login": { emojiId: 1, aura: "" },
     });
     await room.updatePresentation("host-login", inviteId, {
@@ -974,14 +978,12 @@ describe("durable invite wagers", () => {
       matchId: inviteId,
     });
     expect(JSON.parse(await modern.read()).type).toBe("reaction");
-    expect(JSON.parse(await legacy.read()).type).toBe("reaction");
     expect(wager.messages).toEqual([]);
     source.value = { ...invite };
     await evictDurableObject(room);
     await installSource(room, source);
     expect(await runScheduledAlarm(room)).toBe(true);
     expect(JSON.parse(await wager.read()).snapshot.wagers).toEqual({});
-    expect(legacy.messages).toEqual([]);
     expect(modern.messages).toEqual([]);
     wager.socket.send(REACTION_HEARTBEAT_REQUEST);
     expect(await wager.read()).toBe(REACTION_HEARTBEAT_RESPONSE);
@@ -1085,6 +1087,12 @@ describe("durable invite wagers", () => {
         acceptSocket(
           await room.fetch("https://room.internal/socket", {
             headers: {
+              "X-Mons-Presentation-Canonical": "1",
+              "X-Mons-Presentation-Actors": encodeURIComponent(
+                JSON.stringify(["host-login", "guest-login"]),
+              ),
+              "Sec-WebSocket-Protocol": "mons-reactions-v2",
+              "X-Mons-Presentation-Match": inviteId,
               Upgrade: "websocket",
               "X-Mons-Reaction-IP": `198.51.100.${Math.floor(index / 8)}`,
             },
@@ -1096,7 +1104,16 @@ describe("durable invite wagers", () => {
     expect(
       (
         await room.fetch("https://room.internal/socket", {
-          headers: { Upgrade: "websocket", "X-Mons-Reaction-IP": "other" },
+          headers: {
+            "X-Mons-Presentation-Canonical": "1",
+            "X-Mons-Presentation-Actors": encodeURIComponent(
+              JSON.stringify(["host-login", "guest-login"]),
+            ),
+            "Sec-WebSocket-Protocol": "mons-reactions-v2",
+            "X-Mons-Presentation-Match": inviteId,
+            Upgrade: "websocket",
+            "X-Mons-Reaction-IP": "other",
+          },
         })
       ).status,
     ).toBe(429);
@@ -1119,6 +1136,12 @@ describe("durable invite wagers", () => {
                     channel === "reaction"
                       ? new Request("https://room.internal/socket", {
                           headers: {
+                            "Sec-WebSocket-Protocol": "mons-reactions-v2",
+                            "X-Mons-Presentation-Match": inviteId,
+                            "X-Mons-Presentation-Canonical": "1",
+                            "X-Mons-Presentation-Actors": encodeURIComponent(
+                              JSON.stringify(["host-login", "guest-login"]),
+                            ),
                             Upgrade: "websocket",
                             "X-Mons-Reaction-Role": role,
                             ...socketTestSessionHeaders(),

@@ -6,17 +6,9 @@ exports.buildPendingAutomatchTelegramSource =
   exports.buildAutomatchTelegramLifecycleChanges =
   exports.buildAutomatchTelegramProjectionChanges =
   exports.TELEGRAM_AUTOMATCH_VERSION =
-  exports.TELEGRAM_AUTOMATCH_PROJECTION_OUTBOX_ROOT =
-  exports.TELEGRAM_AUTOMATCH_ROOT =
     void 0;
 const TELEGRAM_AUTOMATCH_VERSION = 2;
 exports.TELEGRAM_AUTOMATCH_VERSION = TELEGRAM_AUTOMATCH_VERSION;
-const TELEGRAM_AUTOMATCH_ROOT = "telegramAutomatches";
-exports.TELEGRAM_AUTOMATCH_ROOT = TELEGRAM_AUTOMATCH_ROOT;
-const TELEGRAM_AUTOMATCH_PROJECTION_OUTBOX_ROOT =
-  "telegramProjectionOutbox/automatch";
-exports.TELEGRAM_AUTOMATCH_PROJECTION_OUTBOX_ROOT =
-  TELEGRAM_AUTOMATCH_PROJECTION_OUTBOX_ROOT;
 const buildAutomatchTelegramProjectionChanges = ({
   inviteId,
   requestId,

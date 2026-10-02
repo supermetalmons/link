@@ -1,7 +1,6 @@
 // Generated from src/matchOutcome.ts. Run npm run generate:runtime.
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.resolveMatchResult = void 0;
 exports.resolveMatchWinner = resolveMatchWinner;
 const timers_1 = require("@mons/shared/timers");
 const monsRules_js_1 = require("./monsRules.js");
@@ -64,10 +63,3 @@ async function resolveMatchWinner(matchData, opponentMatchData) {
     reason: resolution.kind === "invalid" ? "invalid-game" : "pending",
   };
 }
-const resolveMatchResult = async (matchData, opponentMatchData) => {
-  const { winner } = await resolveMatchWinner(matchData, opponentMatchData);
-  const result =
-    winner === "player" ? "win" : winner === "opponent" ? "gg" : "none";
-  return { result };
-};
-exports.resolveMatchResult = resolveMatchResult;

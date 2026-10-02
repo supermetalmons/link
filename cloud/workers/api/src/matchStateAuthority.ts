@@ -16,7 +16,7 @@ export function assertDurableMatchState(
   }
 }
 
-export async function requireDurableMatchState(
+async function requireDurableMatchState(
   db: D1Database,
   expectedEpoch?: number,
 ): Promise<MatchStateControl> {

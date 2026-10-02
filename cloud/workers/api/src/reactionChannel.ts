@@ -1,29 +1,27 @@
+import type { MatchPresentation } from "@mons/shared/match-presentation";
 import {
   REACTION_PROTOCOL_VERSION,
   REACTION_SOCKET_PROTOCOL,
-  REACTION_SOCKET_PROTOCOL_V2,
   isInviteReaction,
   type InviteReaction,
-  type InviteReactionEvent,
-  type InviteReactionSnapshot,
+  type InviteRoomReactionEvent,
   type InviteRoomSnapshot,
 } from "@mons/shared/reactions";
-import type { MatchPresentation } from "@mons/shared/match-presentation";
-import type { MatchPresentationStore } from "./matchPresentationStore.ts";
 import {
   selectRegisteredPresentations,
   type MatchPresentationRegistration,
 } from "./matchPresentationRegistry.ts";
+import type { MatchPresentationStore } from "./matchPresentationStore.ts";
 import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
+import {
+  socketCapacityFull,
+  type SocketCapacityLimits,
+} from "./socketCapacity.ts";
 import {
   readSocketSession,
   socketSessionCurrent,
   type SocketSessions,
 } from "./socketSession.ts";
-import {
-  socketCapacityFull,
-  type SocketCapacityLimits,
-} from "./socketCapacity.ts";
 import { acceptRoomSocket, sendSocketSnapshot } from "./socketUpgrade.ts";
 
 type ReactionChannelDependencies = {
@@ -47,10 +45,6 @@ type StoredReaction = {
   reaction_json: string;
 };
 
-function socketVersion(socket: WebSocket): 1 | 2 {
-  return socket.deserializeAttachment()?.schemaVersion === 2 ? 2 : 1;
-}
-
 function isReactionSocket(socket: WebSocket): boolean {
   const channel = socket.deserializeAttachment()?.channel;
   return channel === undefined || channel === "reaction";
@@ -69,7 +63,8 @@ export class ReactionChannel {
     const role = request.headers.get("X-Mons-Reaction-Role") || "spectator";
     const ip = request.headers.get("X-Mons-Reaction-IP") || "unknown";
     const protocol = request.headers.get("Sec-WebSocket-Protocol");
-    const version = protocol === REACTION_SOCKET_PROTOCOL_V2 ? 2 : 1;
+    if (protocol !== REACTION_SOCKET_PROTOCOL)
+      return new Response("Unsupported reaction protocol", { status: 400 });
     let matchId: string | null = null;
     try {
       const encodedMatchId = request.headers.get("X-Mons-Presentation-Match");
@@ -77,33 +72,29 @@ export class ReactionChannel {
     } catch {
       return new Response("Invalid presentation match", { status: 400 });
     }
-    if (
-      version === 2 &&
-      (!matchId || matchId !== matchId.trim() || !isSafeRecordKey(matchId))
-    ) {
+    if (!matchId || matchId !== matchId.trim() || !isSafeRecordKey(matchId)) {
       return new Response("Invalid presentation match", { status: 400 });
     }
-    let canonicalActors: string[] | null = null;
-    if (request.headers.get("X-Mons-Presentation-Canonical") === "1") {
-      try {
-        const value: unknown = JSON.parse(
-          decodeURIComponent(
-            request.headers.get("X-Mons-Presentation-Actors") || "",
-          ),
-        );
-        if (
-          version !== 2 ||
-          !Array.isArray(value) ||
-          !value.length ||
-          value.length > 2 ||
-          value.some((uid) => !isCanonicalLoginUid(uid))
-        ) {
-          return new Response("Invalid presentation actors", { status: 400 });
-        }
-        canonicalActors = value;
-      } catch {
+    if (request.headers.get("X-Mons-Presentation-Canonical") !== "1")
+      return new Response("Invalid presentation authority", { status: 400 });
+    let canonicalActors: string[];
+    try {
+      const value: unknown = JSON.parse(
+        decodeURIComponent(
+          request.headers.get("X-Mons-Presentation-Actors") || "",
+        ),
+      );
+      if (
+        !Array.isArray(value) ||
+        !value.length ||
+        value.length > 2 ||
+        value.some((uid) => !isCanonicalLoginUid(uid))
+      ) {
         return new Response("Invalid presentation actors", { status: 400 });
       }
+      canonicalActors = value;
+    } catch {
+      return new Response("Invalid presentation actors", { status: 400 });
     }
     if (!["host", "guest", "spectator"].includes(role) || ip.length > 64) {
       return new Response("Invalid reaction admission", { status: 400 });
@@ -112,41 +103,37 @@ export class ReactionChannel {
     if (!session) return new Response("Session expired", { status: 401 });
     if (session.authenticated)
       await this.dependencies.scheduleAlarm(session.authExpiresAtMs);
-    let canonicalRegistrations: MatchPresentationRegistration[] | null = null;
-    if (canonicalActors) {
-      const inviteId = this.dependencies.pinnedInviteId();
-      const actors = canonicalActors;
-      const before = this.dependencies.presentations.readPresentations(
-        matchId!,
-      ).players;
-      const read = async () =>
-        (await this.dependencies.readRegistrations(inviteId, matchId!)).filter(
-          (row) => actors.includes(row.actorUid),
-        );
+    const inviteId = this.dependencies.pinnedInviteId();
+    const actors = canonicalActors;
+    const before =
+      this.dependencies.presentations.readPresentations(matchId).players;
+    const read = async () =>
+      (await this.dependencies.readRegistrations(inviteId, matchId)).filter(
+        (row) => actors.includes(row.actorUid),
+      );
+    let canonicalRegistrations = await read();
+    if (!canonicalRegistrations.length)
+      throw new Error("match-presentation-unavailable");
+    const registeredActors = new Set(
+      canonicalRegistrations.map((row) => row.actorUid),
+    );
+    const missedUpdates = Object.values(
+      this.dependencies.presentations.readPresentations(matchId).players,
+    )
+      .filter(
+        (value) =>
+          actors.includes(value.actorUid) &&
+          !registeredActors.has(value.actorUid) &&
+          value.revision > (before[value.actorUid]?.revision ?? 0),
+      )
+      .map((value) => value.actorUid);
+    if (missedUpdates.length) {
       canonicalRegistrations = await read();
-      if (!canonicalRegistrations.length)
-        throw new Error("match-presentation-unavailable");
-      const registeredActors = new Set(
+      const refreshedActors = new Set(
         canonicalRegistrations.map((row) => row.actorUid),
       );
-      const missedUpdates = Object.values(
-        this.dependencies.presentations.readPresentations(matchId!).players,
-      )
-        .filter(
-          (value) =>
-            actors.includes(value.actorUid) &&
-            !registeredActors.has(value.actorUid) &&
-            value.revision > (before[value.actorUid]?.revision ?? 0),
-        )
-        .map((value) => value.actorUid);
-      if (missedUpdates.length) {
-        canonicalRegistrations = await read();
-        const refreshedActors = new Set(
-          canonicalRegistrations.map((row) => row.actorUid),
-        );
-        if (missedUpdates.some((actorUid) => !refreshedActors.has(actorUid)))
-          throw new Error("match-presentation-unavailable");
-      }
+      if (missedUpdates.some((actorUid) => !refreshedActors.has(actorUid)))
+        throw new Error("match-presentation-unavailable");
     }
     if (!socketSessionCurrent(session))
       return new Response("Session expired", { status: 401 });
@@ -183,32 +170,22 @@ export class ReactionChannel {
         .toArray()
         .map((row) => [row.sender_uid, JSON.parse(row.reaction_json)]),
     );
-    const snapshot: InviteReactionSnapshot | InviteRoomSnapshot =
-      version === 2
-        ? {
-            schemaVersion: 2,
-            type: "snapshot",
-            reactions,
-            presentation: canonicalRegistrations
-              ? selectRegisteredPresentations(
-                  matchId!,
-                  canonicalRegistrations,
-                  this.dependencies.presentations.registeredPresentationSnapshot(
-                    matchId!,
-                  ),
-                )
-              : this.dependencies.presentations.readPresentations(matchId!),
-          }
-        : {
-            schemaVersion: REACTION_PROTOCOL_VERSION,
-            type: "snapshot",
-            reactions,
-          };
+    const snapshot: InviteRoomSnapshot = {
+      schemaVersion: REACTION_PROTOCOL_VERSION,
+      type: "snapshot",
+      reactions,
+      presentation: selectRegisteredPresentations(
+        matchId,
+        canonicalRegistrations,
+        this.dependencies.presentations.registeredPresentationSnapshot(matchId),
+      ),
+    };
     const pair = acceptRoomSocket(
       this.ctx,
       {
-        schemaVersion: version,
-        matchId: version === 2 ? matchId : null,
+        channel: "reaction",
+        schemaVersion: REACTION_PROTOCOL_VERSION,
+        matchId,
         ...session,
       },
       [`role:${role}`, ...(role === "spectator" ? [`spectator-ip:${ip}`] : [])],
@@ -217,10 +194,7 @@ export class ReactionChannel {
       this.dependencies.socketSessions,
       pair,
       snapshot,
-      protocol === REACTION_SOCKET_PROTOCOL ||
-        protocol === REACTION_SOCKET_PROTOCOL_V2
-        ? protocol
-        : undefined,
+      REACTION_SOCKET_PROTOCOL,
     );
   }
 
@@ -263,20 +237,16 @@ export class ReactionChannel {
       senderUid,
       serialized,
     );
-    const event: InviteReactionEvent = {
+    const event: InviteRoomReactionEvent = {
       schemaVersion: REACTION_PROTOCOL_VERSION,
       type: "reaction",
       senderUid,
       reaction: normalized,
     };
     const message = JSON.stringify(event);
-    const v2Message = JSON.stringify({ ...event, schemaVersion: 2 });
     for (const socket of this.ctx.getWebSockets()) {
       if (isReactionSocket(socket)) {
-        this.dependencies.socketSessions.send(
-          socket,
-          socketVersion(socket) === 2 ? v2Message : message,
-        );
+        this.dependencies.socketSessions.send(socket, message);
       }
     }
     return "published";

@@ -18,7 +18,6 @@ import type {
 } from "./startTransitionCore.js";
 import { eventField } from "../eventCommands.js";
 
-import {} from "../batchRead.js";
 import { resolveMatchWinner as defaultResolveMatchWinner } from "../matchOutcome.js";
 import {
   buildEventPrizeAssignments,

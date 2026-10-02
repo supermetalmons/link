@@ -34,7 +34,6 @@ export type SessionTokenReadResult = SessionTokenResult & {
   gameBootstrap?: SessionBootstrap;
   eventBootstrap?: SessionEventBootstrap;
   identityBootstrap?: SessionIdentityBootstrap;
-  identitySupport?: "supported" | "legacy";
 };
 type SessionReadTarget = SessionBootstrapTarget | SessionEventBootstrapTarget;
 
@@ -144,16 +143,12 @@ async function tokenResponse(
       let gameBootstrap: SessionBootstrap | undefined;
       let eventBootstrap: SessionEventBootstrap | undefined;
       let identityBootstrap: SessionIdentityBootstrap | undefined;
-      let identitySupport: SessionTokenReadResult["identitySupport"];
       if (
         includeIdentity &&
         token &&
         typeof token === "object" &&
         !Array.isArray(token)
       ) {
-        identitySupport = Object.hasOwn(token, "identityBootstrap")
-          ? "supported"
-          : "legacy";
         const { identityBootstrap: optionalIdentity, ...tokenFields } =
           token as Record<string, unknown>;
         token = tokenFields;
@@ -227,7 +222,6 @@ async function tokenResponse(
         ...(gameBootstrap ? { gameBootstrap } : {}),
         ...(eventBootstrap ? { eventBootstrap } : {}),
         ...(identityBootstrap ? { identityBootstrap } : {}),
-        ...(identitySupport ? { identitySupport } : {}),
       };
     } finally {
       if (timer !== null) clearTimeout(timer);
@@ -286,23 +280,11 @@ async function requestToken(
     }, SESSION_BOOTSTRAP_REQUEST_TIMEOUT_MS);
   });
   const run = async () => {
-    let response: Response;
-    let downgraded = false;
-    try {
-      response = await request(`${path}?${query}`, options, controller.signal);
-    } catch (error) {
-      if (
-        !target ||
-        !includeIdentity ||
-        !(error instanceof SessionApiError) ||
-        error.status !== 400 ||
-        controller.signal.aborted
-      )
-        throw error;
-      query.delete("bootstrapIdentity");
-      downgraded = true;
-      response = await request(`${path}?${query}`, options, controller.signal);
-    }
+    const response = await request(
+      `${path}?${query}`,
+      options,
+      controller.signal,
+    );
     if (controller.signal.aborted || performance.now() >= deadline) {
       void response.body?.cancel().catch(() => undefined);
       throw new SessionApiError(
@@ -310,18 +292,15 @@ async function requestToken(
         "Session service is unavailable. Try again.",
       );
     }
-    const result = await tokenResponse(
+    return tokenResponse(
       response,
       sessionId,
       startedAt,
       target,
       controller.signal,
       deadline,
-      includeIdentity && !downgraded,
+      includeIdentity,
     );
-    return downgraded
-      ? { ...result, identitySupport: "legacy" as const }
-      : result;
   };
   try {
     return await Promise.race([run(), timeout]);

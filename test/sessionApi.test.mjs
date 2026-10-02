@@ -472,7 +472,6 @@ test("identity opt-in composes with route seeds and preserves strict token parsi
       };
       const result = await operation(session, target, true);
       assert.deepEqual(result.identityBootstrap, { ok: true, profile: null });
-      assert.equal(result.identitySupport, "supported");
     }
   }
   globalThis.fetch = async () =>
@@ -485,7 +484,7 @@ test("identity opt-in composes with route seeds and preserves strict token parsi
   });
 });
 
-test("only absent opted-in identity identifies legacy; malformed and unavailable remain supported", async () => {
+test("missing or malformed identity remains absent while explicit repair and outage results are preserved", async () => {
   for (const identityBootstrap of [
     undefined,
     null,
@@ -500,10 +499,6 @@ test("only absent opted-in identity identifies legacy; malformed and unavailable
         ...(identityBootstrap === undefined ? {} : { identityBootstrap }),
       });
     const result = await sessionApi.refresh(session, undefined, true);
-    assert.equal(
-      result.identitySupport,
-      identityBootstrap === undefined ? "legacy" : "supported",
-    );
     assert.deepEqual(
       result.identityBootstrap,
       identityBootstrap?.status === 409 || identityBootstrap?.status === 503
@@ -513,46 +508,32 @@ test("only absent opted-in identity identifies legacy; malformed and unavailable
   }
 });
 
-test("combined old-server 400 retries once without identity using identical capability and target", async () => {
-  const target = { eventId: "event-a" };
-  const calls = [];
-  globalThis.fetch = async (url, options) => {
-    calls.push({ url: new URL(url), options });
-    return calls.length === 1
-      ? json({}, 400)
-      : json({
-          ...response(),
-          eventBootstrap: { ...target, result: { ok: false, status: 404 } },
-        });
-  };
-  const result = await sessionApi.refresh(session, target, true);
-  assert.equal(result.identitySupport, "legacy");
-  assert.equal(calls.length, 2);
-  assert.equal(calls[0].url.searchParams.get("bootstrapIdentity"), "1");
-  assert.equal(calls[1].url.searchParams.has("bootstrapIdentity"), false);
-  assert.equal(calls[1].url.searchParams.get("bootstrapEventId"), "event-a");
-  assert.deepEqual(calls[1].options.headers, calls[0].options.headers);
-  let attempts = 0;
-  globalThis.fetch = async () => {
-    attempts++;
-    return json({}, 400);
-  };
-  await assert.rejects(sessionApi.refresh(session, target, true), {
-    code: "unavailable",
-  });
-  assert.equal(attempts, 2);
-  attempts = 0;
-  await assert.rejects(sessionApi.refresh(session, undefined, true), {
-    code: "unavailable",
-  });
-  assert.equal(attempts, 1);
+test("a rejected combined identity request fails without downgrading its query", async () => {
+  for (const target of [{ eventId: "event-a" }, undefined]) {
+    const calls = [];
+    globalThis.fetch = async (url) => {
+      calls.push(new URL(url));
+      return json({}, 400);
+    };
+    await assert.rejects(sessionApi.refresh(session, target, true), {
+      code: "unavailable",
+      status: 400,
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].searchParams.get("bootstrapIdentity"), "1");
+    if (target)
+      assert.equal(
+        calls[0].searchParams.get("bootstrapEventId"),
+        target.eventId,
+      );
+  }
 });
 
 test("identity response bytes remain bounded separately from the base token", async () => {
   globalThis.fetch = async () =>
     json({ ...response(), identityBootstrap: { padding: "a".repeat(20_000) } });
   const result = await sessionApi.refresh(session, undefined, true);
-  assert.equal(result.identitySupport, "supported");
+
   assert.equal(result.identityBootstrap, undefined);
   globalThis.fetch = async () =>
     json({

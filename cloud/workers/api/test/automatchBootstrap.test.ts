@@ -1,20 +1,20 @@
-import assert from "node:assert/strict";
-import test from "node:test";
 import type { ReadGameBootstrapResponse } from "@mons/shared/game-bootstrap";
 import {
   isStartAutomatchResponse,
   type StartAutomatchResponse,
 } from "@mons/shared/navigation";
-import { enrichAutomatchResponse } from "../src/gameplayRoutes/automatch.ts";
+import assert from "node:assert/strict";
+import test from "node:test";
 import { readAuthenticatedGameBootstrap } from "../src/gameBootstrap.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
+import { enrichAutomatchResponse } from "../src/gameplayRoutes/automatch.ts";
 import { normalizeInviteMetadata } from "../src/inviteMetadata.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const operationId = "00000000-0000-4000-8000-000000000001";
 const inviteId = "auto_bootstrap";
 const identity = { uid: "h".repeat(28) };
-const env: Env = { ...TELEGRAM_TEST_ENV, AUTOMATCH_DELIVERY_MODE: "bootstrap" };
+const env: Env = TELEGRAM_TEST_ENV;
 const repository = createGameplayRepository(env);
 const response: Extract<StartAutomatchResponse, { mode: "matched" }> = {
   ok: true,
@@ -85,7 +85,7 @@ function context(
   };
 }
 
-test("only a matched opted-in bootstrap-mode response triggers enrichment", async () => {
+test("only a matched opted-in response triggers enrichment", async () => {
   let reads = 0;
   const read = async () => {
     reads++;
@@ -101,14 +101,6 @@ test("only a matched opted-in bootstrap-mode response triggers enrichment", asyn
       await enrichAutomatchResponse(response, context(query), read),
       response,
     );
-  assert.deepEqual(
-    await enrichAutomatchResponse(
-      response,
-      context("&bootstrap=1", TELEGRAM_TEST_ENV),
-      read,
-    ),
-    response,
-  );
   for (const result of [
     { ok: false },
     { ok: true, inviteId, mode: "pending", matchedImmediately: false },

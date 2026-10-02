@@ -79,8 +79,6 @@ type Signature_createEventLockManagerCore = (dependencies: {
   clearInterval?: typeof globalThis.clearInterval;
   logger?: Pick<Console, "error">;
 }) => EventLockManager;
-
-const EVENT_LOCK_ROOT = "eventLocks";
 const EVENT_LOCK_TTL_MS = 30_000;
 const EVENT_LOCK_REFRESH_INTERVAL_MS = 10_000;
 
@@ -338,7 +336,6 @@ const createEventLockManagerCore: Signature_createEventLockManagerCore = (
 };
 
 export {
-  EVENT_LOCK_ROOT,
   EVENT_LOCK_REFRESH_INTERVAL_MS,
   EVENT_LOCK_TTL_MS,
   createEventLockManagerCore,

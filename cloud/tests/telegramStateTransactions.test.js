@@ -15,9 +15,7 @@ const {
 const {
   createTelegramRepository,
 } = require("../runtime/telegram/repositoryCore");
-const {
-  runStateDecisionTransaction,
-} = require("../runtime/stateDecisionTransaction");
+const { runStateDecisionTransaction } = require("./legacyStateFixture");
 
 const clone = (value) =>
   value === undefined ? undefined : structuredClone(value);

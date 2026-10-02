@@ -1,13 +1,19 @@
-import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { classifyD1Failure } from "../src/d1Failure.ts";
+import { notifyInviteRooms } from "../src/inviteRoomNotifications.ts";
+import { composeInviteWagerSource } from "../src/inviteWagerSource.ts";
 import {
   acquireWagerReservationAdmission,
   releaseWagerReservationAdmission,
   wagerReservationAdmissionGuards,
 } from "../src/wagerReservationControl.ts";
 import {
-  assertWagerStateActivated,
+  readStoredSettlement,
+  type SendWagerProposalCommand,
+} from "../src/wagerStateCommands.ts";
+import {
   createWagerStateD1Store,
   type WagerStateValue,
 } from "../src/wagerStateD1.ts";
@@ -16,15 +22,8 @@ import {
   createWagerStateRepository,
   type WagerKey,
 } from "../src/wagerStateRepository.ts";
-import {
-  readStoredSettlement,
-  type SendWagerProposalCommand,
-} from "../src/wagerStateCommands.ts";
-import { composeInviteWagerSource } from "../src/inviteWagerSource.ts";
-import { notifyInviteRooms } from "../src/inviteRoomNotifications.ts";
-import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
-import { classifyD1Failure } from "../src/d1Failure.ts";
 import { observeD1FailureDatabase } from "./d1FailureTestUtils.ts";
+import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 const migrations = (env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] })
   .TEST_PROFILE_D1_MIGRATIONS;
 const db = env.PROFILE_DB;
@@ -641,9 +640,9 @@ it("requires verified activation and permanently fences legacy default-epoch wri
     "b".repeat(64),
     { activateWagerState: false },
   );
-  await expect(assertWagerStateActivated(activationDb)).rejects.toThrow(
-    "wager-state-not-activated",
-  );
+  await expect(
+    createWagerStateD1Store(activationDb).readInvite("activation-test"),
+  ).rejects.toThrow("wager-state-not-activated");
   await activationDb.batch([
     activationDb.prepare(
       "UPDATE profile_canonical_control SET state = 'frozen' WHERE singleton = 1",
@@ -671,8 +670,8 @@ it("requires verified activation and permanently fences legacy default-epoch wri
     .bind(...Array<string>(4).fill("b".repeat(64)))
     .run();
   await expect(
-    assertWagerStateActivated(activationDb),
-  ).resolves.toBeUndefined();
+    createWagerStateD1Store(activationDb).readInvite("activation-test"),
+  ).resolves.toEqual([]);
   await expect(
     activationDb
       .prepare(

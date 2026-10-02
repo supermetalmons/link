@@ -1,12 +1,10 @@
-import { socketTestIdentity } from "./socketTestSession.ts";
-import assert from "node:assert/strict";
-import test from "node:test";
 import {
   REACTION_AUTH_PROTOCOL_PREFIX,
   REACTION_SOCKET_PROTOCOL,
-  REACTION_SOCKET_PROTOCOL_V2,
   type InviteReaction,
 } from "@mons/shared/reactions";
+import assert from "node:assert/strict";
+import test from "node:test";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import {
@@ -14,8 +12,9 @@ import {
   isInviteReactionPath,
   type InviteReactionRouteDependencies,
 } from "../src/inviteReactionRoute.ts";
-import { handleRequest } from "../src/router.ts";
 import type { ProfileOwnershipSnapshot } from "../src/profileOwnership.ts";
+import { handleRequest } from "../src/router.ts";
+import { socketTestIdentity } from "./socketTestSession.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const reaction: InviteReaction = {
@@ -39,14 +38,17 @@ function request(
   } = {},
 ) {
   return new Request(
-    `https://api.mons.link${options.path || `/invites/invite-one/reactions${socket ? "/socket" : ""}`}`,
+    `https://api.mons.link${options.path || `/invites/invite-one/reactions${socket ? "/socket?matchId=invite-one" : ""}`}`,
     {
       method: options.method || (socket ? "GET" : "POST"),
       headers: {
         Origin: "https://mons.link",
         "CF-Connecting-IP": "192.0.2.1",
         ...(socket
-          ? { Upgrade: "websocket" }
+          ? {
+              Upgrade: "websocket",
+              "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL,
+            }
           : {
               Authorization: "Bearer test-token",
               "Content-Type": "application/json",
@@ -411,6 +413,11 @@ test("authenticates participant subprotocols and strips credentials from the roo
     upgrade: "websocket",
     "x-mons-reaction-ip": "192.0.2.1",
     "x-mons-reaction-role": "host",
+    "x-mons-presentation-match": "invite-one",
+    "x-mons-presentation-canonical": "1",
+    "x-mons-presentation-actors": encodeURIComponent(
+      JSON.stringify(["host-login", "guest-login"]),
+    ),
     "x-mons-session-id": state.identity.sid,
     "x-mons-session-expires-at": String(state.identity.authExpiresAtMs),
   });
@@ -441,7 +448,7 @@ test("authenticates participant subprotocols and strips credentials from the roo
   assert.equal(publicState.calls.auth, 0);
 });
 
-test("supports native bearer headers and rejects malformed or conflicting websocket credentials", async () => {
+test("supports native bearer headers with the current protocol and rejects malformed or conflicting websocket credentials", async () => {
   const native = setup();
   const response = await handleInviteReactionRoute(
     request(true, { headers: { Authorization: `Bearer ${socketToken}` } }),
@@ -450,10 +457,13 @@ test("supports native bearer headers and rejects malformed or conflicting websoc
     native.dependencies,
   );
   assert.equal(response.status, 200);
-  assert.equal(response.headers.get("Sec-WebSocket-Protocol"), null);
+  assert.equal(
+    response.headers.get("Sec-WebSocket-Protocol"),
+    REACTION_SOCKET_PROTOCOL,
+  );
   const invalidHeaders: Record<string, string>[] = [
     { "Sec-WebSocket-Protocol": "" },
-    { "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL },
+    { "Sec-WebSocket-Protocol": "mons-reactions-v1" },
     { "Sec-WebSocket-Protocol": `${socketProtocols}, extra` },
     { "Sec-WebSocket-Protocol": `other, bearer.${socketToken}` },
     {
@@ -695,15 +705,10 @@ test("fails closed on auth, rate limit and ownership failures and reports confli
 test("v2 sockets validate registered presentation and negotiate anonymous or participant admission", async () => {
   for (const authenticated of [false, true]) {
     const state = setup();
-    const ensured: unknown[] = [];
     state.repository.readInviteMetadata = async (inviteId) => {
       state.calls.reads.push(`invites/${inviteId}`);
       assert.equal(inviteId, "invite-one");
       return { hostId: "host-login", guestId: "guest-login" };
-    };
-    state.dependencies.room!.ensurePresentations = async (matchId, seeds) => {
-      ensured.push({ matchId, seeds });
-      return { matchId, players: {} };
     };
     state.dependencies.room!.fetch = async (incoming) => {
       state.socketRequests.push(incoming);
@@ -720,8 +725,8 @@ test("v2 sockets validate registered presentation and negotiate anonymous or par
         path: "/invites/invite-one/reactions/socket?matchId=invite-one",
         headers: {
           "Sec-WebSocket-Protocol": authenticated
-            ? `${REACTION_SOCKET_PROTOCOL_V2}, ${REACTION_AUTH_PROTOCOL_PREFIX}${socketToken}`
-            : REACTION_SOCKET_PROTOCOL_V2,
+            ? `${REACTION_SOCKET_PROTOCOL}, ${REACTION_AUTH_PROTOCOL_PREFIX}${socketToken}`
+            : REACTION_SOCKET_PROTOCOL,
         },
       }),
       state.env,
@@ -731,7 +736,7 @@ test("v2 sockets validate registered presentation and negotiate anonymous or par
     assert.equal(response.status, 200);
     assert.equal(
       response.headers.get("Sec-WebSocket-Protocol"),
-      REACTION_SOCKET_PROTOCOL_V2,
+      REACTION_SOCKET_PROTOCOL,
     );
     assert.equal(state.calls.auth, authenticated ? 1 : 0);
     assert.equal(
@@ -742,7 +747,6 @@ test("v2 sockets validate registered presentation and negotiate anonymous or par
       state.socketRequests[0].headers.get("X-Mons-Reaction-Role"),
       authenticated ? "host" : "spectator",
     );
-    assert.deepEqual(ensured, []);
     assert.equal(
       state.socketRequests[0].headers.get("X-Mons-Presentation-Canonical"),
       "1",
@@ -758,20 +762,20 @@ test("v2 rejects missing, extra, unrelated or unavailable match selections and v
   const state = setup();
   const prefix = "/invites/invite-one/reactions/socket";
   for (const [path, protocol, expected] of [
-    [prefix, REACTION_SOCKET_PROTOCOL_V2, 400],
-    [`${prefix}?matchId=invite-one`, socketProtocols, 400],
-    [`${prefix}?matchId=other`, REACTION_SOCKET_PROTOCOL_V2, 400],
+    [prefix, REACTION_SOCKET_PROTOCOL, 400],
+    [`${prefix}?matchId=invite-one`, "mons-reactions-v1", 400],
+    [`${prefix}?matchId=other`, REACTION_SOCKET_PROTOCOL, 400],
     [
       `${prefix}?matchId=invite-one&token=secret`,
-      REACTION_SOCKET_PROTOCOL_V2,
+      REACTION_SOCKET_PROTOCOL,
       400,
     ],
     [
       `${prefix}?matchId=invite-one&matchId=invite-one`,
-      REACTION_SOCKET_PROTOCOL_V2,
+      REACTION_SOCKET_PROTOCOL,
       400,
     ],
-    [`${prefix}?matchId=invite-one2`, REACTION_SOCKET_PROTOCOL_V2, 404],
+    [`${prefix}?matchId=invite-one2`, REACTION_SOCKET_PROTOCOL, 404],
   ] as const) {
     const response = await handleInviteReactionRoute(
       request(true, { path, headers: { "Sec-WebSocket-Protocol": protocol } }),
@@ -807,13 +811,10 @@ test("durable v2 admission includes an ensured registered guest before a rematch
       ]),
     ),
   });
-  state.dependencies.room!.ensurePresentations = async () => {
-    throw new Error("unexpected-legacy-bootstrap");
-  };
   const response = await handleInviteReactionRoute(
     request(true, {
       path: "/invites/invite-one/reactions/socket?matchId=invite-one1",
-      headers: { "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL_V2 },
+      headers: { "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL },
     }),
     state.env,
     ctx,
@@ -849,7 +850,7 @@ test("durable v2 admission fails before upgrade when registered appearance is un
   const response = await handleInviteReactionRoute(
     request(true, {
       path: "/invites/invite-one/reactions/socket?matchId=invite-one",
-      headers: { "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL_V2 },
+      headers: { "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL },
     }),
     state.env,
     ctx,
@@ -870,7 +871,7 @@ test("v2 rejects retired appearance authorities before socket admission", async 
     const response = await handleInviteReactionRoute(
       request(true, {
         path: "/invites/invite-one/reactions/socket?matchId=invite-one",
-        headers: { "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL_V2 },
+        headers: { "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL },
       }),
       state.env,
       ctx,
@@ -882,5 +883,24 @@ test("v2 rejects retired appearance authorities before socket admission", async 
       state.calls.reads.some((path) => path.startsWith("players/")),
       false,
     );
+  }
+});
+
+test("rejects missing or retired reaction protocols before reading stored state", async () => {
+  for (const protocol of [null, "mons-reactions-v1"]) {
+    const state = setup();
+    const incoming = request(true);
+    if (protocol === null) incoming.headers.delete("Sec-WebSocket-Protocol");
+    else incoming.headers.set("Sec-WebSocket-Protocol", protocol);
+    const response = await handleInviteReactionRoute(
+      incoming,
+      state.env,
+      ctx,
+      state.dependencies,
+    );
+    assert.equal(response.status, 400);
+    assert.equal(state.calls.auth, 0);
+    assert.equal(state.calls.sockets, 0);
+    assert.deepEqual(state.calls.reads, []);
   }
 });

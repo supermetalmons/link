@@ -1,5 +1,4 @@
 {
-  "batchRead.js": ["batchReadWithRetry"],
   "eventCommands.js": [
     "eventCommandIdentity",
     "eventField",
@@ -10,7 +9,6 @@
   "eventPrizeAwards.js": [
     "EVENT_PRIZE_PLACES",
     "buildEventPrizeAssignments",
-    "buildProfileEventPrizeMergeCopies",
     "isEventPrizeId",
     "normalizeEventPrizeAssignments"
   ],
@@ -147,7 +145,6 @@
   ],
   "events/lockManagerCore.js": [
     "EVENT_LOCK_REFRESH_INTERVAL_MS",
-    "EVENT_LOCK_ROOT",
     "EVENT_LOCK_TTL_MS",
     "createEventLockManagerCore",
     "getOwnershipDecision",
@@ -204,10 +201,9 @@
   "gameVariants.js": ["buildGameSeedForStoredVariant", "buildRandomGameSeed"],
   "gameplay/matchReconstruction.js": [
     "buildOrderedMatchSubmissions",
-    "buildOrderedMoveHistory",
-    "requireLaterGameFromMatchData"
+    "buildOrderedMoveHistory"
   ],
-  "matchOutcome.js": ["resolveMatchResult", "resolveMatchWinner"],
+  "matchOutcome.js": ["resolveMatchWinner"],
   "monsRules.js": ["loadMonsRules", "movesFromFlatString"],
   "profileGamesProjectionCore.js": [
     "READ_RETRY_ATTEMPTS",
@@ -229,7 +225,6 @@
     "MAX_PROFILE_MERGE_TARGET_HOPS",
     "getProfileMergeTargetId",
     "orderProfileMergeCleanupIds",
-    "resolveProfileMergeTargetId",
     "resolveProfileMergeTargetPath"
   ],
   "shared/auth.js": [
@@ -259,7 +254,6 @@
     "ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID",
     "COMPRESSED_PRIZES_EVENT_ID",
     "EVENT_PRIZE_CONFIGS",
-    "EVENT_PRIZE_IDS",
     "EVENT_PRIZE_REVEAL_WINDOW_MS",
     "LEGACY_CORE_PRIZES_EVENT_ID",
     "PLANET_PEPPA_PRIZES_EVENT_ID",
@@ -281,7 +275,6 @@
     "isEventPrizeWithdrawalOperationId",
     "isEventPrizeWithdrawalProcessingResponse",
     "isEventPrizeWithdrawalRequest",
-    "isEventPrizeWithdrawalResponse",
     "isEventPrizeWithdrawalStatusRequest",
     "isProfileEventPrizesResponse",
     "isToggleEventPrizeSelectionRequest",
@@ -309,7 +302,6 @@
     "eventBookmarkEpoch",
     "eventSnapshotEtag",
     "getEventBracketSize",
-    "getFirstRoundByeSeeds",
     "isCreateEventRequest",
     "isCreateEventResponse",
     "isDisqualifyEventMatchWinnersRequest",
@@ -413,10 +405,7 @@
     "isPublicWagerResolution",
     "isReadInviteWagersResponse"
   ],
-  "shared/login-match-discovery.js": [
-    "matchDiscoverySortKey",
-    "resolveMatchDiscoveryInvite"
-  ],
+  "shared/login-match-discovery.js": ["matchDiscoverySortKey"],
   "shared/match-presentation.js": [
     "PRESENTATION_MAX_MESSAGE_BYTES",
     "PRESENTATION_MAX_REQUEST_BYTES",
@@ -507,7 +496,6 @@
   ],
   "shared/profiles.js": [
     "LEADERBOARD_READ_TYPES",
-    "PROFILE_CUSTOMIZATION_FIELDS",
     "PROFILE_FALLBACK_EMOJI_COUNT",
     "PROFILE_STICKER_CATALOG",
     "cropAddress",
@@ -541,13 +529,10 @@
     "REACTION_MAX_MESSAGE_BYTES",
     "REACTION_PROTOCOL_VERSION",
     "REACTION_SOCKET_PROTOCOL",
-    "REACTION_SOCKET_PROTOCOL_V2",
     "STICKER_ID_WHITELIST",
     "isInviteReaction",
     "isInviteReactionForInvite",
-    "isInviteReactionMessage",
     "isInviteRoomMessage",
-    "isReaction",
     "isReactionSocketToken",
     "isSendInviteReactionResponse"
   ],
@@ -555,7 +540,6 @@
     "createInviteCandidatesFromMatchId",
     "deriveLatestMatchId",
     "getHintMatchIndex",
-    "getHistoricalMatchIds",
     "getLatestApprovedRematchIndex",
     "getLatestRematchIndex",
     "inviteMatchesPlayers",
@@ -585,10 +569,8 @@
     "SESSION_IDENTITY_BOOTSTRAP_MAX_RESPONSE_BYTES",
     "isSessionBootstrap",
     "isSessionBootstrapFailure",
-    "isSessionBootstrapResponse",
     "isSessionBootstrapTarget",
     "isSessionEventBootstrap",
-    "isSessionEventBootstrapResponse",
     "isSessionEventBootstrapTarget",
     "isSessionIdentityBootstrap"
   ],
@@ -601,14 +583,12 @@
     "formatMatchTimer",
     "isClaimMatchVictoryByTimerRequest",
     "isClaimMatchVictoryByTimerResponse",
-    "isMatchTimerTerminal",
     "isStartMatchTimerRequest",
     "isStartMatchTimerResponse",
     "parseMatchTimer",
     "parseStrictMatchTimer"
   ],
   "shared/usernames.js": [
-    "USERNAME_LOOKUP_KEY_FIELD",
     "USERNAME_MAX_LENGTH",
     "USERNAME_VALIDATION_MESSAGES",
     "buildUsernameLookupKey",
@@ -648,10 +628,7 @@
     "normalizeServerXConsentSource"
   ],
   "stateCompatibility.js": ["PROFILE_GAME_PROJECTION_SOURCE"],
-  "stateDecisionTransaction.js": ["runStateDecisionTransaction"],
   "telegram/automatchSource.js": [
-    "TELEGRAM_AUTOMATCH_PROJECTION_OUTBOX_ROOT",
-    "TELEGRAM_AUTOMATCH_ROOT",
     "TELEGRAM_AUTOMATCH_VERSION",
     "buildAutomatchTelegramLifecycleChanges",
     "buildAutomatchTelegramProjectionChanges",
@@ -726,7 +703,6 @@
     "EVENT_TELEGRAM_DELIVERY_VERSION",
     "EVENT_TELEGRAM_PROJECTION_GUARD_FIELD",
     "EVENT_TELEGRAM_PROJECTION_LOCK_ROOT",
-    "EVENT_TELEGRAM_PROJECTION_ROOT",
     "addEventTelegramProjectionGuard",
     "buildEndedState",
     "buildEventSignature",
@@ -754,8 +730,7 @@
     "normalizeString",
     "renderMatchedAutomatchTelegramText",
     "resolveAutomatchTelegramLifecycle",
-    "shouldProjectRatingTelegramUpdate",
-    "shouldRequestEventRatingProgress"
+    "shouldProjectRatingTelegramUpdate"
   ],
   "telegram/queueBridge.js": [
     "TELEGRAM_BRIDGE_TIMEOUT_MS",

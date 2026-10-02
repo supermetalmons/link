@@ -22,7 +22,7 @@ const { InviteReactionChannel } =
 const { socketSessionRefreshDelay } =
   await import("../src/connection/socketSession.ts");
 const protocols = (expiresAt) => [
-  "mons-invite-reactions-v1",
+  "mons-reactions-v2",
   `bearer.header.${Buffer.from(JSON.stringify({ exp: expiresAt / 1_000 })).toString("base64url")}.signature`,
 ];
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -106,6 +106,7 @@ function harness(kind, authenticated = true) {
       : new InviteReactionChannel({
           ...dependency,
           inviteId: "invite",
+          matchId: "invite",
           onInitialSnapshot: (value) => updates.push({ initial: value }),
           onReaction: (reaction) => updates.push({ recovered: reaction }),
         });
@@ -113,7 +114,12 @@ function harness(kind, authenticated = true) {
     socket.receive(
       kind === "snapshot"
         ? { revision: 2 }
-        : { schemaVersion: 1, type: "snapshot", reactions: {} },
+        : {
+            schemaVersion: 2,
+            type: "snapshot",
+            reactions: {},
+            presentation: { matchId: "invite", players: {} },
+          },
     );
   return {
     channel,

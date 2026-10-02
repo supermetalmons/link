@@ -1,8 +1,14 @@
-import { gameplayTestPort } from "../test/gameSessionTestPorts.ts";
-import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
-import { beforeAll, describe, expect, it } from "vitest";
 import type { CompletePlayerProfile } from "@mons/shared/profiles";
+import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { beforeAll, describe, expect, it } from "vitest";
+import { createGameplayRepository } from "../src/gameplayRepository.ts";
+import { resolveInviteRole } from "../src/inviteAccess.ts";
+import { captureLoginMatchDiscovery } from "../src/loginMatchDiscoveryD1.ts";
+import {
+  buildMatchPresentationRegistrationStatements,
+  prepareCreatedMatchPresentations,
+} from "../src/matchPresentationRegistry.ts";
 import {
   commitCanonicalPlan,
   materializeCanonicalProfile,
@@ -14,18 +20,12 @@ import {
   createProfileGameProjectionRuntime,
   readProjectionOwnershipSnapshot,
 } from "../src/profileGameProjectionRepository.ts";
+import { getProfileGameProjections } from "../src/profileGamesD1.ts";
 import { createProfileLinkProjectionRuntime } from "../src/profileLinkProfileGameProjection.ts";
-import { captureLoginMatchDiscovery } from "../src/loginMatchDiscoveryD1.ts";
-import { getProfileGameProjection } from "../src/profileGamesD1.ts";
-import {
-  buildMatchPresentationRegistrationStatements,
-  prepareCreatedMatchPresentations,
-} from "../src/matchPresentationRegistry.ts";
-import { createGameplayRepository } from "../src/gameplayRepository.ts";
-import { resolveInviteRole } from "../src/inviteAccess.ts";
+import { gameplayTestPort } from "../test/gameSessionTestPorts.ts";
 import type { StateRepository } from "../test/stateRepositoryTestTypes.ts";
-import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 import { activateDurableMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
+import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
@@ -386,7 +386,9 @@ describe("D1-authoritative profile game projection ownership", () => {
       false,
     );
     await expect(
-      getProfileGameProjection(testEnv.PROFILE_GAMES_DB, profileId, inviteId),
+      getProfileGameProjections(testEnv.PROFILE_GAMES_DB, profileId, [
+        inviteId,
+      ]).then((rows) => rows.get(inviteId) ?? null),
     ).resolves.toMatchObject({
       data: { hostProfileId: profileId, ownerProfileId: profileId },
     });
@@ -439,11 +441,9 @@ describe("D1-authoritative profile game projection ownership", () => {
       eventTimestampMs: 100,
     });
     await expect(
-      getProfileGameProjection(
-        testEnv.PROFILE_GAMES_DB,
-        hostProfileId,
+      getProfileGameProjections(testEnv.PROFILE_GAMES_DB, hostProfileId, [
         inviteId,
-      ),
+      ]).then((rows) => rows.get(inviteId) ?? null),
     ).resolves.toMatchObject({ data: { opponentEmoji: 1 } });
 
     const room = testEnv.INVITE_REACTIONS.getByName(inviteId);
@@ -458,11 +458,9 @@ describe("D1-authoritative profile game projection ownership", () => {
     });
 
     await expect(
-      getProfileGameProjection(
-        testEnv.PROFILE_GAMES_DB,
-        hostProfileId,
+      getProfileGameProjections(testEnv.PROFILE_GAMES_DB, hostProfileId, [
         inviteId,
-      ),
+      ]).then((rows) => rows.get(inviteId) ?? null),
     ).resolves.toMatchObject({
       data: { latestMatchId: matchId, opponentEmoji: 7, status: "ended" },
     });
@@ -531,18 +529,14 @@ describe("D1-authoritative profile game projection ownership", () => {
       eventTimestampMs: 200,
     });
     await expect(
-      getProfileGameProjection(
-        testEnv.PROFILE_GAMES_DB,
-        hostProfileId,
+      getProfileGameProjections(testEnv.PROFILE_GAMES_DB, hostProfileId, [
         inviteId,
-      ),
+      ]).then((rows) => rows.get(inviteId) ?? null),
     ).resolves.toMatchObject({ data: { opponentEmoji: 8 } });
     await expect(
-      getProfileGameProjection(
-        testEnv.PROFILE_GAMES_DB,
-        guestProfileId,
+      getProfileGameProjections(testEnv.PROFILE_GAMES_DB, guestProfileId, [
         inviteId,
-      ),
+      ]).then((rows) => rows.get(inviteId) ?? null),
     ).resolves.toMatchObject({ data: { opponentEmoji: 3 } });
     expect(authorityReads).toBe(1);
     expect(presentationReads).toBe(1);
@@ -614,11 +608,9 @@ describe("D1-authoritative profile game projection ownership", () => {
       );
       expect(presentationReads).toBe(phase === "durable" ? 2 : 0);
       await expect(
-        getProfileGameProjection(
-          testEnv.PROFILE_GAMES_DB,
-          hostProfileId,
+        getProfileGameProjections(testEnv.PROFILE_GAMES_DB, hostProfileId, [
           inviteId,
-        ),
+        ]).then((rows) => rows.get(inviteId) ?? null),
       ).resolves.toBeNull();
     },
   );
@@ -688,11 +680,9 @@ describe("D1-authoritative profile game projection ownership", () => {
 
       for (const profileId of [hostProfileId, guestProfileId]) {
         await expect(
-          getProfileGameProjection(
-            testEnv.PROFILE_GAMES_DB,
-            profileId,
+          getProfileGameProjections(testEnv.PROFILE_GAMES_DB, profileId, [
             entry.inviteId,
-          ),
+          ]).then((rows) => rows.get(entry.inviteId) ?? null),
         ).resolves.toMatchObject({ data: { status: entry.expected } });
       }
     }
@@ -937,11 +927,9 @@ describe("D1-authoritative profile game projection ownership", () => {
     for (const profileId of cleanupSourceProfileIds) {
       for (const inviteId of inviteIds) {
         await expect(
-          getProfileGameProjection(
-            testEnv.PROFILE_GAMES_DB,
-            profileId,
+          getProfileGameProjections(testEnv.PROFILE_GAMES_DB, profileId, [
             inviteId,
-          ),
+          ]).then((rows) => rows.get(inviteId) ?? null),
         ).resolves.toBeNull();
       }
     }

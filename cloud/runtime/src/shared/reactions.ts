@@ -20,22 +20,6 @@ export interface InviteReaction extends Reaction {
   matchId: string;
 }
 
-export type InviteReactionSnapshot = {
-  schemaVersion: 1;
-  type: "snapshot";
-  reactions: Record<string, InviteReaction>;
-};
-
-export type InviteReactionEvent = {
-  schemaVersion: 1;
-  type: "reaction";
-  senderUid: string;
-  reaction: InviteReaction;
-};
-
-export type InviteReactionMessage =
-  InviteReactionSnapshot | InviteReactionEvent;
-
 export type InviteRoomSnapshot = {
   schemaVersion: 2;
   type: "snapshot";
@@ -43,10 +27,12 @@ export type InviteRoomSnapshot = {
   presentation: MatchPresentationSnapshot;
 };
 
-export type InviteRoomReactionEvent = Omit<
-  InviteReactionEvent,
-  "schemaVersion"
-> & { schemaVersion: 2 };
+export type InviteRoomReactionEvent = {
+  schemaVersion: 2;
+  type: "reaction";
+  senderUid: string;
+  reaction: InviteReaction;
+};
 
 export type InviteRoomPresentationEvent = {
   schemaVersion: 2;
@@ -55,19 +41,15 @@ export type InviteRoomPresentationEvent = {
 };
 
 export type InviteRoomMessage =
-  | InviteReactionMessage
-  | InviteRoomSnapshot
-  | InviteRoomReactionEvent
-  | InviteRoomPresentationEvent;
+  InviteRoomSnapshot | InviteRoomReactionEvent | InviteRoomPresentationEvent;
 
 export type SendInviteReactionResponse = { ok: true };
 
-const REACTION_PROTOCOL_VERSION = 1;
+const REACTION_PROTOCOL_VERSION = 2;
 const REACTION_MAX_MESSAGE_BYTES = 4096;
 const REACTION_HEARTBEAT_REQUEST = "ping";
 const REACTION_HEARTBEAT_RESPONSE = "pong";
-const REACTION_SOCKET_PROTOCOL = "mons-reactions-v1";
-const REACTION_SOCKET_PROTOCOL_V2 = "mons-reactions-v2";
+const REACTION_SOCKET_PROTOCOL = "mons-reactions-v2";
 const REACTION_AUTH_PROTOCOL_PREFIX = "bearer.";
 const FIXED_STICKER_IDS: readonly number[] = Object.freeze([
   900316, 900101, 900393, 90063, 900109, 900228, 900245, 900189, 900267, 900374,
@@ -123,10 +105,6 @@ function hasReactionFields(value: unknown): value is Record<string, unknown> {
           VOICE_VARIATIONS[value.kind as keyof typeof VOICE_VARIATIONS];
 }
 
-const isReaction = (value: unknown): value is Reaction =>
-  hasReactionFields(value) &&
-  hasExactKeys(value, ["uuid", "kind", "variation"]);
-
 const isInviteReaction = (value: unknown): value is InviteReaction =>
   hasReactionFields(value) &&
   hasExactKeys(value, ["uuid", "kind", "variation", "matchId"]) &&
@@ -140,39 +118,14 @@ const isInviteReactionForInvite = (
   isInviteReaction(value) &&
   parseInviteMatchIndex(inviteId, value.matchId) !== null;
 
-function isInviteReactionMessage(
-  value: unknown,
-): value is InviteReactionMessage {
-  if (!isRecord(value) || value.schemaVersion !== REACTION_PROTOCOL_VERSION) {
-    return false;
-  }
-  if (value.type === "snapshot") {
-    return (
-      hasExactKeys(value, ["schemaVersion", "type", "reactions"]) &&
-      isRecord(value.reactions) &&
-      Object.keys(value.reactions).length <= 2 &&
-      Object.entries(value.reactions).every(
-        ([senderUid, reaction]) =>
-          isExactKey(senderUid) && isInviteReaction(reaction),
-      )
-    );
-  }
-  return (
-    value.type === "reaction" &&
-    hasExactKeys(value, ["schemaVersion", "type", "senderUid", "reaction"]) &&
-    isExactKey(value.senderUid) &&
-    isInviteReaction(value.reaction)
-  );
-}
-
 const isSendInviteReactionResponse = (
   value: unknown,
 ): value is SendInviteReactionResponse =>
   isRecord(value) && value.ok === true && hasExactKeys(value, ["ok"]);
 
 function isInviteRoomMessage(value: unknown): value is InviteRoomMessage {
-  if (isInviteReactionMessage(value)) return true;
-  if (!isRecord(value) || value.schemaVersion !== 2) return false;
+  if (!isRecord(value) || value.schemaVersion !== REACTION_PROTOCOL_VERSION)
+    return false;
   if (value.type === "presentation") {
     return (
       hasExactKeys(value, ["schemaVersion", "type", "presentation"]) &&
@@ -187,15 +140,21 @@ function isInviteRoomMessage(value: unknown): value is InviteRoomMessage {
         "reactions",
         "presentation",
       ]) &&
-      isInviteReactionMessage({
-        schemaVersion: 1,
-        type: "snapshot",
-        reactions: value.reactions,
-      }) &&
+      isRecord(value.reactions) &&
+      Object.keys(value.reactions).length <= 2 &&
+      Object.entries(value.reactions).every(
+        ([senderUid, reaction]) =>
+          isExactKey(senderUid) && isInviteReaction(reaction),
+      ) &&
       isMatchPresentationSnapshot(value.presentation)
     );
   }
-  return isInviteReactionMessage({ ...value, schemaVersion: 1 });
+  return (
+    value.type === "reaction" &&
+    hasExactKeys(value, ["schemaVersion", "type", "senderUid", "reaction"]) &&
+    isExactKey(value.senderUid) &&
+    isInviteReaction(value.reaction)
+  );
 }
 
 export {
@@ -206,13 +165,10 @@ export {
   REACTION_HEARTBEAT_REQUEST,
   REACTION_HEARTBEAT_RESPONSE,
   REACTION_SOCKET_PROTOCOL,
-  REACTION_SOCKET_PROTOCOL_V2,
   REACTION_AUTH_PROTOCOL_PREFIX,
-  isReaction,
   isReactionSocketToken,
   isInviteReaction,
   isInviteReactionForInvite,
-  isInviteReactionMessage,
   isInviteRoomMessage,
   isSendInviteReactionResponse,
 };

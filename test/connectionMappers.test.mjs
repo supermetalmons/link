@@ -21,12 +21,8 @@ const {
   normalizeEventPrizeId,
 } = await import("../src/connection/eventMappers.ts");
 const { mapProfileGameProjection } = await import("@mons/shared/navigation");
-const {
-  normalizeFiniteNumber,
-  normalizeString,
-  normalizeStringOrNull,
-  readTimestampMillis,
-} = await import("../src/connection/valueNormalizers.ts");
+const { normalizeFiniteNumber, normalizeString, normalizeStringOrNull } =
+  await import("../src/connection/valueNormalizers.ts");
 
 test("normalizes primitive stored values", () => {
   assert.equal(normalizeString("value"), "value");
@@ -34,8 +30,6 @@ test("normalizes primitive stored values", () => {
   assert.equal(normalizeStringOrNull(""), null);
   assert.equal(normalizeFiniteNumber("12.9"), 12);
   assert.equal(normalizeFiniteNumber("bad", 7), 7);
-  assert.equal(readTimestampMillis(42.9), 42);
-  assert.equal(readTimestampMillis({}), 0);
 });
 
 test("maps navigation games with legacy aliases and validation", () => {

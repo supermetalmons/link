@@ -94,7 +94,6 @@ export type ProfileCustomizationUpdateResponse = {
 };
 declare const PROFILE_FALLBACK_EMOJI_COUNT = 155;
 declare const LEADERBOARD_READ_TYPES: readonly LeaderboardReadType[];
-declare const PROFILE_CUSTOMIZATION_FIELDS: readonly ProfileCustomizationField[];
 declare const PROFILE_STICKER_CATALOG: Readonly<
   Record<string, readonly string[]>
 >;
@@ -136,7 +135,6 @@ declare const normalizeProfileEmojiId: (
 declare const cropAddress: (address: string) => string;
 export {
   LEADERBOARD_READ_TYPES,
-  PROFILE_CUSTOMIZATION_FIELDS,
   PROFILE_STICKER_CATALOG,
   PROFILE_FALLBACK_EMOJI_COUNT,
   getProfileFallbackEmojiId,

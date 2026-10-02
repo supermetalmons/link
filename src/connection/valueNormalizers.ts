@@ -19,10 +19,3 @@ export const normalizeFiniteNumber = (value: unknown, fallback = 0): number => {
   }
   return fallback;
 };
-
-export const readTimestampMillis = (value: unknown): number => {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.floor(value);
-  }
-  return 0;
-};

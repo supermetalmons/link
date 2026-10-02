@@ -12,7 +12,6 @@ const {
 } = require("@mons/shared/game-sessions");
 const {
   createInviteCandidatesFromMatchId,
-  getHistoricalMatchIds,
   getLatestApprovedRematchIndex,
   parseInviteMatchIndex,
   parseRematchIndices,
@@ -123,38 +122,7 @@ test("accepts only canonical rematch indices", () => {
   assert.deepEqual(createInviteCandidatesFromMatchId("invite01"), ["invite0"]);
 });
 
-test("derives only matches that have become historical", () => {
-  assert.deepEqual(
-    getHistoricalMatchIds("invite", {
-      hostRematches: "1",
-      guestRematches: "1",
-    }),
-    ["invite"],
-  );
-  assert.deepEqual(
-    getHistoricalMatchIds("invite", {
-      hostRematches: "1;2",
-      guestRematches: "1;2",
-    }),
-    ["invite", "invite1"],
-  );
-  assert.deepEqual(
-    getHistoricalMatchIds("invite", {
-      hostRematches: "1;2x",
-      guestRematches: "1;2",
-    }),
-    ["invite", "invite1", "invite2"],
-  );
-  assert.deepEqual(
-    getHistoricalMatchIds("invite", {
-      hostRematches: "1;2x",
-      guestRematches: "1",
-    }),
-    ["invite", "invite1"],
-  );
-  assert.deepEqual(getHistoricalMatchIds("invite", { hostRematches: "1" }), [
-    "invite",
-  ]);
+test("finds the latest mutually approved rematch", () => {
   assert.equal(
     getLatestApprovedRematchIndex({
       hostRematches: "1;2",
@@ -162,8 +130,4 @@ test("derives only matches that have become historical", () => {
     }),
     1,
   );
-  assert.deepEqual(getHistoricalMatchIds("invite", {}), []);
-  assert.deepEqual(getHistoricalMatchIds("invite", { hostRematches: "x" }), [
-    "invite",
-  ]);
 });

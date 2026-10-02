@@ -31,7 +31,7 @@ test.afterEach(() => {
 test("formats participant authentication as WebSocket subprotocols and rejects unsafe tokens without exposing them", () => {
   assert.deepEqual(
     createInviteReactionSocketProtocols("header.payload.signature"),
-    ["mons-reactions-v1", "bearer.header.payload.signature"],
+    ["mons-reactions-v2", "bearer.header.payload.signature"],
   );
   for (const token of [
     "",

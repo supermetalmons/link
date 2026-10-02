@@ -1,19 +1,11 @@
-import {
-  attachEventTestPorts,
-  type EventTestSource,
-} from "./eventTestPorts.ts";
-import assert from "node:assert/strict";
-import test from "node:test";
 import { LEGACY_CORE_PRIZES_EVENT_ID } from "@mons/shared/event-prizes";
 import type {
   CreateEventRequest,
   EventCreateOptions,
 } from "@mons/shared/events";
+import assert from "node:assert/strict";
+import test from "node:test";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import { joinEvent } from "../src/eventParticipation.ts";
-import type { EventGameplayRepository } from "../src/eventRepository.ts";
-import { eventReadFixture } from "./eventReadFixture.ts";
-import type { ProfileOwnershipSnapshot } from "../src/profileOwnership.ts";
 import {
   createEvent,
   disqualifyEventMatchWinners,
@@ -21,6 +13,14 @@ import {
   postponeEventStart,
   syncEventState,
 } from "../src/eventOperations.ts";
+import { joinEvent } from "../src/eventParticipation.ts";
+import type { EventGameplayRepository } from "../src/eventRepository.ts";
+import type { ProfileOwnershipSnapshot } from "../src/profileOwnership.ts";
+import { eventReadFixture } from "./eventReadFixture.ts";
+import {
+  attachEventTestPorts,
+  type EventTestSource,
+} from "./eventTestPorts.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const profileId = "creator-profile";
@@ -374,7 +374,10 @@ test("creates a scheduled event only after its Workflow exists", async () => {
   const response = await createEvent(
     workflowEnvironment(() => order.push("workflow")),
     identity,
-    { startsInMinutes: 5, announceOnTelegram: true },
+    {
+      startsInMinutes: 5,
+      telegramAnnouncements: { invite: true, matches: true, results: true },
+    },
     {
       repository: repository.repository,
       now: () => 1_000,
@@ -495,16 +498,15 @@ test("rejects invalid creator metadata before scheduling or persisting an event"
   assert.deepEqual(state.patches, []);
 });
 
-test("persists independent Telegram preferences including all-off and legacy defaults", async () => {
+test("persists independent Telegram preferences including all-off and omitted defaults", async () => {
   const allOff = { invite: false, matches: false, results: false };
   const cases: Array<{
     options: EventCreateOptions;
     expected: NonNullable<EventCreateOptions["telegramAnnouncements"]>;
   }> = [
     { options: {}, expected: allOff },
-    { options: { announceOnTelegram: false }, expected: allOff },
     {
-      options: { announceOnTelegram: true, telegramAnnouncements: allOff },
+      options: { telegramAnnouncements: allOff },
       expected: allOff,
     },
   ];
@@ -558,7 +560,7 @@ test("persists Sunday Mons independently of schedule and Telegram preferences th
   ];
   for (const schedule of schedules) {
     for (const option of options) {
-      for (const announceOnTelegram of [false, true]) {
+      for (const enabled of [false, true]) {
         const state = createRepository();
         const env = workflowEnvironment(() => undefined);
         const dependencies = {
@@ -570,7 +572,15 @@ test("persists Sunday Mons independently of schedule and Telegram preferences th
         const response = await createEvent(
           env,
           identity,
-          { ...schedule, ...option, announceOnTelegram },
+          {
+            ...schedule,
+            ...option,
+            telegramAnnouncements: {
+              invite: enabled,
+              matches: enabled,
+              results: enabled,
+            },
+          },
           dependencies,
         );
         const expected = option.isSundayMons === true;

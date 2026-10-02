@@ -1,8 +1,7 @@
 // Generated from src/shared/rematches.ts. Run npm run generate:runtime.
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getHistoricalMatchIds =
-  exports.deriveLatestMatchId =
+exports.deriveLatestMatchId =
   exports.selectInviteMatch =
   exports.getLatestApprovedRematchIndex =
   exports.getLatestRematchIndex =
@@ -172,24 +171,3 @@ const deriveLatestMatchId = (inviteId, inviteData, latestMatchIdHint) => {
   return maxIndex > 0 ? `${inviteId}${maxIndex}` : inviteId;
 };
 exports.deriveLatestMatchId = deriveLatestMatchId;
-const getHistoricalMatchIds = (inviteId, inviteData) => {
-  const normalizedInviteId = normalizeString(inviteId);
-  if (!normalizedInviteId || !inviteData || typeof inviteData !== "object") {
-    return [];
-  }
-  const approvedIndices = Array.from(
-    new Set(getApprovedRematchIndices(inviteData)),
-  );
-  const latestProposedIndex = getLatestRematchIndex(inviteData);
-  if (latestProposedIndex === 0) {
-    return rematchSeriesEnded(inviteData) ? [normalizedInviteId] : [];
-  }
-  const candidateIndices = [0, ...approvedIndices];
-  const historicalIndices = rematchSeriesEnded(inviteData)
-    ? candidateIndices
-    : candidateIndices.filter((index) => index < latestProposedIndex);
-  return historicalIndices.map((index) =>
-    index === 0 ? normalizedInviteId : `${normalizedInviteId}${index}`,
-  );
-};
-exports.getHistoricalMatchIds = getHistoricalMatchIds;

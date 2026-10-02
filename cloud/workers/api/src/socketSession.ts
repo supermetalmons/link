@@ -60,6 +60,14 @@ export class SocketSessions {
   active(socket: WebSocket): boolean {
     if (socket.readyState !== WebSocket.OPEN) return false;
     const attachment = socket.deserializeAttachment();
+    if (
+      (attachment?.channel === undefined ||
+        attachment.channel === "reaction") &&
+      attachment?.schemaVersion !== 2
+    ) {
+      closeSocket(socket, 1008, "Unsupported reaction protocol");
+      return false;
+    }
     const authenticated =
       attachment?.authenticated === true ||
       this.ctx.getTags(socket).some((tag) => PARTICIPANT_TAG.test(tag));

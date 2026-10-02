@@ -14,12 +14,10 @@ import type { EventModalState } from "./modalState";
 
 export type EventModalLifecycleOptions = {
   modalState: EventModalState;
-  devStubRecord: EventRecord | null;
 };
 
 export function useEventModalLifecycle({
   modalState,
-  devStubRecord,
 }: EventModalLifecycleOptions) {
   const [eventRecord, setEventRecord] = useState<EventRecord | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -37,7 +35,6 @@ export function useEventModalLifecycle({
     {},
   );
   const eventAutoRecoveryInFlightRef = useRef<Set<string>>(new Set());
-  const displayedEventRecord = devStubRecord ?? eventRecord;
 
   useEffect(() => {
     const eventAutoRecoveryInFlightSet = eventAutoRecoveryInFlightRef.current;
@@ -149,8 +146,8 @@ export function useEventModalLifecycle({
       timeoutId = window.setTimeout(
         scheduleNextTick,
         getEventNowRefreshDelayMs(
-          displayedEventRecord?.status ?? null,
-          displayedEventRecord?.startAtMs ?? null,
+          eventRecord?.status ?? null,
+          eventRecord?.startAtMs ?? null,
           currentNowMs,
         ),
       );
@@ -175,9 +172,9 @@ export function useEventModalLifecycle({
       }
     };
   }, [
-    displayedEventRecord?.eventId,
-    displayedEventRecord?.startAtMs,
-    displayedEventRecord?.status,
+    eventRecord?.eventId,
+    eventRecord?.startAtMs,
+    eventRecord?.status,
     modalState.eventId,
     modalState.isOpen,
   ]);
@@ -186,7 +183,7 @@ export function useEventModalLifecycle({
     if (!modalState.isOpen || typeof window === "undefined") {
       return;
     }
-    if (!modalState.eventId || !eventRecord || devStubRecord) {
+    if (!modalState.eventId || !eventRecord) {
       if (eventAutoRecoveryTimeoutRef.current !== null) {
         window.clearTimeout(eventAutoRecoveryTimeoutRef.current);
         eventAutoRecoveryTimeoutRef.current = null;
@@ -267,14 +264,7 @@ export function useEventModalLifecycle({
         eventAutoRecoveryTimeoutRef.current = null;
       }
     };
-  }, [
-    devStubRecord,
-    eventRecord,
-    isEventFresh,
-    modalState.eventId,
-    modalState.isOpen,
-    nowMs,
-  ]);
+  }, [eventRecord, isEventFresh, modalState.eventId, modalState.isOpen, nowMs]);
 
   return { eventRecord, isLoading, isEventFresh, nowMs };
 }

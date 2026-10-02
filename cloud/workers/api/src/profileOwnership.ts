@@ -222,32 +222,3 @@ export function loginsShareProfile(
     firstProfileId && firstProfileId === getLoginProfileId(snapshot, secondUid),
   );
 }
-
-export function profilesShareCanonicalProfile(
-  snapshot: ProfileOwnershipSnapshot,
-  firstProfileId: string,
-  secondProfileId: string,
-): boolean {
-  if (firstProfileId === secondProfileId) return true;
-  const firstCanonicalProfileId = getCanonicalProfileId(
-    snapshot,
-    firstProfileId,
-  );
-  return Boolean(
-    firstCanonicalProfileId &&
-    firstCanonicalProfileId ===
-      getCanonicalProfileId(snapshot, secondProfileId),
-  );
-}
-
-export function loginOwnsProfile(
-  snapshot: ProfileOwnershipSnapshot,
-  loginUid: string,
-  profileId: string,
-): boolean {
-  const loginProfileId = getLoginProfileId(snapshot, loginUid);
-  return Boolean(
-    loginProfileId &&
-    loginProfileId === getCanonicalProfileId(snapshot, profileId),
-  );
-}

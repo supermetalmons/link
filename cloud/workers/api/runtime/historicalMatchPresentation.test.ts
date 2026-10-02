@@ -1,8 +1,8 @@
-import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HistoricalMatchPair } from "@mons/shared/game-sessions";
 import type { MatchPresentationSnapshot } from "@mons/shared/match-presentation";
+import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   archiveHistoricalMatchWithPresentation,
   type FreezeHistoricalMatchPresentations,
@@ -12,12 +12,13 @@ import {
   readHistoricalMatchSnapshot,
   writeHistoricalMatchSnapshot,
 } from "../src/historicalMatchesD1.ts";
-import { createProfileGameProjectionRuntime } from "../src/profileGameProjectionRepository.ts";
 import {
   buildMatchPresentationRegistrationStatements,
   prepareCreatedMatchPresentations,
 } from "../src/matchPresentationRegistry.ts";
+import { createProfileGameProjectionRuntime } from "../src/profileGameProjectionRepository.ts";
 import { activateDurableMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
+import { readStoredPresentations } from "./presentationStorageFixture.ts";
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const inviteId = "presentation-history";
@@ -343,7 +344,7 @@ describe("historical match presentation", () => {
     expect(archived?.pair.hostMatch?.emojiId).toBe(1012);
     expect(archived?.pair.hostMatch?.aura).toBe("rainbow");
     expect(
-      (await room.getPresentationSnapshot(input.pair.matchId)).players.host
+      (await readStoredPresentations(room, input.pair.matchId)).players.host
         .emojiId,
     ).toBe(21);
   });

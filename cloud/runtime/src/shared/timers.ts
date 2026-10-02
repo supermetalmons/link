@@ -72,10 +72,6 @@ const parseMatchTimer = (value: unknown): ParsedMatchTimer | null => {
   };
 };
 
-const isMatchTimerTerminal = (
-  value: unknown,
-): value is typeof MATCH_TIMER_TERMINAL => value === MATCH_TIMER_TERMINAL;
-
 const parseStrictMatchTimer = (value: unknown): ParsedMatchTimer | null => {
   if (typeof value !== "string" || !/^\d+;\d+$/.test(value)) {
     return null;
@@ -132,7 +128,6 @@ export {
   formatMatchTimer,
   parseMatchTimer,
   parseStrictMatchTimer,
-  isMatchTimerTerminal,
   isClaimMatchVictoryByTimerRequest,
   isClaimMatchVictoryByTimerResponse,
   isStartMatchTimerRequest,

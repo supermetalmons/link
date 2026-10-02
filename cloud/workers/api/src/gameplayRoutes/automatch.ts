@@ -92,7 +92,6 @@ export async function enrichAutomatchResponse(
 ): Promise<StartAutomatchApiResponse> {
   const requested = new URL(request.url).searchParams.getAll("bootstrap");
   if (
-    env.AUTOMATCH_DELIVERY_MODE !== "bootstrap" ||
     requested.length !== 1 ||
     requested[0] !== "1" ||
     !response.ok ||

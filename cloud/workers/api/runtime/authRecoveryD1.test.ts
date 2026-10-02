@@ -1,6 +1,6 @@
-import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { getEventPrizeDefinition } from "@mons/shared/event-prizes";
+import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import {
   afterEach,
   beforeAll,
@@ -17,21 +17,21 @@ import {
   MERGE_GAME_FINALIZE_DELAY_MS,
   removeCanonicalAuthRecoveryLoginUid,
 } from "../src/authRecovery.ts";
-import { createD1AuthRecoveryPrizeStore } from "../src/eventRepository.ts";
-import { createD1EventPrizeWithdrawalStore } from "../src/eventPrizeWithdrawalD1.ts";
 import { readEventRuntimeControl } from "../src/eventD1.ts";
+import { createD1EventPrizeWithdrawalStore } from "../src/eventPrizeWithdrawalD1.ts";
+import { createD1AuthRecoveryPrizeStore } from "../src/eventRepository.ts";
 import { CanonicalProfileConflict } from "../src/profileCanonicalD1.ts";
-import { createProfileLinkCatchupStore } from "../src/profileLinkCatchupD1.ts";
 import {
   commitProfileGameProjectionWrites,
-  getProfileGameProjection,
+  getProfileGameProjections,
   listProfileGameProjectionPage,
 } from "../src/profileGamesD1.ts";
-import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
+import { createProfileLinkCatchupStore } from "../src/profileLinkCatchupD1.ts";
 import {
   applyEventTestMigrations,
   transitionEventStorageMode,
 } from "./eventTestMigrations.ts";
+import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
@@ -318,11 +318,11 @@ describe("canonical auth recovery with D1 storage", () => {
         },
       })),
     );
-    const newerTarget = await getProfileGameProjection(
+    const newerTarget = await getProfileGameProjections(
       testEnv.PROFILE_GAMES_DB,
       f.targetProfileId,
-      projectionIds[3],
-    );
+      [projectionIds[3]],
+    ).then((rows) => rows.get(projectionIds[3]) ?? null);
     const targetRead = vi.fn();
     let nowMs = Date.now() + 1_000;
     const service = createAuthRecoveryService(d1Env, {
@@ -349,26 +349,26 @@ describe("canonical auth recovery with D1 storage", () => {
     ).toEqual([projectionIds[100]]);
     for (const projectionId of projectionIds.slice(0, 3)) {
       expect(
-        await getProfileGameProjection(
+        await getProfileGameProjections(
           testEnv.PROFILE_GAMES_DB,
           f.targetProfileId,
-          projectionId,
-        ),
+          [projectionId],
+        ).then((rows) => rows.get(projectionId) ?? null),
       ).toMatchObject({ data: gameData(projectionId, f.targetProfileId) });
     }
     expect(
-      await getProfileGameProjection(
+      await getProfileGameProjections(
         testEnv.PROFILE_GAMES_DB,
         f.targetProfileId,
-        projectionIds[3],
-      ),
+        [projectionIds[3]],
+      ).then((rows) => rows.get(projectionIds[3]) ?? null),
     ).toEqual(newerTarget);
     expect(
-      await getProfileGameProjection(
+      await getProfileGameProjections(
         testEnv.PROFILE_GAMES_DB,
         f.targetProfileId,
-        projectionIds[100],
-      ),
+        [projectionIds[100]],
+      ).then((rows) => rows.get(projectionIds[100]) ?? null),
     ).toBeNull();
     expect(await f.readJob()).toMatchObject({ source_phase: "games" });
 
@@ -383,11 +383,11 @@ describe("canonical auth recovery with D1 storage", () => {
       ),
     ).toEqual([]);
     expect(
-      await getProfileGameProjection(
+      await getProfileGameProjections(
         testEnv.PROFILE_GAMES_DB,
         f.targetProfileId,
-        projectionIds[100],
-      ),
+        [projectionIds[100]],
+      ).then((rows) => rows.get(projectionIds[100]) ?? null),
     ).toMatchObject({ data: gameData(projectionIds[100], f.targetProfileId) });
     const completedPage = await f.readJob();
     expect(completedPage).toMatchObject({
@@ -449,11 +449,11 @@ describe("canonical auth recovery with D1 storage", () => {
       expect(message.ack).toHaveBeenCalledOnce();
       expect(message.retry).not.toHaveBeenCalled();
       const job = await f.readJob();
-      const projection = await getProfileGameProjection(
+      const projection = await getProfileGameProjections(
         testEnv.PROFILE_GAMES_DB,
         f.targetProfileId,
-        projectionId,
-      );
+        [projectionId],
+      ).then((rows) => rows.get(projectionId) ?? null);
 
       await handleAuthRecoveryMessage(
         message,
@@ -468,11 +468,11 @@ describe("canonical auth recovery with D1 storage", () => {
       });
       expect(await f.readJob()).toEqual(job);
       expect(
-        await getProfileGameProjection(
+        await getProfileGameProjections(
           testEnv.PROFILE_GAMES_DB,
           f.targetProfileId,
-          projectionId,
-        ),
+          [projectionId],
+        ).then((rows) => rows.get(projectionId) ?? null),
       ).toEqual(projection);
     } finally {
       send.mockRestore();
@@ -519,11 +519,11 @@ describe("canonical auth recovery with D1 storage", () => {
         ),
       ).toEqual([]);
       expect(
-        await getProfileGameProjection(
+        await getProfileGameProjections(
           testEnv.PROFILE_GAMES_DB,
           f.targetProfileId,
-          projectionId,
-        ),
+          [projectionId],
+        ).then((rows) => rows.get(projectionId) ?? null),
       ).toMatchObject({ data: gameData(projectionId, f.targetProfileId) });
       if (timing === "before") expect(await f.readJob()).toEqual(before);
       else
@@ -682,11 +682,11 @@ describe("canonical auth recovery with D1 storage", () => {
       expect(races).toBe(1);
       expect(await f.readJob()).toEqual(before);
       expect(
-        await getProfileGameProjection(
+        await getProfileGameProjections(
           testEnv.PROFILE_GAMES_DB,
           racedProfileId,
-          projectionId,
-        ),
+          [projectionId],
+        ).then((rows) => rows.get(projectionId) ?? null),
       ).toMatchObject({ data: successorData });
       expect(
         (
@@ -697,19 +697,19 @@ describe("canonical auth recovery with D1 storage", () => {
         ).map((game) => game.projectionId),
       ).toEqual([siblingId, projectionId]);
       expect(
-        await getProfileGameProjection(
+        await getProfileGameProjections(
           testEnv.PROFILE_GAMES_DB,
           f.targetProfileId,
-          siblingId,
-        ),
+          [siblingId],
+        ).then((rows) => rows.get(siblingId) ?? null),
       ).toBeNull();
       if (race === "source-updated") {
         expect(
-          await getProfileGameProjection(
+          await getProfileGameProjections(
             testEnv.PROFILE_GAMES_DB,
             f.targetProfileId,
-            projectionId,
-          ),
+            [projectionId],
+          ).then((rows) => rows.get(projectionId) ?? null),
         ).toBeNull();
       }
     },

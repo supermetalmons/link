@@ -1,9 +1,8 @@
-import { env } from "cloudflare:workers";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   createGameSessionMutationLockStore,
-  createGameplayCoordinationStores,
   createMatchTimerStartStore,
   GAME_SESSION_MUTATION_LOCK_MS,
   GAME_SESSION_MUTATION_LOCK_RELEASE_ATTEMPTS,
@@ -433,9 +432,7 @@ describe("D1 gameplay coordination", () => {
         timer: `3;${10_000 + index}`,
         turnNumber: 3,
       }));
-      const stores = candidates.map(
-        () => createGameplayCoordinationStores(db).timerStarts,
-      );
+      const stores = candidates.map(() => createMatchTimerStartStore(db));
       const results = await Promise.all(
         stores.map((store, index) =>
           store.getOrAdvance(

@@ -141,7 +141,6 @@ export async function readEventMutationSnapshots(
         selections.set(
           eventId,
           selectionsFromRows(
-            eventId,
             rows as Array<{ prize_id: string; profile_id: string }>,
           ),
         );

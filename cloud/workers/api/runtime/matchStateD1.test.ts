@@ -1,17 +1,11 @@
-import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  acquireMatchStateAdmission,
-  assertMatchStateAdmission,
   buildMatchStateRouteStatements,
-  completeMatchStateAdmission,
-  extendMatchStateAdmissionResources,
-  markMatchStateAdmissionUncertain,
-  readLegacyMatchState,
   readLegacyMatchStates,
   readMatchStateControl,
-  readMatchStateRoute,
+  readMatchStateRoutes,
   readMatchStateRouteSnapshot,
 } from "../src/matchStateD1.ts";
 
@@ -41,8 +35,16 @@ describe("match state D1 authority and admissions", () => {
       epoch: 1,
       freezeGeneration: 0,
     });
-    expect(await readMatchStateRoute(db, "host", "game")).toBeNull();
-    expect(await readLegacyMatchState(db, "host", "game")).toBeNull();
+    expect(
+      await readMatchStateRoutes(db, [
+        { playerId: "host", matchId: "game" },
+      ]).then((rows) => rows[0]),
+    ).toBeNull();
+    expect(
+      await readLegacyMatchStates(db, [
+        { playerId: "host", matchId: "game" },
+      ]).then((rows) => rows[0]),
+    ).toBeNull();
   });
 
   it("reads authority and mixed routes together while preserving duplicates and missing positions", async () => {
@@ -76,139 +78,6 @@ describe("match state D1 authority and admissions", () => {
     });
   });
 
-  it("drains existing admissions while refusing new work and allows only named recovery", async () => {
-    const existing = await acquireMatchStateAdmission(db, {
-      kind: "move",
-      resources: ["players/host/matches/game"],
-    });
-    await db
-      .prepare(
-        "UPDATE match_state_control SET state = 'draining' WHERE singleton = 1",
-      )
-      .run();
-    await expect(
-      assertMatchStateAdmission(db, existing),
-    ).resolves.toBeUndefined();
-    await expect(
-      acquireMatchStateAdmission(db, { kind: "move", resources: [] }),
-    ).rejects.toThrow("writes-disabled");
-    await expect(
-      acquireMatchStateAdmission(db, {
-        kind: "recover",
-        resources: [],
-        transitionId: "unlisted",
-      }),
-    ).rejects.toThrow("writes-disabled");
-    await db
-      .prepare(
-        "INSERT INTO match_state_recovery_ids (transition_id, freeze_generation) VALUES ('transition', 0)",
-      )
-      .run();
-    const recovery = await acquireMatchStateAdmission(db, {
-      kind: "recover",
-      resources: ["game"],
-      transitionId: "transition",
-    });
-    await completeMatchStateAdmission(db, existing);
-    await completeMatchStateAdmission(db, recovery);
-    expect(
-      (
-        await db
-          .prepare("SELECT COUNT(*) AS count FROM match_state_write_admissions")
-          .first<{ count: number }>()
-      )?.count,
-    ).toBe(0);
-  });
-
-  it("revokes an admitted writer at the freeze generation fence", async () => {
-    const admitted = await acquireMatchStateAdmission(db, {
-      kind: "move",
-      resources: ["game"],
-    });
-    await db
-      .prepare(
-        "UPDATE match_state_control SET state = 'frozen', freeze_generation = 1 WHERE singleton = 1",
-      )
-      .run();
-    await expect(assertMatchStateAdmission(db, admitted)).rejects.toThrow(
-      "admission-lost",
-    );
-    await expect(
-      acquireMatchStateAdmission(db, { kind: "new", resources: [] }),
-    ).rejects.toThrow("writes-disabled");
-  });
-
-  it("records the exact write scope before nested operations during drain", async () => {
-    const admitted = await acquireMatchStateAdmission(db, {
-      kind: "gameplay",
-      resources: [],
-    });
-    await db
-      .prepare(
-        "UPDATE match_state_control SET state = 'draining' WHERE singleton = 1",
-      )
-      .run();
-    await extendMatchStateAdmissionResources(db, admitted, [
-      "players/host/matches/game",
-      "matchTimerClaims/game",
-    ]);
-    await extendMatchStateAdmissionResources(db, admitted, [
-      "players/host/matches/game",
-    ]);
-    expect(admitted.resources).toEqual([
-      "matchTimerClaims/game",
-      "players/host/matches/game",
-    ]);
-    expect(
-      (
-        await db
-          .prepare(
-            "SELECT resources_json FROM match_state_write_admissions WHERE admission_id = ?",
-          )
-          .bind(admitted.admissionId)
-          .first<{ resources_json: string }>()
-      )?.resources_json,
-    ).toBe(JSON.stringify(admitted.resources));
-    await markMatchStateAdmissionUncertain(db, admitted);
-    await expect(
-      extendMatchStateAdmissionResources(db, admitted, ["another"]),
-    ).rejects.toThrow();
-  });
-
-  it("retains uncertain outcomes and does not release them based on age", async () => {
-    const admitted = await acquireMatchStateAdmission(db, {
-      kind: "timer",
-      resources: ["matchTimerClaims/game"],
-      nowMs: 1,
-    });
-    await markMatchStateAdmissionUncertain(db, admitted);
-    await expect(assertMatchStateAdmission(db, admitted)).rejects.toThrow(
-      "admission-lost",
-    );
-    await expect(completeMatchStateAdmission(db, admitted)).rejects.toThrow(
-      "release-unconfirmed",
-    );
-    expect(
-      await db
-        .prepare(
-          "SELECT phase, created_at_ms FROM match_state_write_admissions WHERE admission_id = ?",
-        )
-        .bind(admitted.admissionId)
-        .first(),
-    ).toEqual({ phase: "uncertain", created_at_ms: 1 });
-  });
-
-  it("does not let another admission tuple release a writer", async () => {
-    const admitted = await acquireMatchStateAdmission(db, {
-      kind: "move",
-      resources: ["game"],
-    });
-    await expect(
-      completeMatchStateAdmission(db, { ...admitted, resources: [] }),
-    ).rejects.toThrow("release-unconfirmed");
-    await completeMatchStateAdmission(db, admitted);
-  });
-
   it("preserves immutable exact routes and raw legacy values", async () => {
     const route = {
       actorUid: "old",
@@ -219,10 +88,16 @@ describe("match state D1 authority and admissions", () => {
     };
     await db.batch(buildMatchStateRouteStatements(db, [route]));
     await db.batch(buildMatchStateRouteStatements(db, [route]));
-    expect(await readMatchStateRoute(db, "old", "old-game")).toEqual(route);
-    await expect(readLegacyMatchState(db, "old", "old-game")).rejects.toThrow(
-      "legacy-record-unavailable",
-    );
+    expect(
+      await readMatchStateRoutes(db, [
+        { playerId: "old", matchId: "old-game" },
+      ]).then((rows) => rows[0]),
+    ).toEqual(route);
+    await expect(
+      readLegacyMatchStates(db, [
+        { playerId: "old", matchId: "old-game" },
+      ]).then((rows) => rows[0]),
+    ).rejects.toThrow("legacy-record-unavailable");
     await expect(
       db.batch(
         buildMatchStateRouteStatements(db, [
@@ -243,10 +118,11 @@ describe("match state D1 authority and admissions", () => {
         "malformed",
       )
       .run();
-    expect(await readLegacyMatchState(db, "old", "old-game")).toEqual([
-      1,
-      { legacy: true },
-    ]);
+    expect(
+      await readLegacyMatchStates(db, [
+        { playerId: "old", matchId: "old-game" },
+      ]).then((rows) => rows[0]),
+    ).toEqual([1, { legacy: true }]);
     await expect(
       db
         .prepare(

@@ -86,7 +86,6 @@ type InitialIdentityIntent = {
 export type InitialIdentitySession = {
   user: SessionUser;
   bootstrap: SessionIdentityBootstrap | undefined;
-  support: SessionTokenReadResult["identitySupport"];
 };
 
 export type SessionAuthDependencies = {
@@ -114,7 +113,6 @@ export class SessionAuth {
   private initialGameIntent: InitialGameIntent | null = null;
   private initialEventIntent: InitialEventIntent | null = null;
   private initialIdentityIntent: InitialIdentityIntent | null = null;
-  private identitySupport: SessionTokenReadResult["identitySupport"];
   private stopped = false;
   private ready = false;
   private storeQueue: Promise<void> = Promise.resolve();
@@ -265,7 +263,6 @@ export class SessionAuth {
     }
     if (previous !== this.currentUser) {
       this.access = null;
-      this.identitySupport = undefined;
     }
     if (initial || previous !== this.currentUser) {
       for (const listener of this.listeners) listener.next(this.currentUser);
@@ -409,15 +406,9 @@ export class SessionAuth {
     eventIntent: InitialEventIntent | null,
     identityIntent: InitialIdentityIntent | null,
   ): SessionTokenResult {
-    const {
-      gameBootstrap,
-      eventBootstrap,
-      identityBootstrap,
-      identitySupport,
-      ...token
-    } = response;
+    const { gameBootstrap, eventBootstrap, identityBootstrap, ...token } =
+      response;
     const user = this.currentUser;
-    if (identitySupport) this.identitySupport = identitySupport;
     if (
       identityIntent &&
       this.initialIdentityIntent === identityIntent &&
@@ -485,7 +476,7 @@ export class SessionAuth {
       this.assertUser(user);
       bind();
       markAuthSessionReady();
-      return { user, bootstrap: intent.result, support: this.identitySupport };
+      return { user, bootstrap: intent.result };
     } finally {
       if (this.initialIdentityIntent === intent)
         this.initialIdentityIntent = null;
@@ -831,7 +822,6 @@ export class SessionAuth {
     this.stopped = true;
     this.currentUser = null;
     this.access = null;
-    this.identitySupport = undefined;
     this.initialIdentityIntent = null;
     for (const listener of this.listeners) listener.next(null);
     let applied = true;

@@ -25,13 +25,13 @@ const {
   buildSundayMonsReminder,
 } = require("../runtime/telegram/sundayMonsReminder");
 const {
-  EVENT_LOCK_ROOT,
   EVENT_LOCK_TTL_MS,
   createEventLockManagerCore,
 } = require("../runtime/events/lockManagerCore");
 const {
+  EVENT_LOCK_ROOT,
   runStateDecisionTransaction,
-} = require("../runtime/stateDecisionTransaction");
+} = require("./legacyStateFixture");
 
 const EVENT_ID = "EV2026";
 const NOW_MS = Date.UTC(2026, 7, 7, 12, 0, 0);

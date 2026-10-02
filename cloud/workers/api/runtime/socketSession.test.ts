@@ -1,10 +1,3 @@
-import { env } from "cloudflare:workers";
-import {
-  evictDurableObject,
-  runDurableObjectAlarm,
-  runInDurableObject,
-} from "cloudflare:test";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { INVITE_METADATA_SOCKET_PROTOCOL } from "@mons/shared/invite-metadata";
 import { INVITE_WAGERS_SOCKET_PROTOCOL } from "@mons/shared/invite-wagers";
 import { MATCH_SYNC_SOCKET_PROTOCOL } from "@mons/shared/match-sync";
@@ -12,14 +5,24 @@ import {
   REACTION_HEARTBEAT_REQUEST,
   REACTION_HEARTBEAT_RESPONSE,
   REACTION_SOCKET_PROTOCOL,
-  REACTION_SOCKET_PROTOCOL_V2,
 } from "@mons/shared/reactions";
+import {
+  evictDurableObject,
+  runDurableObjectAlarm,
+  runInDurableObject,
+} from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InviteReactions } from "../src/inviteReactions.ts";
 import type {
   MatchStateSyncReadRequest,
   MatchStateSyncReadResult,
 } from "../src/matchStateTypes.ts";
 import { SOCKET_TEST_SESSION_ID } from "../test/socketTestSession.ts";
+import {
+  seedHistoricalPresentations,
+  reactionSocketTestHeaders,
+} from "./presentationStorageFixture.ts";
 
 type Channel = "reactions" | "presentation" | "metadata" | "wagers" | "matches";
 type Room = DurableObjectStub<InviteReactions>;
@@ -76,10 +79,11 @@ async function fixture() {
               input.opponentId === null ? null : readMatch(input.opponentId),
           };
   });
-  await room.ensurePresentations(inviteId, {
+  await seedHistoricalPresentations(room, inviteId, {
     "host-login": { emojiId: 1, aura: "" },
     "guest-login": { emojiId: 2, aura: "" },
   });
+  await reactionSocketTestHeaders(room, inviteId);
   return { room, inviteId };
 }
 
@@ -95,14 +99,13 @@ function request(
   let path = "/socket";
   if (channel === "reactions" || channel === "presentation") {
     headers.set("X-Mons-Reaction-Role", role);
+    headers.set("Sec-WebSocket-Protocol", REACTION_SOCKET_PROTOCOL);
+    headers.set("X-Mons-Presentation-Match", inviteId);
+    headers.set("X-Mons-Presentation-Canonical", "1");
     headers.set(
-      "Sec-WebSocket-Protocol",
-      channel === "presentation"
-        ? REACTION_SOCKET_PROTOCOL_V2
-        : REACTION_SOCKET_PROTOCOL,
+      "X-Mons-Presentation-Actors",
+      encodeURIComponent(JSON.stringify(["host-login", "guest-login"])),
     );
-    if (channel === "presentation")
-      headers.set("X-Mons-Presentation-Match", inviteId);
   } else {
     const name =
       channel === "metadata"
@@ -196,12 +199,75 @@ afterEach(async () => {
 });
 
 describe("socket session lifetime", () => {
+  it.each([true, false])(
+    "retires v1 reactions on a shared wake while preserving current sockets and data (authenticated=%s)",
+    async (authenticated) => {
+      const { room, inviteId } = await fixture();
+      const expiry = Date.now() + 300_000;
+      const retired = await connect(
+        room,
+        "reactions",
+        inviteId,
+        authenticated ? expiry : null,
+      );
+      const current = await connect(
+        room,
+        "presentation",
+        inviteId,
+        authenticated ? null : expiry,
+      );
+      const otherChannels = await Promise.all(
+        (["metadata", "wagers", "matches"] as const).map((channel) =>
+          connect(room, channel, inviteId, expiry),
+        ),
+      );
+      const reaction = {
+        uuid: crypto.randomUUID(),
+        kind: "yo",
+        variation: 1,
+        matchId: inviteId,
+      };
+      await room.publish("host-login", reaction);
+      await retired.read();
+      await current.read();
+      const before = await runInDurableObject(room, (_instance, state) => {
+        for (const socket of state.getWebSockets()) {
+          const attachment = socket.deserializeAttachment();
+          if (attachment.channel !== "reaction") continue;
+          if (attachment.authenticated === authenticated)
+            attachment.schemaVersion = 1;
+          delete attachment.channel;
+          socket.serializeAttachment(attachment);
+        }
+        return state.storage.sql
+          .exec("SELECT * FROM latest_reactions ORDER BY sender_uid")
+          .toArray();
+      });
+      await evictDurableObject(room);
+      current.socket.send(REACTION_HEARTBEAT_REQUEST);
+      expect(await current.read()).toBe(REACTION_HEARTBEAT_RESPONSE);
+      expect(await retired.closed).toBe(1008);
+      for (const client of otherChannels) {
+        client.socket.send(REACTION_HEARTBEAT_REQUEST);
+        expect(await client.read()).toBe(REACTION_HEARTBEAT_RESPONSE);
+        expect(client.socket.readyState).toBe(WebSocket.OPEN);
+      }
+      expect(
+        await runInDurableObject(room, (_instance, state) =>
+          state.storage.sql
+            .exec("SELECT * FROM latest_reactions ORDER BY sender_uid")
+            .toArray(),
+        ),
+      ).toEqual(before);
+    },
+  );
+
   for (const channel of channels) {
     it(`${channel} preserves its protocol, stored identity and capacity tags`, async () => {
       const { room, inviteId } = await fixture();
       const protocols: Record<Channel, string> = {
         reactions: REACTION_SOCKET_PROTOCOL,
-        presentation: REACTION_SOCKET_PROTOCOL_V2,
+        presentation: REACTION_SOCKET_PROTOCOL,
         metadata: INVITE_METADATA_SOCKET_PROTOCOL,
         wagers: INVITE_WAGERS_SOCKET_PROTOCOL,
         matches: MATCH_SYNC_SOCKET_PROTOCOL,
@@ -212,7 +278,8 @@ describe("socket session lifetime", () => {
           protocols[channel],
         );
         expect(JSON.parse(client.welcome)).toMatchObject({
-          schemaVersion: channel === "presentation" ? 2 : 1,
+          schemaVersion:
+            channel === "presentation" || channel === "reactions" ? 2 : 1,
           type: "snapshot",
         });
         const authenticated = expiry !== null;
@@ -242,8 +309,10 @@ describe("socket session lifetime", () => {
         ).toEqual({
           attachment: reaction
             ? {
-                schemaVersion: channel === "presentation" ? 2 : 1,
-                matchId: channel === "presentation" ? inviteId : null,
+                schemaVersion:
+                  channel === "presentation" || channel === "reactions" ? 2 : 1,
+                channel: "reaction",
+                matchId: inviteId,
                 ...session,
               }
             : {
@@ -342,19 +411,16 @@ describe("socket session lifetime", () => {
     });
   }
 
-  it.each([null, "another-protocol"])(
-    "omits an unrecognized reaction protocol %s from the upgrade response",
+  it.each([null, "mons-reactions-v1", "another-protocol"])(
+    "rejects obsolete or missing reaction protocol %s",
     async (protocol) => {
       const { room, inviteId } = await fixture();
-      const client = await connect(room, "reactions", inviteId, null, {
-        "Sec-WebSocket-Protocol": protocol,
-      });
-      expect(client.response.headers.get("Sec-WebSocket-Protocol")).toBeNull();
-      expect(JSON.parse(client.welcome)).toEqual({
-        schemaVersion: 1,
-        type: "snapshot",
-        reactions: {},
-      });
+      const response = await room.fetch(
+        request("reactions", inviteId, null, {
+          "Sec-WebSocket-Protocol": protocol,
+        }),
+      );
+      expect(response.status).toBe(400);
     },
   );
 

@@ -4497,12 +4497,24 @@ test("A to B to A revisions retain distinct durable task generations", () => {
     [desiredB.revision, "event-b"],
     [desiredA.revision, "event-a-2"],
   ].map(([revision, generation]) =>
-    buildTelegramDeliveryTaskId("key", revision, generation),
+    buildTelegramDeliveryTaskId({
+      messageKey: "key",
+      revision,
+      generation,
+      taskKind: "desired",
+      retrySequence: 0,
+    }),
   );
   assert.equal(new Set(taskIds).size, 3);
   assert.equal(
     taskIds[0],
-    buildTelegramDeliveryTaskId("key", desiredA.revision, "event-a-1"),
+    buildTelegramDeliveryTaskId({
+      messageKey: "key",
+      revision: desiredA.revision,
+      generation: "event-a-1",
+      taskKind: "desired",
+      retrySequence: 0,
+    }),
   );
 });
 

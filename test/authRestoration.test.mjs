@@ -18,7 +18,6 @@ registerHooks({
   },
 });
 
-const { ProfileApiError } = await import("../src/services/profileApi.ts");
 const { AuthApiError } = await import("../src/services/authApi.ts");
 const { createDeferredProfilePresentation } =
   await import("../src/connection/deferredProfilePresentation.ts");
@@ -111,12 +110,10 @@ const deferred = () => {
 };
 
 function harness({
-  initialIdentity = async () => ({ ok: false, status: "legacy" }),
+  initialIdentity = async () => ({ ok: true, profile: authoritativeProfile }),
   syncProfile = async () => ({ ok: true, profileId: "profile-1" }),
-  lookupProfile = async () => authoritativeProfile,
   watchOnly = false,
   stored = {},
-  claimProfileId = "",
   applicationErrors = {},
   autoFlushPresentation = true,
 } = {}) {
@@ -127,8 +124,6 @@ function harness({
     displays: [],
     syncs: 0,
     lookups: [],
-    claimReads: 0,
-    tokenRefreshes: 0,
     mining: [],
     flushes: 0,
     attempts: 0,
@@ -213,13 +208,6 @@ function harness({
       events.lookups.push(uid);
       return lookupProfile(uid);
     },
-    getCurrentProfileClaimId: async () => {
-      events.claimReads++;
-      return claimProfileId;
-    },
-    refreshTokenIfNeeded: () => {
-      events.tokenRefreshes++;
-    },
     getSameProfilePlayerUid: () => null,
   };
   const presentationFrames = new Map();
@@ -287,7 +275,6 @@ function harness({
     },
     document,
     navigator,
-    ProfileApiError,
     AuthApiError,
     markAuthIdentityReady: () => {},
     readInitialIdentity: async () => {
@@ -457,7 +444,7 @@ test("a verified missing owner stays anonymous without trusting the saved profil
   assert.deepEqual(h.retryDelays(), []);
 });
 
-test("unavailable identity retries without entering legacy profile repair", async () => {
+test("unavailable identity retries without entering profile repair", async () => {
   const h = harness({
     initialIdentity: async () => ({ ok: false, status: 503 }),
   });
@@ -499,295 +486,110 @@ test("a newer login fences a late verified startup identity", async () => {
   assert.equal(h.events.consumedIdentities, 0);
 });
 
-test("restores canonical ownership without token claims or forced refreshes", async () => {
-  const h = harness();
+test("unavailable identity preserves cached data and the current session", async () => {
+  const h = harness({ initialIdentity: unavailable });
   h.changeAuth();
+  const user = h.connection.auth.currentUser;
   await h.settle();
-
-  assert.deepEqual(h.events.statuses, ["authenticated"]);
-  assert.equal(h.events.profiles[0].profile.id, "profile-1");
-  assert.equal(h.events.profiles[0].profile.username, "Cached player");
-  assert.equal(h.events.profiles[0].uid, "login-1");
-  assert.deepEqual(h.events.lookups, []);
-  assert.equal(h.events.claimReads, 0);
-  assert.equal(h.events.tokenRefreshes, 0);
-  assert.equal(h.events.attempts, 1);
-});
-
-test("legacy fallback applies full profile storage and tutorial data without a second lookup", async () => {
-  const profile = {
-    ...authoritativeProfile,
-    rating: 1700,
-    nonce: 15,
-    totalManaPoints: 23,
-    completedProblemIds: ["first-problem"],
-    isTutorialCompleted: true,
-    cardBackgroundId: 2,
-    cardSubtitleId: 3,
-    profileMons: "0,1,2,3,4",
-  };
-  const h = harness({
-    syncProfile: unavailable,
-    lookupProfile: async () => profile,
-  });
-  h.changeAuth();
-  await h.settle();
-  assert.deepEqual(h.events.statuses, ["authenticated"]);
-  assert.deepEqual(h.events.lookups, ["login-1"]);
-  assert.equal(h.data.playerRating, 1700);
-  assert.equal(h.data.playerNonce, 15);
-  assert.equal(h.data.playerTotalManaPoints, 23);
-  assert.equal(h.data.cardBackgroundId, 2);
-  assert.equal(h.data.cardSubtitleId, 3);
-  assert.equal(h.data.profileMons, "0,1,2,3,4");
-  assert.deepEqual(h.events.tutorials, [[["first-problem"], true]]);
-  assert.deepEqual(h.events.mining, [profile]);
-});
-
-test("replaces stale cached ownership and presentation with the canonical profile", async () => {
-  const h = harness({
-    syncProfile: async () => ({ ok: true, profileId: "profile-2" }),
-    claimProfileId: "profile-1",
-  });
-  h.changeAuth();
-  await h.settle();
-
-  assert.deepEqual(h.events.statuses, ["authenticated"]);
-  assert.deepEqual(h.events.lookups, ["login-1"]);
-  assert.equal(h.data.profileId, "profile-2");
-  assert.equal(h.data.username, "Canonical player");
-  assert.equal(h.data.ethAddress, "canonical-eth");
-  assert.equal(h.data.solAddress, "canonical-sol");
-  assert.equal(h.data.playerEmojiId, "9");
-  assert.equal(h.data.playerEmojiAura, "canonical-aura");
-  assert.deepEqual(h.events.mining, [authoritativeProfile]);
-  assert.equal(h.events.claimReads, 0);
-});
-
-test("uses safe presentation defaults when ownership changes and profile hydration fails", async () => {
-  const h = harness({
-    syncProfile: async () => ({ ok: true, profileId: "profile-2" }),
-    lookupProfile: unavailable,
-  });
-  h.changeAuth();
-  await h.settle();
-
-  assert.deepEqual(h.events.statuses, ["authenticated"]);
-  assert.deepEqual(h.data, {
-    loginId: "login-1",
-    profileId: "profile-2",
-    username: "",
-    ethAddress: "",
-    solAddress: "",
-    playerEmojiId: "1",
-    playerEmojiAura: "",
-  });
-  assert.equal(h.events.profiles[0].profile.id, "profile-2");
-  assert.equal(h.events.profiles[0].profile.username, "");
-  assert.equal(h.events.flushes, 1);
-});
-
-test("rejects missing canonical ownership despite a matching stale token claim", async () => {
-  const h = harness({
-    syncProfile: async () => ({ ok: true, profileId: null }),
-    claimProfileId: "profile-1",
-  });
-  h.changeAuth();
-  await h.settle();
-
   assert.deepEqual(h.events.statuses, ["unauthenticated"]);
-  assert.deepEqual(h.events.lookups, []);
-  assert.deepEqual(h.events.profiles, []);
-  assert.equal(h.events.claimReads, 0);
   assert.deepEqual(h.data, cachedIdentity);
-  assert.deepEqual(h.retryDelays(), []);
-  h.wake("online");
-  h.wake("pageshow");
-  h.wake("visibilitychange");
-  await h.settle();
-  assert.equal(h.events.syncs, 1);
-});
-
-test("restores ownership through the D1 profile lookup when synchronization fails", async () => {
-  const h = harness({ syncProfile: unavailable });
-  h.changeAuth();
-  await h.settle();
-
-  assert.deepEqual(h.events.statuses, ["authenticated"]);
-  assert.deepEqual(h.events.lookups, ["login-1"]);
-  assert.equal(h.data.profileId, "profile-2");
-  assert.equal(h.events.profiles[0].profile.username, "Canonical player");
-  assert.equal(h.events.claimReads, 0);
-});
-
-test("retains cached data and the session when both canonical APIs fail", async () => {
-  const h = harness({
-    syncProfile: unavailable,
-    lookupProfile: unavailable,
-    claimProfileId: "profile-1",
-  });
-  h.changeAuth();
-  const sessionUser = h.connection.auth.currentUser;
-  await h.settle();
-
-  assert.deepEqual(h.events.statuses, ["unauthenticated"]);
-  assert.deepEqual(h.events.profiles, []);
-  assert.deepEqual(h.events.displays, []);
-  assert.deepEqual(h.data, cachedIdentity);
-  assert.equal(h.connection.auth.currentUser, sessionUser);
-  assert.equal(h.events.claimReads, 0);
-  assert.equal(h.events.tokenRefreshes, 0);
-  assert.equal(h.events.attempts, 1);
-});
-
-test("does not restore a cached identity belonging to a different login", async () => {
-  const h = harness();
-  h.changeAuth("login-2");
-  await h.settle();
-
-  assert.deepEqual(h.events.statuses, ["unauthenticated"]);
+  assert.equal(h.connection.auth.currentUser, user);
   assert.equal(h.events.syncs, 0);
-  assert.deepEqual(h.events.profiles, []);
-  assert.deepEqual(h.data, cachedIdentity);
+  assert.deepEqual(h.events.lookups, []);
+  assert.deepEqual(h.retryDelays(), [1_000]);
+  h.cleanup();
 });
 
-test("retries in the current game session after discarding an older ownership response", async () => {
+test("retries a verified identity discarded after the game session changes", async () => {
   const pending = deferred();
-  const h = harness({ syncProfile: () => pending.promise });
+  const h = harness({ initialIdentity: () => pending.promise });
   h.changeAuth();
   await h.settle();
   h.changeSession();
-  pending.resolve({ ok: true, profileId: "profile-2" });
+  pending.resolve({ ok: true, profile: authoritativeProfile });
   await h.settle();
-
   assert.deepEqual(h.events.statuses, []);
-  assert.deepEqual(h.events.lookups, []);
   assert.deepEqual(h.events.profiles, []);
-  assert.deepEqual(h.data, cachedIdentity);
   assert.deepEqual(h.retryDelays(), [1_000]);
   h.advanceRetry();
   await h.settle();
   assert.deepEqual(h.events.statuses, ["authenticated"]);
-  assert.equal(h.events.syncs, 2);
-  assert.equal(h.events.profiles[0].profile.id, "profile-2");
+  assert.equal(h.events.identities, 2);
   assert.deepEqual(h.retryDelays(), []);
 });
 
-test("ignores a pending ownership response after sign-out", async () => {
-  const pending = deferred();
-  const h = harness({ syncProfile: () => pending.promise });
-  h.changeAuth();
-  await h.settle();
-  h.changeAuth(null);
-  pending.resolve({ ok: true, profileId: "profile-2" });
-  await h.settle();
-
-  assert.deepEqual(h.events.statuses, ["unauthenticated"]);
-  assert.deepEqual(h.events.lookups, []);
-  assert.deepEqual(h.events.profiles, []);
-  assert.deepEqual(h.data, cachedIdentity);
-});
-
-test("ignores a pending fallback profile response after effect cleanup", async () => {
-  const pending = deferred();
-  const h = harness({
-    syncProfile: unavailable,
-    lookupProfile: () => pending.promise,
+for (const cancellation of ["sign-out", "account change", "cleanup"]) {
+  test(`${cancellation} fences a pending verified identity response`, async () => {
+    const pending = deferred();
+    let reads = 0;
+    const h = harness({
+      initialIdentity: () =>
+        ++reads === 1
+          ? pending.promise
+          : Promise.resolve({ ok: true, profile: null }),
+    });
+    h.changeAuth();
+    await h.settle();
+    if (cancellation === "cleanup") h.cleanup();
+    else h.changeAuth(cancellation === "sign-out" ? null : "login-2");
+    pending.resolve({ ok: true, profile: authoritativeProfile });
+    await h.settle();
+    assert.deepEqual(h.events.profiles, []);
+    assert.deepEqual(h.data, cachedIdentity);
+    assert.deepEqual(h.retryDelays(), []);
+    if (cancellation === "cleanup") assert.equal(h.events.unsubscribed, true);
   });
-  h.changeAuth();
-  await h.settle();
-  assert.deepEqual(h.events.lookups, ["login-1"]);
-  h.cleanup();
-  pending.resolve(authoritativeProfile);
-  await h.settle();
+}
 
-  assert.deepEqual(h.events.statuses, []);
-  assert.deepEqual(h.events.profiles, []);
-  assert.deepEqual(h.data, cachedIdentity);
-  assert.equal(h.events.unsubscribed, true);
-  assert.equal(h.events.attempts, 0);
-});
-
-test("keeps the newer auth result when callbacks overlap for the same login", async () => {
+test("keeps the newer verified result when callbacks overlap for the same login", async () => {
   const pending = deferred();
-  let syncs = 0;
+  const current = { ...authoritativeProfile, id: "new-profile" };
+  let reads = 0;
   const h = harness({
-    syncProfile: async () =>
-      ++syncs === 1 ? pending.promise : { ok: true, profileId: "profile-1" },
+    initialIdentity: async () =>
+      ++reads === 1 ? pending.promise : { ok: true, profile: current },
   });
   h.changeAuth();
   await h.settle();
   h.changeAuth();
   await h.settle();
-  pending.resolve({ ok: true, profileId: "profile-2" });
+  pending.resolve({ ok: true, profile: authoritativeProfile });
   await h.settle();
-
   assert.deepEqual(h.events.statuses, ["authenticated"]);
   assert.equal(h.events.profiles.length, 1);
-  assert.equal(h.events.profiles[0].profile.id, "profile-1");
-  assert.deepEqual(h.data, cachedIdentity);
+  assert.equal(h.data.profileId, current.id);
 });
 
-test("hydrates watch-only presentation after confirming unchanged ownership", async () => {
-  const profile = { ...authoritativeProfile, id: "profile-1" };
-  const h = harness({
-    watchOnly: true,
-    lookupProfile: async () => profile,
-  });
-  h.changeAuth();
-  await h.settle();
-
-  assert.deepEqual(h.events.statuses, ["authenticated"]);
-  assert.deepEqual(h.events.lookups, ["login-1"]);
-  assert.equal(h.events.profiles[0].profile.username, "Canonical player");
-  assert.deepEqual(h.events.mining, [profile]);
-});
-
-test("recovers a transient outage by timer without another session auth callback", async () => {
+test("recovers a transient identity outage by timer without another auth callback", async () => {
   let available = false;
   const h = harness({
-    syncProfile: async () =>
-      available ? { ok: true, profileId: "profile-1" } : unavailable(),
-    lookupProfile: unavailable,
+    initialIdentity: async () =>
+      available ? { ok: true, profile: authoritativeProfile } : unavailable(),
   });
   h.changeAuth();
-  const sessionUser = h.connection.auth.currentUser;
+  const user = h.connection.auth.currentUser;
   await h.settle();
-  assert.deepEqual(h.events.statuses, ["unauthenticated"]);
   assert.deepEqual(h.retryDelays(), [1_000]);
-
-  h.changeSession();
   available = true;
   h.advanceRetry();
   await h.settle();
-
   assert.deepEqual(h.events.statuses, ["unauthenticated", "authenticated"]);
-  assert.equal(h.events.syncs, 2);
-  assert.equal(h.events.profiles[0].profile.id, "profile-1");
-  assert.equal(h.connection.auth.currentUser, sessionUser);
-  assert.deepEqual(h.data, cachedIdentity);
+  assert.equal(h.connection.auth.currentUser, user);
+  assert.equal(h.events.identities, 2);
   assert.deepEqual(h.retryDelays(), []);
-  assert.equal(h.events.claimReads, 0);
-  assert.equal(h.events.tokenRefreshes, 0);
 });
 
-test("backs off continuing failures to 30 seconds and resets on an auth callback", async () => {
-  const h = harness({
-    syncProfile: unavailable,
-    lookupProfile: unavailable,
-  });
+test("backs off identity failures to 30 seconds and resets on an auth callback", async () => {
+  const h = harness({ initialIdentity: unavailable });
   h.changeAuth();
   await h.settle();
-
   for (const delay of [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]) {
     assert.deepEqual(h.retryDelays(), [delay]);
     assert.equal(h.advanceRetry(), delay);
     await h.settle();
   }
-  assert.equal(h.events.syncs, 8);
+  assert.equal(h.events.identities, 8);
   assert.deepEqual(h.events.profiles, []);
-  assert.deepEqual(h.retryDelays(), [30_000]);
-
   h.changeAuth();
   await h.settle();
   assert.deepEqual(h.retryDelays(), [1_000]);
@@ -795,11 +597,10 @@ test("backs off continuing failures to 30 seconds and resets on an auth callback
 });
 
 for (const code of ["not-found", "unauthenticated", "permission-denied"]) {
-  test(`does not retry restoration after a definitive ${code} profile lookup`, async () => {
+  test(`does not retry a definitive ${code} identity failure`, async () => {
     const h = harness({
-      syncProfile: unavailable,
-      lookupProfile: async () => {
-        throw new ProfileApiError(code, "Profile unavailable");
+      initialIdentity: async () => {
+        throw new AuthApiError(code, "Profile unavailable");
       },
     });
     h.changeAuth();
@@ -808,32 +609,30 @@ for (const code of ["not-found", "unauthenticated", "permission-denied"]) {
     assert.deepEqual(h.retryDelays(), []);
     h.wake("online");
     await h.settle();
-    assert.equal(h.events.syncs, 1);
+    assert.equal(h.events.identities, 1);
   });
 }
 
-test("retries temporary typed profile lookup failures", async () => {
-  for (const code of ["unavailable", "resource-exhausted", "aborted"]) {
+for (const code of ["unavailable", "resource-exhausted", "aborted"]) {
+  test(`retries a temporary ${code} identity failure`, async () => {
     const h = harness({
-      syncProfile: unavailable,
-      lookupProfile: async () => {
-        throw new ProfileApiError(code, "Profile temporarily unavailable");
+      initialIdentity: async () => {
+        throw new AuthApiError(code, "Profile temporarily unavailable");
       },
     });
     h.changeAuth();
     await h.settle();
     assert.deepEqual(h.events.statuses, ["unauthenticated"]);
-    assert.deepEqual(h.retryDelays(), [1_000], code);
+    assert.deepEqual(h.retryDelays(), [1_000]);
     h.cleanup();
-  }
-});
+  });
+}
 
-test("keeps an offline retry pending until the network returns", async () => {
+test("keeps an offline identity retry pending until the network returns", async () => {
   let available = false;
   const h = harness({
-    syncProfile: async () =>
-      available ? { ok: true, profileId: "profile-1" } : unavailable(),
-    lookupProfile: unavailable,
+    initialIdentity: async () =>
+      available ? { ok: true, profile: authoritativeProfile } : unavailable(),
   });
   h.changeAuth();
   await h.settle();
@@ -841,100 +640,90 @@ test("keeps an offline retry pending until the network returns", async () => {
   h.advanceRetry();
   h.wake("pageshow");
   await h.settle();
-  assert.equal(h.events.syncs, 1);
-
+  assert.equal(h.events.identities, 1);
   available = true;
   h.setOnline(true);
   h.wake("online");
   await h.settle();
   assert.deepEqual(h.events.statuses, ["unauthenticated", "authenticated"]);
-  assert.equal(h.events.syncs, 2);
+  assert.equal(h.events.identities, 2);
   assert.deepEqual(h.retryDelays(), []);
 });
 
-test("an explicit same-login sign-in fences a late retry failure", async () => {
+test("an explicit same-login sign-in fences a late identity retry failure", async () => {
   const pending = deferred();
-  let syncs = 0;
+  let reads = 0;
   const h = harness({
-    syncProfile: async () => {
-      if (++syncs === 1) return unavailable();
-      await pending.promise;
+    initialIdentity: async () => {
+      if (++reads > 1) await pending.promise;
       return unavailable();
     },
-    lookupProfile: unavailable,
   });
   h.changeAuth();
   await h.settle();
   h.advanceRetry();
   await h.settle();
-  assert.equal(h.events.syncs, 2);
-
   h.confirmSignIn();
   pending.resolve();
   await h.settle();
   assert.deepEqual(h.events.statuses, ["unauthenticated", "authenticated"]);
-  assert.deepEqual(h.events.lookups, ["login-1"]);
   assert.deepEqual(h.retryDelays(), []);
   h.wake("online");
   await h.settle();
-  assert.equal(h.events.syncs, 2);
+  assert.equal(h.events.identities, 2);
 });
 
 for (const wakeEvent of ["online", "pageshow", "visibilitychange"]) {
-  test(`${wakeEvent} retries pending restoration immediately without overlapping requests`, async () => {
+  test(`${wakeEvent} retries pending identity without overlapping requests`, async () => {
     const pending = deferred();
-    let syncs = 0;
+    let reads = 0;
     const h = harness({
-      syncProfile: async () =>
-        ++syncs === 1 ? unavailable() : pending.promise,
-      lookupProfile: unavailable,
+      initialIdentity: async () =>
+        ++reads === 1 ? unavailable() : pending.promise,
     });
     h.changeAuth();
     await h.settle();
-    assert.deepEqual(h.retryDelays(), [1_000]);
-
     if (wakeEvent === "visibilitychange") {
       h.wake(wakeEvent, "hidden");
       await h.settle();
-      assert.equal(h.events.syncs, 1);
-      assert.deepEqual(h.retryDelays(), [1_000]);
+      assert.equal(h.events.identities, 1);
     }
     h.wake(wakeEvent, "visible");
     h.wake("online");
     h.wake("pageshow");
     h.wake("visibilitychange");
     await h.settle();
-    assert.equal(h.events.syncs, 2);
+    assert.equal(h.events.identities, 2);
     assert.deepEqual(h.retryDelays(), []);
-
-    pending.resolve({ ok: true, profileId: "profile-1" });
+    pending.resolve({ ok: true, profile: authoritativeProfile });
     await h.settle();
     assert.deepEqual(h.events.statuses, ["unauthenticated", "authenticated"]);
-    assert.equal(h.events.profiles.length, 1);
-    assert.deepEqual(h.retryDelays(), []);
   });
 }
 
 for (const cancellation of ["sign-out", "account change", "cleanup"]) {
-  test(`${cancellation} cancels pending restoration retries`, async () => {
+  test(`${cancellation} cancels a pending identity retry`, async () => {
+    let reads = 0;
     const h = harness({
-      syncProfile: unavailable,
-      lookupProfile: unavailable,
+      initialIdentity: async () =>
+        ++reads === 1 ? unavailable() : { ok: true, profile: null },
     });
     h.changeAuth();
     await h.settle();
     assert.deepEqual(h.retryDelays(), [1_000]);
     assert.equal(h.listenerCount(), 3);
-
     if (cancellation === "cleanup") h.cleanup();
     else h.changeAuth(cancellation === "sign-out" ? null : "login-2");
+    await h.settle();
     h.wake("online");
     h.wake("pageshow");
     h.wake("visibilitychange");
     await h.settle();
-
     assert.deepEqual(h.retryDelays(), []);
-    assert.equal(h.events.syncs, 1);
+    assert.equal(
+      h.events.identities,
+      cancellation === "account change" ? 2 : 1,
+    );
     assert.deepEqual(h.events.profiles, []);
     assert.deepEqual(h.data, cachedIdentity);
     if (cancellation === "cleanup") {

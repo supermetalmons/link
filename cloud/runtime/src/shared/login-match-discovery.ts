@@ -1,5 +1,4 @@
 import { isSafeRecordKey } from "./ids.js";
-import { createInviteCandidatesFromMatchId } from "./rematches.js";
 
 export type MatchDiscoveryResolution = "resolved" | "missing" | "ambiguous";
 
@@ -25,27 +24,4 @@ function matchDiscoverySortKey(matchId: string): string {
   return key;
 }
 
-async function resolveMatchDiscoveryInvite(
-  matchId: string,
-  hasInvite: (inviteId: string) => boolean | Promise<boolean>,
-): Promise<Pick<MatchDiscoveryEntry, "inviteId" | "resolution">> {
-  matchDiscoverySortKey(matchId);
-  const normalizedMatchId = matchId.trim();
-  if (await hasInvite(normalizedMatchId)) {
-    return { inviteId: normalizedMatchId, resolution: "resolved" };
-  }
-  const existing = [];
-  for (const candidate of createInviteCandidatesFromMatchId(
-    normalizedMatchId,
-  )) {
-    if (await hasInvite(candidate)) existing.push(candidate);
-  }
-  if (existing.length > 1) {
-    return { inviteId: null, resolution: "ambiguous" };
-  }
-  return existing.length === 1
-    ? { inviteId: existing[0], resolution: "resolved" }
-    : { inviteId: null, resolution: "missing" };
-}
-
-export { matchDiscoverySortKey, resolveMatchDiscoveryInvite };
+export { matchDiscoverySortKey };

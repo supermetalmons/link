@@ -20,11 +20,6 @@ import type {
   EventMutationReads,
   PreparedEventMutation,
 } from "./eventMutationCommit.ts";
-
-export const EVENT_PRIZE_ANNOUNCEMENT_REASON =
-  EVENT_ANNOUNCEMENT_SPECS.prizes.reason;
-export const SUNDAY_MONS_REMINDER_REASON =
-  EVENT_ANNOUNCEMENT_SPECS.reminder.reason;
 const SCHEDULE_FIELDS = new Set(["isSundayMons", "startAtMs", "status"]);
 
 type ScheduleRepository = Pick<
@@ -69,18 +64,6 @@ export async function buildEventAnnouncementPlan(
   );
 }
 
-export const buildEventPrizeAnnouncementPlan = (
-  eventId: string,
-  event: unknown,
-  nowMs: number,
-) => buildEventAnnouncementPlan(eventId, event, nowMs, "prizes");
-
-export const buildSundayMonsReminderPlan = (
-  eventId: string,
-  event: unknown,
-  nowMs: number,
-) => buildEventAnnouncementPlan(eventId, event, nowMs, "reminder");
-
 async function preserveSchedule(
   repository: Pick<ScheduleRepository, "readEventProgressOutbox">,
   plan: EventProgressPlan,
@@ -93,7 +76,7 @@ async function preserveSchedule(
   return existing || plan;
 }
 
-async function scheduleEventAnnouncement(
+export async function scheduleEventAnnouncement(
   env: Env,
   repository: ScheduleRepository,
   eventId: string,
@@ -117,15 +100,6 @@ async function scheduleEventAnnouncement(
     await ensureEventProgressWorkflow(env, plan);
   });
 }
-
-export const scheduleEventPrizeAnnouncement = (
-  env: Env,
-  repository: ScheduleRepository,
-  eventId: string,
-  event: unknown,
-  nowMs: number,
-) =>
-  scheduleEventAnnouncement(env, repository, eventId, event, nowMs, "prizes");
 
 export async function scheduleEventAnnouncements(
   env: Env,

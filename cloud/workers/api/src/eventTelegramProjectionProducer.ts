@@ -10,11 +10,6 @@ import { EVENT_TELEGRAM_PROJECTION_SCHEMA_VERSION } from "./telegramProjectionOu
 
 export { EVENT_TELEGRAM_PROJECTION_SCHEMA_VERSION } from "./telegramProjectionOutbox.ts";
 
-export const EVENT_TELEGRAM_PROJECTION_OUTBOX_ROOT =
-  "telegramProjectionOutbox/event";
-export const EVENT_TELEGRAM_PROJECTION_GENERATION_ROOT =
-  "eventTelegramProjectionGenerations";
-
 type ProducerDependencies = {
   createRequestId?: () => string;
   enqueue?: (task: EventTelegramProjectionTask) => Promise<unknown>;

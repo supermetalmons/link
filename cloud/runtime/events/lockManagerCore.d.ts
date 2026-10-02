@@ -75,7 +75,6 @@ type Signature_createEventLockManagerCore = (dependencies: {
   clearInterval?: typeof globalThis.clearInterval;
   logger?: Pick<Console, "error">;
 }) => EventLockManager;
-declare const EVENT_LOCK_ROOT = "eventLocks";
 declare const EVENT_LOCK_TTL_MS = 30000;
 declare const EVENT_LOCK_REFRESH_INTERVAL_MS = 10000;
 declare const resolveLockKind: (value?: EventLeaseKind) => EventLeaseKind;
@@ -86,7 +85,6 @@ declare const getOwnershipDecision: (
 ) => "missing" | "foreign" | "expired" | "owned";
 declare const createEventLockManagerCore: Signature_createEventLockManagerCore;
 export {
-  EVENT_LOCK_ROOT,
   EVENT_LOCK_REFRESH_INTERVAL_MS,
   EVENT_LOCK_TTL_MS,
   createEventLockManagerCore,

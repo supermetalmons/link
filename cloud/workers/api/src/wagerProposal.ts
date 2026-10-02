@@ -241,7 +241,6 @@ async function runWagerMutationWithLease<T>(
   identity: RequestIdentity,
   request: { inviteId: string; matchId: string },
   kind: string,
-  repository: GameplayRepository,
   dependencies: WagerProposalDependencies,
   work: (mutation: WagerMutationContext) => Promise<T>,
 ): Promise<T> {
@@ -306,7 +305,6 @@ export async function sendWagerProposal(
     identity,
     request,
     "send",
-    repository,
     dependencies,
     (mutation) =>
       sendWagerProposalUnlocked(
@@ -559,7 +557,6 @@ export async function acceptWagerProposal(
     identity,
     request,
     "accept",
-    repository,
     dependencies,
     (mutation) =>
       acceptWagerProposalUnlocked(
@@ -821,7 +818,6 @@ export async function removeWagerProposal(
     identity,
     request,
     action,
-    repository,
     dependencies,
     (mutation) =>
       removeWagerProposalUnlocked(

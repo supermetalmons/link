@@ -27,95 +27,55 @@ Deploy only affected Workers. Shared prize-catalog changes need both the API and
 
 Authenticate Wrangler locally or supply `CLOUDFLARE_API_TOKEN` through the process environment. Never put credentials in arguments, source files, release files, or logs.
 
-## New-match timer storage
+## Match timer storage
 
-`NEW_MATCH_TIMER_STORAGE` chooses `d1` or `local` only when the Durable Object creates a wholly new match. Missing configuration means `d1`; invalid values are rejected. The checked-in configuration selects `local`. Each new match persists its choice with its first records. Existing or imported matches without a saved choice continue using D1, and creation retries or partial pairs never change that choice. New rematches can use local timers within an existing invite Durable Object.
+`NEW_MATCH_TIMER_STORAGE` selects `d1` or `local` only when the Durable Object creates a wholly new match. The tracked configuration selects `local`; missing configuration means `d1`, and invalid values are rejected. Each new match persists its choice with its first records. Existing or imported matches without a saved choice continue using D1. Creation retries and partial pairs never change that choice; new rematches can use local timers within an existing invite.
 
-Review and validate support before activation. Prepare the support candidate from code that understands both modes with `NEW_MATCH_TIMER_STORAGE` set to `d1`, then prepare the activation candidate with the same code and the setting changed to `local`. Record the support candidate as the compatible rollback target. Use the routine API release path for any separately authorized release, including publication of owned Workflow definitions whose dependencies changed. These additive Durable Object tables need no D1 migration, active-match adoption, write freeze, or Queue pause.
+Keep both timer implementations, D1 reconciliation, and downstream cleanup. Rollback code must understand saved modes and local timer tables; changing the setting affects only future matches. Do not bulk-copy or delete active markers, reset saved modes, or rewrite historical records. Validate mixed timer cohorts, replay, takebacks, eviction, and rollback configuration locally, then use the routine release and affected invite-lifecycle checks.
 
-Rollback must retain code that reads the saved timer mode and the additive local tables. Setting new-match storage back to `d1` affects only future matches; already-local matches continue using local timers. An unmodified Worker version from before timer-mode support is not a compatible rollback after any local match has been created. Keep existing D1 timer markers, reconciliation sweeps, and downstream cleanup for legacy matches. Do not bulk-copy or delete active markers, reset saved modes, or rewrite historical records.
+## Automatch queue selection
 
-Before an authorized promotion, validate mixed legacy/local matches, timer replay, takebacks, eviction, and rollback configuration in the local runtime suite. After promotion, run the standard API and affected invite-lifecycle smoke checks. Finish when the required checks pass; no additional observation window is needed.
+The live-ticket and pending-enqueue projections in `PROFILE_GAMES_DB` are maintained by triggers from canonical automatch records and unchanged v2 journals. The persisted `automatch_runtime_control.metadata_json.queueSelection` flag controls selection; the absence of `fifo` retains legacy selection. Bootstrap response enrichment and committed-session notifications are always enabled independently of this flag.
 
-## FIFO automatch queue rollout
-
-Migration `0025_automatch_fifo_queue.sql` adds a live-ticket projection and pending-enqueue projection in `PROFILE_GAMES_DB`. Triggers maintain both from existing automatch records and unchanged v2 journals, including writes and recovery performed by the compatible bridge. Existing records, journal payloads, digests, receipts, and tombstone revisions remain authoritative. Queue selection stays in legacy mode until `automatch_runtime_control.metadata_json.queueSelection` is explicitly set to `fifo` by the queue operator.
-
-Validate the API, client, concurrency, migration, and queue operator tests before uploading the bridge and final candidates. The bridge contains the new conflict retry/recovery support while retaining the old response delivery mode:
+Inspect projection integrity and the current selection mode read-only:
 
 ```sh
-npm run upload:api -- --var AUTOMATCH_DELIVERY_MODE:legacy
-```
-
-Record that explicit bridge Version ID as the compatible rollback target. Upload the final candidate with the checked-in default bootstrap delivery mode and record its separate Version ID. Promote and verify the bridge first so production understands queue-selection conflicts before enabling the guards. Use the standard API smoke and affected automatch lifecycle checks; no idle observation period is needed.
-
-Keep writes and Queue consumers active. Inspect pending migrations and apply only the reviewed queue migration, then inspect the new projections:
-
-```sh
-npx wrangler d1 migrations list PROFILE_GAMES_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler d1 migrations apply PROFILE_GAMES_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 npm run manage:automatch-queue -- --inspect
 ```
 
-The migration backfills current live entries and pending enqueue journals while installing maintenance triggers. Inspection must report a complete schema, matching projections, valid queue timestamps and login IDs, and an exact recovery resource for every pending enqueue. Resolve malformed or unrecoverable retained data before activation; do not delete evidence or rewrite old payload digests to pass the audit.
-
-Confirm the bridge API Version ID is serving 100% of traffic. Enable FIFO with that promoted compatible Version ID:
+If FIFO activation is required, verify that a compatible API version with conflict retries and journal recovery is serving 100% of traffic, then use its exact Version ID:
 
 ```sh
 npm run manage:automatch-queue -- --activate --candidate-version-id <promoted-compatible-version-id>
 npm run manage:automatch-queue -- --inspect
 ```
 
-Activation checks projection integrity again in the same SQL statement that changes the metadata flag. It preserves other metadata and requires active D1 authority with unchanged admission epochs. It does not require an empty queue or a writer freeze. The Version ID is recorded as release evidence; the operator does not itself verify the provider deployment, so verify that deployment before invoking activation.
+Activation rechecks projection integrity in the statement that changes the flag. It preserves other metadata and requires active D1 authority with unchanged admission epochs. The Version ID records release evidence; the operator does not verify deployment itself. No empty queue, write freeze, or Queue pause is required. Resolve malformed or unrecoverable retained data without deleting evidence or rewriting payload digests.
 
-After activation, promote and verify the exact final API candidate, publish affected owned Workflow definitions, then promote the prepared frontend candidate. Run the API and isolated invite-lifecycle smoke checks, including authenticated bootstrap and live socket delivery. Inspect production queue integrity and its FIFO query plan read-only. Verify concurrent matching, replay, and cancellation with the deterministic local runtime suite; do not put smoke participants into the public matching queue.
+FIFO orders eligible tickets by `(enqueued_at_ms, invite_id)`. Prepared matches and cancellations remove tickets from consideration; receipt-only reservations and pending enqueues require targeted recovery. Preserve canonical records, journal payloads, receipts, tombstone revisions, tables, and triggers on rollback. Validate concurrency, replay, cancellation, and query plans locally; do not put smoke participants into the public matching queue.
 
-FIFO orders eligible waiting tickets by `(enqueued_at_ms, invite_id)`. A prepared match or cancellation removes its ticket from consideration; a receipt-only reservation causes targeted recovery before that ticket is selected. With no eligible ticket, a pending enqueue is recovered before another host can be queued.
+## Recovery outbox indexes
 
-Rollback must retain a Worker with conflict retries, journal recovery, and the installed projection schema. The bridge is compatible with the FIFO flag and maintains the same canonical state while restoring legacy delivery. Never roll back to a pre-support binary, drop the new tables or triggers, reset the Durable Object namespace, purge Queues, or restore source tables independently. Use the routine promotion and affected verification path, with no write freeze or Queue pause.
-
-## Recovery outbox ordering indexes
-
-Migration `0026_recovery_outbox_ordering.sql` replaces only `idx_automatch_telegram_projection_due` and `idx_game_session_projection_due` in `PROFILE_GAMES_DB`, retaining their names and adding the exact `keyOrderSql` expressions used by the existing recovery queries. Records, runtime queries, APIs, and Queue payloads remain unchanged. This is a migration-only release: keep writes and Queues active; no Worker upload, promotion, or Workflow publication is needed. Previous Worker versions remain compatible with the new indexes.
-
-Validate ordering, retained records, and the actual query plans locally:
+`idx_automatch_telegram_projection_due` and `idx_game_session_projection_due` include the `keyOrderSql` expressions used by recovery queries. Keep their names, expressions, and retained outbox records. Verify actual query plans and stored-record compatibility locally:
 
 ```sh
 npm run test:api:runtime -- automatchQueriesD1.test.ts recoveryOutboxOrderingMigration.test.ts
 ```
 
-Inspect pending migrations first. `migrations apply` applies all pending migrations, so proceed only when `0026_recovery_outbox_ordering.sql` is the sole pending migration; review any other pending changes separately. If it is already applied, continue with verification.
-
-```sh
-npx wrangler d1 migrations list PROFILE_GAMES_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler d1 migrations apply PROFILE_GAMES_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler d1 execute PROFILE_GAMES_DB --remote --command "SELECT name, sql FROM sqlite_schema WHERE type = 'index' AND name IN ('idx_automatch_telegram_projection_due', 'idx_game_session_projection_due');" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-```
-
-Compare both returned definitions with the reviewed migration. Prepare a temporary, reviewed SQL file containing `EXPLAIN QUERY PLAN` for the two actual due queries captured by `observeReads()` in [automatchQueriesD1.test.ts](../cloud/workers/api/runtime/automatchQueriesD1.test.ts): `listDueAutomatchTelegramOutboxes` and `listDueAutomatchProfileOutboxes` from [automatchD1.ts](../cloud/workers/api/src/automatchD1.ts). Use the captured SQL with its expanded `keyOrderSql` expressions and substitute the numeric cutoff/limit bindings, preserving numbered `?1`/`?2` reuse. A simplified `ORDER BY record_key` does not verify these queries.
-
-Pass the reviewed SQL through `--command` so D1 returns the query-plan rows:
-
-```sh
-recovery_explain_sql_file="/absolute/path/to/reviewed-explain.sql"
-npx wrangler d1 execute PROFILE_GAMES_DB --remote --command "$(cat "$recovery_explain_sql_file")" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-```
-
-The Telegram plan must search `idx_automatch_telegram_projection_due` without a temporary ordering B-tree. The profile plan must search `idx_game_session_projection_due` in all four branches without branch-level ordering B-trees. Its final union sort remains intentional and bounded to at most four times the query limit; do not remove it. Finish after schema and plan verification pass, without waiting for a scheduled sweep. Retain these compatible indexes on Worker rollback; never rewrite the applied migration or clear outboxes to verify it.
+The Telegram plan searches its due index without a temporary ordering B-tree. The profile plan searches its due index in all four branches without branch-level ordering B-trees; the final union sort is intentional and bounded to four times the query limit. For incident diagnosis, use the exact expanded queries captured by `observeReads()` in the runtime tests rather than a simplified `ORDER BY record_key`. Retain these compatible indexes on rollback and never clear outboxes to verify them.
 
 ## Canonical operators
 
-Status commands are read-only and use Cloudflare credentials. Completed migration phases and source-proof operations are retired and fail during argument validation.
+Status and inspection commands are read-only and use Cloudflare credentials. Completed migration executors have been removed; the inspection command accepts only one explicit domain.
 
-| Command                            | Supported operations                                                                  |
-| ---------------------------------- | ------------------------------------------------------------------------------------- |
-| `manage:match-state`               | `--status`, `--inspect-admissions --directory <new-private-output-directory>`         |
-| `manage:wager-state`               | `--status`                                                                            |
-| `manage:login-match-discovery`     | `--status`                                                                            |
-| `manage:match-presentations`       | `--status`                                                                            |
-| `manage:event-transition-receipts` | `--status`                                                                            |
-| `manage:invite-source`             | `--status`, `--inspect-admission`, `--reconcile-admission`                            |
-| `manage:automatch-state`           | `--status`, D1 `--freeze`/`--resume`, `--inspect-admissions`, `--reconcile-admission` |
+| Command                  | Supported operations                                                                                        |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| `inspect:state`          | `--domain match-discovery`, `--domain match-presentations`, `--domain wagers`, or `--domain event-receipts` |
+| `manage:match-state`     | `--status`, `--inspect-admissions --directory <new-private-output-directory>`                               |
+| `manage:invite-source`   | `--status`, `--inspect-admission`, `--reconcile-admission`                                                  |
+| `manage:automatch-state` | `--status`, D1 `--freeze`/`--resume`, `--inspect-admissions`, `--reconcile-admission`                       |
+
+Inspection preserves authority, provenance, activation, maintenance, and retained-evidence reports. Event-receipt inspection also inventories every Workflow page, the serving deployment, and any retained operator lock. It never takes a lock or changes controls.
 
 Match admission inspection reads the import identity from D1 and writes a protected report to a new directory. It requires no original migration manifest. Retained records remain immutable; unexplained admissions or locks require investigation. D1 admission recovery uses exact canonical records and never reinterprets a historical whole-record digest as proof from a public snapshot.
 
@@ -159,64 +119,27 @@ npm run publish:api:workflows -- --version-id <worker-version-id> --workflow mon
 
 This publication updates code for new instances and does not modify Queue delivery, Worker Cron, routes, or existing instances. Compatible releases preserve running instances on their original versions. A concrete incompatible state change requires the coordinated handoff described in its migration procedure.
 
-## Scheduled-event recovery cursor rollout
+## Scheduled-event recovery
 
-Migration `0005_event_scheduled_recovery_cursor.sql` adds only an independent, seeded checkpoint table in `EVENT_DB`. It does not alter existing tables or canonical records, and previous Worker versions ignore it. Prepare the validated API candidate and affected smoke fixtures first, verify that this is the only pending event migration, then apply it before promotion:
+`EVENT_DB.event_scheduled_recovery_cursor` stores the independent checkpoint for bounded scheduled-event recovery. The sweep combines urgent discovery with paginated background recovery and advances checkpoints using revision comparisons. Preserve canonical events, outboxes, Workflow identities, and the cursor during recovery or rollback; do not reset the cursor to replay announcements.
 
-```sh
-npx wrangler d1 migrations list EVENT_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler d1 migrations apply EVENT_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler d1 execute EVENT_DB --remote --command "PRAGMA foreign_key_check; SELECT * FROM event_scheduled_recovery_cursor;" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-```
+Changes to shared event/profile repositories may affect both owned Workflow definitions. Use the routine API release path and publish affected definitions. Verify authenticated current/ended event reads and affected metadata, wager, or gameplay behavior without adding an observation window.
 
-Use the routine API promotion path with writes and Queues active. Publish both Workflow definitions when this release also changes their event/profile repository dependencies. Verify authenticated current/ended event reads, metadata/wager delivery, and the isolated gameplay lifecycle. Confirm checkpoint progress from a scheduled execution using bounded checks. Retain the additive table on rollback; do not reset canonical event records, outboxes, or Workflow instances.
+## Wager settlement delivery
 
-## Wager settlement Queue rollout
+`WAGER_SETTLEMENT_QUEUE` sends initial and deferred retries to `mons-link-wager-settlement`, with exhausted work retained in `mons-link-wager-settlement-dlq`. Its consumer runs independently of Telegram delivery and preserves wager payloads, replay, profile admissions, and reservation checks.
 
-The settlement Queue split uses one compatible API release with unchanged wager payloads and no database migration. Keep writes and existing Queue delivery active. During preparation, inspect the two queue names and create only missing resources, then validate and upload the API candidate:
+Legacy wager tasks in the Telegram queue forward unchanged to the settlement queue. They are acknowledged only after enqueue succeeds and retried if forwarding fails. Inspect both the settlement DLQ and legacy Telegram DLQ during recovery; reconcile canonical state before replaying a specific operation.
 
-```sh
-npx wrangler queues create mons-link-wager-settlement --message-retention-period-secs 345600 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler queues create mons-link-wager-settlement-dlq --message-retention-period-secs 1209600 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-```
+Preserve both settlement queues and their consumer configuration on rollback. A compatible Worker must handle the dedicated queue and retained legacy tasks. Verify affected behavior with `smoke:api` and fixture-owned `smoke:wagers`; do not purge queues or alter balances to make checks pass. Provisioning or consumer changes require their own explicit resource operation, not an ordinary code release.
 
-Promote the exact candidate with `promote:api`, then attach the dedicated consumer and verify its settings. Messages produced before attachment remain queued. Use this targeted operation; `deploy:api:triggers` also updates other consumers, routes, Cron, and Workflow definitions:
+## Event navigation delivery
 
-```sh
-npx wrangler queues consumer add mons-link-wager-settlement mons-link-api --batch-size 1 --batch-timeout 0 --message-retries 100 --dead-letter-queue mons-link-wager-settlement-dlq --max-concurrency 1 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler queues consumer list mons-link-wager-settlement --json --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-```
+`EVENT_PROFILE_GAME_PROJECTION_QUEUE` delivers event navigation work through `mons-link-event-profile-game-projection`, independently of rating, invite, automatch, and profile-link work. Preserve canonical event records, task payloads, projection generations, durable outboxes, and the dedicated consumer.
 
-If provisioning or attachment returns an uncertain result, inspect remote state before retrying. Preserve existing resources and settings. Run `smoke:api` and the fixture-owned `smoke:wagers` active lifecycle. Verify both queue paths by publishing the same already-completed fixture settlement task through the authenticated Queue API, once to the settlement queue and once to the legacy Telegram queue. Correlate its operation ID with successful processing and forwarding logs, then confirm unchanged balances. Use bounded delivery checks without artificial initial delays or post-success observation; a missing confirmation requires investigation, not a success claim.
+Version-pinned Workflow instances can still produce tasks on the shared profile-game queue. The shared consumer forwards event tasks unchanged and acknowledges them only after the dedicated enqueue succeeds. The event recovery sweep can re-enqueue pending outboxes; investigate the exact event and request before replaying. Rollback requires a Worker that explicitly routes the dedicated queue and supports legacy forwarding. Never redirect event work to an unknown handler, purge queues, or delete pending outboxes.
 
-Legacy wager messages forward unchanged to `WAGER_SETTLEMENT_QUEUE` without added delay. Acknowledge the legacy message only after enqueue succeeds; retry it if forwarding fails. Existing settlement replay and admission checks remain in the dedicated consumer.
-
-For rollback, retain both settlement queues and the attached consumer. Promote only the recorded compatible pre-split Worker version after verifying that its queue fallback handles unchanged wager payloads; it can consume the new queue using its existing settlement handler. Do not remove or purge queues, or apply old trigger configuration. Legacy Telegram DLQ entries can still contain settlement work and require canonical-state reconciliation before a specific replay.
-
-## Event navigation Queue rollout
-
-Event navigation previews use `EVENT_PROFILE_GAME_PROJECTION_QUEUE`, bound to `mons-link-event-profile-game-projection`, independently of rating, invite, automatch, and profile-link work in `mons-link-profile-game-projection`. The split preserves event task payloads, canonical event records, projection generations, and durable outboxes; it needs no database migration, write freeze, or Queue pause.
-
-Before promotion, prepare and validate a compatible rollback candidate with the new producer binding and an explicit route for the new queue to an event-capable projection consumer. Record its Version ID separately from the unmodified pre-split version. The old Worker routes unknown queue names to Telegram delivery, so that unmodified version is not a safe rollback after the new consumer is attached.
-
-Inspect the queue first and create it only if missing. Preserve an existing queue and its settings. Upload the validated rollback and release candidates during preparation:
-
-```sh
-npx wrangler queues create mons-link-event-profile-game-projection --message-retention-period-secs 345600 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-```
-
-Promote the explicit release Version ID, then attach only the new consumer and verify its settings. Keep existing delivery running; messages sent before attachment remain queued. Avoid `deploy:api:triggers` for this attachment because it also changes unrelated triggers:
-
-```sh
-npx wrangler queues consumer add mons-link-event-profile-game-projection mons-link-api --batch-size 1 --batch-timeout 1 --message-retries 100 --max-concurrency 5 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler queues consumer list mons-link-event-profile-game-projection --json --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-```
-
-Resolve uncertain provisioning or attachment responses by inspecting remote state before retrying. Publish the affected Workflow definitions after promotion when their event repository or producer dependencies changed. Existing version-pinned Workflow instances can continue producing legacy tasks: the shared consumer forwards event tasks unchanged and acknowledges them only after the dedicated enqueue succeeds.
-
-Run `smoke:api`, authenticated reads of the affected scheduled event, and an isolated event preview check. Prepare the required authentication before promotion: event creation requires an approved admin profile. Use a new fixture event absent from the prize catalog with `isSundayMons: false` and `telegramAnnouncements: {invite: false, matches: false, results: false}`. Confirm its creator sees two participants in `/navigation/games/read` after a dedicated test profile joins, compare both preview identities with `/events/snapshot`, and remove the test participant before the scheduled start. Verify the legacy forwarding path using only the fixture's exact event/task identity. Check the approved live event read-only; do not join, remove, postpone, or resync it for verification. Correlate pending outbox recovery and queue processing with current projection generations, without artificial observation windows.
-
-Keep the new queue, its producer binding, and consumer attachment on rollback. Promote only the prepared compatible rollback Version ID, verify the dedicated and legacy paths again, and do not apply old trigger configuration. During recovery, preserve `EVENT_DB.event_profile_game_projection_outboxes` and projection fences. Its scheduled sweep can re-enqueue pending work after a delivery failure; investigate the exact event and request before replaying. Never purge queues, delete pending outboxes, or redirect event work into an unknown queue handler.
+For affected releases, publish changed Workflow definitions and verify the event read plus an isolated event preview. Use an approved admin fixture, an event outside the prize catalog with `isSundayMons: false` and all `telegramAnnouncements` flags false, and a dedicated test participant. Compare `/navigation/games/read` with `/events/snapshot`, remove the participant before start, and keep approved live events read-only. Finish after the required checks pass.
 
 ## Coordinated maintenance release
 
@@ -239,11 +162,11 @@ It creates temporary anonymous participants and a manual invite, checks two-play
 Use explicit existing paired invite IDs for read-only delivery checks:
 
 ```sh
-npm run smoke:reactions -- --base-url https://api.mons.link --invite-id <existing-paired-invite-id>
+npm run smoke:reactions -- --base-url https://api.mons.link --invite-id <existing-paired-invite-id> --match-id <existing-match-id>
 npm run smoke:invite-metadata -- --base-url https://api.mons.link --invite-id <existing-paired-invite-id>
 ```
 
-Reaction checks publish no reaction. Add `--match-id <existing-match-id>` for v2 appearance delivery. Metadata and reaction checks verify HTTP or socket snapshots, heartbeat, and reconnect behavior while preserving canonical data.
+Reaction checks require the match ID for v2 appearance delivery and publish no reaction. Metadata and reaction checks verify HTTP or socket snapshots, heartbeat, and reconnect behavior while preserving canonical data.
 
 `smoke:wagers` supports read-only snapshots and a separate isolated mutation lifecycle using dedicated profiles and their own mined dust. Keep its protected fixture across retries and use only the fixture-owned games and balances. Match validation and surrender preparation read `/matches/snapshot`.
 
@@ -401,7 +324,7 @@ npm run deploy -- preview
 npm run deploy -- production --version-id <version-id>
 ```
 
-Promote the prepared frontend's exact version without rebuilding. Verify the affected page on `mons.link` and allow necessary propagation or retries without an overall release deadline. Existing open tabs continue running their loaded version, so public HTTP and WebSocket compatibility must remain intact. Finish after the required checks pass.
+Promote the prepared frontend's exact version without rebuilding. Verify the affected page on `mons.link` and allow necessary propagation or retries without an overall release deadline. Routine releases preserve supported HTTP and WebSocket contracts. Existing tabs using retired reaction v1 need to reload the current frontend; stored reactions are preserved. Finish after the required checks pass.
 
 ## Secrets
 

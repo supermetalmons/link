@@ -1,34 +1,33 @@
-import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
+import { authenticatedPost } from "./authenticatedPost.ts";
 import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
 import { authJsonResponse, getAuthCorsHeaders } from "./authHttp.ts";
-import {
-  EVENT_OPERATION_TIMEOUT_MS,
-  type EventParticipationDependencies,
-} from "./eventParticipation.ts";
-import type { WorkerExecutionContext } from "./sessionAuth.ts";
-import type { EventGameplayRepository } from "./eventRepository.ts";
+import { withD1OperationTelemetry } from "./d1Telemetry.ts";
 import { EventWritesDisabled, assertEventWritesAllowed } from "./eventD1.ts";
 import { createEventMutationRepository } from "./eventMutationRepository.ts";
-import { readBoundedJson } from "./http.ts";
 import {
   EVENT_CONTROL_TIMEOUT_MS,
   type EventControlDependencies,
 } from "./eventOperations.ts";
-import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
-import type { RequestIdentity } from "./requestIdentity.ts";
-import { authenticatedPost } from "./authenticatedPost.ts";
-import { withD1OperationTelemetry } from "./d1Telemetry.ts";
+import {
+  EVENT_OPERATION_TIMEOUT_MS,
+  type EventParticipationDependencies,
+} from "./eventParticipation.ts";
+import type { EventGameplayRepository } from "./eventRepository.ts";
+import {
+  eventRoutes,
+  type EventRoute,
+  type PreparedEventRoute,
+} from "./eventRouteDefinitions.ts";
 import {
   isBoundedEventResponse,
   readOptionalEventSnapshotSeed,
   type EventSnapshotSeedDependencies,
 } from "./eventSnapshotResponse.ts";
-import {
-  eventRoutes,
-  type EventRequestBody,
-  type EventRoute,
-  type PreparedEventRoute,
-} from "./eventRouteDefinitions.ts";
+import { readBoundedJson } from "./http.ts";
+import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
+import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
+import type { RequestIdentity } from "./requestIdentity.ts";
+import type { WorkerExecutionContext } from "./sessionAuth.ts";
 
 export const EVENT_PATHS = new Set(eventRoutes.keys());
 
@@ -51,7 +50,7 @@ function toRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-async function prepareEventRoute(
+export async function prepareEventRoute(
   request: Request,
   route: EventRoute,
 ): Promise<PreparedEventRoute> {
@@ -62,17 +61,6 @@ async function prepareEventRoute(
     throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
   }
   return route.prepare(body);
-}
-
-export async function readEventBody(
-  request: Request,
-  pathname: string,
-): Promise<EventRequestBody> {
-  const route =
-    eventRoutes.get(pathname) || eventRoutes.get("/events/participants/remove");
-  if (!route)
-    throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-  return (await prepareEventRoute(request, route)).body;
 }
 
 export async function handleEventRoute(

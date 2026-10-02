@@ -1,35 +1,49 @@
-import { gameplayTestPort } from "../test/gameSessionTestPorts.ts";
 import {
-  socketTestIdentity,
-  socketTestSessionHeaders,
-} from "../test/socketTestSession.ts";
-import { env } from "cloudflare:workers";
+  REACTION_AUTH_PROTOCOL_PREFIX,
+  REACTION_HEARTBEAT_REQUEST,
+  REACTION_HEARTBEAT_RESPONSE,
+  REACTION_SOCKET_PROTOCOL,
+  isInviteRoomMessage,
+  type InviteReaction,
+} from "@mons/shared/reactions";
 import {
   applyD1Migrations,
   evictDurableObject,
   runInDurableObject,
   type D1Migration,
 } from "cloudflare:test";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { env } from "cloudflare:workers";
 import {
-  REACTION_HEARTBEAT_REQUEST,
-  REACTION_HEARTBEAT_RESPONSE,
-  REACTION_SOCKET_PROTOCOL,
-  REACTION_AUTH_PROTOCOL_PREFIX,
-  isInviteReactionMessage,
-  type InviteReaction,
-} from "@mons/shared/reactions";
-import {
-  MAX_INVITE_REACTION_SOCKETS,
-  MAX_INVITE_REACTION_SPECTATORS,
-  MAX_INVITE_REACTION_SPECTATORS_PER_IP,
-  MAX_INVITE_REACTION_SOCKETS_PER_PARTICIPANT,
-} from "../src/inviteReactions.ts";
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
+import type { MatchPresentationStore } from "../src/matchPresentationStore.ts";
+import {
+  MAX_INVITE_REACTION_SOCKETS,
+  MAX_INVITE_REACTION_SOCKETS_PER_PARTICIPANT,
+  MAX_INVITE_REACTION_SPECTATORS,
+  MAX_INVITE_REACTION_SPECTATORS_PER_IP,
+} from "../src/inviteReactions.ts";
+import {
+  buildMatchPresentationRegistrationStatements,
+  prepareCreatedMatchPresentations,
+} from "../src/matchPresentationRegistry.ts";
 import { handleRequest } from "../src/router.ts";
-import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
+import { gameplayTestPort } from "../test/gameSessionTestPorts.ts";
+import {
+  socketTestIdentity,
+  socketTestSessionHeaders,
+} from "../test/socketTestSession.ts";
 import { activateDurableMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
+import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
+import { reactionSocketTestHeaders } from "./presentationStorageFixture.ts";
 
 beforeAll(async () => {
   const testEnv = env as Env & {
@@ -54,9 +68,17 @@ beforeAll(async () => {
 });
 
 const sockets: WebSocket[] = [];
+let matchId = "";
+beforeEach(() => {
+  matchId = `reaction-${crypto.randomUUID()}`;
+});
+const registrations = new WeakMap<
+  ReturnType<typeof room>,
+  Promise<Record<string, string>>
+>();
 
 function room() {
-  return env.INVITE_REACTIONS.getByName(`runtime-${crypto.randomUUID()}`);
+  return env.INVITE_REACTIONS.get(env.INVITE_REACTIONS.newUniqueId());
 }
 
 function reaction(overrides: Partial<InviteReaction> = {}): InviteReaction {
@@ -64,7 +86,7 @@ function reaction(overrides: Partial<InviteReaction> = {}): InviteReaction {
     uuid: crypto.randomUUID(),
     kind: "yo",
     variation: 1,
-    matchId: "invite-one",
+    matchId,
     ...overrides,
   };
 }
@@ -73,8 +95,14 @@ async function connect(
   stub: ReturnType<typeof room>,
   headers: Record<string, string> = {},
 ) {
+  let headersReady = registrations.get(stub);
+  if (!headersReady) {
+    headersReady = reactionSocketTestHeaders(stub, matchId);
+    registrations.set(stub, headersReady);
+  }
   const response = await stub.fetch("https://reactions.internal/socket", {
     headers: {
+      ...(await headersReady),
       Upgrade: "websocket",
       ...socketTestSessionHeaders(),
       ...headers,
@@ -137,6 +165,26 @@ describe("invite reaction rooms", () => {
         ),
       ),
     );
+    for (const id of [inviteId, otherInviteId]) {
+      const rows = await prepareCreatedMatchPresentations(
+        env,
+        ["host-login", "guest-login"].map((actorUid) => ({
+          inviteId: id,
+          matchId: id,
+          actorUid,
+          emojiId: 1,
+          aura: "",
+          sourceId: "test-creation",
+        })),
+      );
+      await env.PROFILE_GAMES_DB.batch(
+        buildMatchPresentationRegistrationStatements(
+          env.PROFILE_GAMES_DB,
+          rows,
+          1,
+        ),
+      );
+    }
     const repository = createGameplayRepository(env, {
       stateClient: gameplayTestPort({
         getPath: async () => {
@@ -158,7 +206,7 @@ describe("invite reaction rooms", () => {
     });
     const route = (id: string, uid?: string, payload?: InviteReaction) => {
       const request = new Request(
-        `https://api.mons.link/invites/${id}/reactions${payload ? "" : "/socket"}`,
+        `https://api.mons.link/invites/${id}/reactions${payload ? "" : `/socket?matchId=${encodeURIComponent(id)}`}`,
         {
           method: payload ? "POST" : "GET",
           headers: {
@@ -171,6 +219,7 @@ describe("invite reaction rooms", () => {
                 }
               : {
                   Upgrade: "websocket",
+                  "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL,
                   ...(uid
                     ? {
                         "Sec-WebSocket-Protocol": `${REACTION_SOCKET_PROTOCOL}, ${REACTION_AUTH_PROTOCOL_PREFIX}${uid}.payload.signature`,
@@ -218,8 +267,8 @@ describe("invite reaction rooms", () => {
       route(otherInviteId).then(acceptSocket),
     ]);
     for (const client of [host, guest, spectator, other]) {
-      expect(JSON.parse(await client.read())).toEqual({
-        schemaVersion: 1,
+      expect(JSON.parse(await client.read())).toMatchObject({
+        schemaVersion: 2,
         type: "snapshot",
         reactions: {},
       });
@@ -230,7 +279,7 @@ describe("invite reaction rooms", () => {
     expect(await voiceResponse.json()).toEqual({ ok: true });
     for (const client of [host, guest, spectator]) {
       expect(JSON.parse(await client.read())).toEqual({
-        schemaVersion: 1,
+        schemaVersion: 2,
         type: "reaction",
         senderUid: "host-login",
         reaction: voice,
@@ -248,7 +297,7 @@ describe("invite reaction rooms", () => {
     expect((await route(inviteId, "guest-login", sticker)).status).toBe(200);
     for (const client of [host, guest, spectator]) {
       expect(JSON.parse(await client.read())).toEqual({
-        schemaVersion: 1,
+        schemaVersion: 2,
         type: "reaction",
         senderUid: "guest-login",
         reaction: sticker,
@@ -261,8 +310,8 @@ describe("invite reaction rooms", () => {
     expect(JSON.parse(await other.read()).reaction).toEqual(otherVoice);
     spectator.socket.close(1000, "Reconnect");
     const reconnected = acceptSocket(await route(inviteId));
-    expect(JSON.parse(await reconnected.read())).toEqual({
-      schemaVersion: 1,
+    expect(JSON.parse(await reconnected.read())).toMatchObject({
+      schemaVersion: 2,
       type: "snapshot",
       reactions: { "host-login": voice, "guest-login": sticker },
     });
@@ -274,16 +323,16 @@ describe("invite reaction rooms", () => {
     await stub.publish("host-login", first);
     const client = await connect(stub);
     const snapshot = JSON.parse(await client.read());
-    expect(snapshot).toEqual({
-      schemaVersion: 1,
+    expect(snapshot).toMatchObject({
+      schemaVersion: 2,
       type: "snapshot",
       reactions: { "host-login": first },
     });
-    expect(isInviteReactionMessage(snapshot)).toBe(true);
+    expect(isInviteRoomMessage(snapshot)).toBe(true);
     const guest = reaction({ kind: "gg", variation: 2 });
     expect(await stub.publish("guest-login", guest)).toBe("published");
     expect(JSON.parse(await client.read())).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       type: "reaction",
       senderUid: "guest-login",
       reaction: guest,
@@ -291,7 +340,7 @@ describe("invite reaction rooms", () => {
     const latest = reaction({
       kind: "sticker",
       variation: 900316,
-      matchId: "invite-one1",
+      matchId: `${matchId}1`,
     });
     await stub.publish("host-login", latest);
     expect(JSON.parse(await client.read()).reaction).toEqual(latest);
@@ -412,7 +461,16 @@ describe("invite reaction rooms", () => {
     );
     await Promise.all(connected.map((client) => client.read()));
     const response = await stub.fetch("https://reactions.internal/socket", {
-      headers: { Upgrade: "websocket", "X-Mons-Reaction-IP": "198.51.100.1" },
+      headers: {
+        "Sec-WebSocket-Protocol": "mons-reactions-v2",
+        "X-Mons-Presentation-Match": matchId,
+        "X-Mons-Presentation-Canonical": "1",
+        "X-Mons-Presentation-Actors": encodeURIComponent(
+          JSON.stringify(["host-login", "guest-login"]),
+        ),
+        Upgrade: "websocket",
+        "X-Mons-Reaction-IP": "198.51.100.1",
+      },
     });
     expect(response.status).toBe(429);
     expect(response.headers.get("Retry-After")).toBe("60");
@@ -443,14 +501,59 @@ describe("invite reaction rooms", () => {
     await Promise.all(connected.map((client) => client.read()));
     const result = await runInDurableObject(stub, async (instance, state) => {
       const spectators = state.getWebSockets("spectator-ip:192.0.2.1");
-      for (const socket of spectators) socket.close(1000, "Close pending");
-      const closing = spectators.every((socket) => socket.readyState === 2);
-      const response = await instance.fetch(
-        new Request("https://reactions.internal/socket", {
-          headers: { Upgrade: "websocket", "X-Mons-Reaction-IP": "192.0.2.1" },
-        }),
+      const target = instance as unknown as {
+        presentations: Pick<MatchPresentationStore, "readPresentations">;
+      };
+      const readPresentations = target.presentations.readPresentations.bind(
+        target.presentations,
       );
-      return { closing, status: response.status };
+      const getWebSockets = state.getWebSockets.bind(state);
+      let reads = 0;
+      let snapshotPending = false;
+      let closing = false;
+      const presentations = vi
+        .spyOn(target.presentations, "readPresentations")
+        .mockImplementation((selectedMatchId) => {
+          const result = readPresentations(selectedMatchId);
+          if (++reads === 2) {
+            for (const socket of spectators)
+              socket.close(1000, "Close pending");
+            snapshotPending = true;
+          }
+          return result;
+        });
+      const sockets = vi
+        .spyOn(state, "getWebSockets")
+        .mockImplementation((tag) => {
+          const result = getWebSockets(tag);
+          if (snapshotPending && tag === undefined) {
+            snapshotPending = false;
+            closing =
+              result.length === spectators.length &&
+              result.every((socket) => socket.readyState === WebSocket.CLOSING);
+          }
+          return result;
+        });
+      try {
+        const response = await instance.fetch(
+          new Request("https://reactions.internal/socket", {
+            headers: {
+              "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL,
+              "X-Mons-Presentation-Match": matchId,
+              "X-Mons-Presentation-Canonical": "1",
+              "X-Mons-Presentation-Actors": encodeURIComponent(
+                JSON.stringify(["host-login", "guest-login"]),
+              ),
+              Upgrade: "websocket",
+              "X-Mons-Reaction-IP": "192.0.2.1",
+            },
+          }),
+        );
+        return { closing, status: response.status };
+      } finally {
+        presentations.mockRestore();
+        sockets.mockRestore();
+      }
     });
     expect(result).toEqual({ closing: true, status: 429 });
   });
@@ -484,6 +587,12 @@ describe("invite reaction rooms", () => {
     const expectFull = async (headers: Record<string, string>) => {
       const response = await stub.fetch("https://reactions.internal/socket", {
         headers: {
+          "Sec-WebSocket-Protocol": "mons-reactions-v2",
+          "X-Mons-Presentation-Match": matchId,
+          "X-Mons-Presentation-Canonical": "1",
+          "X-Mons-Presentation-Actors": encodeURIComponent(
+            JSON.stringify(["host-login", "guest-login"]),
+          ),
           Upgrade: "websocket",
           ...socketTestSessionHeaders(),
           ...headers,

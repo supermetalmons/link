@@ -105,18 +105,15 @@ let actionResult: ReturnType<typeof useEventModalActions>;
 let updateActions: React.Dispatch<
   React.SetStateAction<EventModalActionsOptions>
 >;
-let updateDev: React.Dispatch<React.SetStateAction<EventRecord | null>>;
 let mode = "controller";
 let saved: Record<string, (...args: any[]) => unknown> = {};
 const shared: ShareData[] = [];
 let rejectShare: ((error: Error) => void) | undefined;
 
 function ControllerHarness() {
-  const [dev, setDev] = useState<EventRecord | null>(null);
-  const current = useEventModalController(dev);
+  const current = useEventModalController();
   useLayoutEffect(() => {
     controller = current;
-    updateDev = setDev;
   });
   return null;
 }
@@ -130,6 +127,10 @@ function ActionsHarness({ initial }: { initial: EventModalActionsOptions }) {
   return null;
 }
 function actions() {
+  if (mode === "view")
+    return {} as ReturnType<typeof useEventModalActions>["administration"] &
+      ReturnType<typeof useEventModalActions>["participation"] &
+      ReturnType<typeof useEventModalActions>["navigation"];
   const source = mode === "actions" ? actionResult : controller;
   return {
     ...source.participation,
@@ -171,6 +172,7 @@ const harness = {
       mode?: string;
       profileId?: string;
       loginUid?: string;
+      username?: string;
       eventId?: string;
       fresh?: boolean;
       strict?: boolean;
@@ -205,14 +207,13 @@ const harness = {
     now = 1_000_000;
     storage.setProfileId(options.profileId ?? "p2");
     storage.setLoginId(options.loginUid ?? "p2-login");
-    storage.setUsername(options.profileId ?? "p2");
+    storage.setUsername(options.username ?? options.profileId ?? "p2");
     const id = options.eventId ?? "event-a";
     openEventModal(id);
     mode = options.mode ?? "controller";
     const initial: EventModalActionsOptions = {
       modalState: getEventModalState(),
       eventRecord: eventRecord(id),
-      devStubRecord: null,
       isEventFresh: true,
       isLoading: false,
       nowMs: now,
@@ -229,7 +230,11 @@ const harness = {
       ...options.overrides,
     };
     const element =
-      mode === "actions" ? (
+      mode === "view" ? (
+        React.createElement(
+          (await import("../../src/ui/event/EventModalView")).default,
+        )
+      ) : mode === "actions" ? (
         <ActionsHarness initial={initial} />
       ) : (
         <ControllerHarness />
@@ -282,9 +287,6 @@ const harness = {
   },
   async override(patch: Partial<EventModalActionsOptions>) {
     await settle(() => updateActions((current) => ({ ...current, ...patch })));
-  },
-  async dev(enabled: boolean) {
-    await settle(() => updateDev(enabled ? eventRecord("stub") : null));
   },
   async invoke(name: string, ...args: unknown[]) {
     await settle(() => {

@@ -1,16 +1,16 @@
-import { env } from "cloudflare:workers";
+import type { UpdateMatchPresentationRequest } from "@mons/shared/match-presentation";
+import {
+  REACTION_SOCKET_PROTOCOL,
+  isInviteRoomMessage,
+} from "@mons/shared/reactions";
 import {
   applyD1Migrations,
   evictDurableObject,
   runInDurableObject,
   type D1Migration,
 } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import {
-  REACTION_SOCKET_PROTOCOL_V2,
-  isInviteRoomMessage,
-} from "@mons/shared/reactions";
-import type { UpdateMatchPresentationRequest } from "@mons/shared/match-presentation";
 import {
   buildMatchPresentationRegistrationStatements,
   freezeRegisteredMatchPresentations,
@@ -24,9 +24,14 @@ import {
   type MatchPresentationSeedRegistration,
 } from "../src/matchPresentationRegistry.ts";
 import {
-  resetMatchPresentationTestState,
   activateDurableMatchPresentationTestState as activateDurable,
+  resetMatchPresentationTestState,
 } from "./matchPresentationTestFixture.ts";
+import {
+  freezeHistoricalPresentations,
+  readStoredPresentations,
+  seedHistoricalPresentations,
+} from "./presentationStorageFixture.ts";
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const db = env.PROFILE_GAMES_DB;
@@ -179,7 +184,7 @@ describe("match presentation registration", () => {
           creation(inviteId),
         ]),
       ).rejects.toThrow("match-presentation-authority-not-active");
-      expect(await room.getPresentationSnapshot(matchId)).toEqual({
+      expect(await readStoredPresentations(room, matchId)).toEqual({
         matchId,
         players: {},
       });
@@ -192,12 +197,12 @@ describe("match presentation registration", () => {
   it("imports immutable seed proof without overwriting live operations or frozen appearance", async () => {
     const { inviteId, matchId, room } = fixture();
     const source = creation(inviteId);
-    await room.ensurePresentations(matchId, {
+    await seedHistoricalPresentations(room, matchId, {
       [hostUid]: { emojiId: source.emojiId, aura: source.aura },
     });
     const operation = update();
     const edited = await room.updatePresentation(hostUid, matchId, operation);
-    const frozen = await room.freezePresentations(matchId, {
+    const frozen = await freezeHistoricalPresentations(room, matchId, {
       [hostUid]: { emojiId: 1, aura: "" },
     });
     const nextOperation = update({
@@ -294,7 +299,7 @@ describe("match presentation registration", () => {
         ]),
       ).rejects.toThrow("invalid-presentation-seed-digest");
     });
-    expect(await room.getPresentationSnapshot(matchId)).toEqual({
+    expect(await readStoredPresentations(room, matchId)).toEqual({
       matchId,
       players: {},
     });
@@ -308,7 +313,7 @@ describe("match presentation registration", () => {
       ).rejects.toThrow("match-presentation-seed-conflict");
     });
     expect(
-      Object.keys((await room.getPresentationSnapshot(matchId)).players),
+      Object.keys((await readStoredPresentations(room, matchId)).players),
     ).toEqual([hostUid]);
     await expect(
       commit([{ ...first[0], seedDigest: changed.seedDigest }]),
@@ -334,7 +339,7 @@ describe("match presentation registration", () => {
       creation(inviteId, guestUid, matchId, 2),
     ]);
     expect(
-      Object.keys((await room.getPresentationSnapshot(matchId)).players),
+      Object.keys((await readStoredPresentations(room, matchId)).players),
     ).toHaveLength(2);
     expect(
       await readRegisteredMatchPresentations(
@@ -373,7 +378,7 @@ describe("match presentation registration", () => {
   it("ignores orphan legacy rows and preserves a partial pending rematch", async () => {
     const { inviteId, room } = fixture();
     const matchId = `${inviteId}1`;
-    await room.ensurePresentations(matchId, {
+    await seedHistoricalPresentations(room, matchId, {
       [guestUid]: { emojiId: 2, aura: "" },
     });
     const rows = await prepareCreatedMatchPresentations(networkIsolatedEnv, [
@@ -395,7 +400,7 @@ describe("match presentation registration", () => {
       revision: 0,
     });
     expect(
-      Object.keys((await room.getPresentationSnapshot(matchId)).players),
+      Object.keys((await readStoredPresentations(room, matchId)).players),
     ).toHaveLength(2);
   });
 
@@ -448,17 +453,10 @@ describe("match presentation registration", () => {
         instance.registerPresentationSeeds(inviteId, [seed]),
       ).rejects.toThrow("match-presentation-unavailable");
       await expect(
-        instance.ensurePresentations(matchId, {
-          [hostUid]: { emojiId: seed.emojiId, aura: seed.aura },
-        }),
-      ).rejects.toThrow("match-presentation-unavailable");
-      await expect(
-        instance.freezePresentations(matchId, {
-          [hostUid]: { emojiId: seed.emojiId, aura: seed.aura },
-        }),
+        instance.freezeRegisteredPresentations(matchId, [hostUid]),
       ).rejects.toThrow("match-presentation-unavailable");
     });
-    expect((await room.getPresentationSnapshot(matchId)).players).toEqual({});
+    expect((await readStoredPresentations(room, matchId)).players).toEqual({});
   });
 
   it("rejects mismatched D1 and DO seed evidence", async () => {
@@ -502,7 +500,7 @@ describe("match presentation registration", () => {
         headers: {
           Upgrade: "websocket",
           "X-Mons-Reaction-IP": "192.0.2.9",
-          "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL_V2,
+          "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL,
           "X-Mons-Presentation-Match": encodeURIComponent(matchId),
           "X-Mons-Presentation-Canonical": "1",
           "X-Mons-Presentation-Actors": encodeURIComponent(
@@ -540,7 +538,7 @@ describe("match presentation registration", () => {
 
   it("reuses frozen history without live registration or current appearance", async () => {
     const { inviteId, matchId, room } = fixture();
-    const frozen = await room.freezePresentations(matchId, {
+    const frozen = await freezeHistoricalPresentations(room, matchId, {
       [hostUid]: { emojiId: 7, aura: "rainbow" },
     });
     await runInDurableObject(room, (_instance, state) => {
@@ -566,12 +564,12 @@ describe("match presentation registration", () => {
         matchId,
       ),
     ).toEqual({ matchId, players: {} });
-    expect((await room.getPresentationSnapshot(matchId)).players).toEqual({});
+    expect((await readStoredPresentations(room, matchId)).players).toEqual({});
   });
 
   it("freezes newly archived actors only after matching registration while preserving earlier freezes", async () => {
     const { inviteId, matchId, room } = fixture();
-    const hostFrozen = await room.freezePresentations(matchId, {
+    const hostFrozen = await freezeHistoricalPresentations(room, matchId, {
       [hostUid]: { emojiId: 7, aura: "rainbow" },
     });
     const guestRows = await prepareCreatedMatchPresentations(

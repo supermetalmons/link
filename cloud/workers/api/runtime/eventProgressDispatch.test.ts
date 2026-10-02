@@ -1,9 +1,10 @@
-import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
-import { env } from "cloudflare:workers";
-import type { WorkflowStep } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
-import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
+import type { WorkflowStep } from "cloudflare:workers";
+import { env } from "cloudflare:workers";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
+import { buildEventAnnouncementPlan } from "../src/eventPrizeAnnouncementSchedule.ts";
+import { runEventAnnouncementWorkflow } from "../src/eventPrizeAnnouncementWorkflow.ts";
 import {
   buildEventProgressPlan,
   ensureEventProgressWorkflow,
@@ -12,11 +13,10 @@ import {
   type EventProgressPlan,
   type EventProgressSweepRepository,
 } from "../src/eventProgress.ts";
-import { readEventOwnedPath } from "./eventD1Fixture.ts";
 import { createEventStateRepository } from "../src/eventRepository.ts";
+import { readEventOwnedPath } from "./eventD1Fixture.ts";
 import { applyEventTestMigrations } from "./eventTestMigrations.ts";
-import { buildSundayMonsReminderPlan } from "../src/eventPrizeAnnouncementSchedule.ts";
-import { runEventAnnouncementWorkflow } from "../src/eventPrizeAnnouncementWorkflow.ts";
+import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 
 const testEnv = env as Env & {
   TEST_EVENT_D1_MIGRATIONS: D1Migration[];
@@ -245,7 +245,7 @@ describe("event-progress Workflow dispatch admissions", () => {
       };
       const plan =
         lane === "announcement"
-          ? await buildSundayMonsReminderPlan(eventId, event, nowMs)
+          ? await buildEventAnnouncementPlan(eventId, event, nowMs, "reminder")
           : await buildEventProgressPlan(
               {
                 eventId,

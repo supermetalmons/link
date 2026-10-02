@@ -1,8 +1,7 @@
 import {
-  REACTION_MAX_MESSAGE_BYTES,
   REACTION_AUTH_PROTOCOL_PREFIX,
+  REACTION_MAX_MESSAGE_BYTES,
   REACTION_SOCKET_PROTOCOL,
-  REACTION_SOCKET_PROTOCOL_V2,
   isInviteReactionForInvite,
   isReactionSocketToken,
 } from "@mons/shared/reactions";
@@ -14,19 +13,12 @@ import {
   isAllowedAuthOrigin,
 } from "./authHttp.ts";
 import {
-  verifySessionRequest,
-  type SessionIdentity,
-  type WorkerExecutionContext,
-} from "./sessionAuth.ts";
-import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
-import {
   createGameplayRepository,
   type GameplayRepository,
 } from "./gameplayRepository.ts";
-import { resolveInviteRole } from "./inviteAccess.ts";
 import { readBoundedJson } from "./http.ts";
+import { resolveInviteRole } from "./inviteAccess.ts";
 import type { InviteReactions } from "./inviteReactions.ts";
-import { socketSessionHeaders } from "./socketSession.ts";
 import {
   isPresentationMatchId,
   readMatchPresentationSnapshot,
@@ -34,51 +26,44 @@ import {
   requirePresentationPair,
   type MatchPresentationReadDependencies,
 } from "./matchPresentationAccess.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
+import {
+  verifySessionRequest,
+  type SessionIdentity,
+  type WorkerExecutionContext,
+} from "./sessionAuth.ts";
+import { socketSessionHeaders } from "./socketSession.ts";
 
 const REACTION_ROUTE_PATTERN = /^\/invites\/([^/]+)\/reactions(\/socket)?$/;
 
-function readSocketCredentials(request: Request): {
-  token: string | null;
-  protocol: string | null;
-} {
+function readSocketToken(request: Request): string | null {
   const protocolHeader = request.headers.get("Sec-WebSocket-Protocol");
   const authorization = request.headers.get("Authorization");
   const invalid = () =>
     new AuthApiFailure(400, "invalid-argument", "invalid-reaction-auth");
+  const unsupported = () =>
+    new AuthApiFailure(400, "invalid-argument", "invalid-reaction-protocol");
+  if (protocolHeader === null) throw unsupported();
+  if (
+    protocolHeader.length >
+    REACTION_MAX_MESSAGE_BYTES +
+      REACTION_AUTH_PROTOCOL_PREFIX.length +
+      REACTION_SOCKET_PROTOCOL.length +
+      4
+  )
+    throw invalid();
+  const protocols = protocolHeader
+    .split(",")
+    .map((protocol) => protocol.trim());
+  if (!protocols.includes(REACTION_SOCKET_PROTOCOL)) throw unsupported();
+  const bearer = protocols.find((protocol) =>
+    protocol.startsWith(REACTION_AUTH_PROTOCOL_PREFIX),
+  );
+  if (protocols.length !== (bearer ? 2 : 1)) throw invalid();
   let protocolToken: string | null = null;
-  let negotiatedProtocol: string | null = null;
-  if (protocolHeader !== null) {
-    if (
-      protocolHeader.length >
-      REACTION_MAX_MESSAGE_BYTES +
-        REACTION_AUTH_PROTOCOL_PREFIX.length +
-        REACTION_SOCKET_PROTOCOL.length +
-        4
-    )
-      throw invalid();
-    const protocols = protocolHeader
-      .split(",")
-      .map((protocol) => protocol.trim());
-    const bearer = protocols.find((protocol) =>
-      protocol.startsWith(REACTION_AUTH_PROTOCOL_PREFIX),
-    );
-    negotiatedProtocol = protocols.includes(REACTION_SOCKET_PROTOCOL_V2)
-      ? REACTION_SOCKET_PROTOCOL_V2
-      : protocols.includes(REACTION_SOCKET_PROTOCOL)
-        ? REACTION_SOCKET_PROTOCOL
-        : null;
-    if (
-      !negotiatedProtocol ||
-      (bearer
-        ? protocols.length !== 2
-        : protocols.length !== 1 ||
-          negotiatedProtocol !== REACTION_SOCKET_PROTOCOL_V2)
-    )
-      throw invalid();
-    if (bearer) {
-      protocolToken = bearer.slice(REACTION_AUTH_PROTOCOL_PREFIX.length);
-      if (!isReactionSocketToken(protocolToken)) throw invalid();
-    }
+  if (bearer) {
+    protocolToken = bearer.slice(REACTION_AUTH_PROTOCOL_PREFIX.length);
+    if (!isReactionSocketToken(protocolToken)) throw invalid();
   }
   let headerToken: string | null = null;
   if (authorization !== null) {
@@ -88,10 +73,7 @@ function readSocketCredentials(request: Request): {
   }
   if (protocolToken && headerToken && protocolToken !== headerToken)
     throw invalid();
-  return {
-    token: protocolToken || headerToken,
-    protocol: negotiatedProtocol,
-  };
+  return protocolToken || headerToken;
 }
 
 async function reactionRateLimit(
@@ -112,8 +94,7 @@ async function reactionRateLimit(
 export type InviteReactionRouteDependencies =
   MatchPresentationReadDependencies & {
     repository?: GameplayRepository;
-    room?: Pick<InviteReactions, "fetch" | "publish"> &
-      Partial<Pick<InviteReactions, "ensurePresentations">>;
+    room?: Pick<InviteReactions, "fetch" | "publish">;
     verifyIdentity?: (
       request: Request,
       env: Env,
@@ -155,28 +136,6 @@ function readRoute(request: Request): {
   return { inviteId, socket: Boolean(match?.[2]), matchId };
 }
 
-async function requirePairedInvite(
-  repository: GameplayRepository,
-  inviteId: string,
-): Promise<void> {
-  const value = await repository.readInviteMetadata(inviteId);
-  if (value === null || value === undefined) {
-    throw new AuthApiFailure(404, "not-found", "invite-not-found");
-  }
-  const invite =
-    value && typeof value === "object" && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
-      : null;
-  if (
-    !invite ||
-    !isCanonicalLoginUid(invite.hostId) ||
-    !isCanonicalLoginUid(invite.guestId) ||
-    invite.hostId === invite.guestId
-  ) {
-    throw new AuthApiFailure(409, "failed-precondition", "invite-not-paired");
-  }
-}
-
 export async function handleInviteReactionRoute(
   request: Request,
   env: Env,
@@ -212,11 +171,8 @@ export async function handleInviteReactionRoute(
     const ip = request.headers.get("CF-Connecting-IP")?.trim() || "unknown";
     const repository = dependencies.repository || createGameplayRepository(env);
     if (route.socket) {
-      const credentials = readSocketCredentials(request);
-      if (
-        (credentials.protocol === REACTION_SOCKET_PROTOCOL_V2) !==
-        (route.matchId !== null)
-      ) {
+      const token = readSocketToken(request);
+      if (!route.matchId) {
         throw new AuthApiFailure(
           400,
           "invalid-argument",
@@ -226,10 +182,10 @@ export async function handleInviteReactionRoute(
       let role: "host" | "guest" | "spectator" = "spectator";
       let rateKey = `reactions:connect:spectator:${ip}`;
       let identity: SessionIdentity | null = null;
-      if (credentials.token) {
+      if (token) {
         identity = await (dependencies.verifyIdentity || verifySessionRequest)(
           new Request(request.url, {
-            headers: { Authorization: `Bearer ${credentials.token}` },
+            headers: { Authorization: `Bearer ${token}` },
           }),
           env,
           ctx,
@@ -261,31 +217,17 @@ export async function handleInviteReactionRoute(
       }
       const limited = await reactionRateLimit(env, rateKey, corsHeaders);
       if (limited) return limited;
-      if (!credentials.token)
-        await requirePairedInvite(repository, route.inviteId);
       const room =
         dependencies.room || env.INVITE_REACTIONS.getByName(route.inviteId);
-      let presentationHeaders: Record<string, string> = {};
-      if (route.matchId) {
-        const invite = await readPresentationInvite(repository, route.inviteId);
-        requirePresentationPair(invite);
-        const { canonical } = await readMatchPresentationSnapshot(
-          env,
-          repository,
-          route.inviteId,
-          route.matchId,
-          invite,
-          { ...dependencies, room },
-        );
-        if (canonical) {
-          presentationHeaders = {
-            "X-Mons-Presentation-Canonical": "1",
-            "X-Mons-Presentation-Actors": encodeURIComponent(
-              JSON.stringify([invite.hostId, invite.guestId]),
-            ),
-          };
-        }
-      }
+      const invite = await readPresentationInvite(repository, route.inviteId);
+      requirePresentationPair(invite);
+      await readMatchPresentationSnapshot(
+        env,
+        route.inviteId,
+        route.matchId,
+        invite,
+        dependencies,
+      );
       return await room.fetch(
         new Request("https://reactions.internal/socket", {
           headers: {
@@ -293,17 +235,12 @@ export async function handleInviteReactionRoute(
             "X-Mons-Reaction-Role": role,
             "X-Mons-Reaction-IP": ip,
             ...socketSessionHeaders(identity),
-            ...presentationHeaders,
-            ...(credentials.protocol
-              ? { "Sec-WebSocket-Protocol": credentials.protocol }
-              : {}),
-            ...(route.matchId
-              ? {
-                  "X-Mons-Presentation-Match": encodeURIComponent(
-                    route.matchId,
-                  ),
-                }
-              : {}),
+            "X-Mons-Presentation-Canonical": "1",
+            "X-Mons-Presentation-Actors": encodeURIComponent(
+              JSON.stringify([invite.hostId, invite.guestId]),
+            ),
+            "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL,
+            "X-Mons-Presentation-Match": encodeURIComponent(route.matchId),
           },
         }),
       );

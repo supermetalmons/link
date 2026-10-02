@@ -16,7 +16,6 @@ exports.cropAddress =
   exports.getProfileFallbackEmojiId =
   exports.PROFILE_FALLBACK_EMOJI_COUNT =
   exports.PROFILE_STICKER_CATALOG =
-  exports.PROFILE_CUSTOMIZATION_FIELDS =
   exports.LEADERBOARD_READ_TYPES =
     void 0;
 const mining_js_1 = require("./mining.js");
@@ -61,17 +60,6 @@ const LEADERBOARD_READ_TYPES = Object.freeze([
   ...mining_js_1.MATERIAL_KEYS,
 ]);
 exports.LEADERBOARD_READ_TYPES = LEADERBOARD_READ_TYPES;
-const PROFILE_CUSTOMIZATION_FIELDS = Object.freeze([
-  "emojiAndAura",
-  "cardBackgroundId",
-  "cardSubtitleId",
-  "profileCounter",
-  "profileMons",
-  "cardStickers",
-  "completedProblems",
-  "tutorialCompleted",
-]);
-exports.PROFILE_CUSTOMIZATION_FIELDS = PROFILE_CUSTOMIZATION_FIELDS;
 const PROFILE_STICKER_CATALOG = Object.freeze({
   "big-mon-top-right": Object.freeze([
     "applecreme",

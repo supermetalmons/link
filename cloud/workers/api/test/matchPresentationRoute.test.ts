@@ -1,7 +1,6 @@
-import { socketTestIdentity } from "./socketTestSession.ts";
+import type { MatchPresentation } from "@mons/shared/match-presentation";
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { MatchPresentation } from "@mons/shared/match-presentation";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import {
@@ -11,6 +10,7 @@ import {
 } from "../src/matchPresentationRoute.ts";
 import type { ProfileOwnershipSnapshot } from "../src/profileOwnership.ts";
 import { handleRequest } from "../src/router.ts";
+import { socketTestIdentity } from "./socketTestSession.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const ctx = { waitUntil: (_promise: Promise<unknown>) => undefined };
@@ -53,7 +53,6 @@ function setup(invite: unknown = paired, uid = "host-login") {
     auth: 0,
     reads: [] as string[],
     rates: [] as string[],
-    ensured: [] as unknown[],
     updated: [] as unknown[],
   };
   const env = {
@@ -139,18 +138,6 @@ function setup(invite: unknown = paired, uid = "host-login") {
       return socketTestIdentity(uid);
     },
     room: {
-      ensurePresentations: async (matchId, seeds) => {
-        calls.ensured.push({ matchId, seeds });
-        return {
-          matchId,
-          players: Object.fromEntries(
-            Object.entries(seeds).map(([actorUid, seed]) => [
-              actorUid,
-              { matchId, actorUid, ...seed, revision: 0 },
-            ]),
-          ),
-        };
-      },
       updatePresentation: async (actorUid, matchId, update) => {
         calls.updated.push({ actorUid, matchId, update });
         return {
@@ -197,7 +184,6 @@ test("presentation routes preflight before authentication or reads", async () =>
     auth: 0,
     reads: [],
     rates: [],
-    ensured: [],
     updated: [],
   });
 });
@@ -218,7 +204,6 @@ test("presentation updates resolve the actor server-side with registered cosmeti
   assert.deepEqual(state.calls.updated, [
     { actorUid: "host-login", matchId: "invite-one", update: payload },
   ]);
-  assert.deepEqual(state.calls.ensured, []);
   assert.deepEqual(state.calls.reads, ["invites/invite-one"]);
   assert.deepEqual(state.calls.rates, [
     "presentation:post:ip:192.0.2.1",
@@ -564,9 +549,6 @@ test("durable presentation reads and updates use registered cosmetics without Fi
       players: { "host-login": { ...state.current, matchId } },
     };
   };
-  state.dependencies.room!.ensurePresentations = async () => {
-    throw new Error("unexpected-legacy-bootstrap");
-  };
   for (const method of ["GET", "POST"]) {
     const response = await handleMatchPresentationRoute(
       request(method),
@@ -621,7 +603,6 @@ test("durable pending rematches expose only registered actors", async () => {
     presentation: { players: Record<string, unknown> };
   };
   assert.deepEqual(Object.keys(body.presentation.players), ["host-login"]);
-  assert.deepEqual(state.calls.ensured, []);
   assert.equal(
     state.calls.reads.some((path) => path.startsWith("players/")),
     false,
@@ -738,7 +719,6 @@ test("durable missing actors and unavailable registered storage never bootstrap 
     ).status,
     503,
   );
-  assert.deepEqual(state.calls.ensured, []);
   assert.deepEqual(state.calls.updated, []);
   assert.equal(
     state.calls.reads.some((path) => path.startsWith("players/")),
@@ -762,7 +742,6 @@ test("retired appearance authorities fail without reading or initializing Fireba
       );
       assert.equal(response.status, 503);
     }
-    assert.deepEqual(state.calls.ensured, []);
     assert.deepEqual(state.calls.updated, []);
     assert.equal(
       state.calls.reads.some((path) => path.startsWith("players/")),

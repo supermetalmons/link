@@ -1,26 +1,27 @@
-import { env } from "cloudflare:workers";
+import {
+  buildSessionRefreshToken,
+  isSessionTokenResponse,
+  type SessionCreateRequest,
+} from "@mons/shared/session-auth";
+import {
+  isSessionBootstrap,
+  isSessionEventBootstrap,
+  type SessionBootstrapResponse,
+  type SessionEventBootstrapResponse,
+} from "@mons/shared/session-bootstrap";
 import {
   applyD1Migrations,
   runInDurableObject,
   type D1Migration,
 } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import {
-  buildSessionRefreshToken,
-  type SessionCreateRequest,
-} from "@mons/shared/session-auth";
-import {
-  isSessionBootstrapResponse,
-  isSessionEventBootstrapResponse,
-  type SessionEventBootstrapResponse,
-  type SessionBootstrapResponse,
-} from "@mons/shared/session-bootstrap";
 import type { InviteReactions } from "../src/inviteReactions.ts";
 import { getMatchStateRpc, unwrapMatchStateRpc } from "../src/matchStateRpc.ts";
 import { handleRequest } from "../src/router.ts";
 import { createSessionRepository } from "../src/sessionD1.ts";
-import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 import { applyEventTestMigrations } from "./eventTestMigrations.ts";
+import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
@@ -157,7 +158,9 @@ describe("composed session Worker with canonical D1 and Durable Object state", (
     );
     expect(response.status).toBe(200);
     const body = await response.json<SessionEventBootstrapResponse>();
-    expect(isSessionEventBootstrapResponse(body)).toBe(true);
+    const { eventBootstrap, ...session } = body;
+    expect(isSessionTokenResponse(session)).toBe(true);
+    expect(isSessionEventBootstrap(eventBootstrap)).toBe(true);
     const seed = body.eventBootstrap.result;
     if (!("snapshot" in seed)) throw new Error("event-bootstrap-failed");
     expect(seed.snapshot).toEqual({
@@ -222,7 +225,9 @@ describe("composed session Worker with canonical D1 and Durable Object state", (
       const response = await handleRequest(request, environment, {}, ctx);
       expect(response.status).toBe(200);
       const body = await response.json<SessionBootstrapResponse>();
-      expect(isSessionBootstrapResponse(body)).toBe(true);
+      const { gameBootstrap, ...session } = body;
+      expect(isSessionTokenResponse(session)).toBe(true);
+      expect(isSessionBootstrap(gameBootstrap)).toBe(true);
       expect(body.gameBootstrap.result.ok).toBe(true);
       if (!body.gameBootstrap.result.ok)
         throw new Error(JSON.stringify(body.gameBootstrap.result));
@@ -274,7 +279,9 @@ describe("composed session Worker with canonical D1 and Durable Object state", (
     );
     expect(response.status).toBe(200);
     const body = await response.json<SessionBootstrapResponse>();
-    expect(isSessionBootstrapResponse(body)).toBe(true);
+    const { gameBootstrap, ...session } = body;
+    expect(isSessionTokenResponse(session)).toBe(true);
+    expect(isSessionBootstrap(gameBootstrap)).toBe(true);
     expect(body.gameBootstrap.result).toEqual({ ok: false, status: 404 });
     expect(
       await createSessionRepository(env.AUTH_STATE_DB).refresh({

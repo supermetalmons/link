@@ -2,48 +2,47 @@ import { WAGER_FROZEN_READ_PATH } from "@mons/shared/wagers";
 import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
 import { authJsonResponse, getAuthCorsHeaders } from "./authHttp.ts";
 import { authenticatedPost } from "./authenticatedPost.ts";
-import type { WorkerExecutionContext } from "./sessionAuth.ts";
-import {
-  GameSessionMutationLockFailure,
-  MatchTimerStartStoreFailure,
-} from "./gameplayCoordinationD1.ts";
-import { createGameplayRepository } from "./gameplayRepository.ts";
-import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
-import { MatchStateD1Failure } from "./matchStateD1.ts";
-import { enforceWagerOutcomeRateLimit } from "./wagerOutcome.ts";
-import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
-import {
-  createWagerReservationRuntime,
-  WagerClientUpdateRequired,
-} from "./wagerReservationRuntime.ts";
-import {
-  automatchRoutes,
-  readAutomatchOperationId,
-} from "./gameplayRoutes/automatch.ts";
-import { sessionRoutes } from "./gameplayRoutes/sessions.ts";
-import { matchRoutes } from "./gameplayRoutes/matches.ts";
-import { navigationRoutes } from "./gameplayRoutes/navigation.ts";
-import { ratingRoutes } from "./gameplayRoutes/ratings.ts";
-import { wagerRoutes } from "./gameplayRoutes/wagers.ts";
-import {
-  invalidRequest,
-  prepareGameplayRoute,
-  type GameplayRoute,
-} from "./gameplayRoutes/definition.ts";
-import type { GameplayRouteDependencies } from "./gameplayRoutes/runtime.ts";
 import {
   measureAutomatchPhase,
   withAutomatchTelemetry,
 } from "./automatchTelemetry.ts";
 import { withD1OperationTelemetry } from "./d1Telemetry.ts";
+import {
+  GameSessionMutationLockFailure,
+  MatchTimerStartStoreFailure,
+} from "./gameplayCoordinationD1.ts";
+import { createGameplayRepository } from "./gameplayRepository.ts";
+import {
+  automatchRoutes,
+  readAutomatchOperationId,
+} from "./gameplayRoutes/automatch.ts";
+import {
+  prepareGameplayRoute,
+  type GameplayRoute,
+} from "./gameplayRoutes/definition.ts";
+import { matchRoutes } from "./gameplayRoutes/matches.ts";
+import { navigationRoutes } from "./gameplayRoutes/navigation.ts";
+import { ratingRoutes } from "./gameplayRoutes/ratings.ts";
+import type { GameplayRouteDependencies } from "./gameplayRoutes/runtime.ts";
+import { sessionRoutes } from "./gameplayRoutes/sessions.ts";
+import { wagerRoutes } from "./gameplayRoutes/wagers.ts";
+import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
+import { MatchStateD1Failure } from "./matchStateD1.ts";
+import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
+import type { WorkerExecutionContext } from "./sessionAuth.ts";
+import { enforceWagerOutcomeRateLimit } from "./wagerOutcome.ts";
+import {
+  createWagerReservationRuntime,
+  WagerClientUpdateRequired,
+} from "./wagerReservationRuntime.ts";
 
-export type { GameplayRouteDependencies } from "./gameplayRoutes/runtime.ts";
 export { cancelAutomatch } from "./gameplayRoutes/automatch.ts";
 export {
   removeNavigationGame,
   resolveProfileId,
 } from "./gameplayRoutes/navigation.ts";
-export { MAX_RECORD_KEY_BYTES, isSafeRecordKey } from "./recordKeys.ts";
+export type { GameplayRouteDependencies } from "./gameplayRoutes/runtime.ts";
+export { isSafeRecordKey, MAX_RECORD_KEY_BYTES } from "./recordKeys.ts";
 
 const gameplayRoutes: ReadonlyMap<string, GameplayRoute> = new Map(
   [
@@ -57,19 +56,6 @@ const gameplayRoutes: ReadonlyMap<string, GameplayRoute> = new Map(
 );
 
 export const GAMEPLAY_PATHS = new Set(gameplayRoutes.keys());
-
-export async function readGameplayBody(
-  request: Request,
-  pathname: string,
-): Promise<Record<string, unknown>> {
-  const fallbackPath = pathname.startsWith("/wagers/proposals/")
-    ? "/wagers/proposals/accept"
-    : "/navigation/games/remove";
-  const route =
-    gameplayRoutes.get(pathname) || gameplayRoutes.get(fallbackPath);
-  if (!route) throw invalidRequest();
-  return (await prepareGameplayRoute(request, route)).body;
-}
 
 export async function handleGameplayRoute(
   request: Request,
