@@ -21,6 +21,7 @@ exports.eventSnapshotEtag = eventSnapshotEtag;
 exports.eventBookmarkEpoch = eventBookmarkEpoch;
 exports.isEventSnapshotSeed = isEventSnapshotSeed;
 exports.buildEventMatchKey = buildEventMatchKey;
+exports.buildEventParticipantSnapshot = buildEventParticipantSnapshot;
 exports.buildEventSeedOrder = buildEventSeedOrder;
 exports.getEventBracketSize = getEventBracketSize;
 exports.getFirstRoundByeSeeds = getFirstRoundByeSeeds;
@@ -47,6 +48,7 @@ exports.isSyncEventStateResponse = isSyncEventStateResponse;
 exports.parseEventMatchKey = parseEventMatchKey;
 exports.resolveEventTelegramAnnouncements = resolveEventTelegramAnnouncements;
 const ids_js_1 = require("./ids.js");
+const profiles_js_1 = require("./profiles.js");
 const MONS_LINK_ADMIN_USERNAMES = Object.freeze([
   "ivan",
   "meinong",
@@ -244,6 +246,31 @@ function isEventParticipantSnapshot(value) {
     value.eliminatedRoundIndex === null &&
     value.eliminatedByProfileId === null
   );
+}
+function buildEventParticipantSnapshot(profile, loginUid, joinedAtMs) {
+  const parsedEmojiId = Math.floor(Number(profile.emoji));
+  const participant = {
+    profileId: profile.profileId,
+    loginUid,
+    username: profile.username.trim(),
+    displayName:
+      profile.username ||
+      (profile.eth
+        ? (0, profiles_js_1.cropAddress)(profile.eth)
+        : profile.sol
+          ? (0, profiles_js_1.cropAddress)(profile.sol)
+          : "anon"),
+    emojiId:
+      Number.isSafeInteger(parsedEmojiId) && parsedEmojiId >= 0
+        ? parsedEmojiId
+        : 0,
+    aura: profile.aura.trim(),
+    joinedAtMs,
+    state: "active",
+    eliminatedRoundIndex: null,
+    eliminatedByProfileId: null,
+  };
+  return isEventParticipantSnapshot(participant) ? participant : null;
 }
 function isJoinEventResponse(value) {
   return (

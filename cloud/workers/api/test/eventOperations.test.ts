@@ -10,6 +10,7 @@ import type {
   EventCreateOptions,
 } from "@mons/shared/events";
 import { AuthApiFailure } from "../src/authErrors.ts";
+import { joinEvent } from "../src/eventParticipation.ts";
 import type { EventGameplayRepository } from "../src/eventRepository.ts";
 import { eventReadFixture } from "./eventReadFixture.ts";
 import type { ProfileOwnershipSnapshot } from "../src/profileOwnership.ts";
@@ -400,6 +401,98 @@ test("creates a scheduled event only after its Workflow exists", async () => {
     (outboxEntry[1] as Record<string, unknown>).sourceKey,
     "start:aaaaaaaaaaa:301000",
   );
+});
+
+test("creation and fresh joining persist identical participant snapshots", async () => {
+  for (const emoji of [7.9, "7.9", "Infinity"]) {
+    const creator = createRepository();
+    const joiner = createRepository({
+      "events/join-event": {
+        eventId: "join-event",
+        status: "scheduled",
+        startAtMs: 10_000,
+        participants: {},
+      },
+    });
+    for (const { repository } of [creator, joiner]) {
+      const readProfile = repository.getGameplayProfile;
+      repository.getGameplayProfile = async (uid, signal) => ({
+        ...(await readProfile(uid, signal))!,
+        username: " ivan ",
+        emoji,
+        aura: " rainbow ",
+      });
+    }
+    const created = await createEvent(
+      workflowEnvironment(() => undefined),
+      identity,
+      { startsInMinutes: 5 },
+      {
+        repository: creator.repository,
+        now: () => 1_000,
+        random: () => 0,
+      },
+    );
+    const joined = await joinEvent(
+      identity,
+      { eventId: "join-event" },
+      joiner.repository,
+      {
+        now: () => 1_000,
+        buildDueUpdates: async () => ({ didChange: false, updates: [] }),
+      },
+    );
+    const expected = {
+      profileId,
+      loginUid: identity.uid,
+      username: "ivan",
+      displayName: " ivan ",
+      emojiId: emoji === "Infinity" ? 0 : 7,
+      aura: "rainbow",
+      joinedAtMs: 1_000,
+      state: "active",
+      eliminatedRoundIndex: null,
+      eliminatedByProfileId: null,
+    };
+    assert.deepEqual(
+      (created.event.participants as Record<string, unknown>)[profileId],
+      expected,
+    );
+    assert.deepEqual(joined.participant, expected);
+    assert.deepEqual(
+      joiner.patches[0][`events/join-event/participants/${profileId}`],
+      expected,
+    );
+  }
+});
+
+test("rejects invalid creator metadata before scheduling or persisting an event", async () => {
+  const state = createRepository();
+  const readProfile = state.repository.getGameplayProfile;
+  state.repository.getGameplayProfile = async (uid, signal) => ({
+    ...(await readProfile(uid, signal))!,
+    aura: "é".repeat(129),
+  });
+  let workflowCreates = 0;
+  await assert.rejects(
+    createEvent(
+      workflowEnvironment(() => workflowCreates++),
+      identity,
+      { startsInMinutes: 5 },
+      {
+        repository: state.repository,
+        now: () => 1_000,
+        random: () => 0,
+      },
+    ),
+    (error: unknown) =>
+      error instanceof AuthApiFailure &&
+      error.status === 503 &&
+      error.code === "unavailable" &&
+      error.message === "event-service-unavailable",
+  );
+  assert.equal(workflowCreates, 0);
+  assert.deepEqual(state.patches, []);
 });
 
 test("persists independent Telegram preferences including all-off and legacy defaults", async () => {

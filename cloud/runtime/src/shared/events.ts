@@ -1,4 +1,5 @@
 import { isSafeRecordKey } from "./ids.js";
+import { cropAddress } from "./profiles.js";
 
 export type MonsLinkAdminUsername = (typeof MONS_LINK_ADMIN_USERNAMES)[number];
 
@@ -105,6 +106,15 @@ export type EventParticipantSnapshot = {
   eliminatedRoundIndex: null;
   eliminatedByProfileId: null;
 };
+
+export type EventParticipantProfile = Readonly<{
+  profileId: string;
+  username: string;
+  eth: string;
+  sol: string;
+  emoji: number | string;
+  aura: string;
+}>;
 
 export type JoinEventRequest = { eventId: string };
 
@@ -345,6 +355,36 @@ function isEventParticipantSnapshot(
     value.eliminatedRoundIndex === null &&
     value.eliminatedByProfileId === null
   );
+}
+
+function buildEventParticipantSnapshot(
+  profile: EventParticipantProfile,
+  loginUid: string,
+  joinedAtMs: number,
+): EventParticipantSnapshot | null {
+  const parsedEmojiId = Math.floor(Number(profile.emoji));
+  const participant: EventParticipantSnapshot = {
+    profileId: profile.profileId,
+    loginUid,
+    username: profile.username.trim(),
+    displayName:
+      profile.username ||
+      (profile.eth
+        ? cropAddress(profile.eth)
+        : profile.sol
+          ? cropAddress(profile.sol)
+          : "anon"),
+    emojiId:
+      Number.isSafeInteger(parsedEmojiId) && parsedEmojiId >= 0
+        ? parsedEmojiId
+        : 0,
+    aura: profile.aura.trim(),
+    joinedAtMs,
+    state: "active",
+    eliminatedRoundIndex: null,
+    eliminatedByProfileId: null,
+  };
+  return isEventParticipantSnapshot(participant) ? participant : null;
 }
 
 function isJoinEventResponse(value: unknown): value is JoinEventResponse {
@@ -660,6 +700,7 @@ export {
   SCHEDULED_TIMEZONE_LOCAL,
   THIRD_PLACE_MATCH_KEY,
   buildEventMatchKey,
+  buildEventParticipantSnapshot,
   buildEventSeedOrder,
   getEventBracketSize,
   getFirstRoundByeSeeds,

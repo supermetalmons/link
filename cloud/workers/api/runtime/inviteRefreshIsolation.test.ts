@@ -561,9 +561,13 @@ describe("invite refresh isolation", () => {
     });
   });
 
-  it.each(["reader", "metadata", "hash"] as const)(
-    "discards an invalidation during wager %s work and coalesces newer queued readers",
-    async (stage) => {
+  it.each(
+    (["reader", "metadata", "hash"] as const).flatMap((stage) =>
+      (["wagers", "metadata"] as const).map((channel) => ({ stage, channel })),
+    ),
+  )(
+    "discards a $channel invalidation during wager $stage work and coalesces newer queued readers",
+    async ({ stage, channel }) => {
       const { room, inviteId, source } = await fixture();
       await room.readWagers(inviteId);
       source.count = 5;
@@ -573,7 +577,11 @@ describe("invite refresh isolation", () => {
         try {
           await promptly(gate.began);
           source.count = 7;
-          await promptly(instance.notifyWagersChanged(inviteId));
+          await promptly(
+            channel === "wagers"
+              ? instance.notifyWagersChanged(inviteId)
+              : instance.notifyMetadataChanged(inviteId),
+          );
           pending.push(
             instance.readWagers(inviteId),
             instance.readWagers(inviteId),

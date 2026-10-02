@@ -392,7 +392,7 @@ describe("durable invite wagers", () => {
       release.resolve();
       return Promise.all([older, newer]);
     });
-    expect(source.reads).toBe(5);
+    expect(source.reads).toBe(4);
     expect(source.wagerReads).toBe(4);
     for (const result of results) {
       expect(result).toMatchObject({
@@ -608,6 +608,80 @@ describe("durable invite wagers", () => {
       ),
     );
     expect(JSON.parse(await client.read()).snapshot.revision).toBe(2);
+  });
+
+  it("rejects a completed wager snapshot invalidated while socket admission is pending", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.now());
+    const { room, inviteId, source } = await fixture();
+    await room.readWagers(inviteId);
+    const status = await runInDurableObject(room, async (instance) => {
+      const reading = deferred();
+      const releaseRead = deferred();
+      const admitting = deferred();
+      const releaseAdmission = deferred();
+      const digest = crypto.subtle.digest.bind(crypto.subtle);
+      vi.spyOn(crypto.subtle, "digest").mockImplementationOnce(
+        async (...args) => {
+          reading.resolve();
+          await releaseRead.promise;
+          return digest(...args);
+        },
+      );
+      const channels = (
+        instance as unknown as {
+          inviteChannels: {
+            dependencies: { scheduleAlarm: (atMs: number) => Promise<void> };
+          };
+        }
+      ).inviteChannels;
+      const scheduleAlarm = channels.dependencies.scheduleAlarm;
+      const schedule = vi
+        .spyOn(channels.dependencies, "scheduleAlarm")
+        .mockImplementationOnce(async (atMs) => {
+          await scheduleAlarm(atMs);
+          admitting.resolve();
+          await releaseAdmission.promise;
+        });
+      const first = instance.readWagers(inviteId);
+      let second: ReturnType<typeof instance.readWagers> | undefined;
+      let admission: Promise<Response> | undefined;
+      try {
+        await reading.promise;
+        second = instance.readWagers(inviteId);
+        admission = instance.fetch(request(inviteId));
+        releaseRead.resolve();
+        await admitting.promise;
+        await Promise.all([first, second]);
+        expect(source.wagerReads).toBe(3);
+        source.value = {
+          ...invite,
+          wagers: {
+            [inviteId]: {
+              proposals: { "host-login": { ...proposal, count: 7 } },
+            },
+          },
+        };
+        await instance.notifyWagersChanged(inviteId);
+        releaseAdmission.resolve();
+        const response = await admission;
+        if (response.webSocket) {
+          response.webSocket.accept();
+          await closeSocket(response.webSocket);
+        }
+        return response.status;
+      } finally {
+        releaseRead.resolve();
+        releaseAdmission.resolve();
+        schedule.mockRestore();
+        await Promise.allSettled([first, second, admission]);
+      }
+    });
+    expect(status).toBe(409);
+    expect(source.wagerReads).toBe(4);
+    expect(JSON.parse((await storedWagers(room)).snapshot_json)).toMatchObject({
+      revision: 2,
+      wagers: { [inviteId]: { proposals: { "host-login": { count: 7 } } } },
+    });
   });
 
   it("gives a wager admission arriving during a metadata-only read a fresh wager read", async () => {

@@ -255,6 +255,88 @@ afterEach(async () => {
 });
 
 describe("live match snapshots", () => {
+  it("preserves a recent match snapshot after a wager-only notification", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.now());
+    const { room, inviteId, source } = await fixture();
+    const initial = await room.readMatches(inviteId, inviteId);
+    const metadataReads = source.metadataReads;
+    const revisionReads = source.revisionReads.length;
+    const recordReads = source.reads.length;
+    await room.notifyWagersChanged(inviteId);
+    expect(await room.readMatches(inviteId, inviteId)).toEqual(initial);
+    expect(source.metadataReads).toBe(metadataReads);
+    expect(source.revisionReads).toHaveLength(revisionReads);
+    expect(source.reads).toHaveLength(recordReads);
+    expect(source.wagerReads).toBe(0);
+    expect(
+      await runInDurableObject(room, (_instance, state) =>
+        state.storage.getAlarm(),
+      ),
+    ).toBeNull();
+  });
+
+  it.each(["metadata", "pair"] as const)(
+    "keeps an in-flight match %s read through a wager-only notification",
+    async (stage) => {
+      vi.spyOn(Date, "now").mockReturnValue(Date.now());
+      const { room, inviteId, source } = await fixture();
+      await runInDurableObject(room, async (instance) => {
+        const target = instance as unknown as {
+          inviteReader: (id: string) => Promise<unknown>;
+          matchSync: { readSyncState: SyncReader };
+        };
+        let started!: () => void;
+        let release!: () => void;
+        const began = new Promise<void>((resolve) => {
+          started = resolve;
+        });
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let paused = false;
+        const hold = async <T>(value: T): Promise<T> => {
+          if (!paused) {
+            paused = true;
+            started();
+            await gate;
+          }
+          return value;
+        };
+        if (stage === "metadata") {
+          const read = target.inviteReader;
+          target.inviteReader = async (id) => hold(await read(id));
+        } else {
+          const read = target.matchSync.readSyncState;
+          target.matchSync.readSyncState = async (input) =>
+            hold(await read(input));
+        }
+        const first = instance.readMatches(inviteId, inviteId);
+        try {
+          await began;
+          await instance.notifyWagersChanged(inviteId);
+          const second = instance.readMatches(inviteId, inviteId);
+          release();
+          const results = await Promise.all([first, second]);
+          expect(results[0]).toEqual(results[1]);
+          expect(results[0]).toMatchObject({
+            status: "ok",
+            snapshot: { revision: 1, hostMatch: { fen: "initial" } },
+          });
+        } finally {
+          release();
+          await first;
+        }
+      });
+      expect(source.metadataReads).toBe(1);
+      expect(source.revisionReads).toEqual([inviteId]);
+      expect(source.reads).toEqual([
+        `host-login/${inviteId}`,
+        `guest-login/${inviteId}`,
+      ]);
+      expect(source.wagerReads).toBe(0);
+    },
+  );
+
   it("bounds idle snapshots, keeps recent reads cached and restores evicted revisions", async () => {
     vi.spyOn(Date, "now").mockReturnValue(Date.now());
     const { room, inviteId, source } = await fixture();

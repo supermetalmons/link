@@ -93,6 +93,14 @@ export type EventParticipantSnapshot = {
   eliminatedRoundIndex: null;
   eliminatedByProfileId: null;
 };
+export type EventParticipantProfile = Readonly<{
+  profileId: string;
+  username: string;
+  eth: string;
+  sol: string;
+  emoji: number | string;
+  aura: string;
+}>;
 export type JoinEventRequest = {
   eventId: string;
 };
@@ -192,6 +200,11 @@ declare function isRemoveEventParticipantRequest(
 declare function isEventParticipantSnapshot(
   value: unknown,
 ): value is EventParticipantSnapshot;
+declare function buildEventParticipantSnapshot(
+  profile: EventParticipantProfile,
+  loginUid: string,
+  joinedAtMs: number,
+): EventParticipantSnapshot | null;
 declare function isJoinEventResponse(
   value: unknown,
 ): value is JoinEventResponse;
@@ -255,6 +268,7 @@ export {
   SCHEDULED_TIMEZONE_LOCAL,
   THIRD_PLACE_MATCH_KEY,
   buildEventMatchKey,
+  buildEventParticipantSnapshot,
   buildEventSeedOrder,
   getEventBracketSize,
   getFirstRoundByeSeeds,

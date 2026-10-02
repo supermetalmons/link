@@ -275,6 +275,15 @@ function projectionRatingRepository(db = testEnv.PROFILE_DB) {
   );
 }
 
+function miningReadRepository(db = testEnv.PROFILE_DB) {
+  return createCanonicalGameplayRepository(db, testEnv.PROFILE_GAMES_DB, {
+    createFailure: (operation, options) =>
+      new GameplayRepositoryFailure(operation, options),
+    maxAttempts: 2,
+    now: () => 3_000,
+  });
+}
+
 const ratingDiscoveryCases = [
   {
     list: "listDueRatingEventProgress",
@@ -296,9 +305,10 @@ const ratingDiscoveryCases = [
   },
 ] as const;
 
-function observeRatingDiscovery(
+function observeProfileReads(
   db: D1Database,
   beforeRead?: (query: string) => Promise<void>,
+  mapRows?: (rows: Record<string, unknown>[]) => Record<string, unknown>[],
 ) {
   const queries: string[] = [];
   const reads: Array<{
@@ -328,7 +338,9 @@ function observeRatingDiscovery(
               rows: result.results,
               rowsWritten: result.meta.rows_written,
             });
-            return result;
+            return mapRows
+              ? { ...result, results: mapRows(result.results) }
+              : result;
           };
         }
         const value = Reflect.get(target, property, target);
@@ -489,6 +501,117 @@ async function resetCanonicalRows(db: D1Database): Promise<void> {
 }
 
 describe("canonical gameplay repositories", () => {
+  describe.each(["getMiningMaterials", "getMiningSnapshot"] as const)(
+    "%s",
+    (operation) => {
+      it("reads healthy, redirected, and missing profiles without legacy data or writes", async () => {
+        const sourceId = "mining-read-source";
+        const targetId = "mining-read-target";
+        const mining = {
+          lastRockDate: "2026-10-02",
+          materials: { dust: 27, slime: 8, gum: 3, metal: 0, ice: 5 },
+        };
+        await insertProfile(sourceId, null, { username: null });
+        await insertProfile(targetId, null, { username: null, mining });
+        await retireProfileInto(sourceId, targetId, 2_000, "mining-read-merge");
+        const before = await seedRetainedProfileFields([sourceId, targetId]);
+        const observed = observeProfileReads(testEnv.PROFILE_DB);
+        const repository = miningReadRepository(observed.database);
+        for (const profileId of [sourceId, targetId]) {
+          await expect(repository[operation](profileId)).resolves.toEqual(
+            operation === "getMiningMaterials" ? mining.materials : mining,
+          );
+        }
+        await expect(
+          repository[operation]("mining-read-missing"),
+        ).resolves.toEqual(
+          operation === "getMiningMaterials"
+            ? { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 }
+            : null,
+        );
+        expect(observed.reads).toHaveLength(3);
+        expect(observed.queries).toHaveLength(3);
+        for (const read of observed.reads) {
+          expect(read.query).not.toMatch(/profile\.\*|legacy_fields_json/);
+          expect(read.rowsWritten).toBe(0);
+        }
+        expect(
+          await Promise.all([sourceId, targetId].map(readRawProfileRow)),
+        ).toEqual(before);
+      });
+
+      it("ignores malformed write-only metadata while mutation snapshots still reject it", async () => {
+        const profileId = "mining-read-metadata";
+        await insertProfile(profileId, null);
+        await testEnv.PROFILE_DB.prepare(
+          "UPDATE profile_records SET merged_at_ms = 1.5 WHERE profile_id = ?",
+        )
+          .bind(profileId)
+          .run();
+        const before = await readRawProfileRow(profileId);
+        const mining = profile(profileId).mining;
+        await expect(
+          miningReadRepository()[operation](profileId),
+        ).resolves.toEqual(
+          operation === "getMiningMaterials" ? mining.materials : mining,
+        );
+        await expect(
+          readCanonicalProfile(testEnv.PROFILE_DB, profileId),
+        ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+        await expect(
+          createMiningRepository(testEnv).getProfileSnapshot(profileId),
+        ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+        expect(await readRawProfileRow(profileId)).toEqual(before);
+      });
+
+      it.each([
+        { name: "malformed mining", dust: -1 },
+        { name: "material sort drift", dust: 99 },
+      ])("rejects $name without changing the profile", async ({ dust }) => {
+        const profileId = "mining-read-corrupt";
+        await insertProfile(profileId, null);
+        await testEnv.PROFILE_DB.prepare(
+          `UPDATE profile_records
+           SET payload_json = json_set(payload_json, '$.mining.materials.dust', ?)
+           WHERE profile_id = ?`,
+        )
+          .bind(dust, profileId)
+          .run();
+        const before = await readRawProfileRow(profileId);
+        await expect(
+          miningReadRepository()[operation](profileId),
+        ).rejects.toMatchObject({
+          operation,
+          cause: expect.any(CanonicalProfileCorruption),
+        });
+        expect(await readRawProfileRow(profileId)).toEqual(before);
+      });
+
+      it("rejects a retiring profile without its canonical redirect", async () => {
+        const profileId = "mining-read-topology";
+        await insertProfile(profileId, null);
+        const observed = observeProfileReads(
+          testEnv.PROFILE_DB,
+          undefined,
+          (rows) =>
+            rows.map((row) => ({
+              ...row,
+              state: "retiring",
+              merged_into_profile_id: "missing-redirect-target",
+            })),
+        );
+        await expect(
+          miningReadRepository(observed.database)[operation](profileId),
+        ).rejects.toMatchObject({
+          operation,
+          cause: expect.any(CanonicalProfileCorruption),
+        });
+        expect(observed.reads).toHaveLength(1);
+        expect(observed.reads[0].rowsWritten).toBe(0);
+      });
+    },
+  );
+
   it.each([
     "readProfileOwnershipSnapshot",
     "getMiningMaterials",
@@ -1488,7 +1611,7 @@ describe("canonical gameplay repositories", () => {
       playerProfileId,
       priorOpponentProfileId,
     );
-    const observed = observeRatingDiscovery(testEnv.PROFILE_DB);
+    const observed = observeProfileReads(testEnv.PROFILE_DB);
 
     await projectionRatingRepository(
       observed.database,
@@ -1541,7 +1664,7 @@ describe("canonical gameplay repositories", () => {
       const before = await Promise.all(profileIds.map(readRawProfileRow));
       const failure = new Error("challenge-id-resolution-unavailable");
       let phase = 0;
-      const observed = observeRatingDiscovery(
+      const observed = observeProfileReads(
         testEnv.PROFILE_DB,
         async (query) => {
           if (
@@ -2329,7 +2452,7 @@ describe("canonical gameplay repositories", () => {
             : {}),
         });
       }
-      const observed = observeRatingDiscovery(testEnv.PROFILE_DB);
+      const observed = observeProfileReads(testEnv.PROFILE_DB);
       const rating = projectionRatingRepository(observed.database);
       const expected = [
         ["first", 0],
@@ -2394,7 +2517,7 @@ describe("canonical gameplay repositories", () => {
   it.each(ratingDiscoveryCases)(
     "rejects invalid $field discovery bounds before querying",
     async ({ list }) => {
-      const observed = observeRatingDiscovery(testEnv.PROFILE_DB);
+      const observed = observeProfileReads(testEnv.PROFILE_DB);
       const rating = projectionRatingRepository(observed.database);
       for (const [cutoff, limit] of [
         [-1, 10],

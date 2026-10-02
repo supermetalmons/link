@@ -11,7 +11,6 @@ import type { EventMatchPairRequest } from "./events/bracket.js";
 import type { EventOwnershipSnapshot } from "./events/ownership.js";
 
 import { eventField, mergeEventPlans } from "./eventCommands.js";
-import { getDisplayNameFromAddress } from "./telegramDisplay.js";
 import { isEventPrizeEvent } from "@mons/shared/event-prizes";
 import { getCompletedEventPrizeProjectionCleanupRequest } from "./eventPrizeProjectionState.js";
 import { INVITE_ID_RANDOM_LENGTH, randomAlphanumeric } from "@mons/shared/ids";
@@ -21,6 +20,7 @@ import {
   MAX_STARTS_IN_MINUTES,
   MIN_STARTS_IN_MINUTES,
   THIRD_PLACE_MATCH_KEY,
+  buildEventParticipantSnapshot,
   isMonsLinkAdmin,
   parseEventMatchKey as parseMatchKey,
   resolveEventTelegramAnnouncements,
@@ -191,17 +191,6 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
       ? Object.keys(value)
       : [];
 
-  const buildEventDisplayName = (profile: EventOwnershipProfile) => {
-    return getDisplayNameFromAddress(
-      profile.username ?? "",
-      profile.eth ?? "",
-      profile.sol ?? "",
-      0,
-      profile.emoji ?? "",
-      false,
-    );
-  };
-
   const generateEventId = () =>
     randomAlphanumeric(INVITE_ID_RANDOM_LENGTH, dependencies.random);
 
@@ -228,30 +217,6 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
       }
       throw profileOwnershipUnavailable();
     }
-  };
-
-  const buildParticipantSnapshot = (
-    profile: EventOwnershipProfile,
-    loginUid: string,
-    joinedAtMs: number,
-  ) => {
-    const username = normalizeString(profile.username);
-    const profileId = normalizeString(profile.profileId);
-    return {
-      profileId,
-      loginUid,
-      username,
-      displayName: buildEventDisplayName(profile),
-      emojiId:
-        typeof profile.emoji === "number"
-          ? Math.floor(profile.emoji)
-          : Number(profile.emoji) || 0,
-      aura: normalizeString(profile.aura),
-      joinedAtMs,
-      state: "active",
-      eliminatedRoundIndex: null,
-      eliminatedByProfileId: null,
-    };
   };
 
   const ensurePilotEventCreator = (
@@ -295,11 +260,14 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
     isSundayMons: boolean;
     telegramAnnouncements: ReturnType<typeof resolveEventTelegramAnnouncements>;
   }) => {
-    const creatorParticipant = buildParticipantSnapshot(
+    const creatorParticipant = buildEventParticipantSnapshot(
       creatorProfile,
       creatorUid,
       createdAtMs,
     );
+    if (!creatorParticipant) {
+      throw new HttpsError("unavailable", "event-service-unavailable");
+    }
     return {
       schemaVersion: EVENT_SCHEMA_VERSION,
       eventId,

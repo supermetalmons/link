@@ -15,6 +15,7 @@ import {
 } from "@mons/shared/event-prizes";
 import {
   MAX_EVENT_PARTICIPANTS,
+  buildEventParticipantSnapshot,
   isEventParticipantSnapshot,
   type EventParticipantSnapshot,
   type JoinEventRequest,
@@ -41,7 +42,6 @@ import {
   resolveParticipantParticipation,
   type EventOwnershipSnapshot,
 } from "../../../runtime/events/ownership.js";
-import { getDisplayNameFromAddress } from "../../../runtime/telegramDisplay.js";
 import { AuthApiFailure } from "./authErrors.ts";
 import { EventNotUpcoming } from "./eventD1.ts";
 import type {
@@ -120,31 +120,12 @@ function buildParticipant(
   loginUid: string,
   joinedAtMs: number,
 ): EventParticipantSnapshot {
-  const parsedEmojiId = Math.floor(Number(profile.emoji));
-  const emojiId =
-    Number.isSafeInteger(parsedEmojiId) && parsedEmojiId >= 0
-      ? parsedEmojiId
-      : 0;
-  const participant: EventParticipantSnapshot = {
-    profileId: profile.profileId,
+  const participant = buildEventParticipantSnapshot(
+    profile,
     loginUid,
-    username: normalizeString(profile.username),
-    displayName: getDisplayNameFromAddress(
-      profile.username,
-      profile.eth,
-      profile.sol,
-      0,
-      profile.emoji,
-      false,
-    ),
-    emojiId,
-    aura: normalizeString(profile.aura),
     joinedAtMs,
-    state: "active",
-    eliminatedRoundIndex: null,
-    eliminatedByProfileId: null,
-  };
-  if (!isEventParticipantSnapshot(participant)) {
+  );
+  if (!participant) {
     throw new AuthApiFailure(
       503,
       "unavailable",

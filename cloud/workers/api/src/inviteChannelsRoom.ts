@@ -49,6 +49,7 @@ type WagerRead = {
   metadata: MetadataRead;
   wagers: InviteWagersReadResult;
   generation: number;
+  invalidationGeneration: number;
 };
 
 type StoredMetadata = {
@@ -123,6 +124,7 @@ export class InviteChannelsRoom {
   private metadataVersion = 0;
   private wagerRefreshGeneration = 0;
   private inviteInvalidationGeneration = 0;
+  private wagerInvalidationGeneration = 0;
   private metadataResult: MetadataRead | null = null;
   private wagerResult: WagerRead | null = null;
   private metadataCheckedAt = 0;
@@ -178,6 +180,11 @@ export class InviteChannelsRoom {
 
   invalidate(): void {
     this.inviteInvalidationGeneration++;
+    this.wagerInvalidationGeneration++;
+  }
+
+  invalidateWagers(): void {
+    this.wagerInvalidationGeneration++;
   }
 
   private inviteSockets(
@@ -348,6 +355,7 @@ export class InviteChannelsRoom {
     return (
       this.wagerResult === result &&
       result.generation === this.wagerRefreshGeneration &&
+      result.invalidationGeneration === this.wagerInvalidationGeneration &&
       this.metadataResult !== null &&
       this.metadataCurrent(this.metadataResult) &&
       result.metadata.version === this.metadataResult.version &&
@@ -410,7 +418,8 @@ export class InviteChannelsRoom {
     this.wagerResult = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       const generation = ++this.wagerRefreshGeneration;
-      const invalidationGeneration = this.inviteInvalidationGeneration;
+      const metadataInvalidationGeneration = this.inviteInvalidationGeneration;
+      const invalidationGeneration = this.wagerInvalidationGeneration;
       let wagerStates: WagerStateSnapshot[] | undefined;
       try {
         wagerStates = await this.dependencies.readWagerStates(inviteId);
@@ -425,7 +434,10 @@ export class InviteChannelsRoom {
         Date.now() - this.metadataCheckedAt < INVITE_METADATA_REFRESH_MS
           ? alarmMetadata
           : await this.readMetadataSnapshot(inviteId);
-      if (invalidationGeneration !== this.inviteInvalidationGeneration)
+      if (
+        metadataInvalidationGeneration !== this.inviteInvalidationGeneration ||
+        invalidationGeneration !== this.wagerInvalidationGeneration
+      )
         continue;
       let source: InviteWagersSourceResult;
       try {
@@ -452,7 +464,9 @@ export class InviteChannelsRoom {
           !latest ||
           !this.metadataCurrent(latest) ||
           latest.version !== metadata.version ||
-          invalidationGeneration !== this.inviteInvalidationGeneration
+          metadataInvalidationGeneration !==
+            this.inviteInvalidationGeneration ||
+          invalidationGeneration !== this.wagerInvalidationGeneration
         )
           return null;
         let wagers: InviteWagersReadResult;
@@ -462,7 +476,12 @@ export class InviteChannelsRoom {
           logWagersRefreshFailure(inviteId, error);
           wagers = { status: "invalid" };
         }
-        const result = { metadata: latest, wagers, generation };
+        const result = {
+          metadata: latest,
+          wagers,
+          generation,
+          invalidationGeneration,
+        };
         this.wagerResult = result;
         return result;
       });

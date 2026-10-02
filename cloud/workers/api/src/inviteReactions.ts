@@ -345,7 +345,7 @@ export class InviteReactions
   }
 
   async notifyWagersChanged(inviteId: string): Promise<void> {
-    this.inviteChannels.invalidate();
+    this.inviteChannels.invalidateWagers();
     await this.inviteChannels.refreshIfSubscribed(inviteId, "wagers");
   }
 

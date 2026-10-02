@@ -4,6 +4,7 @@ import {
   readCanonicalProfileOwnershipSnapshot,
   readCanonicalWagerSettlement,
   resolveCanonicalProfile,
+  resolveCanonicalPublicProfile,
   CanonicalProfileConflict,
   type CanonicalProfileSnapshot,
   type CanonicalExpectation,
@@ -276,7 +277,7 @@ export function createCanonicalGameplayRepository(
 
     async getMiningMaterials(profileId) {
       try {
-        const snapshot = await resolveCanonicalProfile(db, profileId);
+        const snapshot = await resolveCanonicalPublicProfile(db, profileId);
         return normalizeMaterials(snapshot?.profile.mining.materials);
       } catch (error) {
         throw options.createFailure("getMiningMaterials", { cause: error });
@@ -285,9 +286,8 @@ export function createCanonicalGameplayRepository(
 
     async getMiningSnapshot(profileId) {
       try {
-        return (
-          (await resolveCanonicalProfile(db, profileId))?.profile.mining || null
-        );
+        const snapshot = await resolveCanonicalPublicProfile(db, profileId);
+        return snapshot?.profile.mining || null;
       } catch (error) {
         throw options.createFailure("getMiningSnapshot", { cause: error });
       }

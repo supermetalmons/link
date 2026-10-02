@@ -303,6 +303,7 @@
     "SCHEDULED_TIMEZONE_LOCAL",
     "THIRD_PLACE_MATCH_KEY",
     "buildEventMatchKey",
+    "buildEventParticipantSnapshot",
     "buildEventSeedOrder",
     "eventBookmarkEpoch",
     "eventSnapshotEtag",

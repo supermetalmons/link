@@ -3,7 +3,6 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.EventRuntimeError = exports.createEventRuntime = void 0;
 const eventCommands_js_1 = require("./eventCommands.js");
-const telegramDisplay_js_1 = require("./telegramDisplay.js");
 const event_prizes_1 = require("@mons/shared/event-prizes");
 const eventPrizeProjectionState_js_1 = require("./eventPrizeProjectionState.js");
 const ids_1 = require("@mons/shared/ids");
@@ -74,16 +73,6 @@ const createEventRuntime = (dependencies) => {
     value && typeof value === "object" && !Array.isArray(value)
       ? Object.keys(value)
       : [];
-  const buildEventDisplayName = (profile) => {
-    return (0, telegramDisplay_js_1.getDisplayNameFromAddress)(
-      profile.username ?? "",
-      profile.eth ?? "",
-      profile.sol ?? "",
-      0,
-      profile.emoji ?? "",
-      false,
-    );
-  };
   const generateEventId = () =>
     (0, ids_1.randomAlphanumeric)(
       ids_1.INVITE_ID_RANDOM_LENGTH,
@@ -108,25 +97,6 @@ const createEventRuntime = (dependencies) => {
       }
       throw (0, ownership_js_1.profileOwnershipUnavailable)();
     }
-  };
-  const buildParticipantSnapshot = (profile, loginUid, joinedAtMs) => {
-    const username = normalizeString(profile.username);
-    const profileId = normalizeString(profile.profileId);
-    return {
-      profileId,
-      loginUid,
-      username,
-      displayName: buildEventDisplayName(profile),
-      emojiId:
-        typeof profile.emoji === "number"
-          ? Math.floor(profile.emoji)
-          : Number(profile.emoji) || 0,
-      aura: normalizeString(profile.aura),
-      joinedAtMs,
-      state: "active",
-      eliminatedRoundIndex: null,
-      eliminatedByProfileId: null,
-    };
   };
   const ensurePilotEventCreator = (uid, ownershipSnapshot) => {
     const profileId = (0, ownership_js_1.getLoginProfileId)(
@@ -160,11 +130,14 @@ const createEventRuntime = (dependencies) => {
     isSundayMons,
     telegramAnnouncements,
   }) => {
-    const creatorParticipant = buildParticipantSnapshot(
+    const creatorParticipant = (0, events_1.buildEventParticipantSnapshot)(
       creatorProfile,
       creatorUid,
       createdAtMs,
     );
+    if (!creatorParticipant) {
+      throw new HttpsError("unavailable", "event-service-unavailable");
+    }
     return {
       schemaVersion: events_1.EVENT_SCHEMA_VERSION,
       eventId,
