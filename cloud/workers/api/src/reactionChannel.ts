@@ -63,11 +63,7 @@ export class ReactionChannel {
   constructor(
     private readonly ctx: DurableObjectState,
     private readonly dependencies: ReactionChannelDependencies,
-  ) {
-    this.ctx.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS latest_reactions (sender_uid TEXT PRIMARY KEY, reaction_json TEXT NOT NULL)",
-    );
-  }
+  ) {}
 
   async fetch(request: Request): Promise<Response> {
     const role = request.headers.get("X-Mons-Reaction-Role") || "spectator";

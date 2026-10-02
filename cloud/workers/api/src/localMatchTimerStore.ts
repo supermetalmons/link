@@ -28,14 +28,7 @@ function invalid(): never {
 }
 
 export class LocalMatchTimerStore {
-  constructor(private readonly sql: SqlStorage) {
-    sql.exec(
-      "CREATE TABLE IF NOT EXISTS match_state_timer_cohorts (match_id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('d1', 'local')), schema_version INTEGER NOT NULL CHECK(schema_version = 1))",
-    );
-    sql.exec(
-      "CREATE TABLE IF NOT EXISTS match_state_timer_starts (match_id TEXT NOT NULL, player_id TEXT NOT NULL, opponent_id TEXT NOT NULL, timer TEXT NOT NULL, turn_number INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL, PRIMARY KEY(match_id, player_id))",
-    );
-  }
+  constructor(private readonly sql: SqlStorage) {}
 
   mode(matchId: string): MatchTimerStorageMode | null {
     const [cohort] = this.sql

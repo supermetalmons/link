@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { ensureInviteRoomSchema } from "./inviteRoomSchema.ts";
 import {
   REACTION_HEARTBEAT_REQUEST,
   REACTION_HEARTBEAT_RESPONSE,
@@ -107,6 +108,7 @@ export class InviteReactions
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    ensureInviteRoomSchema(ctx.storage);
     this.socketSessions = new SocketSessions(ctx);
     this.alarmCoordinator = new InviteAlarmCoordinator(ctx.storage, {
       expireSessions: () => this.socketSessions.nextExpiry(),

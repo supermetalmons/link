@@ -85,9 +85,6 @@ export class MatchSyncRoom {
     private readonly ctx: DurableObjectState,
     private readonly dependencies: MatchRoomDependencies,
   ) {
-    ctx.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS match_sync_snapshots (match_id TEXT PRIMARY KEY, snapshot_json TEXT NOT NULL, revision INTEGER NOT NULL, next_at_ms INTEGER)",
-    );
     this.readSyncState = dependencies.readSyncState;
   }
 

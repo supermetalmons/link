@@ -135,27 +135,6 @@ export class MatchStateStore {
       options.newMatchTimerStorage,
     );
     this.resolveGame = options.resolveGame || resolveMatchTimerGame;
-    storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS match_state_source (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), invite_id TEXT NOT NULL, active_epoch INTEGER, staged_epoch INTEGER, import_id TEXT, digest TEXT)",
-    );
-    storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS match_state_records (match_id TEXT NOT NULL, player_id TEXT NOT NULL, value_json TEXT NOT NULL, PRIMARY KEY(match_id, player_id))",
-    );
-    storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS match_state_revisions (match_id TEXT PRIMARY KEY, revision INTEGER NOT NULL)",
-    );
-    storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS match_state_claims (match_id TEXT PRIMARY KEY, value_json TEXT NOT NULL)",
-    );
-    storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS match_state_effects (effect_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, next_at_ms INTEGER, attempts INTEGER NOT NULL DEFAULT 0, completed_at_ms INTEGER)",
-    );
-    storage.sql.exec(
-      "CREATE INDEX IF NOT EXISTS match_state_effects_due ON match_state_effects(next_at_ms)",
-    );
-    storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS match_state_event_receipts (operation_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL)",
-    );
     this.localTimers = new LocalMatchTimerStore(storage.sql);
   }
 

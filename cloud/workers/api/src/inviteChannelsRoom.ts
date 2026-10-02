@@ -130,17 +130,7 @@ export class InviteChannelsRoom {
   constructor(
     private readonly ctx: DurableObjectState,
     private readonly dependencies: InviteChannelsDependencies,
-  ) {
-    this.ctx.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS invite_metadata (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), invite_id TEXT NOT NULL, snapshot_json TEXT, revision INTEGER NOT NULL)",
-    );
-    this.ctx.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS invite_wagers (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), invite_id TEXT NOT NULL, snapshot_json TEXT, revision INTEGER NOT NULL, source_fingerprint TEXT)",
-    );
-    this.ctx.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS invite_refresh_schedule (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), next_at_ms INTEGER NOT NULL)",
-    );
-  }
+  ) {}
 
   pinInvite(inviteId: string, options: { cache?: boolean } = {}): void {
     if (

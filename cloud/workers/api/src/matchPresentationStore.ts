@@ -58,17 +58,7 @@ export class MatchPresentationStore {
   constructor(
     private readonly storage: DurableObjectStorage,
     private readonly dependencies: { pinInvite: (inviteId: string) => void },
-  ) {
-    this.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS match_presentations (match_id TEXT NOT NULL, actor_uid TEXT NOT NULL, emoji_id INTEGER NOT NULL, aura TEXT NOT NULL, revision INTEGER NOT NULL, operation_id TEXT, operation_json TEXT, PRIMARY KEY(match_id, actor_uid))",
-    );
-    this.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS frozen_match_presentations (match_id TEXT NOT NULL, actor_uid TEXT NOT NULL, emoji_id INTEGER NOT NULL, aura TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(match_id, actor_uid))",
-    );
-    this.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS match_presentation_seeds (match_id TEXT NOT NULL, actor_uid TEXT NOT NULL, invite_id TEXT NOT NULL, seed_digest TEXT NOT NULL, emoji_id INTEGER NOT NULL, aura TEXT NOT NULL, provenance TEXT NOT NULL, source_id TEXT NOT NULL, PRIMARY KEY(match_id, actor_uid))",
-    );
-  }
+  ) {}
 
   readPresentations(
     matchId: string,
