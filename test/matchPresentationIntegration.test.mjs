@@ -601,6 +601,147 @@ test("actual board hydration and late profile responses retain canonical and opt
   assert.deepEqual(rendered, [false, false, false]);
 });
 
+function watchOnlyAuraHarness(auras) {
+  const element = () => {
+    const attributes = new Map();
+    return {
+      getAttribute: (name) => attributes.get(name) ?? null,
+      getAttributeNS: (_namespace, name) => attributes.get(name) ?? null,
+      setAttribute: (name, value) => attributes.set(name, value),
+      removeAttribute: (name) => attributes.delete(name),
+    };
+  };
+  const avatars = [element(), element()];
+  const placeholders = [element(), element()];
+  for (const placeholder of placeholders) {
+    placeholder.setAttribute("display", "none");
+  }
+  const actualAuraVisibility = [false, false];
+  const presentations = [
+    { actorUid: "actor", emojiId: 1001, aura: auras[0] },
+    { actorUid: "guest", emojiId: 1002, aura: auras[1] },
+  ];
+  const newEmptyPlayerMetadata = () => ({ uid: "", emojiId: "", aura: "" });
+  const noop = () => {};
+  const board = compile(
+    `
+    let playerSideMetadata = newEmptyPlayerMetadata();
+    let opponentSideMetadata = newEmptyPlayerMetadata();
+    let playerInfoPlayerVisible = false;
+    let playerInfoOpponentVisible = false;
+    let playerInfoPlayerNameVisible = false;
+    let playerInfoOpponentNameVisible = false;
+    let playerScoreDisplayText = "";
+    let opponentScoreDisplayText = "";
+    ${functions(sourceFile("../src/game/board.ts"), [
+      "syncAvatarForCurrentMetadata",
+      "resetForNewGame",
+      "updateEmojiAndAuraIfNeeded",
+      "setupPlayerId",
+      "hideBoardPlayersInfo",
+      "showBoardPlayersInfo",
+    ])}
+    `,
+    {
+      newEmptyPlayerMetadata,
+      gameInputRuntime: {
+        isWatchOnly: true,
+        isOnlineGame: true,
+        isGameWithBot: false,
+        getDisplayedMatchPresentation: (uid) =>
+          presentations.find(
+            (value) =>
+              value.actorUid === uid || `new-${value.actorUid}` === uid,
+          ) ?? null,
+      },
+      storage: { getPlayerEmojiAura: () => "rainbow" },
+      slotIsOpponentForMetadataSide: (side) => side,
+      playerAvatar: avatars[0],
+      opponentAvatar: avatars[1],
+      playerAvatarPlaceholder: placeholders[0],
+      opponentAvatarPlaceholder: placeholders[1],
+      doNotShowPlayerAvatarPlaceholderAgain: true,
+      doNotShowOpponentAvatarPlaceholderAgain: true,
+      emojis: { getEmojiUrl: (id) => (id ? `emoji-${id}.webp` : "") },
+      SVG: {
+        setHidden: (target, hidden) => {
+          if (hidden) target.setAttribute("display", "none");
+          else target.removeAttribute("display");
+        },
+        setImageUrl: (target, url) => target.setAttribute("href", url),
+      },
+      showRaibowAura: (visible, _url, opponent) => {
+        actualAuraVisibility[opponent ? 1 : 0] = visible;
+      },
+      updateAuraForAvatarElement: noop,
+      setEndOfGameMarkers: noop,
+      clearVoiceReactionState: noop,
+      renderPlayersNamesLabels: noop,
+      recalculateDisplayNames: noop,
+      updateWagerPlayerUids: noop,
+      emitBoardPlayerInfoOverlayState: noop,
+      setInviteBotButtonVisible: noop,
+      setBotStrengthControlVisible: noop,
+      removeHighlights: noop,
+      cleanAllPixels: noop,
+      clearWagerPilesForNewMatch: noop,
+    },
+    `({
+      reset: resetForNewGame,
+      hide: hideBoardPlayersInfo,
+      show: showBoardPlayersInfo,
+      switchPlayers: () => {
+        setupPlayerId("new-actor", false);
+        setupPlayerId("new-guest", true);
+      },
+      restore: () => {
+        setupPlayerId("actor", false);
+        setupPlayerId("guest", true);
+        updateEmojiAndAuraIfNeeded("1001", ${JSON.stringify(auras[0])}, false);
+        updateEmojiAndAuraIfNeeded("1002", ${JSON.stringify(auras[1])}, true);
+      }
+    })`,
+  );
+  return { board, actualAuraVisibility };
+}
+
+for (const [label, auras] of [
+  ["player rainbow", ["rainbow", ""]],
+  ["opponent rainbow", ["", "rainbow"]],
+  ["both rainbow", ["rainbow", "rainbow"]],
+  ["neither rainbow", ["", ""]],
+]) {
+  test(`watch-only board reset restores unchanged appearance with ${label}`, () => {
+    const h = watchOnlyAuraHarness(auras);
+    const expected = auras.map((aura) => aura === "rainbow");
+    h.board.restore();
+    assert.deepEqual(h.actualAuraVisibility, expected);
+    h.board.reset();
+    assert.deepEqual(h.actualAuraVisibility, [false, false]);
+    h.board.restore();
+    assert.deepEqual(h.actualAuraVisibility, expected);
+  });
+}
+
+test("watch-only player identity changes restore the same rainbow appearance", () => {
+  const h = watchOnlyAuraHarness(["rainbow", "rainbow"]);
+  h.board.restore();
+  assert.deepEqual(h.actualAuraVisibility, [true, true]);
+  h.board.switchPlayers();
+  assert.deepEqual(h.actualAuraVisibility, [true, true]);
+});
+
+test("watch-only appearance refresh keeps hidden auras hidden until avatars are shown", () => {
+  const h = watchOnlyAuraHarness(["rainbow", "rainbow"]);
+  h.board.restore();
+  h.board.hide();
+  assert.deepEqual(h.actualAuraVisibility, [false, false]);
+  h.board.restore();
+  assert.deepEqual(h.actualAuraVisibility, [false, false]);
+  h.board.show();
+  assert.deepEqual(h.actualAuraVisibility, [true, true]);
+});
+
 test("actual presentation callback is appearance-only and respects hydration, actor aliases and historical views", () => {
   const values = new Map([
     ["invite/actor", appearance(2, 7)],

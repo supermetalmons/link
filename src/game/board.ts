@@ -1339,8 +1339,8 @@ function syncAvatarForCurrentMetadata(
       }
     }
     const didUpdateAuraVisibility = setAuraVisibilityIfNeeded(avatar, false);
+    showRaibowAura(false, emojis.pc, slotIsOpponent);
     if (didSetBotImage || didChangeVisibility || didUpdateAuraVisibility) {
-      showRaibowAura(false, emojis.pc, slotIsOpponent);
       try {
         updateAuraForAvatarElement(slotIsOpponent, avatar);
       } catch {}
@@ -1408,12 +1408,13 @@ function syncAvatarForCurrentMetadata(
           setHiddenIfNeeded(placeholder, true) || didChangeVisibility;
       }
     }
+    const auraVisible = aura === "rainbow" && !keepHiddenState;
     const didUpdateAuraVisibility = setAuraVisibilityIfNeeded(
       avatar,
-      aura === "rainbow",
+      auraVisible,
     );
+    showRaibowAura(auraVisible, emojiUrl, slotIsOpponent);
     if (didSetEmojiImage || didChangeVisibility || didUpdateAuraVisibility) {
-      showRaibowAura(aura === "rainbow", emojiUrl, slotIsOpponent);
       try {
         updateAuraForAvatarElement(slotIsOpponent, avatar);
       } catch {}
@@ -1431,8 +1432,8 @@ function syncAvatarForCurrentMetadata(
     }
   }
   const didUpdateAuraVisibility = setAuraVisibilityIfNeeded(avatar, false);
+  showRaibowAura(false, "", slotIsOpponent);
   if (didClearAvatarImage || didChangeVisibility || didUpdateAuraVisibility) {
-    showRaibowAura(false, "", slotIsOpponent);
     try {
       updateAuraForAvatarElement(slotIsOpponent, avatar);
     } catch {}
