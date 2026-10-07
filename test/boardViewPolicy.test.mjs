@@ -15,12 +15,35 @@ const context = {
 const controls = (overrides) =>
   deriveBoardViewControls({ ...context, ...overrides });
 
+const preservedGameControls = {
+  hideGameControls: false,
+  automoveVisible: null,
+  undoVisible: null,
+  undoEnabled: null,
+  hideTimers: false,
+};
+const waitingGameControls = {
+  hideGameControls: false,
+  automoveVisible: false,
+  undoVisible: false,
+  undoEnabled: false,
+  hideTimers: true,
+};
+const historicalGameControls = {
+  hideGameControls: true,
+  automoveVisible: null,
+  undoVisible: null,
+  undoEnabled: null,
+  hideTimers: true,
+};
+
 test("live views preserve end controls and local reaction state", () => {
   for (const isGameWithBot of [false, true]) {
     assert.deepEqual(controls({ isGameWithBot, isSeriesEnded: true }), {
       endMatchVisible: null,
       endMatchConfirmed: null,
       voiceReactionVisible: null,
+      ...preservedGameControls,
     });
   }
   for (const isWatchOnly of [false, true]) {
@@ -28,6 +51,7 @@ test("live views preserve end controls and local reaction state", () => {
       endMatchVisible: null,
       endMatchConfirmed: null,
       voiceReactionVisible: !isWatchOnly,
+      ...preservedGameControls,
     });
   }
 });
@@ -47,6 +71,7 @@ test("waiting keeps end available without changing confirmation", () => {
           endMatchVisible: true,
           endMatchConfirmed: null,
           voiceReactionVisible: isOnlineGame && !isWatchOnly,
+          ...waitingGameControls,
         },
       );
     }
@@ -59,6 +84,7 @@ test("historical participant controls follow terminal and pending state", () => 
     endMatchVisible: false,
     endMatchConfirmed: null,
     voiceReactionVisible: true,
+    ...historicalGameControls,
   });
   for (const terminal of [
     { isGameOver: true },
@@ -68,12 +94,14 @@ test("historical participant controls follow terminal and pending state", () => 
       endMatchVisible: true,
       endMatchConfirmed: null,
       voiceReactionVisible: true,
+      ...historicalGameControls,
     });
   }
   assert.deepEqual(controls({ ...historical, isSeriesEnded: true }), {
     endMatchVisible: true,
     endMatchConfirmed: true,
     voiceReactionVisible: true,
+    ...historicalGameControls,
   });
 });
 
@@ -94,6 +122,7 @@ test("historical spectators and local games do not inherit online end controls",
         endMatchVisible: false,
         endMatchConfirmed: null,
         voiceReactionVisible: false,
+        ...historicalGameControls,
       },
     );
   }
@@ -101,5 +130,6 @@ test("historical spectators and local games do not inherit online end controls",
     endMatchVisible: false,
     endMatchConfirmed: null,
     voiceReactionVisible: true,
+    ...historicalGameControls,
   });
 });

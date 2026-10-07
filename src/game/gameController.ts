@@ -158,7 +158,11 @@ import {
   toMonsColor,
   type TrustedMatchPairGame,
 } from "./historicalMatchModels";
-import { deriveBoardViewControls, type BoardViewMode } from "./boardViewPolicy";
+import {
+  deriveBoardViewControls,
+  type BoardViewControls,
+  type BoardViewMode,
+} from "./boardViewPolicy";
 
 function publishGameControlsContext() {
   updateGameControlsContext({
@@ -859,6 +863,24 @@ function playIncomingInviteReaction(
   playReaction(reaction);
 }
 
+function applyBoardViewGameControlPolicy(controls: BoardViewControls) {
+  if (controls.hideGameControls) {
+    disableAndHideUndoResignAndTimerControls();
+  }
+  if (controls.automoveVisible !== null) {
+    setAutomoveActionVisible(controls.automoveVisible);
+  }
+  if (controls.undoVisible !== null) {
+    setUndoVisible(controls.undoVisible);
+  }
+  if (controls.undoEnabled !== null) {
+    setUndoEnabled(controls.undoEnabled);
+  }
+  if (controls.hideTimers) {
+    hideTimerButtons();
+  }
+}
+
 function applyBoardUiForCurrentView() {
   const controls = deriveBoardViewControls({
     mode: boardViewMode,
@@ -887,8 +909,7 @@ function applyBoardUiForCurrentView() {
     if (controls.voiceReactionVisible !== null) {
       showVoiceReactionButton(controls.voiceReactionVisible);
     }
-    disableAndHideUndoResignAndTimerControls();
-    hideTimerButtons();
+    applyBoardViewGameControlPolicy(controls);
     Board.hideTimerCountdownDigits();
     Board.hideAllMoveStatuses();
     syncInviteBotIntoLocalGameButton();
@@ -905,10 +926,7 @@ function applyBoardUiForCurrentView() {
     if (controls.voiceReactionVisible !== null) {
       showVoiceReactionButton(controls.voiceReactionVisible);
     }
-    setAutomoveActionVisible(false);
-    setUndoVisible(false);
-    setUndoEnabled(false);
-    hideTimerButtons();
+    applyBoardViewGameControlPolicy(controls);
     Board.hideTimerCountdownDigits();
     Board.hideAllMoveStatuses();
     syncInviteBotIntoLocalGameButton();

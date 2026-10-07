@@ -14,6 +14,11 @@ export type BoardViewControls = {
   endMatchVisible: boolean | null;
   endMatchConfirmed: true | null;
   voiceReactionVisible: boolean | null;
+  hideGameControls: boolean;
+  automoveVisible: false | null;
+  undoVisible: false | null;
+  undoEnabled: false | null;
+  hideTimers: boolean;
 };
 
 export const deriveBoardViewControls = ({
@@ -33,6 +38,11 @@ export const deriveBoardViewControls = ({
         (isSeriesEnded || isGameOver || isWaitingForRematchResponse),
       endMatchConfirmed: isOnlineParticipant && isSeriesEnded ? true : null,
       voiceReactionVisible: isGameWithBot || isOnlineParticipant,
+      hideGameControls: true,
+      automoveVisible: null,
+      undoVisible: null,
+      undoEnabled: null,
+      hideTimers: true,
     };
   }
   if (mode === "waitingLive") {
@@ -40,11 +50,21 @@ export const deriveBoardViewControls = ({
       endMatchVisible: true,
       endMatchConfirmed: null,
       voiceReactionVisible: isOnlineParticipant,
+      hideGameControls: false,
+      automoveVisible: false,
+      undoVisible: false,
+      undoEnabled: false,
+      hideTimers: true,
     };
   }
   return {
     endMatchVisible: null,
     endMatchConfirmed: null,
     voiceReactionVisible: isOnlineGame ? !isWatchOnly : null,
+    hideGameControls: false,
+    automoveVisible: null,
+    undoVisible: null,
+    undoEnabled: null,
+    hideTimers: false,
   };
 };

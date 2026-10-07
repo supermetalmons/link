@@ -1,8 +1,26 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { registerHooks } from "node:module";
 import test from "node:test";
 import ts from "typescript";
 import { deriveBoardViewControls } from "../src/game/boardViewPolicy.ts";
+
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (
+      context.parentURL?.endsWith(".ts") &&
+      specifier.startsWith("./") &&
+      !/\.[^/]+$/.test(specifier)
+    ) {
+      return nextResolve(`${specifier}.ts`, context);
+    }
+    return nextResolve(specifier, context);
+  },
+});
+
+const { createGameControlsState, gameControlsReducer } =
+  await import("../src/ui/controls/bottomControlsState.ts");
+const timerConfig = { duration: 60, progress: 15, requestDate: 1000 };
 
 const source = ts.createSourceFile(
   "gameController.ts",
@@ -18,6 +36,7 @@ const declarations = [
   "clearViewedRematchState",
   "nextBoardRenderSession",
   "isBoardRenderSessionActive",
+  "applyBoardViewGameControlPolicy",
   "applyBoardUiForCurrentView",
   "clearBoardViewInputs",
   "prepareLiveBoardView",
@@ -35,9 +54,13 @@ const declarations = [
   return declaration.getText(source).replace(/^export /, "");
 });
 
-function harness(overrides = {}) {
+function harness(
+  overrides = {},
+  initialControls = createGameControlsState(timerConfig),
+) {
   const events = [];
   const contexts = [];
+  let gameControls = initialControls;
   const initial = {
     selectedProblem: null,
     puzzleMode: false,
@@ -131,6 +154,24 @@ function harness(overrides = {}) {
       ].map((name) => [name, record(name)]),
     ),
   };
+  for (const [name, action] of [
+    [
+      "disableAndHideUndoResignAndTimerControls",
+      () => ({ type: "hideGameControls" }),
+    ],
+    [
+      "setAutomoveActionVisible",
+      (visible) => ({ type: "setAutomoveVisible", visible }),
+    ],
+    ["setUndoVisible", (visible) => ({ type: "setUndoVisible", visible })],
+    ["setUndoEnabled", (enabled) => ({ type: "setUndoEnabled", enabled })],
+    ["hideTimerButtons", () => ({ type: "hideTimers" })],
+  ]) {
+    dependencies[name] = (...args) => {
+      record(name)(...args);
+      gameControls = gameControlsReducer(gameControls, action(...args));
+    };
+  }
   const { outputText } = ts.transpileModule(
     `${Object.keys(initial)
       .map((name) => `let ${name} = initial.${name};`)
@@ -155,6 +196,7 @@ function harness(overrides = {}) {
     ...api,
     contexts,
     events,
+    controls: () => gameControls,
     names: () => events.map(({ name }) => name),
   };
 }
@@ -304,6 +346,90 @@ test("live local UI leaves existing end and reaction controls untouched", () => 
     "showWaitingStateText",
     "syncInviteBotIntoLocalGameButton",
   ]);
+});
+
+test("historical UI clears timer claims before presentation and hides controls before board digits", () => {
+  const h = harness();
+  h.applyUi();
+  assert.deepEqual(h.names(), [
+    "clearTimerVictoryClaimTimeout",
+    "stopMonsBoardAsDisplayAnimations",
+    "showBoardPlayersInfo",
+    "showWaitingStateText",
+    "setEndMatchVisible",
+    "setEndMatchConfirmed",
+    "showVoiceReactionButton",
+    "disableAndHideUndoResignAndTimerControls",
+    "hideTimerButtons",
+    "hideTimerCountdownDigits",
+    "hideAllMoveStatuses",
+    "syncInviteBotIntoLocalGameButton",
+  ]);
+});
+
+test("active online UI changes only reaction visibility between board appearance and bot controls", () => {
+  for (const isWatchOnly of [false, true]) {
+    const h = harness({ boardViewMode: "activeLive", isWatchOnly });
+    h.applyUi();
+    assert.deepEqual(h.names(), [
+      "stopMonsBoardAsDisplayAnimations",
+      "showBoardPlayersInfo",
+      "showWaitingStateText",
+      "showVoiceReactionButton",
+      "syncInviteBotIntoLocalGameButton",
+    ]);
+    assert.deepEqual(
+      h.events.find(({ name }) => name === "showVoiceReactionButton").args,
+      [!isWatchOnly],
+    );
+  }
+});
+
+test("view controls preserve independent timer and action state while clearing mode-specific controls", () => {
+  for (const confirmation of ["none", "resign", "timer", "claim"]) {
+    const initial = {
+      undo: { visible: true, enabled: true },
+      automove: { visible: true, enabled: false },
+      resignVisible: true,
+      primaryAction: "rematch",
+      timer: {
+        mode: "progressing",
+        config: timerConfig,
+        startEnabled: true,
+        claimEnabled: false,
+      },
+      confirmation,
+    };
+    for (const boardViewMode of [
+      "activeLive",
+      "waitingLive",
+      "historicalView",
+    ]) {
+      const h = harness({ boardViewMode }, initial);
+      h.applyUi();
+      const controls = h.controls();
+      if (boardViewMode === "activeLive") {
+        assert.equal(controls, initial);
+        continue;
+      }
+      assert.deepEqual(controls.undo, { visible: false, enabled: false });
+      assert.deepEqual(controls.automove, { visible: false, enabled: false });
+      assert.equal(controls.primaryAction, "rematch");
+      assert.equal(controls.timer.config, timerConfig);
+      assert.deepEqual(controls.timer, {
+        ...initial.timer,
+        mode: "hidden",
+        startEnabled: false,
+      });
+      assert.equal(controls.resignVisible, boardViewMode === "waitingLive");
+      assert.equal(
+        controls.confirmation,
+        boardViewMode === "waitingLive" && confirmation === "resign"
+          ? "resign"
+          : "none",
+      );
+    }
+  }
 });
 
 test("scrubbing a live match changes flashback without entering historical view", () => {

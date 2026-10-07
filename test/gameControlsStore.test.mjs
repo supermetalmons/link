@@ -110,7 +110,9 @@ test("waiting and historical policy retain explicit confirmation and local live 
     });
     store.updatePresentation(
       Object.fromEntries(
-        Object.entries(controls).filter(([, value]) => value !== null),
+        ["endMatchVisible", "endMatchConfirmed", "voiceReactionVisible"]
+          .map((key) => [key, controls[key]])
+          .filter(([, value]) => value !== null),
       ),
     );
   };
@@ -125,6 +127,15 @@ test("waiting and historical policy retain explicit confirmation and local live 
   assert.equal(store.getSnapshot().presentation.endMatchVisible, false);
   assert.equal(store.getSnapshot().presentation.endMatchConfirmed, true);
   assert.equal(store.getSnapshot().presentation.voiceReactionVisible, true);
+  for (const key of [
+    "hideGameControls",
+    "automoveVisible",
+    "undoVisible",
+    "undoEnabled",
+    "hideTimers",
+  ]) {
+    assert.equal(Object.hasOwn(store.getSnapshot().presentation, key), false);
+  }
 });
 
 test("view selectors use published role, completion, series and puzzle facts", () => {
