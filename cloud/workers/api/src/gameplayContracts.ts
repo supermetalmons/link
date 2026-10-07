@@ -11,7 +11,7 @@ export type GameSessionRepository = InviteAccessRepository &
     GameSessionPort,
     "readAutomatchEntry" | "readMutationReceipt" | "commitSessionChanges"
   > &
-  Pick<MatchStatePort, "readMatchRecord">;
+  Pick<MatchStatePort, "readMatchRecord" | "readMatchRecords">;
 
 export type AutomatchRepository = ProfileOwnershipReader &
   Pick<

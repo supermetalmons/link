@@ -1411,6 +1411,116 @@ test("proposes and ends rematches through participant-owned writes", async () =>
   );
 });
 
+test("batches rematch participants in actor order and replays without reading again", async () => {
+  for (const role of ["host", "guest"] as const) {
+    const actorUid = role === "host" ? identity.uid : "guest-login";
+    const opponentUid = role === "host" ? "guest-login" : identity.uid;
+    const state = repository({
+      "invites/abcdefghijk": {
+        version: 2,
+        hostId: identity.uid,
+        hostColor: "white",
+        guestId: "guest-login",
+      },
+    });
+    const batches: Array<
+      Parameters<GameSessionRepository["readMatchRecords"]>[0]
+    > = [];
+    const opponentMatch = match(role === "host" ? "white" : "black");
+    state.repository.readMatchRecords = async (inputs) => {
+      batches.push([...inputs]);
+      return [null, opponentMatch];
+    };
+    state.repository.readMatchRecord = async () => {
+      throw new Error("unexpected-scalar-match-read");
+    };
+    const request: ProposeRematchRequest = {
+      operationId: ids.propose,
+      inviteId: "abcdefghijk",
+      ...presentation(),
+    };
+    const dependencies = { createOwnerId: () => "owner", now: () => 1_000 };
+
+    const result = await proposeRematch(
+      { uid: actorUid },
+      request,
+      state.repository,
+      dependencies,
+    );
+    assert.deepEqual(batches, [
+      [
+        { playerId: actorUid, matchId: "abcdefghijk1" },
+        { playerId: opponentUid, matchId: "abcdefghijk1" },
+      ],
+    ]);
+    assert.equal(result.actorUid, actorUid);
+    assert.equal(result.match.color, role === "host" ? "black" : "white");
+    assert.equal(result.match.fen, opponentMatch.fen);
+    assert.equal(result.match.gameVariant, opponentMatch.gameVariant);
+    assert.ok(state.patches[0][`players/${actorUid}/matches/abcdefghijk1`]);
+    const committed = [...state.values];
+
+    assert.deepEqual(
+      await proposeRematch(
+        { uid: actorUid },
+        request,
+        state.repository,
+        dependencies,
+      ),
+      result,
+    );
+    assert.equal(batches.length, 1);
+    assert.equal(state.patches.length, 1);
+    assert.deepEqual([...state.values], committed);
+  }
+});
+
+test("a failed rematch batch leaves session state and projections untouched", async () => {
+  const state = repository({
+    "invites/abcdefghijk": {
+      version: 2,
+      hostId: identity.uid,
+      hostColor: "white",
+      guestId: "guest-login",
+    },
+  });
+  const initial = [...state.values];
+  const failure = new Error("match-batch-unavailable");
+  let reads = 0;
+  let projections = 0;
+  state.repository.readMatchRecords = async () => {
+    reads++;
+    throw failure;
+  };
+  state.repository.readMatchRecord = async () => {
+    throw new Error("unexpected-scalar-match-read");
+  };
+
+  await assert.rejects(
+    proposeRematch(
+      identity,
+      {
+        operationId: ids.propose,
+        inviteId: "abcdefghijk",
+        ...presentation(),
+      },
+      state.repository,
+      {
+        createOwnerId: () => "owner",
+        now: () => 1_000,
+        enqueueProfileGameProjection: async () => {
+          projections++;
+        },
+      },
+    ),
+    (error) => error === failure,
+  );
+  assert.equal(reads, 1);
+  assert.equal(projections, 0);
+  assert.deepEqual(state.patches, []);
+  assert.deepEqual([...state.values], initial);
+});
+
 test("does not propose a rematch between one canonical profile", async () => {
   const state = repository({
     "invites/abcdefghijk": {

@@ -502,12 +502,9 @@ export async function proposeRematch(
         throw failedPrecondition("rematch-unavailable");
       }
       const matchId = `${request.inviteId}${index}`;
-      const [storedMatch, storedOpponent] = await Promise.all([
-        repository.readMatchRecord({ playerId: participant.actorUid, matchId }),
-        repository.readMatchRecord({
-          playerId: participant.opponentUid,
-          matchId: matchId,
-        }),
+      const [storedMatch, storedOpponent] = await repository.readMatchRecords([
+        { playerId: participant.actorUid, matchId },
+        { playerId: participant.opponentUid, matchId },
       ]);
       const existingMatch = normalizeMatch(storedMatch);
       const color = rematchColor(invite, participant.role, index);
