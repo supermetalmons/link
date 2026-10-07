@@ -2,6 +2,17 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import {
+  buildTelegramSendDesired,
+  createTelegramDeliveryEngine,
+  createTelegramLocalRetryBarrier,
+  type TelegramRetrySchedule,
+} from "../../../runtime/telegram/deliveryEngine.js";
+import {
+  readDelivery,
+  writeDelivery,
+} from "../../../runtime/telegram/deliveryState.js";
+import { normalizeTaskPayload } from "../../../runtime/telegram/taskIdentity.js";
+import {
   createD1TelegramAnnouncementRepository,
   createD1TelegramRepository,
   MAX_D1_TRANSACTION_ATTEMPTS,
@@ -138,6 +149,150 @@ describe("Telegram D1 repositories", () => {
       ),
     );
     expect(await repositories[0].getMessage("counter")).toEqual({ count: 12 });
+  });
+
+  it("preserves delivery state across queued retries and cold engine instances", async () => {
+    let nowMs = 1_000;
+    let sends = 0;
+    const tasks: TelegramRetrySchedule[] = [];
+    const desired = buildTelegramSendDesired({
+      destination: "community",
+      instanceKey: "instance-1",
+      text: "test delivery",
+      sourceRevision: "source-1",
+    });
+    const repository = createD1TelegramRepository(testEnv.TELEGRAM_DB);
+    await repository.transactMessage("cold-engine", () => ({
+      value: {
+        desired,
+        futureRecord: { keep: true },
+        delivery: { futureDelivery: { keep: true }, explicitNull: null },
+      },
+    }));
+    await testEnv.TELEGRAM_DB.prepare(
+      "UPDATE telegram_delivery_control SET record_json = ? WHERE singleton = 1",
+    )
+      .bind(JSON.stringify({ futureControl: { keep: true } }))
+      .run();
+    const createEngine = () =>
+      createTelegramDeliveryEngine({
+        repository: createD1TelegramRepository(testEnv.TELEGRAM_DB, {
+          now: () => nowMs,
+        }),
+        client: {
+          async sendTelegramMessage() {
+            sends++;
+            return sends === 1
+              ? {
+                  ok: false,
+                  classification: "retryable",
+                  code: "temporary-rejection",
+                  description: "try again",
+                  httpStatus: 503,
+                  retryAfterSeconds: null,
+                }
+              : { ok: true, outcome: "sent", httpStatus: 200, messageId: 77 };
+          },
+          async editTelegramMessage() {
+            throw new Error("unexpected edit");
+          },
+          async deleteTelegramMessage() {
+            throw new Error("unexpected delete");
+          },
+        },
+        now: () => nowMs,
+        createOwnerToken: () => `owner-${nowMs}`,
+        createAttemptId: () => `attempt-${nowMs}`,
+        resolveDestination: () => "test-chat",
+        localRetryBarrier: createTelegramLocalRetryBarrier(),
+        async scheduleRetry(task) {
+          tasks.push(task);
+          return { scheduled: true };
+        },
+        logger: { error() {}, info() {} },
+      });
+    await expect(
+      createEngine().reconcile({ messageKey: "cold-engine" }),
+    ).resolves.toMatchObject({
+      status: "retryable",
+      scheduled: true,
+    });
+    expect(tasks).toHaveLength(1);
+    const task = normalizeTaskPayload(tasks[0]);
+    nowMs = Number(task.retryAtMs);
+    const retryInput = {
+      ...task,
+      requestedRevision: task.revision,
+      requestedGeneration: task.generation,
+    };
+    await expect(createEngine().reconcile(retryInput)).resolves.toMatchObject({
+      status: "delivered",
+    });
+    await expect(createEngine().reconcile(retryInput)).resolves.toMatchObject({
+      status: "settled",
+    });
+    expect(sends).toBe(2);
+    const stored = await repository.getMessage("cold-engine");
+    expect(stored).toMatchObject({
+      desired,
+      futureRecord: { keep: true },
+      delivery: {
+        status: "delivered",
+        futureDelivery: { keep: true },
+        explicitNull: null,
+      },
+      applied: { messageId: 77 },
+    });
+    expect(stored).not.toHaveProperty("delivery.source");
+    expect(stored).not.toHaveProperty("delivery.sendInFlight");
+    expect(stored).not.toHaveProperty("delivery.leaseOwner");
+    const control = await testEnv.TELEGRAM_DB.prepare(
+      "SELECT record_json FROM telegram_delivery_control WHERE singleton = 1",
+    ).first<{ record_json: string }>();
+    expect(JSON.parse(control!.record_json)).toEqual({
+      futureControl: { keep: true },
+    });
+  });
+
+  it("reapplies typed transitions to authoritative state after optimistic conflicts", async () => {
+    const repository = createD1TelegramRepository(testEnv.TELEGRAM_DB);
+    await repository.transactMessage("typed-conflict", () => ({
+      value: { delivery: { futureDelivery: { keep: true }, attempts: 0 } },
+    }));
+    let decisions = 0;
+    await Promise.all(
+      Array.from({ length: 8 }, (_, index) =>
+        createD1TelegramRepository(testEnv.TELEGRAM_DB).transactMessage(
+          "typed-conflict",
+          (current) => {
+            decisions++;
+            const delivery = readDelivery(current?.delivery);
+            return {
+              value: {
+                ...current,
+                delivery: writeDelivery({
+                  ...delivery.source,
+                  status: "processing",
+                  revision: "revision-1",
+                  attempts: delivery.attempts + 1,
+                  leaseOwner: `owner-${index}`,
+                  leaseExpiresAtMs: 61_000,
+                  startedAtMs: 1_000,
+                }),
+              },
+            };
+          },
+        ),
+      ),
+    );
+    expect(decisions).toBeGreaterThan(8);
+    expect(await repository.getMessage("typed-conflict")).toMatchObject({
+      delivery: {
+        status: "processing",
+        attempts: 8,
+        futureDelivery: { keep: true },
+      },
+    });
   });
 
   it("deletes existing and absent records while retaining transaction decisions", async () => {
