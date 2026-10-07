@@ -10,6 +10,7 @@ import {
   canonical as eventCanonical,
   digest as eventDigest,
 } from "../src/eventTransitionCodec.ts";
+import { canonicalMatchStateJson } from "../src/matchStateLogic.ts";
 
 const codecs = [
   {
@@ -28,6 +29,15 @@ const codecs = [
     error: {
       constructor: Error,
       message: "event-transition-invalid-effect",
+    },
+  },
+  {
+    name: "match state",
+    canonical: canonicalMatchStateJson,
+    digest: async (value: unknown) => sha256Hex(canonicalMatchStateJson(value)),
+    error: {
+      constructor: TypeError,
+      message: "match-state-invalid-json",
     },
   },
 ];

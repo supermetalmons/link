@@ -4,44 +4,14 @@ import type {
   EventProgressWorkflowParams,
 } from "./eventProgressCodec.ts";
 import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
-import {
-  acquireEventWriteAdmission,
-  EventWritesDisabled,
-  releaseEventWriteAdmission,
-  type EventWriteAdmission,
-} from "./eventD1.ts";
+import type { EventWriteAdmission } from "./eventD1.ts";
+import { withEventWriteAdmission } from "./eventWriteAdmission.ts";
 
 export async function withEventProgressDispatchAdmission(
   db: D1Database,
   work: (admission: EventWriteAdmission) => Promise<void>,
 ): Promise<void> {
-  let admission: EventWriteAdmission;
-  try {
-    admission = await acquireEventWriteAdmission(db);
-  } catch (error) {
-    if (error instanceof EventWritesDisabled) return;
-    throw error;
-  }
-  try {
-    await work(admission);
-  } finally {
-    let failureKind: string | null = null;
-    try {
-      if (!(await releaseEventWriteAdmission(db, admission))) {
-        failureKind = "unconfirmed";
-      }
-    } catch (error) {
-      failureKind = error instanceof Error ? error.name : typeof error;
-    }
-    if (failureKind) {
-      console.error(
-        JSON.stringify({
-          event: "event_progress_dispatch_admission_release_failed",
-          kind: failureKind,
-        }),
-      );
-    }
-  }
+  return withEventWriteAdmission(db, { kind: "dispatch" }, work);
 }
 
 async function ensureEventProgressWorkflowInstance(

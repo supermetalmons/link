@@ -251,7 +251,13 @@ async function insertProjectionRating(
   const value = {
     operationId,
     ...fields,
-    payload: { ...fields, retained: [null, { nested: "retained" }] },
+    payload: {
+      ...fields,
+      retained: [null, { nested: "retained" }],
+      eventProgressReason: null,
+      profileGameProjectionReason: null,
+      telegramProjectionReason: null,
+    },
     ...overrides,
   };
   await commitCanonicalPlan(testEnv.PROFILE_DB, {
@@ -288,18 +294,21 @@ const ratingDiscoveryCases = [
   {
     list: "listDueRatingEventProgress",
     claim: "claimRatingEventProgress",
+    mark: "markRatingEventProgress",
     field: "eventProgress",
     prefix: "event_progress",
   },
   {
     list: "listDueRatingProfileGameProjections",
     claim: "claimRatingProfileGameProjection",
+    mark: "markRatingProfileGameProjection",
     field: "profileGameProjection",
     prefix: "profile_game_projection",
   },
   {
     list: "listDueRatingTelegramProjections",
     claim: "claimRatingTelegramProjection",
+    mark: "markRatingTelegramProjection",
     field: "telegramProjection",
     prefix: "telegram_projection",
   },
@@ -2751,7 +2760,9 @@ describe("canonical gameplay repositories", () => {
       for (const update of updates) {
         const assignments = update.split("SET")[1].split("WHERE")[0];
         expect(
-          assignments.split(",").map((value) => value.split("=")[0].trim()),
+          [...assignments.matchAll(/\b([a-z_]+)\s*=/g)].map(
+            (match) => match[1],
+          ),
         ).toEqual([
           "payload_json",
           `${prefix}_state`,
@@ -2765,6 +2776,215 @@ describe("canonical gameplay repositories", () => {
           /^\s*SELECT \* FROM rating_updates\b/.test(query),
         ),
       ).toHaveLength(3);
+    },
+  );
+
+  it.each(ratingDiscoveryCases)(
+    "patches $field JSON with exact scalar bytes and bounded write bindings",
+    async ({ claim, mark, field, prefix }) => {
+      const operationId = `projection-json-${prefix}`;
+      const initial = await insertProjectionRating(operationId);
+      const archive = "retained-match-payload-".repeat(5_000);
+      let expectedPayload = {
+        ...initial.payload,
+        archive,
+        retained: {
+          text: 'snow-雪 😀\n\u0000quote"slash\\lone-\ud800',
+          numbers: [1.2e-7, 1e21, 1.2345678901234567, Number.MAX_SAFE_INTEGER],
+          values: [null, true, false],
+        },
+      };
+      await testEnv.PROFILE_DB.prepare(
+        "UPDATE rating_updates SET payload_json = ? WHERE operation_id = ?",
+      )
+        .bind(JSON.stringify(expectedPayload), operationId)
+        .run();
+      const readRow = () =>
+        testEnv.PROFILE_DB.prepare(
+          "SELECT * FROM rating_updates WHERE operation_id = ?",
+        )
+          .bind(operationId)
+          .first<Record<string, unknown>>();
+      const original = await readRow();
+      const queries: string[] = [];
+      const writes: Array<{ query: string; bindings: unknown[] }> = [];
+      const db = beforeMatchingBatch(
+        testEnv.PROFILE_DB,
+        () => false,
+        async () => {},
+        (query) => queries.push(query),
+        (query, bindings) => {
+          if (/^\s*UPDATE rating_updates\b/.test(query)) {
+            writes.push({ query, bindings });
+          }
+        },
+      );
+      const rating = projectionRatingRepository(db);
+      await expect(
+        rating[claim](operationId, 1, Number.MAX_SAFE_INTEGER),
+      ).resolves.toBe(true);
+      expectedPayload = {
+        ...expectedPayload,
+        [`${field}UpdatedAtMs`]: Number.MAX_SAFE_INTEGER,
+      };
+      expect(await readRow()).toEqual({
+        ...original,
+        payload_json: JSON.stringify(expectedPayload),
+        [`${prefix}_updated_at_ms`]: Number.MAX_SAFE_INTEGER,
+        revision: 2,
+      });
+      const reasons = [
+        undefined,
+        " \t ",
+        ' snow-雪 😀\n\u0000quote"slash\\ ',
+        "lone-\ud800",
+        "[1]",
+        "null",
+      ];
+      for (const [index, reason] of reasons.entries()) {
+        const state = index % 2 === 0 ? "done" : "dead";
+        const updatedAtMs = 3_000 + index;
+        await rating[mark](operationId, state, updatedAtMs, reason);
+        expectedPayload = {
+          ...expectedPayload,
+          [`${field}State`]: state,
+          [`${field}UpdatedAtMs`]: updatedAtMs,
+          [`${field}Reason`]: reason?.trim() || null,
+        };
+        expect(await readRow()).toEqual({
+          ...original,
+          payload_json: JSON.stringify(expectedPayload),
+          [`${prefix}_state`]: state,
+          [`${prefix}_updated_at_ms`]: updatedAtMs,
+          revision: index + 3,
+        });
+      }
+      expect(writes).toHaveLength(reasons.length + 1);
+      expect(
+        queries.filter((query) =>
+          /^\s*SELECT \* FROM rating_updates\b/.test(query),
+        ),
+      ).toHaveLength(reasons.length + 1);
+      for (const { query, bindings } of writes) {
+        expect(query).toContain("json_set(payload_json,");
+        expect(query.match(/json\(\?\)/g)).toHaveLength(3);
+        const encoded = JSON.stringify(bindings);
+        expect(encoded).not.toContain("retained-match-payload-");
+        expect(new TextEncoder().encode(encoded).byteLength).toBeLessThan(512);
+      }
+    },
+  );
+
+  it.each(ratingDiscoveryCases)(
+    "preserves $field legacy JSON through the full-payload fallback",
+    async ({ mark, field, prefix }) => {
+      const variants = [
+        "whitespace",
+        "duplicate key",
+        "escaped key",
+        "numeric spelling",
+        "escaped text",
+        "missing reason",
+        "missing timestamp fallback",
+        "unrelated normalization",
+        "NUL state key",
+        "NUL timestamp key",
+        "NUL reason key",
+      ] as const;
+      for (const [index, variant] of variants.entries()) {
+        const operationId = `projection-legacy-json-${prefix}-${index}`;
+        const initial = await insertProjectionRating(operationId);
+        const payload = { ...initial.payload };
+        if (variant === "missing reason") delete payload[`${field}Reason`];
+        if (variant === "missing timestamp fallback")
+          delete payload.updatedAtMs;
+        if (variant === "unrelated normalization") {
+          delete payload[
+            field === "telegramProjection"
+              ? "profileGameProjectionState"
+              : "telegramProjectionState"
+          ];
+        }
+        let raw = JSON.stringify(payload);
+        if (variant === "whitespace") raw = JSON.stringify(payload, null, 2);
+        if (variant === "duplicate key") {
+          raw = raw.replace(
+            `"${field}State":"pending"`,
+            `"${field}State":"dead","${field}State":"pending"`,
+          );
+        }
+        if (variant === "escaped key") {
+          raw = raw.replace(`"${field}State"`, `"${field}Stat\\u0065"`);
+        }
+        if (variant === "numeric spelling") {
+          raw = raw.replace('"updatedAtMs":2000', '"updatedAtMs":2e3');
+        }
+        if (variant === "escaped text") {
+          raw = raw.replace('"nested":"retained"', '"nested":"r\\u0065tained"');
+        }
+        const nulField =
+          variant === "NUL state key"
+            ? `${field}State`
+            : variant === "NUL timestamp key"
+              ? `${field}UpdatedAtMs`
+              : variant === "NUL reason key"
+                ? `${field}Reason`
+                : null;
+        if (nulField) {
+          raw = JSON.stringify({
+            [`${nulField}\u0000suffix`]: "retained",
+            ...payload,
+          });
+        }
+        await testEnv.PROFILE_DB.prepare(
+          "UPDATE rating_updates SET payload_json = ? WHERE operation_id = ?",
+        )
+          .bind(raw, operationId)
+          .run();
+        const writes: Array<{ query: string; bindings: unknown[] }> = [];
+        const db = beforeMatchingBatch(
+          testEnv.PROFILE_DB,
+          () => false,
+          async () => {},
+          undefined,
+          (query, bindings) => {
+            if (/^\s*UPDATE rating_updates\b/.test(query)) {
+              writes.push({ query, bindings });
+            }
+          },
+        );
+        await projectionRatingRepository(db)[mark](
+          operationId,
+          "done",
+          3_000,
+          " reason ",
+        );
+        const expected = JSON.stringify({
+          ...JSON.parse(raw),
+          updatedAtMs: initial.updatedAtMs,
+          [`${field}State`]: "done",
+          [`${field}UpdatedAtMs`]: 3_000,
+          [`${field}Reason`]: "reason",
+        });
+        expect(writes, variant).toHaveLength(1);
+        expect(writes[0].query, variant).not.toContain("json_set(");
+        expect(writes[0].bindings, variant).toContain(expected);
+        expect(
+          await testEnv.PROFILE_DB.prepare(
+            `SELECT payload_json, revision, ${prefix}_state AS state,
+                    ${prefix}_updated_at_ms AS updated_at_ms
+             FROM rating_updates WHERE operation_id = ?`,
+          )
+            .bind(operationId)
+            .first(),
+          variant,
+        ).toEqual({
+          payload_json: expected,
+          revision: 2,
+          state: "done",
+          updated_at_ms: 3_000,
+        });
+      }
     },
   );
 

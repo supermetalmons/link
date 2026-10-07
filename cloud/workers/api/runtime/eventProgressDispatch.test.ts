@@ -1,7 +1,7 @@
 import type { D1Migration } from "cloudflare:test";
 import type { WorkflowStep } from "cloudflare:workers";
 import { env } from "cloudflare:workers";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
 import { buildEventAnnouncementPlan } from "../src/eventPrizeAnnouncementSchedule.ts";
 import { runEventAnnouncementWorkflow } from "../src/eventPrizeAnnouncementWorkflow.ts";
@@ -164,6 +164,58 @@ describe("event-progress Workflow dispatch admissions", () => {
     ).toEqual(plan.outbox);
     expect(await admissionCount()).toBe(0);
   });
+
+  for (const providerFails of [false, true]) {
+    it.each(["unconfirmed", "throws"] as const)(
+      `preserves ${providerFails ? "failed" : "successful"} direct dispatch when admission release %s`,
+      async (release) => {
+        const { plan } = await seedOutbox();
+        const failure = new Error("provider-dispatch-failed");
+        const f = environment();
+        if (providerFails) {
+          f.value.EVENT_PROGRESS_WORKFLOW.createBatch = async () => {
+            throw failure;
+          };
+          f.value.EVENT_PROGRESS_WORKFLOW.get = async () => {
+            throw new Error("workflow-not-found");
+          };
+        }
+        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+        await testEnv.EVENT_DB.prepare(
+          `CREATE TRIGGER fail_dispatch_admission_release BEFORE DELETE ON event_write_admissions
+           BEGIN SELECT ${release === "unconfirmed" ? "RAISE(IGNORE)" : "RAISE(ABORT, 'dispatch-admission-release-failed')"}; END`,
+        ).run();
+        try {
+          const operation = ensureEventProgressWorkflow(f.value, plan);
+          if (providerFails) await expect(operation).rejects.toBe(failure);
+          else await expect(operation).resolves.toBeUndefined();
+          expect(await admissionCount()).toBe(1);
+          expect(
+            await readEventOwnedPath(
+              testEnv.EVENT_DB,
+              `eventProgressOutbox/${plan.outboxId}`,
+            ),
+          ).toEqual(plan.outbox);
+          expect(
+            errors.mock.calls.map(([entry]) => JSON.parse(String(entry))),
+          ).toEqual([
+            {
+              event: "event_progress_dispatch_admission_release_failed",
+              kind: release === "unconfirmed" ? "unconfirmed" : "Error",
+            },
+          ]);
+        } finally {
+          errors.mockRestore();
+          await testEnv.EVENT_DB.batch([
+            testEnv.EVENT_DB.prepare(
+              "DROP TRIGGER fail_dispatch_admission_release",
+            ),
+            testEnv.EVENT_DB.prepare("DELETE FROM event_write_admissions"),
+          ]);
+        }
+      },
+    );
+  }
 
   it("isolates BLOB outbox IDs so healthy dispatch and scheduled recovery continue", async () => {
     const { plan, repository } = await seedOutbox();

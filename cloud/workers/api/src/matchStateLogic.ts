@@ -12,6 +12,7 @@ import {
   parseStrictMatchTimer,
 } from "@mons/shared/timers";
 import { AuthApiFailure } from "./authErrors.ts";
+import { canonicalJson } from "./canonicalJson.ts";
 import { isCanonicalLoginUid } from "./recordKeys.ts";
 import type { MatchStateJson, MatchStateRecord } from "./matchStateTypes.ts";
 
@@ -141,22 +142,7 @@ export function isCommittedMatchStateClaim(
 }
 
 export function canonicalMatchStateJson(value: unknown): string {
-  if (value === null) return "null";
-  if (typeof value === "string" || typeof value === "boolean") {
-    return JSON.stringify(value);
-  }
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalMatchStateJson).join(",")}]`;
-  }
-  const record = matchStateRecord(value);
-  if (!record) throw new TypeError("match-state-invalid-json");
-  return `{${Object.keys(record)
-    .sort()
-    .map(
-      (key) => `${JSON.stringify(key)}:${canonicalMatchStateJson(record[key])}`,
-    )
-    .join(",")}}`;
+  return canonicalJson(value, () => {
+    throw new TypeError("match-state-invalid-json");
+  });
 }

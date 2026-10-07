@@ -605,6 +605,12 @@ export type CanonicalMutation =
       projection: CanonicalRatingProjectionKind;
       value: CanonicalRatingUpdateValue;
     }
+  | {
+      kind: "patch-rating-projection";
+      currentRevision: number;
+      projection: CanonicalRatingProjectionKind;
+      value: CanonicalRatingUpdateValue;
+    }
   | { kind: "delete-rating-update"; operationId: string }
   | { kind: "insert-wager-settlement"; value: CanonicalWagerSettlement };
 

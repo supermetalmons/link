@@ -12,6 +12,7 @@ import {
   type CanonicalRatingProjectionKind,
   type CanonicalMutation,
   type D1Value,
+  type JsonObject,
 } from "./types.ts";
 import {
   record,
@@ -103,16 +104,39 @@ export function parseCanonicalWagerSettlementRow(
   };
 }
 
-export async function readCanonicalRatingUpdate(
+function readCanonicalRatingUpdateRow(
   db: D1Database,
   operationId: string,
-): Promise<CanonicalRatingUpdateSnapshot | null> {
-  const row = await readD1FirstRow<RatingRow>(
+): Promise<RatingRow | null> {
+  return readD1FirstRow<RatingRow>(
     db
       .prepare("SELECT * FROM rating_updates WHERE operation_id = ?")
       .bind(operationId),
   );
+}
+
+export async function readCanonicalRatingUpdate(
+  db: D1Database,
+  operationId: string,
+): Promise<CanonicalRatingUpdateSnapshot | null> {
+  const row = await readCanonicalRatingUpdateRow(db, operationId);
   return row ? parseCanonicalRatingUpdateRow(row) : null;
+}
+
+export async function readCanonicalRatingProjectionSnapshot(
+  db: D1Database,
+  operationId: string,
+): Promise<{
+  snapshot: CanonicalRatingUpdateSnapshot;
+  payloadJson: string;
+} | null> {
+  const row = await readCanonicalRatingUpdateRow(db, operationId);
+  return row
+    ? {
+        snapshot: parseCanonicalRatingUpdateRow(row),
+        payloadJson: row.payload_json,
+      }
+    : null;
 }
 
 export async function readCanonicalWagerSettlement(
@@ -216,13 +240,73 @@ export function canonicalRatingProjectionFields(
   return RATING_PROJECTION_FIELDS[projection];
 }
 
+function isPlainPayload(value: JsonObject): boolean {
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return (
+    (prototype === Object.prototype || prototype === null) &&
+    Object.entries(Object.getOwnPropertyDescriptors(value)).every(
+      ([key, descriptor]) =>
+        Object.hasOwn(descriptor, "value") &&
+        (key !== "toJSON" || typeof descriptor.value !== "function"),
+    )
+  );
+}
+
+function canPatchRatingProjectionPayload(
+  current: JsonObject,
+  next: JsonObject,
+  projection: CanonicalRatingProjectionKind,
+  sourcePayloadJson: string,
+): boolean {
+  if (!isPlainPayload(current) || !isPlainPayload(next)) return false;
+  const { state, updated, reason } =
+    canonicalRatingProjectionFields(projection);
+  const fields = new Set<string>([state, updated, reason]);
+  const currentKeys = Object.keys(current);
+  const nextKeys = Object.keys(next);
+  if (
+    currentKeys.length !== nextKeys.length ||
+    currentKeys.some(
+      (key, index) =>
+        key.includes("\u0000") ||
+        key !== nextKeys[index] ||
+        (!fields.has(key) && current[key] !== next[key]),
+    )
+  ) {
+    return false;
+  }
+  for (const payload of [current, next]) {
+    if (
+      !Object.hasOwn(payload, state) ||
+      !Object.hasOwn(payload, updated) ||
+      !Object.hasOwn(payload, reason) ||
+      (payload[state] !== null &&
+        payload[state] !== "pending" &&
+        payload[state] !== "done" &&
+        payload[state] !== "dead") ||
+      !Number.isSafeInteger(payload[updated]) ||
+      Number(payload[updated]) < 0 ||
+      (payload[reason] !== null && typeof payload[reason] !== "string")
+    ) {
+      return false;
+    }
+  }
+  return sourcePayloadJson === JSON.stringify(current);
+}
+
 export function buildCanonicalRatingProjectionMutation(
   snapshot: CanonicalRatingUpdateSnapshot,
   value: CanonicalRatingUpdateValue,
   projection: CanonicalRatingProjectionKind,
+  sourcePayloadJson?: string,
 ): Extract<
   CanonicalMutation,
-  { kind: "update-rating-update" | "update-rating-projection" }
+  {
+    kind:
+      | "update-rating-update"
+      | "update-rating-projection"
+      | "patch-rating-projection";
+  }
 > {
   if (snapshot.operationId !== value.operationId) {
     throw new TypeError("invalid-canonical-rating-projection");
@@ -236,20 +320,49 @@ export function buildCanonicalRatingProjectionMutation(
   ).some(
     (column) => !excluded.has(column) && previous[column] !== next[column],
   );
-  return changedOutsideProjection
-    ? { kind: "update-rating-update", value }
-    : { kind: "update-rating-projection", projection, value };
+  if (changedOutsideProjection) return { kind: "update-rating-update", value };
+  if (
+    sourcePayloadJson !== undefined &&
+    canPatchRatingProjectionPayload(
+      snapshot.payload,
+      value.payload,
+      projection,
+      sourcePayloadJson,
+    )
+  ) {
+    return {
+      kind: "patch-rating-projection",
+      currentRevision: snapshot.revision,
+      projection,
+      value,
+    };
+  }
+  return { kind: "update-rating-projection", projection, value };
+}
+
+export function ratingProjectionColumns(
+  value: CanonicalRatingUpdateValue,
+  projection: CanonicalRatingProjectionKind,
+): Record<string, D1Value> {
+  const { columns } = canonicalRatingProjectionFields(projection);
+  const row = ratingValueColumns(value);
+  return {
+    operation_id: row.operation_id,
+    ...Object.fromEntries(columns.map((column) => [column, row[column]])),
+  };
 }
 
 export function ratingProjectionWriteRow(
   value: CanonicalRatingUpdateValue,
   projection: CanonicalRatingProjectionKind,
 ): Record<string, D1Value> {
-  const { columns } = canonicalRatingProjectionFields(projection);
-  const row = ratingWriteRow(value);
+  const { operation_id, ...columns } = ratingProjectionColumns(
+    value,
+    projection,
+  );
   return {
-    operation_id: row.operation_id,
-    payload_json: row.payload_json,
-    ...Object.fromEntries(columns.map((column) => [column, row[column]])),
+    operation_id,
+    payload_json: JSON.stringify(value.payload),
+    ...columns,
   };
 }

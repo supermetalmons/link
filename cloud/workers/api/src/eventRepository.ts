@@ -19,10 +19,10 @@ import { STATE_EFFECTS_FIELD } from "./stateCompatibility.ts";
 import { createEventReadRepository } from "./eventReadRepository.ts";
 import { createEventOutboxReadRepository } from "./eventOutboxReadRepository.ts";
 import { createMatchStateSource } from "./matchStateSource.ts";
+import { withEventWriteAdmission } from "./eventWriteAdmission.ts";
 import {
   EventD1Conflict,
   EventWritesDisabled,
-  acquireEventWriteAdmission,
   createEventTransitionIntent,
   listPendingEventTransitionIntents,
   commitEventMutations,
@@ -30,7 +30,6 @@ import {
   readEventSnapshot,
   readEventTransitionIntent,
   recordEventTransitionAttempt,
-  releaseEventWriteAdmission,
   transactEventLease,
   type EventTransitionIntent,
   type EventWriteAdmission,
@@ -79,50 +78,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-async function withEventWriteAdmission<T>(
-  db: D1Database,
-  context:
-    "event-path-transaction" | "event-root-patch" | "transition-recovery",
-  work: (admission: EventWriteAdmission) => Promise<T>,
-): Promise<T> {
-  const admission = await acquireEventWriteAdmission(db);
-  try {
-    return await work(admission);
-  } finally {
-    let failureKind = "missing";
-    let released = false;
-    try {
-      released = await releaseEventWriteAdmission(db, admission);
-    } catch (error) {
-      failureKind = error instanceof Error ? error.name : typeof error;
-    }
-    if (!released) {
-      console.error(
-        JSON.stringify({
-          event: "event_write_admission_release_failed",
-          admissionId: admission.admissionId,
-          freezeGeneration: admission.freezeGeneration,
-          attempts: 1,
-          context,
-          kind: failureKind,
-        }),
-      );
-    }
-  }
-}
-
 export function createEventProgressOutboxWriter(
   db: D1Database,
 ): EventProgressOutboxWriter {
   return {
     putEventProgressOutbox: (outboxId, record) =>
-      withEventWriteAdmission(db, "event-root-patch", async (admission) => {
-        await commitEventMutations(
-          db,
-          [{ kind: "progress-outbox", outboxId, value: record }],
-          { admission },
-        );
-      }),
+      withEventWriteAdmission(
+        db,
+        { kind: "mutation", context: "event-root-patch" },
+        async (admission) => {
+          await commitEventMutations(
+            db,
+            [{ kind: "progress-outbox", outboxId, value: record }],
+            { admission },
+          );
+        },
+      ),
   };
 }
 
@@ -529,7 +500,7 @@ export async function recoverEventTransitionIntents(
     try {
       const committed = await withEventWriteAdmission(
         env.EVENT_DB,
-        "transition-recovery",
+        { kind: "mutation", context: "transition-recovery" },
         async (admission) => {
           return applyIntent(
             env.EVENT_DB,
@@ -583,7 +554,11 @@ function createEventStore(
   commit: EventStore["commitEventPlan"],
 ): EventStore {
   const admit = <T>(work: (admission: EventWriteAdmission) => Promise<T>) =>
-    withEventWriteAdmission(db, "event-path-transaction", work);
+    withEventWriteAdmission(
+      db,
+      { kind: "mutation", context: "event-path-transaction" },
+      work,
+    );
   const read = <T>(work: () => Promise<T>, signal?: AbortSignal) => {
     signal?.throwIfAborted();
     return work();
@@ -771,7 +746,7 @@ export function createEventStateRepository(
     ...createEventStore(env.EVENT_DB, async (plan, signal, commitOptions) => {
       const committed = await withEventWriteAdmission(
         env.EVENT_DB,
-        "event-root-patch",
+        { kind: "mutation", context: "event-root-patch" },
         (admission) =>
           commitD1EventPlan(
             env.EVENT_DB,

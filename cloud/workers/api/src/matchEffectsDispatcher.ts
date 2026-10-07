@@ -1,10 +1,7 @@
 import type { MatchStateStore } from "./matchStateStore.ts";
 import type { MatchStateEffect } from "./matchStateTypes.ts";
-import {
-  acquireEventWriteAdmission,
-  commitEventMutations,
-  releaseEventWriteAdmission,
-} from "./eventD1.ts";
+import { commitEventMutations } from "./eventD1.ts";
+import { withEventWriteAdmission } from "./eventWriteAdmission.ts";
 import { buildEventProgressPlan } from "./eventProgressCodec.ts";
 import { ensureEventProgressWorkflow } from "./eventProgressDispatch.ts";
 import { assertProfileBackgroundMutationsEnabled } from "./profileCanonicalActivation.ts";
@@ -36,24 +33,22 @@ export function createMatchEffectDelivery(
       },
       effect.claimedAtMs,
     );
-    const admission = await acquireEventWriteAdmission(env.EVENT_DB);
-    let released = false;
-    try {
-      await commitEventMutations(
-        env.EVENT_DB,
-        [
-          {
-            kind: "progress-outbox",
-            outboxId: plan.outboxId,
-            value: plan.outbox,
-          },
-        ],
-        { admission },
-      );
-    } finally {
-      released = await releaseEventWriteAdmission(env.EVENT_DB, admission);
-    }
-    if (!released) throw new Error("match-event-admission-release-unconfirmed");
+    await withEventWriteAdmission(
+      env.EVENT_DB,
+      { kind: "match-effect" },
+      (admission) =>
+        commitEventMutations(
+          env.EVENT_DB,
+          [
+            {
+              kind: "progress-outbox",
+              outboxId: plan.outboxId,
+              value: plan.outbox,
+            },
+          ],
+          { admission },
+        ),
+    );
     await ensureEventProgressWorkflow(env, plan);
   };
 }

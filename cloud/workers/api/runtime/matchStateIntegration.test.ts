@@ -174,6 +174,70 @@ describe("canonical match room integration", () => {
     },
   );
 
+  it("replays deployed receipt bytes after eviction and rejects changed payloads", async () => {
+    const { room, rpc, inviteId, input } = await fixture({
+      ...match,
+      timer: MATCH_TIMER_TERMINAL,
+    });
+    await createMatches(input);
+    const operationId = "deployed-event-effect";
+    const quotedInviteId = JSON.stringify(inviteId);
+    const receipt = `{"epoch":2,"inviteId":${quotedInviteId},"operationId":"deployed-event-effect","terminalTimers":[{"matchId":${quotedInviteId},"playerId":"host-login"}]}`;
+    await runInDurableObject(room, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO match_state_event_receipts(operation_id, payload_json) VALUES (?, ?)",
+        operationId,
+        receipt,
+      );
+    });
+    const pairRequest = {
+      inviteId,
+      epoch: 2,
+      matchId: inviteId,
+      playerId: "host-login",
+      opponentId: "guest-login",
+    };
+    const before = unwrapMatchStateRpc(
+      await rpc.readCanonicalMatchPair(pairRequest),
+    );
+    await evictDurableObject(room);
+    const effect = {
+      terminalTimers: [{ playerId: "host-login", matchId: inviteId }],
+      operationId,
+      inviteId,
+      epoch: 2,
+    };
+    expect(
+      unwrapMatchStateRpc(await rpc.applyCanonicalMatchEventEffects(effect)),
+    ).toEqual({ records: [], changedMatchIds: [] });
+    expect(
+      await rpc.applyCanonicalMatchEventEffects({
+        ...effect,
+        terminalTimers: [{ playerId: "guest-login", matchId: inviteId }],
+      }),
+    ).toEqual({
+      ok: false,
+      status: 409,
+      code: "failed-precondition",
+      message: "match-state-event-effect-conflict",
+    });
+    expect(
+      unwrapMatchStateRpc(await rpc.readCanonicalMatchPair(pairRequest)),
+    ).toEqual(before);
+    expect(
+      await runInDurableObject(
+        room,
+        (_instance, state) =>
+          state.storage.sql
+            .exec<{ payload_json: string }>(
+              "SELECT payload_json FROM match_state_event_receipts WHERE operation_id = ?",
+              operationId,
+            )
+            .one().payload_json,
+      ),
+    ).toBe(receipt);
+  });
+
   it("repairs deferred event effects when the post-commit notification is lost", async () => {
     const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
     const { room, rpc, inviteId, input } = await fixture();

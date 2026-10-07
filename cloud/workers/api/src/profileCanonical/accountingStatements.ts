@@ -1,5 +1,10 @@
 import type { CanonicalMutation } from "./types.ts";
-import { ratingProjectionWriteRow, ratingWriteRow } from "./accounting.ts";
+import {
+  canonicalRatingProjectionFields,
+  ratingProjectionColumns,
+  ratingProjectionWriteRow,
+  ratingWriteRow,
+} from "./accounting.ts";
 import { canonicalRowMutationStatement } from "./rowStatements.ts";
 
 type AccountingMutation = Extract<
@@ -11,6 +16,7 @@ type AccountingMutation = Extract<
       | "insert-rating-update"
       | "update-rating-update"
       | "update-rating-projection"
+      | "patch-rating-projection"
       | "delete-rating-update"
       | "insert-wager-settlement";
   }
@@ -57,6 +63,33 @@ function accountingMutationStatement(
         ratingProjectionWriteRow(mutation.value, mutation.projection),
         false,
       );
+    case "patch-rating-projection": {
+      const { operation_id, ...columns } = ratingProjectionColumns(
+        mutation.value,
+        mutation.projection,
+      );
+      const { state, updated, reason } = canonicalRatingProjectionFields(
+        mutation.projection,
+      );
+      const fields = [state, updated, reason];
+      return db
+        .prepare(
+          `UPDATE rating_updates
+           SET payload_json = json_set(payload_json, ${fields.map((field) => `'$.${field}', json(?)`).join(", ")}),
+               ${Object.keys(columns)
+                 .map((column) => `${column} = ?`)
+                 .join(", ")},
+               revision = revision + 1
+           WHERE operation_id = ?`,
+        )
+        .bind(
+          ...fields.map((field) =>
+            JSON.stringify(mutation.value.payload[field]),
+          ),
+          ...Object.values(columns),
+          operation_id,
+        );
+    }
     case "delete-rating-update":
       return db
         .prepare("DELETE FROM rating_updates WHERE operation_id = ?")

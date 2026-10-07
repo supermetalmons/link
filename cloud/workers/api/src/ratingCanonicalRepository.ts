@@ -18,6 +18,7 @@ import { readCanonicalProfileIdMap } from "./profileCanonical/auth.ts";
 import {
   canonicalRatingProjectionFields,
   buildCanonicalRatingProjectionMutation,
+  readCanonicalRatingProjectionSnapshot,
 } from "./profileCanonical/accounting.ts";
 import type {
   CanonicalRatingProjectionKind,
@@ -302,8 +303,9 @@ async function claimProjection(
 ): Promise<boolean> {
   if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1)
     return false;
-  const snapshot = await readCanonicalRatingUpdate(db, operationId);
-  if (!snapshot || snapshot.revision !== expectedRevision) return false;
+  const stored = await readCanonicalRatingProjectionSnapshot(db, operationId);
+  if (!stored || stored.snapshot.revision !== expectedRevision) return false;
+  const { snapshot, payloadJson } = stored;
   const fields = canonicalRatingProjectionFields(projection);
   try {
     await commitCanonicalPlan(db, {
@@ -319,6 +321,7 @@ async function claimProjection(
           snapshot,
           mergedRatingValue(snapshot, { [fields.updated]: claimedAtMs }),
           projection,
+          payloadJson,
         ),
       ],
     });
@@ -393,8 +396,9 @@ async function markProjection(
 ): Promise<void> {
   const fields = canonicalRatingProjectionFields(projection);
   for (let attempt = 0; attempt < attempts; attempt++) {
-    const snapshot = await readCanonicalRatingUpdate(db, operationId);
-    if (!snapshot) throw new TypeError("rating-operation-missing");
+    const stored = await readCanonicalRatingProjectionSnapshot(db, operationId);
+    if (!stored) throw new TypeError("rating-operation-missing");
+    const { snapshot, payloadJson } = stored;
     try {
       await commitCanonicalPlan(db, {
         expectations: [
@@ -413,6 +417,7 @@ async function markProjection(
               [fields.reason]: reason?.trim() || null,
             }),
             projection,
+            payloadJson,
           ),
         ],
       });

@@ -52,6 +52,7 @@ function mutationStatements(
     case "insert-rating-update":
     case "update-rating-update":
     case "update-rating-projection":
+    case "patch-rating-projection":
     case "delete-rating-update":
     case "insert-wager-settlement":
       return buildAccountingMutationStatements(db, mutation);

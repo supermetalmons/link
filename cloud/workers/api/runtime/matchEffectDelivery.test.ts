@@ -260,6 +260,49 @@ it("retains the committed outbox without dispatch when admission release is unco
   ).toBe(1);
 });
 
+it.each(["unconfirmed", "throws"] as const)(
+  "preserves commit error precedence when match-effect admission release %s",
+  async (release) => {
+    await testEnv.EVENT_DB.batch([
+      testEnv.EVENT_DB.prepare(
+        `CREATE TRIGGER fail_match_effect_commit BEFORE INSERT ON event_progress_outboxes
+         BEGIN SELECT RAISE(ABORT, 'match-effect-commit-failed'); END`,
+      ),
+      testEnv.EVENT_DB.prepare(
+        `CREATE TRIGGER fail_match_effect_release BEFORE DELETE ON event_write_admissions
+         BEGIN SELECT ${release === "unconfirmed" ? "RAISE(IGNORE)" : "RAISE(ABORT, 'match-effect-release-failed')"}; END`,
+      ),
+    ]);
+    try {
+      const f = environment(async () => {});
+      const operation = f.deliver(effect);
+      if (release === "unconfirmed") {
+        await expect(operation).rejects.toMatchObject({
+          message: "event-d1-integrity",
+          cause: expect.objectContaining({
+            message: expect.stringContaining("match-effect-commit-failed"),
+          }),
+        });
+      } else {
+        await expect(operation).rejects.toThrow("match-effect-release-failed");
+      }
+      expect(f.dispatched()).toBe(0);
+      expect(await admissionCount()).toBe(1);
+      expect(
+        await testEnv.EVENT_DB.prepare(
+          "SELECT COUNT(*) AS count FROM event_progress_outboxes",
+        ).first<number>("count"),
+      ).toBe(0);
+    } finally {
+      await testEnv.EVENT_DB.batch([
+        testEnv.EVENT_DB.prepare("DROP TRIGGER fail_match_effect_commit"),
+        testEnv.EVENT_DB.prepare("DROP TRIGGER fail_match_effect_release"),
+        testEnv.EVENT_DB.prepare("DELETE FROM event_write_admissions"),
+      ]);
+    }
+  },
+);
+
 it.each(["event", null])(
   "keeps timer markers for event %s when canonical profile writes are frozen",
   async (eventId) => {
