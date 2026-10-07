@@ -12,9 +12,10 @@ import {
   EVENT_PROGRESS_OUTBOX_DEAD_ROOT,
   EventProgressRetryableError,
   runEventProgressWorkflow,
-  sweepEventProgress,
+  sweepEventProgress as runEventProgressSweep,
   type EventProgressRatingRepository,
   type EventProgressSweepRepository,
+  type EventProgressSweepDependencies,
   type EventProgressWorkflowParams,
 } from "../src/eventProgress.ts";
 import {
@@ -29,6 +30,26 @@ import {
   type EventTestSource,
 } from "./eventTestPorts.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+import { createEventProgressRecoveryTestStore } from "./eventProgressRecoveryTestStore.ts";
+
+const outboxRecoveryStores = new WeakMap<
+  EventProgressSweepRepository,
+  ReturnType<typeof createEventProgressRecoveryTestStore>
+>();
+
+function sweepEventProgress(
+  env: Env,
+  dependencies: EventProgressSweepDependencies,
+): Promise<void> {
+  const { repository } = dependencies;
+  if (!repository) throw new Error("missing-test-event-repository");
+  let outboxRecovery = outboxRecoveryStores.get(repository);
+  if (!outboxRecovery) {
+    outboxRecovery = createEventProgressRecoveryTestStore(repository);
+    outboxRecoveryStores.set(repository, outboxRecovery);
+  }
+  return runEventProgressSweep(env, { outboxRecovery, ...dependencies });
+}
 
 function scheduledRecovery(
   events: Record<string, { startAtMs: number; isSundayMons?: boolean }>,
@@ -113,6 +134,12 @@ function sweepRepository(
   onPatch?: (updates: Record<string, unknown>) => void | Promise<void>,
 ) {
   const patches: Record<string, unknown>[] = [];
+  const records = new Map(
+    Object.entries(outbox).map(([id, value]) => [
+      `eventProgressOutbox/${id}`,
+      value,
+    ]),
+  );
   const value: EventProgressSweepRepository = attachEventTestPorts<
     EventProgressSweepRepository & EventTestSource
   >({
@@ -125,10 +152,14 @@ function sweepRepository(
         record,
       }));
     },
-    getStatePath: async () => null,
+    getStatePath: async (path) => records.get(path) ?? null,
     patchStateRoot: async (updates) => {
       await onPatch?.(updates);
       patches.push(updates);
+      for (const [path, value] of Object.entries(updates)) {
+        if (value === null) records.delete(path);
+        else records.set(path, value);
+      }
     },
   });
   return { patches, value };
@@ -405,7 +436,7 @@ test("failed records cannot exhaust outbox or rating runners before the rest of 
 
 for (const kind of ["start", "reminder"] as const) {
   test(
-    `same-ID ${kind} scheduling waits for outbox recreation and executes freshly`,
+    `same-ID ${kind} scheduling waits for recreation and respects its retry checkpoint`,
     { timeout: 10_000 },
     async () => {
       const nowMs = 1_000_000;
@@ -511,14 +542,14 @@ for (const kind of ["start", "reminder"] as const) {
         scheduledRecovery: recovery,
         ratingRepository: null,
       });
-      assert.equal(creates, 3);
+      assert.equal(creates, 2);
       assert.deepEqual(
-        operations,
-        kind === "start"
-          ? ["create-1", "delete", "create-2", "read", "create-3", "remove"]
-          : ["create-1", "delete", "create-2", "read", "publish", "create-3"],
+        operations.filter((operation) =>
+          /^(create-|delete|remove)/.test(operation),
+        ),
+        ["create-1", "delete", "create-2"],
       );
-      assert.deepEqual(current, kind === "start" ? null : plan.outbox);
+      assert.deepEqual(current, plan.outbox);
     },
   );
 }
@@ -643,7 +674,7 @@ test("scheduled-event sweep discovers both announcements and retains their first
     records.get(`eventProgressOutbox/${reminder.outboxId}`),
     reminder.outbox,
   );
-  assert.equal(creates, 6);
+  assert.equal(creates, 3);
 });
 
 test("scheduled recovery rotates beyond 1,000 events in bounded pages", async () => {
@@ -965,8 +996,8 @@ test("failed recovery queries and checkpoints preserve the cursor for replay", a
     scheduledRecovery: recovery,
     ratingRepository: null,
   });
-  assert.equal(created.length, 2);
-  assert.equal(created[0], created[1]);
+  assert.equal(created.length, 1);
+  assert.deepEqual(await recovery.readCursor(), { cursor: null, revision: 1 });
 });
 
 test("a failed concurrent dispatch keeps its sweep admitted until every other provider call settles", async () => {
@@ -1268,11 +1299,7 @@ test("dispatches valid outbox records before reporting dead-letter failure", asy
     /dead-letter-unavailable/,
   );
   assert.equal(workflowCreates, 1);
-  assert.deepEqual(repository.patches, [
-    {
-      [`eventProgressOutbox/${outbox.plan.outboxId}/lastQueuedAtMs`]: 2_000,
-    },
-  ]);
+  assert.deepEqual(repository.patches, []);
 });
 
 test("recovers a finalized event rating when its outbox write was lost", async () => {

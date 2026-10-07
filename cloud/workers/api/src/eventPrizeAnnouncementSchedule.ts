@@ -84,6 +84,8 @@ export async function scheduleEventAnnouncement(
   nowMs: number,
   kind: EventAnnouncementKind,
   execute: EventProgressWorkExecutor = (_workflowId, work) => work(),
+  dispatch: (plan: EventProgressPlan) => Promise<void> = (plan) =>
+    ensureEventProgressWorkflow(env, plan),
 ): Promise<void> {
   const candidate = await buildEventAnnouncementPlan(
     eventId,
@@ -97,7 +99,7 @@ export async function scheduleEventAnnouncement(
     await repository.commitEventPlan([
       { kind: "progress-outbox", outboxId: plan.outboxId, value: plan.outbox },
     ]);
-    await ensureEventProgressWorkflow(env, plan);
+    await dispatch(plan);
   });
 }
 
@@ -108,6 +110,7 @@ export async function scheduleEventAnnouncements(
   event: unknown,
   nowMs: number,
   execute?: EventProgressWorkExecutor,
+  dispatch?: (plan: EventProgressPlan) => Promise<void>,
 ): Promise<void> {
   const results = await Promise.allSettled(
     EVENT_ANNOUNCEMENT_KINDS.map((kind) =>
@@ -119,6 +122,7 @@ export async function scheduleEventAnnouncements(
         nowMs,
         kind,
         execute,
+        dispatch,
       ),
     ),
   );

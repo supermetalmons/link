@@ -14,6 +14,11 @@ import {
   type EventProgressSweepRepository,
 } from "../src/eventProgress.ts";
 import { createEventStateRepository } from "../src/eventRepository.ts";
+import {
+  acquireEventWriteAdmission,
+  releaseEventWriteAdmission,
+} from "../src/eventD1.ts";
+import { createEventProgressRecoveryStore } from "../src/eventProgressRecoveryD1.ts";
 import { readEventOwnedPath } from "./eventD1Fixture.ts";
 import { applyEventTestMigrations } from "./eventTestMigrations.ts";
 import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
@@ -244,7 +249,7 @@ describe("event-progress Workflow dispatch admissions", () => {
         testEnv.EVENT_DB,
         `eventProgressOutbox/${plan.outboxId}`,
       ),
-    ).toEqual({ ...plan.outbox, lastQueuedAtMs: 200 });
+    ).toEqual(plan.outbox);
     expect(
       await testEnv.EVENT_DB.prepare(
         "SELECT revision FROM event_scheduled_recovery_cursor WHERE singleton = 1",
@@ -340,61 +345,78 @@ describe("event-progress Workflow dispatch admissions", () => {
       const cleaned = Promise.withResolvers<void>();
       const f = environment();
       const ratingOutcomes: string[] = [];
-      await sweepEventProgress(f.value, {
-        now: () => nowMs,
-        ratingRepository:
-          lane === "rating"
-            ? {
-                listDueRatingEventProgress: async () => {
-                  if (order === "cleanup-first") await cleaned.promise;
-                  return [
-                    {
-                      eventId,
-                      inviteId: "rating-invite",
-                      matchId: "match-1",
-                      operationId: "rating-invite__match-1",
-                      revision: 1,
-                      version: 1,
-                    },
-                  ];
-                },
-                claimRatingEventProgress: async () => true,
-                markRatingEventProgress: async (operationId, state) => {
-                  expect(operationId).toBe("rating-invite__match-1");
-                  ratingOutcomes.push(state);
-                },
+      const recoveryAdmission = await acquireEventWriteAdmission(
+        testEnv.EVENT_DB,
+      );
+      const outboxRecovery = createEventProgressRecoveryStore(
+        testEnv.EVENT_DB,
+        recoveryAdmission,
+      );
+      try {
+        await sweepEventProgress(f.value, {
+          now: () => nowMs,
+          outboxRecovery: {
+            ...outboxRecovery,
+            async listDue(beforeMs, limit) {
+              const rows = await outboxRecovery.listDue(beforeMs, limit);
+              if (order === "publication-first") await published.promise;
+              return rows.filter((row) => row.outboxId === plan.outboxId);
+            },
+          },
+          ratingRepository:
+            lane === "rating"
+              ? {
+                  listDueRatingEventProgress: async () => {
+                    if (order === "cleanup-first") await cleaned.promise;
+                    return [
+                      {
+                        eventId,
+                        inviteId: "rating-invite",
+                        matchId: "match-1",
+                        operationId: "rating-invite__match-1",
+                        revision: 1,
+                        version: 1,
+                      },
+                    ];
+                  },
+                  claimRatingEventProgress: async () => true,
+                  markRatingEventProgress: async (operationId, state) => {
+                    expect(operationId).toBe("rating-invite__match-1");
+                    ratingOutcomes.push(state);
+                  },
+                }
+              : null,
+          repository: {
+            ...repository,
+            async commitEventPlan(commands) {
+              await repository.commitEventPlan(commands);
+              for (const command of commands) {
+                if (
+                  command.kind !== "progress-outbox" ||
+                  command.outboxId !== plan.outboxId
+                )
+                  continue;
+                if (command.value === null) cleaned.resolve();
+                else published.resolve();
               }
-            : null,
-        repository: {
-          ...repository,
-          async listDueEventProgressOutboxes() {
-            if (order === "publication-first") await published.promise;
-            return [{ outboxId: plan.outboxId, record: malformed }];
+            },
           },
-          async commitEventPlan(commands) {
-            await repository.commitEventPlan(commands);
-            for (const command of commands) {
-              if (
-                command.kind !== "progress-outbox" ||
-                command.outboxId !== plan.outboxId
-              )
-                continue;
-              if (command.value === null) cleaned.resolve();
-              else published.resolve();
-            }
+          scheduledRecovery: {
+            readCursor: async () => ({ cursor: null, revision: 0 }),
+            listPage: async () => [],
+            listUrgent: async () => {
+              if (lane === "rating") return [];
+              if (order === "cleanup-first") await cleaned.promise;
+              return [
+                { cursor: { eventId, startAtMs: event.startAtMs }, event },
+              ];
+            },
+            checkpoint: async () => true,
           },
-        },
-        scheduledRecovery: {
-          readCursor: async () => ({ cursor: null, revision: 0 }),
-          listPage: async () => [],
-          listUrgent: async () => {
-            if (lane === "rating") return [];
-            if (order === "cleanup-first") await cleaned.promise;
-            return [{ cursor: { eventId, startAtMs: event.startAtMs }, event }];
-          },
-          checkpoint: async () => true,
-        },
-      });
+        });
+      } finally {
+        await releaseEventWriteAdmission(testEnv.EVENT_DB, recoveryAdmission);
+      }
       expect(await repository.readEventProgressOutbox(plan.outboxId)).toEqual(
         plan.outbox,
       );
@@ -458,21 +480,33 @@ describe("event-progress Workflow dispatch admissions", () => {
     it(`prevents the gate from closing during ${status} dispatch and outbox publication`, async () => {
       const { plan, repository } = await seedOutbox();
       const blocked: string[] = [];
+      let providerStarted = false;
       const assertBlocked = async (phase: string) => {
         expect(await admissionCount()).toBeGreaterThan(0);
         expect(await freezeEventGate()).toBe(false);
         blocked.push(phase);
       };
-      const f = environment(status, assertBlocked);
-      await sweepEventProgress(f.value, {
-        repository: {
-          ...repository,
-          async commitEventPlan(updates) {
-            await assertBlocked("before-outbox");
-            await repository.commitEventPlan(updates);
-            await assertBlocked("after-outbox");
-          },
+      const f = environment(status, async (phase) => {
+        providerStarted = true;
+        await assertBlocked(phase);
+      });
+      const db = f.value.EVENT_DB;
+      f.value.EVENT_DB = new Proxy(db, {
+        get(target, property) {
+          if (property === "batch") {
+            return async (statements: D1PreparedStatement[]) => {
+              if (providerStarted) await assertBlocked("before-outbox");
+              const result = await target.batch(statements);
+              if (providerStarted) await assertBlocked("after-outbox");
+              return result;
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
         },
+      });
+      await sweepEventProgress(f.value, {
+        repository,
         now: () => 200,
         ratingRepository: null,
       });
@@ -489,7 +523,7 @@ describe("event-progress Workflow dispatch admissions", () => {
           `eventProgressOutbox/${plan.outboxId}`,
         );
         if (status === "complete") expect(outbox).toBeNull();
-        else expect(outbox).toMatchObject({ lastQueuedAtMs: 200 });
+        else expect(outbox).toEqual(plan.outbox);
       }
       expect(await admissionCount()).toBe(0);
       expect(await freezeEventGate()).toBe(true);
@@ -513,6 +547,55 @@ describe("event-progress Workflow dispatch admissions", () => {
     await dispatch;
     expect(await admissionCount()).toBe(0);
     expect(await freezeEventGate()).toBe(true);
+  });
+
+  it("shares confirmed deadlines across persisted, scheduled-start, and announcement recovery", async () => {
+    const { plan, repository } = await seedOutbox();
+    let nowMs = 1_000_000;
+    await repository.commitEventPlan([
+      { kind: "progress-outbox", outboxId: plan.outboxId, value: null },
+      { kind: "event-field", eventId, field: "status", value: "scheduled" },
+      {
+        kind: "event-field",
+        eventId,
+        field: "startAtMs",
+        value: nowMs + 5 * 3_600_000,
+      },
+      { kind: "event-field", eventId, field: "isSundayMons", value: true },
+    ]);
+    const f = environment();
+    const sweep = () =>
+      sweepEventProgress(f.value, {
+        repository,
+        now: () => nowMs,
+        ratingRepository: null,
+      });
+    await sweep();
+    expect(
+      f.operations.filter((operation) => operation === "status"),
+    ).toHaveLength(2);
+    const original = await testEnv.EVENT_DB.prepare(
+      "SELECT outbox_id, record_json FROM event_progress_outboxes WHERE status = 'pending' ORDER BY outbox_id",
+    ).all();
+    expect(original.results).toHaveLength(2);
+    nowMs += 300_000;
+    await sweep();
+    expect(
+      f.operations.filter((operation) => operation === "status"),
+    ).toHaveLength(2);
+    nowMs += 3_300_000;
+    await sweep();
+    expect(
+      f.operations.filter((operation) => operation === "status"),
+    ).toHaveLength(4);
+    expect(
+      (
+        await testEnv.EVENT_DB.prepare(
+          "SELECT outbox_id, record_json FROM event_progress_outboxes WHERE status = 'pending' ORDER BY outbox_id",
+        ).all()
+      ).results,
+    ).toEqual(original.results);
+    expect(await admissionCount()).toBe(0);
   });
 
   it("keeps the sweep admitted across a failed outbox lane and a delayed scheduled lane", async () => {

@@ -41,6 +41,10 @@ import {
   dispatchOutboxPlan,
   withEventProgressDispatchAdmission,
 } from "./eventProgressDispatch.ts";
+import {
+  createEventProgressRecoveryStore,
+  type EventProgressRecoveryStore,
+} from "./eventProgressRecoveryD1.ts";
 
 export {
   ensureEventProgressWorkflow,
@@ -100,6 +104,7 @@ export type EventProgressSweepDependencies = {
   ratingRepository?: EventProgressRatingRepository | null;
   repository?: EventProgressSweepRepository;
   scheduledRecovery?: EventScheduledRecoveryStore;
+  outboxRecovery?: EventProgressRecoveryStore;
 };
 
 export class InvalidEventProgressPayloadError extends Error {}
@@ -137,6 +142,7 @@ async function reconcileScheduledEvents(
   env: Env,
   repository: EventProgressSweepRepository,
   recovery: EventScheduledRecoveryStore,
+  outboxRecovery: EventProgressRecoveryStore,
   now: () => number,
   execute: EventProgressWorkExecutor,
 ): Promise<void> {
@@ -170,6 +176,7 @@ async function reconcileScheduledEvents(
         event,
         discoveredAtMs,
         execute,
+        (plan) => dispatchOutboxPlan(env, outboxRecovery, plan.outboxId, now),
       ),
       (async () => {
         const plan = await buildEventProgressPlan(
@@ -194,7 +201,7 @@ async function reconcileScheduledEvents(
               },
             ]);
           }
-          await dispatchOutboxPlan(env, repository, plan, now);
+          await dispatchOutboxPlan(env, outboxRecovery, plan.outboxId, now);
         });
       })(),
     ]);
@@ -263,6 +270,7 @@ async function recoverRatingEventProgress(
   env: Env,
   repository: EventProgressSweepRepository,
   ratingRepository: EventProgressRatingRepository,
+  outboxRecovery: EventProgressRecoveryStore,
   now: () => number,
   execute: EventProgressWorkExecutor,
 ): Promise<void> {
@@ -313,7 +321,7 @@ async function recoverRatingEventProgress(
             value: plan.outbox,
           },
         ]);
-        await dispatchOutboxPlan(env, repository, plan, now);
+        await dispatchOutboxPlan(env, outboxRecovery, plan.outboxId, now);
         await ratingRepository.markRatingEventProgress(
           record.operationId,
           "done",
@@ -347,13 +355,11 @@ export async function sweepEventProgress(
 async function sweepPersistedEventProgressOutboxes(
   env: Env,
   repository: EventProgressSweepRepository,
+  recovery: EventProgressRecoveryStore,
   now: () => number,
   execute: EventProgressWorkExecutor,
 ): Promise<void> {
-  const records = await repository.listDueEventProgressOutboxes(
-    Number.MAX_SAFE_INTEGER,
-    EVENT_PROGRESS_SWEEP_LIMIT,
-  );
+  const records = await recovery.listDue(now(), EVENT_PROGRESS_SWEEP_LIMIT);
   await runRecoveryItems(
     records,
     async ({ outboxId: rawOutboxId, record }) => {
@@ -361,7 +367,7 @@ async function sweepPersistedEventProgressOutboxes(
       const plan = await parseEventProgressOutbox(outboxId, record);
       if (plan) {
         await execute(plan.workflowId, () =>
-          dispatchOutboxPlan(env, repository, plan, now),
+          dispatchOutboxPlan(env, recovery, plan.outboxId, now),
         );
       } else {
         const workflowId = workflowIdFromOutboxId(outboxId);
@@ -407,13 +413,23 @@ async function sweepAdmittedEventProgress(
           getDefaultRepository(),
         );
   const execute = createEventProgressWorkExecutor();
+  const outboxRecovery =
+    dependencies.outboxRecovery ||
+    createEventProgressRecoveryStore(env.EVENT_DB, admission);
   const results = await Promise.allSettled([
-    sweepPersistedEventProgressOutboxes(env, repository, now, execute),
+    sweepPersistedEventProgressOutboxes(
+      env,
+      repository,
+      outboxRecovery,
+      now,
+      execute,
+    ),
     reconcileScheduledEvents(
       env,
       repository,
       dependencies.scheduledRecovery ||
         createEventScheduledRecoveryStore(env.EVENT_DB, admission),
+      outboxRecovery,
       now,
       execute,
     ),
@@ -423,6 +439,7 @@ async function sweepAdmittedEventProgress(
             env,
             repository,
             ratingRepository,
+            outboxRecovery,
             now,
             execute,
           ),

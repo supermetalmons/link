@@ -12,6 +12,8 @@ The invite Durable Object owns active match records and timer claims. Gameplay D
 
 Worker and portable-runtime callers use typed domain repositories for matches, sessions, wagers, events, leases, Telegram delivery, and prize withdrawals. Event and session plans preserve their existing guarded commit stages. Compatibility codecs retain the exact persisted path encodings, server-value markers, and replay digests; legacy-shaped test adapters live only with the tests.
 
+Rematch preparation reads both participants through the existing match-record batch API, sharing routing, authority checks, and room reads. Join and ensure-match operations retain their scalar reads so an existing participant match can return without reading the opponent.
+
 Preserve existing login IDs, applied SQL migrations, immutable snapshots, imported legacy match records, rating completions, source digests, and both event receipt stages. Stored compatibility formats are not permission to restart a completed migration or rewrite historical data.
 
 ## Browser sessions and profile recovery
@@ -118,7 +120,9 @@ Scheduled-event recovery checks up to 1,000 events within the longest announceme
 
 Scheduled-event recovery, persisted progress outboxes, and rating recovery run independently with reserved concurrency of ten, five, and five records respectively. Each sweep serializes work targeting the same Workflow ID and retains its write admission until every recovery task settles.
 
-Progress-outbox upserts skip row updates only when the indexed fields and stored JSON are unchanged. Admission and snapshot guards still execute in the same SQL batch, and Workflow reconciliation and malformed-record repair continue normally.
+Progress-outbox recovery uses `event_progress_outboxes.next_reconcile_at_ms`, independently of the stored outbox JSON and Workflow parameters. A confirmed waiting Workflow more than ten minutes before execution is checked again at the earlier of one hour later or ten minutes before execution. Other nonterminal states, unconfirmed or recreated instances, and provider failures remain eligible at the next five-minute Cron boundary. Initial producer dispatch remains immediate after durable persistence.
+
+Scheduled starts, announcements, and persisted-outbox recovery share this eligibility check. Checkpoints compare the exact observed payload and permit a concurrent urgent result to shorten a later check. Completion only removes the observed outbox; a checkpoint cannot recreate an acknowledged row. Changed outbox writes reset eligibility, including writes from older Worker versions, while identical upserts preserve it. Admission and snapshot guards remain enforced. Do not manually postpone checkpoints to hide failed work.
 
 `PROFILE_DB.invite_wager_states` owns proposals, agreements, settlement state, and resolution markers. Reserved balances, consumed operation tombstones, pending settlements, and replay records are current application data. Current wager incidents use `manage:wager-reservations` and canonical-profile maintenance. Reconcile uncertain effects before settling an expired admission.
 
@@ -127,6 +131,8 @@ Progress-outbox upserts skip row updates only when the indexed fields and stored
 Prize withdrawals retain D1 leases, destination identity, signed transaction bytes, exact signature recovery, and completion records. Freeze affected storage before a schema change or terminating an instance. The read-only withdrawal Workflow preflight validates wallet identity and RPC access without sending a transaction. Never manually rewrite assigned prizes or replay a possibly completed transfer.
 
 ## Telegram recovery and announcements
+
+Telegram delivery is authored in `cloud/runtime/src/telegram/`. The delivery engine is the public facade; typed state transitions, delivery control, manual recovery, desired operations, sends, and cleanup have separate modules. Stored records retain their original fields and compatibility behavior. Retry proofs, send-in-flight markers, receipts, and gate ownership remain durable recovery evidence; an uncertain send still requires an explicit reviewed recovery action.
 
 Event Telegram projection runs through `mons-link-telegram-projection`. Every supported API or Workflow mutation writes `EVENT_DB.event_telegram_projection_outboxes` and increments the generation in `event_telegram_projection_state` atomically with the event update. The five-minute Worker schedule recovers pending markers; all event mutations pass through the canonical Worker repository.
 

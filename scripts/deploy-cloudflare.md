@@ -123,6 +123,12 @@ This publication updates code for new instances and does not modify Queue delive
 
 `EVENT_DB.event_scheduled_recovery_cursor` stores the independent checkpoint for bounded scheduled-event recovery. The sweep combines urgent discovery with paginated background recovery and advances checkpoints using revision comparisons. Preserve canonical events, outboxes, Workflow identities, and the cursor during recovery or rollback; do not reset the cursor to replay announcements.
 
+Before releasing deadline-aware Workflow recovery, apply `event-migrations/0006_event_progress_recovery_deadlines.sql` to `EVENT_DB`. This additive migration introduces `next_reconcile_at_ms`, a due index, and an invalidation trigger. Existing rows and inserts from older code default to immediately due. Changed outbox writes invalidate checkpoints, while identical writes preserve them. Validate the migration, query plan, old-writer compatibility, and concurrent checkpoint behavior locally before applying it remotely.
+
+The new Worker requires this migration. Older Workers and existing Workflow instances remain compatible with it; retain the extra column, trigger, and both due indexes on rollback. Rollback code resumes its previous frequent checks. The migration preserves outbox JSON, scheduling proofs, Workflow parameters, identities, and step history, so this compatible release does not require a write freeze or Queue pause.
+
+Recovery checks confirmed waiting Workflows hourly while execution is more than ten minutes away, capped at ten minutes before execution. Other states and failures use the next five-minute Cron boundary. Initial dispatch remains immediate. Verify the affected event behavior through the routine release checks; do not add an hour-long observation window to demonstrate the reduced cadence.
+
 Changes to shared event/profile repositories may affect both owned Workflow definitions. Use the routine API release path and publish affected definitions. Verify authenticated current/ended event reads and affected metadata, wager, or gameplay behavior without adding an observation window.
 
 ## Wager settlement delivery
