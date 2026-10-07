@@ -37,9 +37,9 @@ import {
   applyInviteBotButtonLayout,
 } from "../game/board";
 import {
-  bindBoardVideoReactionHandler,
-  unbindBoardVideoReactionHandler,
-} from "./controls/boardReactionPort";
+  BoardReactionsLayer,
+  type BoardReactionsLayerHandle,
+} from "./BoardReactionsLayer";
 import { getImageResource } from "../resources/imageResources";
 import { registerBoardTransientUiHandler } from "./uiSession";
 import {
@@ -151,18 +151,6 @@ const CircularButton = styled.button`
   }
 `;
 
-const VIDEO_CONTAINER_HEIGHT_GRID = "12.5%";
-const VIDEO_CONTAINER_HEIGHT_IMAGE = "13.5%";
-const VIDEO_CONTAINER_MAX_HEIGHT = "min(20vh, 180px)";
-const VIDEO_CONTAINER_ASPECT_RATIO = "1";
-const VIDEO_CONTAINER_Z_INDEX = 10000;
-const VIDEO_REACTION_APPEAR_MS = 400;
-const VIDEO_REACTION_FADE_OUT_MS = 200;
-const VIDEO_REACTION_CLEAR_FADE_OUT_MS = 120;
-const VIDEO_REACTION_DEFAULT_LIFETIME_MS = 7000;
-const VIDEO_REACTION_MIN_LIFETIME_MS = 1000;
-const VIDEO_REACTION_MAX_LIFETIME_MS = 12000;
-const VIDEO_REACTION_END_GRACE_MS = 700;
 const BOARD_VIEWBOX_WIDTH = BOARD_WIDTH_UNITS * 100;
 const BOARD_VIEWBOX_HEIGHT = BOARD_HEIGHT_UNITS * 100;
 const BOT_STRENGTH_IGNORE_MOUSE_AFTER_TOUCH_MS = 700;
@@ -176,27 +164,6 @@ const END_OF_GAME_ICON_OPACITY = 0.69;
 const PLAYER_INFO_TEXT_OPACITY = 0.69;
 const WAGER_STACK_REACTION_GAP_MULTIPLIER = 0.08;
 const NAME_REACTION_GAP_MULTIPLIER = 0.0777;
-
-const getVideoReactionPlaybackLifetimeMs = (videoElement: HTMLVideoElement) => {
-  const currentTimeSeconds =
-    Number.isFinite(videoElement.currentTime) && videoElement.currentTime > 0
-      ? videoElement.currentTime
-      : 0;
-  const durationMs =
-    Number.isFinite(videoElement.duration) && videoElement.duration > 0
-      ? Math.max(0, videoElement.duration - currentTimeSeconds) * 1000 +
-        VIDEO_REACTION_END_GRACE_MS
-      : VIDEO_REACTION_DEFAULT_LIFETIME_MS;
-  return Math.min(
-    VIDEO_REACTION_MAX_LIFETIME_MS,
-    Math.max(VIDEO_REACTION_MIN_LIFETIME_MS, durationMs),
-  );
-};
-
-const getErrorName = (error: unknown) =>
-  error && typeof error === "object" && "name" in error
-    ? String((error as { name?: unknown }).name)
-    : "";
 
 const getEndOfGameIconHrefs = (): EndOfGameIconHrefs => ({
   victory:
@@ -216,320 +183,6 @@ const preloadEndOfGameIcons = () =>
   (Object.keys(END_OF_GAME_ICON_URLS) as EndOfGameIconName[]).map((name) =>
     getEndOfGameIconCachedUrl(name),
   );
-
-const playVideoReactionElement = (
-  videoElement: HTMLVideoElement | null,
-  onCannotPlay: () => void,
-) => {
-  if (!videoElement || document.visibilityState !== "visible") {
-    return;
-  }
-
-  const playPromise = videoElement.play() as Promise<void> | undefined;
-  void playPromise?.catch((error: unknown) => {
-    const errorName = getErrorName(error);
-    if (
-      errorName === "AbortError" ||
-      document.visibilityState !== "visible" ||
-      !videoElement.isConnected ||
-      videoElement.ended
-    ) {
-      return;
-    }
-    onCannotPlay();
-  });
-};
-
-const startVideoReactionElement = (
-  videoElement: HTMLVideoElement | null,
-  onCannotPlay: () => void,
-) => {
-  if (!videoElement) {
-    return;
-  }
-  videoElement.muted = true;
-  videoElement.playsInline = true;
-  try {
-    videoElement.currentTime = 0;
-  } catch {}
-  playVideoReactionElement(videoElement, onCannotPlay);
-};
-
-const isVideoReactionElementError = (
-  event: React.SyntheticEvent<HTMLVideoElement>,
-) => event.currentTarget === event.target;
-
-const useVideoReactionSlot = (
-  setTrackedTimeout: (callback: () => void, delay: number) => number,
-  clearTrackedTimeout: (timeoutId: number | null) => void,
-) => {
-  const [id, setId] = useState<number | null>(null);
-  const [visible, setVisible] = useState(false);
-  const [fading, setFading] = useState(false);
-  const [appearing, setAppearing] = useState(false);
-  const [instance, setInstance] = useState(0);
-  const dismissTimeoutRef = useRef<number | null>(null);
-  const dismissDeadlineRef = useRef<number | null>(null);
-  const appearingTimeoutRef = useRef<number | null>(null);
-  const lifetimeTimeoutRef = useRef<number | null>(null);
-  const lifetimeDeadlineRef = useRef<number | null>(null);
-  const instanceRef = useRef(0);
-  const videoElementRef = useRef<HTMLVideoElement | null>(null);
-
-  const clearDismissTimeout = useCallback(() => {
-    clearTrackedTimeout(dismissTimeoutRef.current);
-    dismissTimeoutRef.current = null;
-    dismissDeadlineRef.current = null;
-  }, [clearTrackedTimeout]);
-
-  const clearAppearingTimeout = useCallback(() => {
-    clearTrackedTimeout(appearingTimeoutRef.current);
-    appearingTimeoutRef.current = null;
-  }, [clearTrackedTimeout]);
-
-  const clearLifetimeTimeout = useCallback(() => {
-    clearTrackedTimeout(lifetimeTimeoutRef.current);
-    lifetimeTimeoutRef.current = null;
-    lifetimeDeadlineRef.current = null;
-  }, [clearTrackedTimeout]);
-
-  const dismiss = useCallback(
-    (durationMs: number) => {
-      clearDismissTimeout();
-      clearLifetimeTimeout();
-      setAppearing(false);
-      setFading(true);
-      dismissDeadlineRef.current = Date.now() + durationMs;
-      dismissTimeoutRef.current = setTrackedTimeout(() => {
-        setVisible(false);
-        setFading(false);
-        setId(null);
-        dismissTimeoutRef.current = null;
-        dismissDeadlineRef.current = null;
-      }, durationMs);
-    },
-    [clearDismissTimeout, clearLifetimeTimeout, setTrackedTimeout],
-  );
-
-  const fadeOut = useCallback(() => {
-    dismiss(VIDEO_REACTION_FADE_OUT_MS);
-  }, [dismiss]);
-
-  const fadeOutInstance = useCallback(
-    (targetInstance: number) => {
-      if (instanceRef.current !== targetInstance) {
-        return;
-      }
-      fadeOut();
-    },
-    [fadeOut],
-  );
-
-  const scheduleLifetimeTimeout = useCallback(
-    (durationMs: number, targetInstance: number) => {
-      if (
-        instanceRef.current !== targetInstance ||
-        dismissTimeoutRef.current !== null
-      ) {
-        return;
-      }
-      clearLifetimeTimeout();
-      lifetimeDeadlineRef.current = Date.now() + durationMs;
-      lifetimeTimeoutRef.current = setTrackedTimeout(() => {
-        if (instanceRef.current !== targetInstance) {
-          return;
-        }
-        lifetimeTimeoutRef.current = null;
-        lifetimeDeadlineRef.current = null;
-        fadeOut();
-      }, durationMs);
-    },
-    [clearLifetimeTimeout, fadeOut, setTrackedTimeout],
-  );
-
-  const show = useCallback(
-    (stickerId: number) => {
-      const nextInstance = instanceRef.current + 1;
-      instanceRef.current = nextInstance;
-      clearDismissTimeout();
-      clearAppearingTimeout();
-      setId(stickerId);
-      setInstance(nextInstance);
-      setVisible(true);
-      setFading(false);
-      setAppearing(true);
-      scheduleLifetimeTimeout(VIDEO_REACTION_DEFAULT_LIFETIME_MS, nextInstance);
-      appearingTimeoutRef.current = setTrackedTimeout(() => {
-        setAppearing(false);
-        appearingTimeoutRef.current = null;
-      }, VIDEO_REACTION_APPEAR_MS);
-    },
-    [
-      clearAppearingTimeout,
-      clearDismissTimeout,
-      scheduleLifetimeTimeout,
-      setTrackedTimeout,
-    ],
-  );
-
-  const clearNow = useCallback(() => {
-    clearDismissTimeout();
-    clearAppearingTimeout();
-    clearLifetimeTimeout();
-    setVisible(false);
-    setFading(false);
-    setAppearing(false);
-    setId(null);
-  }, [clearAppearingTimeout, clearDismissTimeout, clearLifetimeTimeout]);
-
-  const setElementRef = useCallback(
-    (videoElement: HTMLVideoElement | null) => {
-      videoElementRef.current = videoElement;
-      startVideoReactionElement(videoElement, () => {
-        fadeOutInstance(instance);
-      });
-    },
-    [fadeOutInstance, instance],
-  );
-
-  const syncAfterPageResume = useCallback(
-    (now: number) => {
-      if (!visible) {
-        return;
-      }
-
-      if (fading) {
-        const dismissDeadline = dismissDeadlineRef.current;
-        if (dismissDeadline !== null && now >= dismissDeadline) {
-          clearDismissTimeout();
-          setVisible(false);
-          setFading(false);
-          setAppearing(false);
-          setId(null);
-        }
-        return;
-      }
-
-      const videoElement = videoElementRef.current;
-      const deadline = lifetimeDeadlineRef.current;
-      if (
-        (deadline !== null && now >= deadline) ||
-        videoElement?.ended === true
-      ) {
-        dismiss(VIDEO_REACTION_CLEAR_FADE_OUT_MS);
-        return;
-      }
-
-      playVideoReactionElement(videoElement, () => {
-        dismiss(VIDEO_REACTION_CLEAR_FADE_OUT_MS);
-      });
-    },
-    [clearDismissTimeout, dismiss, fading, visible],
-  );
-
-  const resetTimeoutRefs = useCallback(() => {
-    dismissTimeoutRef.current = null;
-    dismissDeadlineRef.current = null;
-    appearingTimeoutRef.current = null;
-    lifetimeTimeoutRef.current = null;
-    lifetimeDeadlineRef.current = null;
-  }, []);
-
-  return {
-    appearing,
-    clearNow,
-    dismiss,
-    fadeOutInstance,
-    fading,
-    id,
-    instance,
-    resetTimeoutRefs,
-    scheduleLifetimeTimeout,
-    setElementRef,
-    show,
-    syncAfterPageResume,
-    visible,
-  };
-};
-
-type BoardVideoReactionProps = Pick<
-  ReturnType<typeof useVideoReactionSlot>,
-  | "appearing"
-  | "fadeOutInstance"
-  | "fading"
-  | "id"
-  | "instance"
-  | "scheduleLifetimeTimeout"
-  | "setElementRef"
-  | "visible"
->;
-
-const BoardVideoReaction: React.FC<BoardVideoReactionProps> = ({
-  appearing,
-  fadeOutInstance,
-  fading,
-  id,
-  instance,
-  scheduleLifetimeTimeout,
-  setElementRef,
-  visible,
-}) => {
-  if (!visible || id === null) {
-    return null;
-  }
-
-  return (
-    <video
-      key={`${id}-${instance}`}
-      ref={setElementRef}
-      style={{
-        position: "absolute",
-        left: "50%",
-        top: "50%",
-        transform: appearing
-          ? "translate(-50%, -50%) scale(0.3) rotate(-10deg)"
-          : fading
-            ? "translate(-50%, -50%) scale(0.8) rotate(0deg)"
-            : "translate(-50%, -50%) scale(1) rotate(0deg)",
-        width: "100%",
-        height: "100%",
-        opacity: appearing ? 0 : fading ? 0 : 1,
-        transition: appearing
-          ? "opacity 0.3s ease-out, transform 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55)"
-          : fading
-            ? "opacity 0.2s ease-in, transform 0.2s ease-in"
-            : "opacity 0.3s ease-out, transform 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55)",
-      }}
-      autoPlay
-      muted
-      preload="auto"
-      playsInline
-      onEnded={() => {
-        fadeOutInstance(instance);
-      }}
-      onError={(event) => {
-        if (isVideoReactionElementError(event)) {
-          fadeOutInstance(instance);
-        }
-      }}
-      onPlaying={(event) => {
-        scheduleLifetimeTimeout(
-          getVideoReactionPlaybackLifetimeMs(event.currentTarget),
-          instance,
-        );
-      }}
-    >
-      <source
-        src={`https://cdn.lil.org/mons/emojipack/swagpack/video/${id}.mov`}
-        type='video/quicktime; codecs="hvc1"'
-      />
-      <source
-        src={`https://cdn.lil.org/mons/emojipack/swagpack/video/${id}.webm`}
-        type="video/webm"
-      />
-    </video>
-  );
-};
 
 const toOverlayFontSizePx = (
   svgFontSize: number,
@@ -725,6 +378,7 @@ const seeIfShouldOffsetFromBorders = () =>
   window.innerWidth / window.innerHeight < 0.72;
 
 const BoardComponent: React.FC = () => {
+  const reactionsLayerRef = useRef<BoardReactionsLayerHandle>(null);
   const transitionTimeoutIdsRef = useRef<Set<number>>(new Set());
   const [currentColorSet, setCurrentColorSet] =
     useState<ColorSet>(getCurrentColorSet());
@@ -904,78 +558,6 @@ const BoardComponent: React.FC = () => {
     transitionTimeoutIdsRef.current.clear();
   }, []);
 
-  const {
-    appearing: opponentVideoAppearing,
-    clearNow: clearOpponentVideoNow,
-    dismiss: dismissOpponentVideo,
-    fadeOutInstance: fadeOutOpponentVideoInstance,
-    fading: opponentVideoFading,
-    id: opponentVideoId,
-    instance: opponentVideoInstance,
-    resetTimeoutRefs: resetOpponentVideoTimeoutRefs,
-    scheduleLifetimeTimeout: scheduleOpponentVideoLifetimeTimeout,
-    setElementRef: setOpponentVideoElementRef,
-    show: showOpponentVideoReaction,
-    syncAfterPageResume: syncOpponentVideoAfterPageResume,
-    visible: opponentVideoVisible,
-  } = useVideoReactionSlot(setTrackedTimeout, clearTrackedTimeout);
-
-  const {
-    appearing: playerVideoAppearing,
-    clearNow: clearPlayerVideoNow,
-    dismiss: dismissPlayerVideo,
-    fadeOutInstance: fadeOutPlayerVideoInstance,
-    fading: playerVideoFading,
-    id: playerVideoId,
-    instance: playerVideoInstance,
-    resetTimeoutRefs: resetPlayerVideoTimeoutRefs,
-    scheduleLifetimeTimeout: schedulePlayerVideoLifetimeTimeout,
-    setElementRef: setPlayerVideoElementRef,
-    show: showPlayerVideoReaction,
-    syncAfterPageResume: syncPlayerVideoAfterPageResume,
-    visible: playerVideoVisible,
-  } = useVideoReactionSlot(setTrackedTimeout, clearTrackedTimeout);
-
-  const clearVideoReactionsNow = useCallback(() => {
-    clearOpponentVideoNow();
-    clearPlayerVideoNow();
-  }, [clearOpponentVideoNow, clearPlayerVideoNow]);
-
-  const showVideoReactionHandler = (opponent: boolean, stickerId: number) => {
-    if (opponent) {
-      showOpponentVideoReaction(stickerId);
-    } else {
-      showPlayerVideoReaction(stickerId);
-    }
-  };
-
-  const syncVideoReactionsAfterPageResume = useCallback(() => {
-    if (document.visibilityState === "hidden") {
-      return;
-    }
-
-    const now = Date.now();
-    syncOpponentVideoAfterPageResume(now);
-    syncPlayerVideoAfterPageResume(now);
-  }, [syncOpponentVideoAfterPageResume, syncPlayerVideoAfterPageResume]);
-
-  useEffect(() => {
-    document.addEventListener(
-      "visibilitychange",
-      syncVideoReactionsAfterPageResume,
-    );
-    window.addEventListener("focus", syncVideoReactionsAfterPageResume);
-    window.addEventListener("pageshow", syncVideoReactionsAfterPageResume);
-    return () => {
-      document.removeEventListener(
-        "visibilitychange",
-        syncVideoReactionsAfterPageResume,
-      );
-      window.removeEventListener("focus", syncVideoReactionsAfterPageResume);
-      window.removeEventListener("pageshow", syncVideoReactionsAfterPageResume);
-    };
-  }, [syncVideoReactionsAfterPageResume]);
-
   const setTopBoardOverlayVisibleHandler = (
     blurry: boolean,
     svgElement: SVGElement | null,
@@ -1041,9 +623,6 @@ const BoardComponent: React.FC = () => {
       updateWagerPlayerUids: updateWagerPlayerUidsHandler,
       setBoardPlayerInfoOverlayState: setBoardPlayerInfoOverlayStateHandler,
     });
-    const boundVideoHandler = bindBoardVideoReactionHandler(
-      showVideoReactionHandler,
-    );
     const latestPlayerInfoOverlayState = getBoardPlayerInfoOverlayState();
     if (
       !playerInfoOverlayStatesEqual(
@@ -1055,7 +634,6 @@ const BoardComponent: React.FC = () => {
     }
     return () => {
       unbindBoardUiHandlers(boundHandlers);
-      unbindBoardVideoReactionHandler(boundVideoHandler);
     };
   });
 
@@ -1305,14 +883,8 @@ const BoardComponent: React.FC = () => {
   const clearPendingBoardTransitionState = useCallback(() => {
     clearAllTrackedTimeouts();
     resetWagerTransitionState();
-    resetOpponentVideoTimeoutRefs();
-    resetPlayerVideoTimeoutRefs();
-  }, [
-    clearAllTrackedTimeouts,
-    resetWagerTransitionState,
-    resetOpponentVideoTimeoutRefs,
-    resetPlayerVideoTimeoutRefs,
-  ]);
+    reactionsLayerRef.current?.resetTimeoutRefs();
+  }, [clearAllTrackedTimeouts, resetWagerTransitionState]);
 
   useEffect(() => {
     return () => {
@@ -1336,32 +908,9 @@ const BoardComponent: React.FC = () => {
       if (playerAuraRefs.current) {
         hideAuraDom(playerAuraRefs.current.background);
       }
-      if (!fadeOutVideos) {
-        clearVideoReactionsNow();
-        return;
-      }
-      if (opponentVideoVisible) {
-        dismissOpponentVideo(VIDEO_REACTION_CLEAR_FADE_OUT_MS);
-      } else {
-        clearOpponentVideoNow();
-      }
-      if (playerVideoVisible) {
-        dismissPlayerVideo(VIDEO_REACTION_CLEAR_FADE_OUT_MS);
-      } else {
-        clearPlayerVideoNow();
-      }
+      reactionsLayerRef.current?.clear(fadeOutVideos);
     },
-    [
-      clearPendingBoardTransitionState,
-      clearOpponentVideoNow,
-      clearPlayerVideoNow,
-      clearVideoReactionsNow,
-      clearWagerPanel,
-      dismissOpponentVideo,
-      dismissPlayerVideo,
-      opponentVideoVisible,
-      playerVideoVisible,
-    ],
+    [clearPendingBoardTransitionState, clearWagerPanel],
   );
 
   useEffect(() => {
@@ -1386,18 +935,6 @@ const BoardComponent: React.FC = () => {
   const boardClassName = `board-svg ${
     isPangchiuBoardLayout ? "grid-hidden" : "grid-visible"
   }`;
-  const topVideoReactionStyle = {
-    top: isPangchiuBoardLayout ? "7.05%" : "7.02%",
-    height: isPangchiuBoardLayout
-      ? VIDEO_CONTAINER_HEIGHT_IMAGE
-      : VIDEO_CONTAINER_HEIGHT_GRID,
-  };
-  const bottomVideoReactionStyle = {
-    top: isPangchiuBoardLayout ? "89.65%" : "85.22%",
-    height: isPangchiuBoardLayout
-      ? VIDEO_CONTAINER_HEIGHT_IMAGE
-      : VIDEO_CONTAINER_HEIGHT_GRID,
-  };
   const boardOverlayStyle = {
     top: isPangchiuBoardLayout ? "7.05%" : "7.02%",
     height: isPangchiuBoardLayout ? "82.6%" : "78.2%",
@@ -1886,166 +1423,90 @@ const BoardComponent: React.FC = () => {
           )}
       </svg>
 
-      {boardViewportRect && (
-        <div
-          style={{
-            position: "fixed",
-            left: `${boardViewportRect.left}px`,
-            top: `${boardViewportRect.top}px`,
-            width: `${boardViewportRect.width}px`,
-            height: `${boardViewportRect.height}px`,
-            pointerEvents: "none",
-          }}
-        >
+      <BoardReactionsLayer
+        ref={reactionsLayerRef}
+        viewportRect={boardViewportRect}
+        isPangchiuBoardLayout={isPangchiuBoardLayout}
+        setTrackedTimeout={setTrackedTimeout}
+        clearTrackedTimeout={clearTrackedTimeout}
+        wagerLayer={
           <BoardWagerLayer
             {...wagerLayerProps}
             boardPixelSize={boardPixelSize}
             prefersDarkMode={prefersDarkMode}
           />
-          <div
-            style={{
-              position: "absolute",
-              left: "50%",
-              transform: "translate(-50%, -100%)",
-              ...topVideoReactionStyle,
-              maxHeight: VIDEO_CONTAINER_MAX_HEIGHT,
-              aspectRatio: VIDEO_CONTAINER_ASPECT_RATIO,
-              zIndex: VIDEO_CONTAINER_Z_INDEX,
-              pointerEvents: "none",
-              touchAction: "none",
-            }}
-          >
-            <div
-              style={{
-                position: "absolute",
-                left: "50%",
-                top: "50%",
-                transform: "translate(-50%, -50%)",
-                width: "100%",
-                height: "100%",
-                pointerEvents: "none",
-              }}
-            />
-            <BoardVideoReaction
-              appearing={opponentVideoAppearing}
-              fadeOutInstance={fadeOutOpponentVideoInstance}
-              fading={opponentVideoFading}
-              id={opponentVideoId}
-              instance={opponentVideoInstance}
-              scheduleLifetimeTimeout={scheduleOpponentVideoLifetimeTimeout}
-              setElementRef={setOpponentVideoElementRef}
-              visible={opponentVideoVisible}
-            />
-          </div>
+        }
+      >
+        {overlayState.svgElement && (
           <div
             style={{
               position: "absolute",
               left: "50%",
               transform: "translateX(-50%)",
-              ...bottomVideoReactionStyle,
-              maxHeight: VIDEO_CONTAINER_MAX_HEIGHT,
-              aspectRatio: VIDEO_CONTAINER_ASPECT_RATIO,
-              zIndex: VIDEO_CONTAINER_Z_INDEX,
-              pointerEvents: "none",
-              touchAction: "none",
+              top: boardOverlayStyle.top,
+              pointerEvents: "all",
+              height: boardOverlayStyle.height,
+              aspectRatio: boardOverlayStyle.aspectRatio,
+              ...(overlayState.blurry
+                ? {
+                    backdropFilter: "blur(3px)",
+                    WebkitBackdropFilter: "blur(3px)",
+                  }
+                : {}),
+              overflow: "hidden",
+              border: "none",
+            }}
+            ref={(div) => {
+              if (div && overlayState.svgElement) {
+                div.innerHTML = "";
+                const wrapperSvg = document.createElementNS(
+                  "http://www.w3.org/2000/svg",
+                  "svg",
+                );
+                wrapperSvg.style.position = "absolute";
+                wrapperSvg.style.top = "0";
+                wrapperSvg.style.left = "0";
+                wrapperSvg.style.width = "100%";
+                wrapperSvg.style.height = "100%";
+                wrapperSvg.setAttribute("viewBox", "0 0 1100 1100");
+                wrapperSvg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+                wrapperSvg.appendChild(overlayState.svgElement);
+                div.appendChild(wrapperSvg);
+              }
+            }}
+          />
+        )}
+        {overlayState.withConfirmAndCancelButtons && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: "30.5%",
+              left: "50%",
+              transform: "translateX(-50%)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "27%",
+              height: "10.8%",
+              aspectRatio: "3.75",
+              pointerEvents: "all",
             }}
           >
-            <div
-              style={{
-                position: "absolute",
-                left: "50%",
-                top: "50%",
-                transform: "translate(-50%, -50%)",
-                width: "100%",
-                height: "100%",
-                pointerEvents: "none",
-              }}
-            />
-            <BoardVideoReaction
-              appearing={playerVideoAppearing}
-              fadeOutInstance={fadeOutPlayerVideoInstance}
-              fading={playerVideoFading}
-              id={playerVideoId}
-              instance={playerVideoInstance}
-              scheduleLifetimeTimeout={schedulePlayerVideoLifetimeTimeout}
-              setElementRef={setPlayerVideoElementRef}
-              visible={playerVideoVisible}
-            />
-          </div>
-          {overlayState.svgElement && (
-            <div
-              style={{
-                position: "absolute",
-                left: "50%",
-                transform: "translateX(-50%)",
-                top: boardOverlayStyle.top,
-                pointerEvents: "all",
-                height: boardOverlayStyle.height,
-                aspectRatio: boardOverlayStyle.aspectRatio,
-                ...(overlayState.blurry
-                  ? {
-                      backdropFilter: "blur(3px)",
-                      WebkitBackdropFilter: "blur(3px)",
-                    }
-                  : {}),
-                overflow: "hidden",
-                border: "none",
-              }}
-              ref={(div) => {
-                if (div && overlayState.svgElement) {
-                  div.innerHTML = "";
-                  const wrapperSvg = document.createElementNS(
-                    "http://www.w3.org/2000/svg",
-                    "svg",
-                  );
-                  wrapperSvg.style.position = "absolute";
-                  wrapperSvg.style.top = "0";
-                  wrapperSvg.style.left = "0";
-                  wrapperSvg.style.width = "100%";
-                  wrapperSvg.style.height = "100%";
-                  wrapperSvg.setAttribute("viewBox", "0 0 1100 1100");
-                  wrapperSvg.setAttribute(
-                    "preserveAspectRatio",
-                    "xMidYMid meet",
-                  );
-                  wrapperSvg.appendChild(overlayState.svgElement);
-                  div.appendChild(wrapperSvg);
-                }
-              }}
-            />
-          )}
-          {overlayState.withConfirmAndCancelButtons && (
-            <div
-              style={{
-                position: "absolute",
-                bottom: "30.5%",
-                left: "50%",
-                transform: "translateX(-50%)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: "27%",
-                height: "10.8%",
-                aspectRatio: "3.75",
-                pointerEvents: "all",
-              }}
+            <CircularButton
+              onClick={!isMobile ? handleCancelClick : undefined}
+              onTouchStart={isMobile ? handleCancelClick : undefined}
             >
-              <CircularButton
-                onClick={!isMobile ? handleCancelClick : undefined}
-                onTouchStart={isMobile ? handleCancelClick : undefined}
-              >
-                <FaTimes />
-              </CircularButton>
-              <CircularButton
-                onClick={!isMobile ? handleConfirmClick : undefined}
-                onTouchStart={isMobile ? handleConfirmClick : undefined}
-              >
-                <FaCheck />
-              </CircularButton>
-            </div>
-          )}
-        </div>
-      )}
+              <FaTimes />
+            </CircularButton>
+            <CircularButton
+              onClick={!isMobile ? handleConfirmClick : undefined}
+              onTouchStart={isMobile ? handleConfirmClick : undefined}
+            >
+              <FaCheck />
+            </CircularButton>
+          </div>
+        )}
+      </BoardReactionsLayer>
     </>
   );
 };

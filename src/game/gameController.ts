@@ -2153,28 +2153,83 @@ function resetSessionFlags() {
   publishGameControlsContext();
 }
 
+function resetSessionState(
+  phase: "start" | "dispose",
+  preserveAutomatchUi = false,
+): boolean {
+  resetSessionBoardState();
+  setIslandButtonDimmed(preserveAutomatchUi);
+  if (phase === "dispose") {
+    if (unsubscribeFromWagerState) {
+      unsubscribeFromWagerState();
+      unsubscribeFromWagerState = null;
+    }
+    didSetupWagerSubscription = false;
+    if (wagerOutcomeAnimTimer !== null) {
+      clearManagedGameTimeout(wagerOutcomeAnimTimer);
+      wagerOutcomeAnimTimer = null;
+    }
+  }
+  resetSessionFlags();
+  if (phase === "dispose") {
+    selectedProblem = null;
+    publishGameControlsContext();
+  }
+  isWaitingForInviteToGetAccepted = preserveAutomatchUi;
+  const isAutomatchTransition = phase === "start" && pendingAutomatchTransition;
+  if (phase === "start") {
+    pendingAutomatchTransition = false;
+  }
+  resetOnlineReconnectRequestState();
+  isInviteBotIntoLocalGameUnavailable = false;
+  didMakeFirstLocalPlayerMoveOnLocalBoard = false;
+  if (phase === "dispose") {
+    setWatchOnlyState(false);
+    currentWagerState = null;
+    wagerOutcomeShown = false;
+    wagerOutcomeAnimating = false;
+    wagerOutcomeAnimationAllowed = false;
+    whiteProcessedMovesCount = 0;
+    blackProcessedMovesCount = 0;
+    didSetWhiteProcessedMovesCount = false;
+    didSetBlackProcessedMovesCount = false;
+    currentGameModelMatchId = null;
+    whiteFlatMovesString = null;
+    blackFlatMovesString = null;
+    wagerMatchId = null;
+  }
+  flashbackMode = false;
+  if (phase === "dispose") {
+    lastObservedMatchSideFallbackWarningKey = "";
+  }
+  resignedColor = undefined;
+  winnerByTimerColor = undefined;
+  if (phase === "dispose") {
+    lastReactionTime = 0;
+    lastBotMoveTimestamp = 0;
+    processedVoiceReactions.clear();
+  }
+  currentInputs = [];
+  if (phase === "start") {
+    setCurrentWagerMatch(null);
+    connection.setWagerViewMatchId(null);
+    setWatchOnlyState(false);
+  }
+  resetTimerStateForMatch(null);
+  if (phase === "dispose") {
+    setCurrentWagerMatch(null);
+    connection.setWagerViewMatchId(null);
+  } else {
+    lastObservedMatchSideFallbackWarningKey = "";
+  }
+  return isAutomatchTransition;
+}
+
 export async function go(routeStateOverride?: RouteState) {
   cancelSessionPreload();
   const routeState = routeStateOverride ?? getCurrentRouteState();
   activeRouteState = routeState;
-  resetSessionBoardState();
-  setIslandButtonDimmed(false);
-  resetSessionFlags();
-  isWaitingForInviteToGetAccepted = false;
-  const isAutomatchTransition = pendingAutomatchTransition;
-  pendingAutomatchTransition = false;
-  resetOnlineReconnectRequestState();
-  isInviteBotIntoLocalGameUnavailable = false;
-  didMakeFirstLocalPlayerMoveOnLocalBoard = false;
-  flashbackMode = false;
-  resignedColor = undefined;
-  winnerByTimerColor = undefined;
-  currentInputs = [];
-  setCurrentWagerMatch(null);
-  connection.setWagerViewMatchId(null);
-  setWatchOnlyState(false);
-  resetTimerStateForMatch(null);
-  lastObservedMatchSideFallbackWarningKey = "";
+  const isAutomatchTransition = resetSessionState("start");
   Board.setBotStrengthControlVisible(false);
   triggerMoveHistoryPopupReload();
   if (!didSetupWagerSubscription) {
@@ -2329,48 +2384,7 @@ export function disposeGameSession(nextRouteState?: RouteState) {
     connection.hasPendingInviteCreationFor(nextRouteState.inviteId);
   const preserveWaitingAnimation =
     preserveAutomatchUi || preserveManualInviteAnimation;
-  resetSessionBoardState();
-  setIslandButtonDimmed(preserveAutomatchUi);
-  if (unsubscribeFromWagerState) {
-    unsubscribeFromWagerState();
-    unsubscribeFromWagerState = null;
-  }
-  didSetupWagerSubscription = false;
-  if (wagerOutcomeAnimTimer !== null) {
-    clearManagedGameTimeout(wagerOutcomeAnimTimer);
-    wagerOutcomeAnimTimer = null;
-  }
-  resetSessionFlags();
-  selectedProblem = null;
-  publishGameControlsContext();
-  isWaitingForInviteToGetAccepted = preserveAutomatchUi;
-  resetOnlineReconnectRequestState();
-  isInviteBotIntoLocalGameUnavailable = false;
-  didMakeFirstLocalPlayerMoveOnLocalBoard = false;
-  setWatchOnlyState(false);
-  currentWagerState = null;
-  wagerOutcomeShown = false;
-  wagerOutcomeAnimating = false;
-  wagerOutcomeAnimationAllowed = false;
-  whiteProcessedMovesCount = 0;
-  blackProcessedMovesCount = 0;
-  didSetWhiteProcessedMovesCount = false;
-  didSetBlackProcessedMovesCount = false;
-  currentGameModelMatchId = null;
-  whiteFlatMovesString = null;
-  blackFlatMovesString = null;
-  wagerMatchId = null;
-  flashbackMode = false;
-  lastObservedMatchSideFallbackWarningKey = "";
-  resignedColor = undefined;
-  winnerByTimerColor = undefined;
-  lastReactionTime = 0;
-  lastBotMoveTimestamp = 0;
-  processedVoiceReactions.clear();
-  currentInputs = [];
-  resetTimerStateForMatch(null);
-  setCurrentWagerMatch(null);
-  connection.setWagerViewMatchId(null);
+  resetSessionState("dispose", preserveAutomatchUi);
   setHomeVisible(preserveAutomatchUi);
   setInviteLinkActionVisible(false);
   if (!preserveAutomatchUi) {

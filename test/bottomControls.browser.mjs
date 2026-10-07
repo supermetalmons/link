@@ -518,9 +518,14 @@ export const teardownProfileScope = () => {};
           }
           const isControlsHook =
             importer?.endsWith("/useAutomatchControls.ts") ||
-            importer?.endsWith("/useRematchSeries.ts");
+            importer?.endsWith("/useRematchSeries.ts") ||
+            importer?.endsWith("/useReactionActions.ts");
           const replacementId =
-            isControlsHook && id.startsWith("../../") ? id.slice(3) : id;
+            isControlsHook && id.startsWith("../../")
+              ? id.slice(3)
+              : isControlsHook && id === "./boardReactionPort"
+                ? "./controls/boardReactionPort"
+                : id;
           if (
             (importer?.endsWith("/BottomControls.tsx") || isControlsHook) &&
             replacements.has(replacementId)
@@ -1964,6 +1969,64 @@ test(
     });
   },
 );
+
+test(
+  "reaction cooldown expires at 9999ms and match reset re-enables the control",
+  { timeout: 60000 },
+  async () => {
+    await fixture(async (page) => {
+      await showPopupControls(page);
+      await click(page, "Voice Reaction");
+      await click(page, "yo");
+      assert.equal(await button(page, "Voice Reaction").isDisabled(), true);
+      await page.clock.runFor(9998);
+      assert.equal(await button(page, "Voice Reaction").isDisabled(), true);
+      await page.clock.runFor(1);
+      assert.equal(await button(page, "Voice Reaction").isDisabled(), false);
+      await click(page, "Voice Reaction");
+      await click(page, "yo");
+      await page.evaluate(() => window.harness.resetMatch());
+      assert.equal(await button(page, "Voice Reaction").isDisabled(), false);
+      assert.equal(
+        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        0,
+      );
+      await page.clock.runFor(9999);
+      assert.equal(await button(page, "Voice Reaction").isDisabled(), false);
+    });
+  },
+);
+
+for (const isGameWithBot of [false, true]) {
+  test(
+    `${isGameWithBot ? "bot reply" : "reaction cooldown"} timers clear on unmount`,
+    { timeout: 60000 },
+    async () => {
+      await fixture(async (page) => {
+        await showPopupControls(page);
+        await page.evaluate((isGameWithBot) => {
+          window.harness.run(() =>
+            window.harness.controlsStore.updateGameControlsContext({
+              isGameWithBot,
+            }),
+          );
+        }, isGameWithBot);
+        await click(page, "Voice Reaction");
+        await click(page, "yo");
+        assert.equal(
+          await page.evaluate(() => window.harness.counters().uiTimeouts),
+          1,
+        );
+        await page.evaluate(() => window.harness.dispose());
+        assert.equal(
+          await page.evaluate(() => window.harness.counters().uiTimeouts),
+          0,
+        );
+        await page.clock.runFor(9999);
+      });
+    },
+  );
+}
 
 test(
   "reaction callbacks read the current context during synchronous mode changes",

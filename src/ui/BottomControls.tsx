@@ -7,10 +7,7 @@ import React, {
   useMemo,
   useSyncExternalStore,
 } from "react";
-import {
-  FIXED_STICKER_IDS,
-  STICKER_ID_WHITELIST,
-} from "@mons/shared/reactions";
+import { FIXED_STICKER_IDS } from "@mons/shared/reactions";
 import { useAvailableMaterials } from "../hooks/useAvailableMaterials";
 import { useMaterialImages } from "../hooks/useMaterialImages";
 import {
@@ -51,17 +48,13 @@ import { connection } from "../connection/connection";
 import type { AuthState } from "../connection/authModels";
 import { defaultEarlyInputEventName, isMobile } from "../utils/misc";
 import { soundPlayer } from "../utils/SoundPlayer";
-import { playReaction, playSounds } from "../content/sounds";
-import { newReactionOfKind, newStickerReaction } from "../content/sounds";
 import {
-  showVoiceReactionText,
-  isMetadataSideDisplayedAtOpponentSlot,
   getPlayerReactionUid,
   getOpponentReactionUid,
-  showVideoReaction,
 } from "./controls/boardReactionPort";
 import NavigationPicker from "./NavigationPicker";
 import { useNavigationGames } from "./controls/useNavigationGames";
+import { useReactionActions } from "./controls/useReactionActions";
 import { useAutomatchControls } from "./controls/useAutomatchControls";
 import { useRematchSeries } from "./controls/useRematchSeries";
 import { RematchSeriesControls } from "./controls/RematchSeriesControls";
@@ -92,7 +85,6 @@ import {
 } from "./BottomControlsStyles";
 import { closeMenuAndInfoIfAny } from "./controls/menuPort";
 import BoardStylePickerComponent from "./BoardStylePicker";
-import { Sound } from "../utils/gameModels";
 import MoveHistoryPopup from "./MoveHistoryPopup";
 import { MATERIALS, MaterialName } from "../services/rocksMiningService";
 import {
@@ -1198,86 +1190,16 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     didClickEndMatchButton();
   };
 
-  const handleStickerSelect = useCallback(
-    (stickerId: number) => {
-      if (!isVoiceReactionButtonVisible) {
-        dispatchControlsUi({ type: "dismissPopups", reaction: true });
-        return;
-      }
-      if (!canSendSticker(stickerId)) {
-        dispatchControlsUi({ type: "dismissPopups", reaction: true });
-        return;
-      }
-      dispatchControlsUi({ type: "dismissPopups", reaction: true });
-      showVideoReaction(
-        isMetadataSideDisplayedAtOpponentSlot(false),
-        stickerId,
-      );
-      playSounds([Sound.EmoteSent]);
-      if (getGameControlsSnapshot().context.isGameWithBot) {
-        const sessionGuard = connection.createSessionGuard();
-        const responseStickerId =
-          STICKER_ID_WHITELIST[
-            Math.floor(Math.random() * STICKER_ID_WHITELIST.length)
-          ];
-        setMatchScopedTimeout(() => {
-          if (!sessionGuard()) {
-            return;
-          }
-          showVideoReaction(
-            isMetadataSideDisplayedAtOpponentSlot(true),
-            responseStickerId,
-          );
-          playSounds([Sound.EmoteReceived]);
-        }, 5000);
-      } else if (!getGameControlsSnapshot().context.puzzleMode) {
-        connection.sendVoiceReaction(newStickerReaction(stickerId));
-        setIsVoiceReactionDisabled(true);
-        setMatchScopedTimeout(() => {
-          setIsVoiceReactionDisabled(false);
-        }, 9999);
-      }
-    },
-    [
-      canSendSticker,
-      dispatchControlsUi,
-      isVoiceReactionButtonVisible,
-      setMatchScopedTimeout,
-    ],
-  );
-
-  const handleReactionSelect = useCallback(
-    (reaction: string) => {
-      if (!isVoiceReactionButtonVisible) {
-        dispatchControlsUi({ type: "dismissPopups", reaction: true });
-        return;
-      }
-      dispatchControlsUi({ type: "dismissPopups", reaction: true });
-      const reactionObj = newReactionOfKind(reaction);
-      playReaction(reactionObj);
-      showVoiceReactionText(reaction, false);
-
-      if (getGameControlsSnapshot().context.isGameWithBot) {
-        const sessionGuard = connection.createSessionGuard();
-        const responseReaction = reaction;
-        const responseReactionObj = newReactionOfKind(responseReaction);
-        setMatchScopedTimeout(() => {
-          if (!sessionGuard()) {
-            return;
-          }
-          playReaction(responseReactionObj);
-          showVoiceReactionText(reaction, true);
-        }, 2000);
-      } else if (!getGameControlsSnapshot().context.puzzleMode) {
-        connection.sendVoiceReaction(reactionObj);
-        setIsVoiceReactionDisabled(true);
-        setMatchScopedTimeout(() => {
-          setIsVoiceReactionDisabled(false);
-        }, 9999);
-      }
-    },
-    [dispatchControlsUi, isVoiceReactionButtonVisible, setMatchScopedTimeout],
-  );
+  const dismissReactionPicker = useCallback(() => {
+    dispatchControlsUi({ type: "dismissPopups", reaction: true });
+  }, [dispatchControlsUi]);
+  const { handleStickerSelect, handleReactionSelect } = useReactionActions({
+    isVisible: isVoiceReactionButtonVisible,
+    canSendSticker,
+    dismissPicker: dismissReactionPicker,
+    setDisabled: setIsVoiceReactionDisabled,
+    setMatchScopedTimeout,
+  });
 
   const playerUid = getPlayerReactionUid();
   const opponentUid = getOpponentReactionUid();

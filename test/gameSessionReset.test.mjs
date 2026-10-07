@@ -19,6 +19,7 @@ const declarations = [
   "cancelSessionPreload",
   "resetSessionBoardState",
   "resetSessionFlags",
+  "resetSessionState",
   "clearAllManagedGameTimeouts",
   "resetBotScoreReactionState",
   "nextBoardRenderSession",
@@ -388,13 +389,19 @@ test("wager subscriptions survive repeated startup and are replaced once after d
   assert.equal(h.events.filter(([name]) => name === "subscribe").length, 2);
 });
 
-for (const action of ["go", "disposeGameSession"]) {
-  test(`${action} preserves synchronous wager and watch-only notification ordering`, async () => {
+for (const [action, pendingAutomatch] of [
+  ["go", false],
+  ["go", true],
+  ["disposeGameSession", false],
+  ["disposeGameSession", true],
+]) {
+  test(`${action} preserves synchronous wager and watch-only notification ordering with pending automatch ${pendingAutomatch}`, async () => {
     const h = harness();
     await h.go(home);
     const wager = { agreed: "old" };
     h.publishWager(wager);
     h.setState({
+      pendingAutomatchTransition: pendingAutomatch,
       isWatchOnly: true,
       flashbackMode: true,
       currentInputs: ["old-selection"],
@@ -465,7 +472,7 @@ for (const action of ["go", "disposeGameSession"]) {
             timer: "old",
             wager,
             selectedProblem: null,
-            waiting: false,
+            waiting: pendingAutomatch,
           },
         ],
         ["wager-match", null],
