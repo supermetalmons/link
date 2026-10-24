@@ -475,6 +475,10 @@ describe("event prize withdrawal D1 repository", () => {
         sourceWrites++;
         throw new Error("unexpected-profile-prize-transaction");
       },
+      removeMatchingProfileEventPrizeAssignment: async () => {
+        sourceWrites++;
+        throw new Error("unexpected-profile-prize-cleanup");
+      },
     };
     const runtime = await createEventPrizeContext(testEnv, {
       repository,

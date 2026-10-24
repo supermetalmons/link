@@ -8,6 +8,7 @@ import { STATE_VALUE_FIELD } from "../stateCompatibility.ts";
 import { parseAutomatchTelegramProjectionOutbox } from "../telegramProjectionOutbox.ts";
 import {
   encodeValue,
+  isAutomatchRevisionConflict,
   requireKey,
   requireRoot,
   resolveAutomatchServerValues,
@@ -15,7 +16,11 @@ import {
   validateAutomatchJson,
 } from "./codec.ts";
 import type { createAutomatchReads } from "./reads.ts";
-import { AutomatchD1Failure, type AutomatchRoot } from "./types.ts";
+import {
+  AutomatchD1Failure,
+  type AutomatchRoot,
+  type AutomatchOutboxClaimSnapshot,
+} from "./types.ts";
 
 type ProjectionMethods = Pick<
   AutomatchProjectionPort,
@@ -55,6 +60,38 @@ function hasServerValues(value: unknown): boolean {
   return found;
 }
 
+function prepareOutboxPatch(
+  valueColumn: string,
+  current: unknown,
+  patch: OutboxPatch | null,
+  resolvedAtMs: number,
+): { expression: string; values: Array<string | number | null> } {
+  timestamp(resolvedAtMs);
+  if (patch === null) return { expression: "NULL", values: [] };
+  const next = { ...toRecord(current), ...patch };
+  validateAutomatchJson(next);
+  if (hasServerValues(next)) {
+    return {
+      expression: "?",
+      values: [
+        encodeValue(resolveAutomatchServerValues(next, current, resolvedAtMs)),
+      ],
+    };
+  }
+  const fields = Object.entries(patch);
+  return {
+    expression: `json_set(${valueColumn}, ${fields
+      .map(
+        ([key, value]) =>
+          `'$.${key}', ${typeof value === "number" ? "?" : "json(?)"}`,
+      )
+      .join(", ")})`,
+    values: fields.map(([, value]) =>
+      typeof value === "number" ? value : JSON.stringify(value),
+    ),
+  };
+}
+
 export function createAutomatchProjectionOutboxes(
   db: D1Database,
   {
@@ -72,12 +109,46 @@ export function createAutomatchProjectionOutboxes(
     requestId: string,
     decide: (current: unknown) => OutboxDecision<Result>,
     signal?: AbortSignal,
+    initialSnapshot?: AutomatchOutboxClaimSnapshot,
   ): Promise<Result> {
     const resolvedAtMs = now();
     const { table, valueColumn, revisionColumn } = requireRoot(root);
+    let availableSnapshot = initialSnapshot;
+    let seededSnapshot: AutomatchOutboxClaimSnapshot | undefined;
     const transaction = await runOptimisticTransaction({
       maxAttempts: 25,
-      read: () => read(root, inviteId, signal),
+      async read() {
+        const snapshot = availableSnapshot;
+        availableSnapshot = undefined;
+        seededSnapshot = undefined;
+        if (snapshot) {
+          requireKey(inviteId);
+          signal?.throwIfAborted();
+          try {
+            if (
+              snapshot.root === root &&
+              snapshot.key === inviteId &&
+              Number.isSafeInteger(snapshot.revision) &&
+              snapshot.revision > 0 &&
+              Number.isSafeInteger(snapshot.revision + 1)
+            ) {
+              const decision = decide(snapshot.value);
+              if (decision.write !== undefined) {
+                prepareOutboxPatch(
+                  valueColumn,
+                  snapshot.value,
+                  decision.write,
+                  resolvedAtMs,
+                );
+                seededSnapshot = snapshot;
+              }
+            }
+          } catch {}
+          signal?.throwIfAborted();
+          if (seededSnapshot) return seededSnapshot;
+        }
+        return read(root, inviteId, signal);
+      },
       getValue: (current) => decide(current.value),
       decide: (
         decision,
@@ -88,59 +159,62 @@ export function createAutomatchProjectionOutboxes(
           ? { commit: false }
           : { value: { result: decision.result, write: decision.write } },
       async write(current, decision) {
-        timestamp(resolvedAtMs);
-        let expression = "NULL";
-        const values: Array<string | number | null> = [];
-        if (decision.write !== null) {
-          const next = { ...toRecord(current.value), ...decision.write };
-          validateAutomatchJson(next);
-          if (hasServerValues(next)) {
-            expression = "?";
-            values.push(
-              encodeValue(
-                resolveAutomatchServerValues(next, current.value, resolvedAtMs),
-              ),
-            );
-          } else {
-            const fields = Object.entries(decision.write);
-            expression = `json_set(${valueColumn}, ${fields
-              .map(
-                ([key, value]) =>
-                  `'$.${key}', ${typeof value === "number" ? "?" : "json(?)"}`,
-              )
-              .join(", ")})`;
-            values.push(
-              ...fields.map(([, value]) =>
-                typeof value === "number" ? value : JSON.stringify(value),
-              ),
-            );
-          }
+        const { expression, values } = prepareOutboxPatch(
+          valueColumn,
+          current.value,
+          decision.write,
+          resolvedAtMs,
+        );
+        const seeded = current === seededSnapshot;
+        let guards: D1PreparedStatement[];
+        try {
+          guards = buildWriteGuardStatements();
+        } catch (error) {
+          if (seeded) return { applied: false, value: decision };
+          throw error;
         }
-        const guards = buildWriteGuardStatements();
         if (!Number.isSafeInteger(current.revision + 1))
           throw new TypeError("invalid-automatch-revision");
         const updatedAtMs = timestamp(now());
         signal?.throwIfAborted();
-        const results = await db.batch<{ record_key: string }>([
-          ...guards,
-          db
-            .prepare(
-              `UPDATE ${table}
+        const revisionGuards = seeded
+          ? [
+              db
+                .prepare(
+                  `INSERT INTO automatch_revision_guards (singleton)
+           SELECT 0 WHERE COALESCE((SELECT ${revisionColumn} FROM ${table} WHERE record_key = ?), 0) != ?`,
+                )
+                .bind(inviteId, current.revision),
+            ]
+          : [];
+        let results: D1Result<{ record_key: string }>[];
+        try {
+          results = await db.batch<{ record_key: string }>([
+            ...revisionGuards,
+            ...guards,
+            db
+              .prepare(
+                `UPDATE ${table}
              SET ${valueColumn} = ${expression},
                ${revisionColumn} = ${revisionColumn} + 1,
                updated_at_ms = MAX(updated_at_ms, ?)
              WHERE record_key = ? AND ${revisionColumn} = ?
                AND json_extract(${valueColumn}, '$.requestId') = ?
              RETURNING record_key`,
-            )
-            .bind(
-              ...values,
-              updatedAtMs,
-              inviteId,
-              current.revision,
-              requestId,
-            ),
-        ]);
+              )
+              .bind(
+                ...values,
+                updatedAtMs,
+                inviteId,
+                current.revision,
+                requestId,
+              ),
+          ]);
+        } catch (error) {
+          if (seeded && isAutomatchRevisionConflict(error))
+            return { applied: false, value: decision };
+          throw error;
+        }
         return {
           applied: results[results.length - 1].results.length > 0,
           value: decision,
@@ -159,6 +233,7 @@ export function createAutomatchProjectionOutboxes(
       expectedLastQueuedAtMs,
       nowMs,
       signal,
+      snapshot,
     ) =>
       mutate(
         "profileGameProjectionOutbox/automatch",
@@ -174,6 +249,7 @@ export function createAutomatchProjectionOutboxes(
             : { result: true, write: { lastQueuedAtMs: nowMs } };
         },
         signal,
+        snapshot,
       ),
     acknowledgeAutomatchProfileOutbox: (inviteId, requestId, signal) =>
       mutate(
@@ -221,6 +297,7 @@ export function createAutomatchProjectionOutboxes(
       expectedUpdatedAtMs,
       nowMs,
       signal,
+      snapshot,
     ) =>
       mutate(
         "telegramProjectionOutbox/automatch",
@@ -236,6 +313,7 @@ export function createAutomatchProjectionOutboxes(
             : { result: true, write: { updatedAtMs: nowMs } };
         },
         signal,
+        snapshot,
       ),
     acknowledgeAutomatchTelegramOutbox: (inviteId, requestId, signal) =>
       mutate(

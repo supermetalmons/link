@@ -60,6 +60,7 @@ import type { createEventPrizeRuntimeDependencies } from "../src/eventPrizeWithd
 import type { EventPrizeWithdrawalStore } from "../src/eventPrizeWithdrawalD1.ts";
 import type { EventGameplayRepository } from "../src/eventRepository.ts";
 import type { ProfileOwnershipReader } from "../src/profileOwnership.ts";
+import type { EventPrizeRepository } from "../src/eventPrizeRepository.ts";
 import type { WithdrawalRuntimeDependencies } from "../../../runtime/eventPrizes/solanaTypes.js";
 
 type Assert<T extends true> = T;
@@ -495,6 +496,12 @@ export type PrizeRequestCannotReplaceCompletionRecords = Assert<
   Equal<
     EventPrizeRequestDependencies["withdrawals"],
     Pick<EventPrizeWithdrawalStore, "record">
+  >
+>;
+export type PrizeRepositoryRequiresGuardedCleanup = Assert<
+  Rejects<
+    Omit<EventPrizeRepository, "removeMatchingProfileEventPrizeAssignment">,
+    EventPrizeRepository
   >
 >;
 export type PrizeContextHasNoSigner = Assert<

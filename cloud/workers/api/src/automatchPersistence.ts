@@ -229,6 +229,7 @@ export function createAutomatchPersistence(
       expected,
       nowMs,
       signal,
+      snapshot,
     ) =>
       withProjectionWrite(inviteId, (guarded) =>
         guarded.claimAutomatchProfileOutbox(
@@ -237,6 +238,7 @@ export function createAutomatchPersistence(
           expected,
           nowMs,
           signal,
+          snapshot,
         ),
       ),
     acknowledgeAutomatchProfileOutbox: (inviteId, requestId, signal) =>
@@ -258,6 +260,7 @@ export function createAutomatchPersistence(
       expected,
       nowMs,
       signal,
+      snapshot,
     ) =>
       withProjectionWrite(inviteId, (guarded) =>
         guarded.claimAutomatchTelegramOutbox(
@@ -266,6 +269,7 @@ export function createAutomatchPersistence(
           expected,
           nowMs,
           signal,
+          snapshot,
         ),
       ),
     acknowledgeAutomatchTelegramOutbox: (inviteId, requestId, signal) =>

@@ -13,6 +13,8 @@ import {
 import { createEventPrizeRepository } from "../src/eventPrizeRepository.ts";
 import { createD1ProfileOwnershipReader } from "../src/profileOwnershipD1.ts";
 import { createEventPrizeContext } from "../src/eventPrizeWithdrawal/context.ts";
+import { handleEventPrizeWithdrawalRoute } from "../src/eventPrizeWithdrawal/route.ts";
+import { createD1EventPrizeWithdrawalStore } from "../src/eventPrizeWithdrawalD1.ts";
 import { executeEventPrizeWithdrawal } from "../src/eventPrizeWithdrawal/runtime.ts";
 import { buildEventPrizeWithdrawalOperationId } from "../src/eventPrizeWithdrawal/contracts.ts";
 import { handleEventReadRoute } from "../src/eventReadRoute.ts";
@@ -245,6 +247,95 @@ describe("focused event prize repositories", () => {
       await context.readProfileEventPrizeAssignment(profileId, eventId),
     ).toBeNull();
     expect(await admissionCount()).toBe(0);
+  });
+
+  it("uses focused default withdrawal routes and leaves repeated cleanup revisions unchanged", async () => {
+    const { profileId, loginUid } = await owner();
+    const repository = createEventPrizeRepository(
+      testEnv.PROFILE_DB,
+      testEnv.EVENT_DB,
+    );
+    await repository.transactProfileEventPrize(profileId, eventId, () => ({
+      value: assignment(profileId),
+    }));
+    const withdrawals = createD1EventPrizeWithdrawalStore(
+      testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
+    );
+    const recipientAddress = "11111111111111111111111111111111";
+    const completed = {
+      assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
+      eventId,
+      place: 1,
+      prizeId,
+      profileId,
+      recipientAddress,
+      requesterUid: loginUid,
+      status: "completed",
+      transactionSignature: "signature",
+    };
+    await withdrawals.replaceRecords([{ eventId, prizeId, value: completed }]);
+    const invoke = (path: string, body: unknown) =>
+      handleEventPrizeWithdrawalRoute(
+        new Request(`https://api.mons.link${path}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Origin: "https://mons.link",
+          },
+          body: JSON.stringify(body),
+        }),
+        restrictedEnv(),
+        { waitUntil() {} },
+        { verifyIdentity: async () => ({ uid: loginUid }) },
+      );
+    const readRevision = () =>
+      testEnv.EVENT_DB.prepare(
+        "SELECT revision, updated_at_ms FROM profile_event_prize_revisions WHERE profile_id = ?",
+      )
+        .bind(profileId)
+        .first<{ revision: number; updated_at_ms: number }>();
+    try {
+      const status = await invoke("/events/prizes/withdrawals/status", {
+        eventId,
+        prizeId,
+        operationId: await buildEventPrizeWithdrawalOperationId(
+          eventId,
+          prizeId,
+        ),
+      });
+      expect(status.status).toBe(200);
+      expect(await status.json()).toMatchObject({ status: "completed" });
+      expect(
+        await repository.readProfileEventPrizeAssignment(profileId, eventId),
+      ).toEqual(assignment(profileId));
+      expect((await readRevision())?.revision).toBe(1);
+
+      const first = await invoke("/events/prizes/withdrawals", {
+        eventId,
+        prizeId,
+        solanaAddress: recipientAddress,
+      });
+      expect(first.status).toBe(200);
+      expect(await first.json()).toMatchObject({ status: "completed" });
+      expect(
+        await repository.readProfileEventPrizeAssignment(profileId, eventId),
+      ).toBeNull();
+      const revision = await readRevision();
+      expect(revision?.revision).toBe(2);
+
+      const repeated = await invoke("/events/prizes/withdrawals", {
+        eventId,
+        prizeId,
+        solanaAddress: recipientAddress,
+      });
+      expect(repeated.status).toBe(200);
+      expect(await repeated.json()).toMatchObject({ status: "completed" });
+      expect(await readRevision()).toEqual(revision);
+      expect(await withdrawals.get(eventId, prizeId)).toEqual(completed);
+      expect(await admissionCount()).toBe(0);
+    } finally {
+      await withdrawals.replaceRecords([{ eventId, prizeId, value: null }]);
+    }
   });
 
   it("keeps profileDb overrides scoped to merge paths and narrows the execution default", async () => {

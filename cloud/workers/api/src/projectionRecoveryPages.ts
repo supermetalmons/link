@@ -7,11 +7,27 @@ export const PROJECTION_RECOVERY_PAGE_SIZE = 10;
 export const PROJECTION_RECOVERY_MAX_PAGES = 2;
 const MAX_RETAINED_IDENTITY_BYTES = 32 * 1024;
 
-export async function* projectionRecoveryPages<T>(
+type ProjectionRecoveryPage<T> = { entries: T; itemOffset: number };
+
+export function projectionRecoveryPages<T>(
   readPage: (
     excludedIdentities: readonly string[],
   ) => Promise<RecoveryScanPage<T>>,
-): AsyncGenerator<{ entries: T; itemOffset: number }> {
+): AsyncGenerator<ProjectionRecoveryPage<T>>;
+export function projectionRecoveryPages<
+  Page extends RecoveryScanPage<unknown>,
+  Entries,
+>(
+  readPage: (excludedIdentities: readonly string[]) => Promise<Page>,
+  selectEntries: (page: Page) => Entries,
+): AsyncGenerator<ProjectionRecoveryPage<Entries>>;
+export async function* projectionRecoveryPages<
+  Page extends RecoveryScanPage<unknown>,
+  Entries,
+>(
+  readPage: (excludedIdentities: readonly string[]) => Promise<Page>,
+  selectEntries?: (page: Page) => Entries,
+): AsyncGenerator<ProjectionRecoveryPage<Page["entries"] | Entries>> {
   let excludedIdentities: string[] = [];
   for (let index = 0; index < PROJECTION_RECOVERY_MAX_PAGES; index++) {
     const page = await readPage(excludedIdentities);
@@ -30,7 +46,7 @@ export async function* projectionRecoveryPages<T>(
       throw new TypeError("invalid-projection-recovery-page");
     }
     yield {
-      entries: page.entries,
+      entries: selectEntries ? selectEntries(page) : page.entries,
       itemOffset: index * PROJECTION_RECOVERY_PAGE_SIZE,
     };
     if (

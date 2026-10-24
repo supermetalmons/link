@@ -12,7 +12,8 @@ import {
 } from "../src/eventPrizeWithdrawal.ts";
 import { createEventPrizeContext } from "../src/eventPrizeWithdrawal/context.ts";
 import type { EventPrizeWithdrawalStore } from "../src/eventPrizeWithdrawalD1.ts";
-import type { EventGameplayRepository } from "../src/eventRepository.ts";
+import type { EventPrizeRepository } from "../src/eventPrizeRepository.ts";
+import { isMatchingProfileEventPrizeAssignment } from "../../../runtime/eventPrizeWithdrawalState.js";
 import type { EventPrizeAssignmentRecord } from "../../../runtime/eventReads.js";
 import type {
   ProfileOwnershipQuery,
@@ -176,12 +177,7 @@ function repository() {
       { eventId, place: 1, prizeId, profileId, assignedAtMs: 1 },
     ],
   ]);
-  const value: Pick<
-    EventGameplayRepository,
-    | "readProfileEventPrizeAssignment"
-    | "transactProfileEventPrize"
-    | "readProfileOwnershipSnapshot"
-  > = {
+  const value: EventPrizeRepository = {
     readProfileOwnershipSnapshot:
       ownershipReader().readProfileOwnershipSnapshot,
     readProfileEventPrizeAssignment: async (
@@ -191,6 +187,26 @@ function repository() {
       (values.get(
         `profileEventPrizes/${candidateProfileId}/${candidateEventId}`,
       ) as EventPrizeAssignmentRecord | undefined) ?? null,
+    async removeMatchingProfileEventPrizeAssignment({
+      profileId: candidateProfileId,
+      eventId: candidateEventId,
+      prizeId: candidatePrizeId,
+    }) {
+      const path = `profileEventPrizes/${candidateProfileId}/${candidateEventId}`;
+      const current =
+        (values.get(path) as EventPrizeAssignmentRecord | undefined) ?? null;
+      if (current === null) return true;
+      if (
+        !isMatchingProfileEventPrizeAssignment(
+          current,
+          candidateEventId,
+          candidatePrizeId,
+        )
+      )
+        return false;
+      values.set(path, null);
+      return true;
+    },
     transactProfileEventPrize: async (
       candidateProfileId,
       candidateEventId,
@@ -767,11 +783,11 @@ for (const cleanupFails of [false, true]) {
     const completed = completedWithdrawal();
     state.values.set(withdrawalPath, completed);
     let cleanupAttempts = 0;
-    const transact = state.value.transactProfileEventPrize;
-    state.value.transactProfileEventPrize = async (...args) => {
+    const cleanup = state.value.removeMatchingProfileEventPrizeAssignment;
+    state.value.removeMatchingProfileEventPrizeAssignment = async (...args) => {
       cleanupAttempts++;
       if (cleanupFails) throw new Error("projection-cleanup-unavailable");
-      return transact(...args);
+      return cleanup(...args);
     };
     let workflowCalls = 0;
     const binding = workflow(() => ({ status: "running" }), {
@@ -826,7 +842,7 @@ test("completed status does not reconcile assignments or acquire claims", async 
   const completed = completedWithdrawal();
   state.values.set(withdrawalPath, completed);
   let cleanupAttempts = 0;
-  state.value.transactProfileEventPrize = async () => {
+  state.value.removeMatchingProfileEventPrizeAssignment = async () => {
     cleanupAttempts++;
     throw new Error("unexpected-projection-cleanup");
   };
@@ -877,7 +893,7 @@ test("completion observed during claim acquisition returns without projection cl
   const assignment = state.values.get(assignmentPath);
   const completed = completedWithdrawal();
   let cleanupAttempts = 0;
-  state.value.transactProfileEventPrize = async () => {
+  state.value.removeMatchingProfileEventPrizeAssignment = async () => {
     cleanupAttempts++;
     throw new Error("unexpected-projection-cleanup");
   };
@@ -1263,7 +1279,7 @@ test("completed execution retries projection cleanup failures", async () => {
   });
   const failingRepository = {
     ...state.value,
-    transactProfileEventPrize: async () => {
+    removeMatchingProfileEventPrizeAssignment: async () => {
       throw new Error("database unavailable");
     },
   };

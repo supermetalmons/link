@@ -7,6 +7,7 @@ import { createGameplayRepository } from "../gameplayRepository.ts";
 import { createRatingRepository } from "../ratingRepository.ts";
 import type { RatingProjectionRepository } from "../ratingContracts.ts";
 import { isSafeRecordKey } from "../recordKeys.ts";
+import type { AutomatchOutboxClaimSnapshot } from "../automatchD1/types.ts";
 import type {
   AutomatchTelegramProjectionTask,
   TelegramProjectionTask,
@@ -41,21 +42,27 @@ function toRecord(value: unknown): Record<string, unknown> | null {
 type AutomatchSweepCandidate = {
   task: AutomatchTelegramProjectionTask;
   updatedAtMs: number;
+  snapshot?: AutomatchOutboxClaimSnapshot;
 };
 
 type AutomatchSweepEntry =
   | { kind: "candidate"; value: AutomatchSweepCandidate }
   | { inviteId: string; kind: "invalid" };
 
-function automatchSweepEntries(value: unknown): AutomatchSweepEntry[] {
+function automatchSweepEntries(
+  value: unknown,
+  snapshots?: ReadonlyMap<string, AutomatchOutboxClaimSnapshot>,
+): AutomatchSweepEntry[] {
   const records = toRecord(value) || {};
   return Object.entries(records).flatMap(([inviteId, raw]) => {
     const outbox = parseOutbox(raw);
+    const snapshot = snapshots?.get(inviteId);
     return [
       outbox && isSafeRecordKey(inviteId)
         ? {
             kind: "candidate" as const,
             value: {
+              ...(snapshot ? { snapshot } : {}),
               task: {
                 kind: "automatch-telegram-projection" as const,
                 inviteId,
@@ -91,6 +98,8 @@ export async function claimAutomatchSweepCandidate(
     candidate.task.requestId,
     candidate.updatedAtMs,
     nowMs,
+    undefined,
+    candidate.snapshot,
   );
 }
 
@@ -141,18 +150,19 @@ export async function sweepAutomatchProjections(
   nowMs: number,
 ): Promise<number> {
   try {
-    const pages = projectionRecoveryPages((excludedIdentities) =>
-      state.projectionRecovery.listDueAutomatchTelegramOutboxesPage(
-        nowMs,
-        PROJECTION_SWEEP_LIMIT,
-        excludedIdentities,
-      ),
+    const pages = projectionRecoveryPages(
+      (excludedIdentities) =>
+        state.projectionRecovery.listDueAutomatchTelegramOutboxesPage(
+          nowMs,
+          PROJECTION_SWEEP_LIMIT,
+          excludedIdentities,
+        ),
+      (page) => automatchSweepEntries(page.entries, page.snapshots),
     );
     let sentCount = 0;
     const claimFailures: Error[] = [];
     const repairFailures: Error[] = [];
-    for await (const { entries: value, itemOffset } of pages) {
-      const entries = automatchSweepEntries(value);
+    for await (const { entries, itemOffset } of pages) {
       const candidates = entries.flatMap((entry) =>
         entry.kind === "candidate" ? [entry.value] : [],
       );

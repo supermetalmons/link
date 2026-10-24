@@ -12,6 +12,7 @@ import {
   type MatchSyncMetadata,
   type MatchSyncReadResult,
 } from "./matchSync.ts";
+import { createMatchSyncSnapshotStore } from "./matchSyncSnapshotStore.ts";
 import type { SocketSession, SocketSessions } from "./socketSession.ts";
 import {
   readSocketAdmission,
@@ -40,13 +41,6 @@ type MatchSocketAttachment = {
   role: SocketRole;
   actorUid: string | null;
 } & SocketSession;
-
-type StoredMatch = {
-  match_id: string;
-  snapshot_json: string;
-  revision: number;
-  next_at_ms: number | null;
-};
 
 type MatchReadState = {
   generation: number;
@@ -83,12 +77,14 @@ type MatchRoomDependencies = {
 export class MatchSyncRoom {
   private readonly states = new Map<string, MatchReadState>();
   private readonly admissions = new Map<string, number>();
+  private readonly snapshots: ReturnType<typeof createMatchSyncSnapshotStore>;
   private readSyncState: MatchRoomDependencies["readSyncState"];
 
   constructor(
     private readonly ctx: DurableObjectState,
     private readonly dependencies: MatchRoomDependencies,
   ) {
+    this.snapshots = createMatchSyncSnapshotStore(ctx.storage.sql);
     this.readSyncState = dependencies.readSyncState;
   }
 
@@ -159,22 +155,14 @@ export class MatchSyncRoom {
 
   private close(matchId: string, code: number, reason: string): void {
     for (const socket of this.sockets(matchId)) socket.close(code, reason);
-    this.ctx.storage.sql.exec(
-      "UPDATE match_sync_snapshots SET next_at_ms = NULL WHERE match_id = ?",
-      matchId,
-    );
+    this.snapshots.clearDeadline(matchId);
   }
 
   private apply(
     snapshot: MatchSyncSnapshot,
     metadata: MatchSyncMetadata,
   ): MatchSyncSnapshot {
-    const [stored] = this.ctx.storage.sql
-      .exec<StoredMatch>(
-        "SELECT * FROM match_sync_snapshots WHERE match_id = ?",
-        snapshot.matchId,
-      )
-      .toArray();
+    const stored = this.snapshots.read(snapshot.matchId);
     const previousRevision = stored?.revision ?? 0;
     const comparison = { ...snapshot, revision: previousRevision };
     const changed = JSON.stringify(comparison) !== stored?.snapshot_json;
@@ -186,12 +174,7 @@ export class MatchSyncRoom {
     };
     assertMatchSyncEnvelope(next);
     if (changed) {
-      this.ctx.storage.sql.exec(
-        "INSERT INTO match_sync_snapshots (match_id, snapshot_json, revision) VALUES (?, ?, ?) ON CONFLICT(match_id) DO UPDATE SET snapshot_json = excluded.snapshot_json, revision = excluded.revision",
-        next.matchId,
-        JSON.stringify(next),
-        next.revision,
-      );
+      this.snapshots.write(next.matchId, JSON.stringify(next), next.revision);
     }
     const message = changed
       ? JSON.stringify({ schemaVersion: 1, type: "snapshot", snapshot: next })
@@ -227,19 +210,10 @@ export class MatchSyncRoom {
       !this.admissions.get(matchId) &&
       this.sockets(matchId).length === 0
     ) {
-      this.ctx.storage.sql.exec(
-        "UPDATE match_sync_snapshots SET next_at_ms = NULL WHERE match_id = ?",
-        matchId,
-      );
+      this.snapshots.clearDeadline(matchId);
       return;
     }
-    this.ctx.storage.sql.exec(
-      "UPDATE match_sync_snapshots SET next_at_ms = CASE WHEN ? AND next_at_ms IS NOT NULL THEN MIN(next_at_ms, ?) ELSE ? END WHERE match_id = ?",
-      preserveEarlier ? 1 : 0,
-      atMs,
-      atMs,
-      matchId,
-    );
+    this.snapshots.setDeadline(matchId, atMs, preserveEarlier);
     await this.dependencies.scheduleAlarm(atMs);
   }
 
@@ -420,11 +394,7 @@ export class MatchSyncRoom {
                 this.dependencies.socketSessions.active(socket),
               );
       if (!hasSubscribers) continue;
-      this.ctx.storage.sql.exec(
-        "UPDATE match_sync_snapshots SET next_at_ms = ? WHERE match_id = ?",
-        now,
-        matchId,
-      );
+      this.snapshots.setDeadline(matchId, now);
       subscribed = true;
     }
     if (subscribed) await this.dependencies.scheduleAlarm(now);
@@ -551,10 +521,7 @@ export class MatchSyncRoom {
       else {
         this.admissions.delete(matchId);
         if (this.sockets(matchId).length === 0) {
-          this.ctx.storage.sql.exec(
-            "UPDATE match_sync_snapshots SET next_at_ms = NULL WHERE match_id = ?",
-            matchId,
-          );
+          this.snapshots.clearDeadline(matchId);
         }
       }
       this.pruneStates();
@@ -562,12 +529,7 @@ export class MatchSyncRoom {
   }
 
   async alarm(): Promise<void> {
-    const due = this.ctx.storage.sql
-      .exec<{ match_id: string }>(
-        "SELECT match_id FROM match_sync_snapshots WHERE next_at_ms IS NOT NULL AND next_at_ms <= ? ORDER BY next_at_ms",
-        Date.now(),
-      )
-      .toArray();
+    const due = this.snapshots.listDue(Date.now());
     let groups: Map<string, WebSocket[]> | undefined;
     let cursor = 0;
     const run = async () => {
@@ -583,17 +545,13 @@ export class MatchSyncRoom {
         )?.inviteId;
         if (!inviteId) {
           if (this.admissions.get(matchId)) {
-            this.ctx.storage.sql.exec(
-              "UPDATE match_sync_snapshots SET next_at_ms = ? WHERE match_id = ?",
-              Date.now() + MATCH_SYNC_REPAIR_MS,
+            this.snapshots.setDeadline(
               matchId,
+              Date.now() + MATCH_SYNC_REPAIR_MS,
             );
             continue;
           }
-          this.ctx.storage.sql.exec(
-            "UPDATE match_sync_snapshots SET next_at_ms = NULL WHERE match_id = ?",
-            matchId,
-          );
+          this.snapshots.clearDeadline(matchId);
           continue;
         }
         try {
@@ -622,11 +580,7 @@ export class MatchSyncRoom {
   }
 
   nextAlarm(): number | null {
-    return this.ctx.storage.sql
-      .exec<{ next_at_ms: number | null }>(
-        "SELECT MIN(next_at_ms) AS next_at_ms FROM match_sync_snapshots",
-      )
-      .one().next_at_ms;
+    return this.snapshots.nextDeadline();
   }
 
   closed(socket: WebSocket): void {
@@ -636,10 +590,7 @@ export class MatchSyncRoom {
       !this.admissions.get(attachment.matchId) &&
       this.sockets(attachment.matchId).length === 0
     ) {
-      this.ctx.storage.sql.exec(
-        "UPDATE match_sync_snapshots SET next_at_ms = NULL WHERE match_id = ?",
-        attachment.matchId,
-      );
+      this.snapshots.clearDeadline(attachment.matchId);
       this.pruneStates();
     }
   }

@@ -8,6 +8,7 @@ import {
 } from "../src/automatchD1.ts";
 import { createAutomatchPersistence } from "../src/automatchPersistence.ts";
 import { matchTestPort } from "../test/gameSessionTestPorts.ts";
+import type { AutomatchOutboxClaimSnapshot } from "../src/automatchD1/types.ts";
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const db = env.PROFILE_GAMES_DB;
@@ -35,6 +36,14 @@ function telegramOutbox(extra: Record<string, unknown> = {}) {
     updatedAtMs: 100,
     ...extra,
   };
+}
+
+function claimSnapshot(
+  root: AutomatchOutboxClaimSnapshot["root"],
+  value: unknown,
+  revision = 1,
+): AutomatchOutboxClaimSnapshot {
+  return { root, key: "invite", value, revision };
 }
 
 function historical(retryNotBeforeMs?: number) {
@@ -210,6 +219,437 @@ describe("native automatch projection outboxes", () => {
       updated_at_ms: nowMs + 100,
       value: telegramOutbox({ unknown, updatedAtMs: 200 }),
     });
+  });
+
+  it("claims scanned snapshots with one fewer primary read per outbox", async () => {
+    const unknown = { nested: [1, { retained: true }] };
+    const profile = profileOutbox({ unknown });
+    const telegram = telegramOutbox({ unknown });
+    await seed(profileTable, profile, 7, nowMs + 100);
+    await seed(telegramTable, telegram, 9, nowMs + 100);
+    const observed = observeDatabase();
+    const store = await writableStore(observed.database);
+    expect(
+      await store.claimAutomatchProfileOutbox(
+        "invite",
+        "request-one",
+        100,
+        200,
+        undefined,
+        claimSnapshot("profileGameProjectionOutbox/automatch", profile, 7),
+      ),
+    ).toBe(true);
+    expect(
+      await store.claimAutomatchTelegramOutbox(
+        "invite",
+        "request-one",
+        100,
+        200,
+        undefined,
+        claimSnapshot("telegramProjectionOutbox/automatch", telegram, 9),
+      ),
+    ).toBe(true);
+    expect(observed.reads).toEqual([]);
+    expect(observed.batches()).toBe(2);
+    expect(
+      observed.writes.filter((query) =>
+        query.includes("INSERT INTO automatch_revision_guards"),
+      ),
+    ).toHaveLength(2);
+    expect(await stored(profileTable)).toMatchObject({
+      revision: 8,
+      updated_at_ms: nowMs + 100,
+      value: profileOutbox({ unknown, lastQueuedAtMs: 200 }),
+    });
+    expect(await stored(telegramTable)).toMatchObject({
+      revision: 10,
+      updated_at_ms: nowMs + 100,
+      value: telegramOutbox({ unknown, updatedAtMs: 200 }),
+    });
+  });
+
+  it.each([
+    "request",
+    "timestamp",
+    "tombstone",
+    "deleted",
+    "metadata",
+  ] as const)(
+    "rereads a stale seed after a concurrent %s change",
+    async (change) => {
+      const snapshot = claimSnapshot(
+        "profileGameProjectionOutbox/automatch",
+        profileOutbox(),
+      );
+      const newer =
+        change === "request"
+          ? profileOutbox({ requestId: "request-two" })
+          : change === "timestamp"
+            ? profileOutbox({ lastQueuedAtMs: 150 })
+            : change === "metadata"
+              ? profileOutbox({ unknown: { newer: true } })
+              : null;
+      if (change !== "deleted") await seed(profileTable, newer, 2);
+      const observed = observeDatabase();
+      const store = await writableStore(observed.database);
+      expect(
+        await store.claimAutomatchProfileOutbox(
+          "invite",
+          "request-one",
+          100,
+          200,
+          undefined,
+          snapshot,
+        ),
+      ).toBe(change === "metadata");
+      expect(observed.reads).toHaveLength(1);
+      expect(observed.batches()).toBe(change === "metadata" ? 2 : 1);
+      if (change === "metadata")
+        expect(await stored(profileTable)).toMatchObject({
+          revision: 3,
+          value: profileOutbox({
+            unknown: { newer: true },
+            lastQueuedAtMs: 200,
+          }),
+        });
+      else if (change === "deleted")
+        expect(await stored(profileTable)).toBeNull();
+      else
+        expect(await stored(profileTable)).toMatchObject({
+          revision: 2,
+          value: newer,
+        });
+    },
+  );
+
+  it("checks seed revisions before stale admission or resource guards", async () => {
+    await seed(profileTable, profileOutbox({ requestId: "request-two" }), 2);
+    const observed = observeDatabase();
+    const store = await writableStore(observed.database);
+    await db
+      .prepare("UPDATE automatch_runtime_control SET state = 'frozen'")
+      .run();
+    expect(
+      await store.claimAutomatchProfileOutbox(
+        "invite",
+        "request-one",
+        100,
+        200,
+        undefined,
+        claimSnapshot("profileGameProjectionOutbox/automatch", profileOutbox()),
+      ),
+    ).toBe(false);
+    expect(observed.reads).toHaveLength(1);
+    expect(observed.batches()).toBe(1);
+    await expect(
+      store.claimAutomatchProfileOutbox(
+        "invite",
+        "request-two",
+        100,
+        200,
+        undefined,
+        claimSnapshot(
+          "profileGameProjectionOutbox/automatch",
+          profileOutbox({ requestId: "request-two" }),
+          2,
+        ),
+      ),
+    ).rejects.toThrow();
+    expect((await stored(profileTable))?.revision).toBe(2);
+  });
+
+  it("discards invalid or ineligible seeds before choosing the authoritative outcome", async () => {
+    const values = [
+      claimSnapshot("telegramProjectionOutbox/automatch", telegramOutbox()),
+      {
+        ...claimSnapshot(
+          "profileGameProjectionOutbox/automatch",
+          profileOutbox(),
+        ),
+        key: "other",
+      },
+      claimSnapshot(
+        "profileGameProjectionOutbox/automatch",
+        profileOutbox(),
+        0,
+      ),
+      claimSnapshot(
+        "profileGameProjectionOutbox/automatch",
+        profileOutbox(),
+        Number.MAX_SAFE_INTEGER,
+      ),
+      claimSnapshot(
+        "profileGameProjectionOutbox/automatch",
+        profileOutbox({ requestId: "other" }),
+      ),
+      claimSnapshot(
+        "profileGameProjectionOutbox/automatch",
+        profileOutbox({ lastQueuedAtMs: 300 }),
+      ),
+      claimSnapshot(
+        "profileGameProjectionOutbox/automatch",
+        profileOutbox({ "invalid/key": true }),
+      ),
+      claimSnapshot(
+        "profileGameProjectionOutbox/automatch",
+        profileOutbox({ future: { ".sv": "unsupported" } }),
+      ),
+    ];
+    for (const snapshot of values) {
+      await seed(profileTable, profileOutbox());
+      const observed = observeDatabase();
+      const store = await writableStore(observed.database);
+      expect(
+        await store.claimAutomatchProfileOutbox(
+          "invite",
+          "request-one",
+          100,
+          200,
+          undefined,
+          snapshot,
+        ),
+      ).toBe(true);
+      expect(observed.reads).toHaveLength(1);
+      expect(observed.batches()).toBe(1);
+    }
+    const invalid = profileOutbox({ "invalid/key": true });
+    await seed(profileTable, invalid);
+    const store = await writableStore();
+    await expect(
+      store.claimAutomatchProfileOutbox(
+        "invite",
+        "request-one",
+        100,
+        200,
+        undefined,
+        claimSnapshot("profileGameProjectionOutbox/automatch", invalid),
+      ),
+    ).rejects.toThrow("invalid-automatch-key");
+  });
+
+  it("does not expose a read-only seed error when the current row is a no-op", async () => {
+    const observed = observeDatabase();
+    const store = createAutomatchD1Store(observed.database, {
+      now: () => nowMs,
+    });
+    expect(
+      await store.claimAutomatchProfileOutbox(
+        "invite",
+        "request-one",
+        100,
+        200,
+        undefined,
+        claimSnapshot("profileGameProjectionOutbox/automatch", profileOutbox()),
+      ),
+    ).toBe(false);
+    expect(observed.reads).toHaveLength(1);
+    expect(observed.batches()).toBe(0);
+  });
+
+  it("keeps seeded conflicts within the existing 25-attempt budget", async () => {
+    await seed(profileTable, profileOutbox());
+    let revision = 1;
+    const observed = observeDatabase(() =>
+      seed(profileTable, profileOutbox(), ++revision),
+    );
+    const store = await writableStore(observed.database);
+    await expect(
+      store.claimAutomatchProfileOutbox(
+        "invite",
+        "request-one",
+        100,
+        200,
+        undefined,
+        claimSnapshot("profileGameProjectionOutbox/automatch", profileOutbox()),
+      ),
+    ).rejects.toThrow("automatch-transaction-contention");
+    expect(observed.reads).toHaveLength(24);
+    expect(observed.batches()).toBe(25);
+  });
+
+  it.each([false, true])(
+    "retains the initial marker clock for a seeded claim with conflict=%s",
+    async (conflict) => {
+      const value = profileOutbox({
+        lastQueuedAtMs: 100.9,
+        sourceUpdatedAtMs: 50.5,
+        future: {
+          at: { ".sv": "timestamp" },
+          count: { ".sv": { increment: 2 } },
+        },
+      });
+      await seed(profileTable, value);
+      let clock = nowMs;
+      let changed = false;
+      const observed = observeDatabase(async () => {
+        if (!conflict || changed) return;
+        changed = true;
+        await db
+          .prepare(`UPDATE ${profileTable} SET revision = revision + 1`)
+          .run();
+      });
+      const store = await writableStore(observed.database, () => clock++);
+      const operationClock = clock;
+      expect(
+        await store.claimAutomatchProfileOutbox(
+          "invite",
+          "request-one",
+          100,
+          100,
+          undefined,
+          claimSnapshot("profileGameProjectionOutbox/automatch", value),
+        ),
+      ).toBe(true);
+      expect(await stored(profileTable)).toMatchObject({
+        value: {
+          future: { at: operationClock, count: 2 },
+          sourceUpdatedAtMs: 50.5,
+        },
+        updated_at_ms: operationClock + (conflict ? 2 : 1),
+      });
+      expect(observed.reads).toHaveLength(conflict ? 1 : 0);
+    },
+  );
+
+  it.each(["before", "conflict", "committed"] as const)(
+    "preserves cancellation %s a seeded write",
+    async (stage) => {
+      await seed(profileTable, profileOutbox());
+      const controller = new AbortController();
+      const reason = new Error("cancelled-seeded-claim");
+      const observed = observeDatabase(
+        async () => {
+          if (stage === "conflict") {
+            await seed(profileTable, profileOutbox(), 2);
+            controller.abort(reason);
+          }
+        },
+        () => {
+          if (stage === "committed") controller.abort(reason);
+        },
+      );
+      const store = await writableStore(observed.database);
+      if (stage === "before") controller.abort(reason);
+      const operation = store.claimAutomatchProfileOutbox(
+        "invite",
+        "request-one",
+        100,
+        200,
+        controller.signal,
+        claimSnapshot("profileGameProjectionOutbox/automatch", profileOutbox()),
+      );
+      if (stage === "committed") expect(await operation).toBe(true);
+      else await expect(operation).rejects.toBe(reason);
+      expect(observed.reads).toHaveLength(0);
+      expect(observed.batches()).toBe(stage === "before" ? 0 : 1);
+    },
+  );
+
+  it("preserves raw unknown JSON bytes when a seeded claim patches its timestamp", async () => {
+    const raw =
+      JSON.stringify(profileOutbox()).slice(0, -1) +
+      ',"precision":9007199254740993123,"duplicate":1,"duplicate":2}';
+    await seed(profileTable, profileOutbox());
+    await db
+      .prepare(`UPDATE ${profileTable} SET payload_json = ?`)
+      .bind(raw)
+      .run();
+    const observed = observeDatabase();
+    const store = await writableStore(observed.database);
+    expect(
+      await store.claimAutomatchProfileOutbox(
+        "invite",
+        "request-one",
+        100,
+        200,
+        undefined,
+        claimSnapshot("profileGameProjectionOutbox/automatch", JSON.parse(raw)),
+      ),
+    ).toBe(true);
+    expect(observed.reads).toEqual([]);
+    const row = await stored(profileTable);
+    expect(row?.payload_json).toContain('"precision":9007199254740993123');
+    expect(row?.payload_json).toContain('"duplicate":1,"duplicate":2');
+    expect(row?.value.lastQueuedAtMs).toBe(200);
+  });
+
+  it("falls back to the primary row when malformed UTF-8 scan keys collide", async () => {
+    const key = "\uFFFD";
+    const canonical = profileOutbox({
+      future: { owner: "canonical", retained: true },
+    });
+    const malformed = profileOutbox({
+      future: { owner: "malformed", at: { ".sv": "timestamp" } },
+    });
+    await db.batch([
+      db
+        .prepare(
+          `INSERT INTO ${profileTable} (record_key, payload_json, revision, updated_at_ms) VALUES (?, ?, 1, ?)`,
+        )
+        .bind(key, JSON.stringify(canonical), nowMs),
+      db
+        .prepare(
+          `INSERT INTO ${profileTable} (record_key, payload_json, revision, updated_at_ms) VALUES (CAST(X'FF' AS TEXT), ?, 1, ?)`,
+        )
+        .bind(JSON.stringify(malformed), nowMs),
+    ]);
+    const observed = observeDatabase();
+    const store = await writableStore(observed.database);
+    const page = await store.listDueAutomatchProfileOutboxesPage(100, 10);
+    expect(page.scannedIdentities).toEqual(["text:EFBFBD", "text:FF"]);
+    expect(page.entries?.[key]).toEqual(malformed);
+    expect(
+      await store.claimAutomatchProfileOutbox(
+        key,
+        "request-one",
+        100,
+        200,
+        undefined,
+        page.snapshots?.get(key),
+      ),
+    ).toBe(true);
+    const rows = await db
+      .prepare(
+        `SELECT hex(CAST(record_key AS BLOB)) AS identity, payload_json, revision FROM ${profileTable} ORDER BY record_key`,
+      )
+      .all<{ identity: string; payload_json: string; revision: number }>();
+    expect(
+      rows.results.map((row) => ({
+        ...row,
+        payload_json: JSON.parse(row.payload_json),
+      })),
+    ).toEqual([
+      {
+        identity: "EFBFBD",
+        payload_json: { ...canonical, lastQueuedAtMs: 200 },
+        revision: 2,
+      },
+      { identity: "FF", payload_json: malformed, revision: 1 },
+    ]);
+    expect(page.snapshots?.has(key)).toBe(false);
+    expect(observed.reads).toHaveLength(2);
+  });
+
+  it("does not retry a provider failure during a seeded write", async () => {
+    await seed(profileTable, profileOutbox());
+    const failure = new Error("provider-write-failed");
+    const observed = observeDatabase(async () => {
+      throw failure;
+    });
+    const store = await writableStore(observed.database);
+    await expect(
+      store.claimAutomatchProfileOutbox(
+        "invite",
+        "request-one",
+        100,
+        200,
+        undefined,
+        claimSnapshot("profileGameProjectionOutbox/automatch", profileOutbox()),
+      ),
+    ).rejects.toBe(failure);
+    expect(observed.reads).toEqual([]);
+    expect(observed.batches()).toBe(1);
+    expect((await stored(profileTable))?.revision).toBe(1);
   });
 
   it("retains floored fractional timestamp matching and equal-time claims", async () => {

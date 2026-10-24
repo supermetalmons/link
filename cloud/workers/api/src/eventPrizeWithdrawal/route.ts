@@ -17,7 +17,7 @@ import {
   type WorkerExecutionContext,
 } from "../sessionAuth.ts";
 import type { RequestIdentity } from "../requestIdentity.ts";
-import { createEventGameplayRepository } from "../eventRepository.ts";
+import { createEventPrizeRepository } from "../eventPrizeRepository.ts";
 import { readBoundedJson } from "../http.ts";
 import { assertProfileMutationAllowed } from "../profileCanonicalActivation.ts";
 import {
@@ -74,7 +74,8 @@ export async function handleEventPrizeWithdrawalRoute(
       throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
     }
     const repository =
-      dependencies.repository || createEventGameplayRepository(env);
+      dependencies.repository ||
+      createEventPrizeRepository(env.PROFILE_DB, env.EVENT_DB);
     const context: EventPrizeRequestDependencies =
       await createEventPrizeContext(env, {
         now: dependencies.now,

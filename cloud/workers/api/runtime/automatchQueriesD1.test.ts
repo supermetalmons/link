@@ -488,6 +488,20 @@ describe("explicit D1 automatch queries", () => {
         "2": { [field]: value, requestId: "2" },
         "02": { [field]: value, requestId: "02" },
       });
+      if (typeof value === "number") {
+        expect([...first.snapshots!.keys()]).toEqual(["2", "02"]);
+        for (const [index, key] of ["2", "02"].entries()) {
+          expect(first.snapshots!.get(key)).toEqual({
+            root,
+            key,
+            value: first.entries![key],
+            revision: index + 1,
+          });
+          expect(first.snapshots!.get(key)!.value).toBe(first.entries![key]);
+        }
+      } else {
+        expect(first).not.toHaveProperty("snapshots");
+      }
       const second = await run(store, 2, ["text:32", "text:3032"]);
       expect(second.scannedIdentities).toEqual([
         "text:3130",
@@ -506,6 +520,98 @@ describe("explicit D1 automatch queries", () => {
       expect(await run(store, 2, [...excluded, "text:F09F9880"])).toEqual({
         entries: null,
         scannedIdentities: [],
+      });
+    },
+  );
+
+  it.each([telegramRoot, profileRoot] as const)(
+    "retains decoded snapshots from the existing %s page query without rewriting JSON",
+    async (root) => {
+      const field = root === telegramRoot ? "updatedAtMs" : "lastQueuedAtMs";
+      const { table } = AUTOMATCH_RECORD_TABLES[root];
+      const payload = `{"${field}":10.9,"requestId":"first","requestId":"last","large":9007199254740993,"future":{".sv":"timestamp"}}`;
+      await db
+        .prepare(
+          `INSERT INTO ${table} (record_key, payload_json, revision, updated_at_ms)
+           VALUES ('invite', ?, 7, 1)`,
+        )
+        .bind(payload)
+        .run();
+      const observed = observeReads();
+      const page =
+        root === telegramRoot
+          ? await observed.store.listDueAutomatchTelegramOutboxesPage(11, 10)
+          : await observed.store.listDueAutomatchProfileOutboxesPage(11, 10);
+      expect(page.snapshots!.get("invite")).toEqual({
+        root,
+        key: "invite",
+        value: JSON.parse(payload),
+        revision: 7,
+      });
+      expect(observed.sessions).toEqual(["first-primary"]);
+      expect(observed.queries).toHaveLength(1);
+      expect(
+        await db
+          .prepare(
+            `SELECT payload_json FROM ${table} WHERE record_key = 'invite'`,
+          )
+          .first<string>("payload_json"),
+      ).toBe(payload);
+    },
+  );
+
+  it.each([
+    [telegramRoot, 0x80],
+    [telegramRoot, 0xff],
+    [profileRoot, 0x80],
+    [profileRoot, 0xff],
+  ] as const)(
+    "retains only exact text identities for %s with malformed byte %s",
+    async (root, malformedByte) => {
+      const field = root === telegramRoot ? "updatedAtMs" : "lastQueuedAtMs";
+      const { table } = AUTOMATCH_RECORD_TABLES[root];
+      const key = "\uFFFD";
+      const valid = { [field]: 10, requestId: "same", source: "valid" };
+      const malformed = { [field]: 10, requestId: "same", source: "malformed" };
+      await db.batch([
+        db
+          .prepare(
+            `INSERT INTO ${table} (record_key, payload_json, revision, updated_at_ms)
+             VALUES (?, ?, 7, 1)`,
+          )
+          .bind(key, JSON.stringify(valid)),
+        db
+          .prepare(
+            `INSERT INTO ${table} (record_key, payload_json, revision, updated_at_ms)
+             VALUES (CAST(? AS TEXT), ?, 7, 1)`,
+          )
+          .bind(Uint8Array.of(malformedByte).buffer, JSON.stringify(malformed)),
+      ]);
+      const page =
+        root === telegramRoot
+          ? await store.listDueAutomatchTelegramOutboxesPage(10, 10)
+          : await store.listDueAutomatchProfileOutboxesPage(10, 10);
+      const malformedIdentity = `text:${malformedByte.toString(16).toUpperCase()}`;
+      const validLast = malformedByte < 0xef;
+      expect(page.scannedIdentities).toEqual(
+        validLast
+          ? [malformedIdentity, "text:EFBFBD"]
+          : ["text:EFBFBD", malformedIdentity],
+      );
+      expect(page.entries).toEqual({ [key]: validLast ? valid : malformed });
+      expect(page.snapshots!.get(key)).toEqual(
+        validLast ? { root, key, value: valid, revision: 7 } : undefined,
+      );
+      expect(page.entries).toEqual(
+        root === telegramRoot
+          ? await store.listDueAutomatchTelegramOutboxes(10, 10)
+          : await store.listDueAutomatchProfileOutboxes(10, 10),
+      );
+      expect(await store.read(root, key)).toEqual({
+        root,
+        key,
+        value: valid,
+        revision: 7,
       });
     },
   );

@@ -1,5 +1,4 @@
 import { resolveProfileMergeTargetPath } from "../../../../runtime/profileMergeTargets.js";
-import { isMatchingProfileEventPrizeAssignment } from "../../../../runtime/eventPrizeWithdrawalState.js";
 import { EventPrizeWithdrawalError } from "../../../../runtime/eventPrizes/errors.js";
 import {
   createEventPrizeRepository,
@@ -29,11 +28,7 @@ export type EventPrizeContext = {
   ): Promise<Record<string, unknown> | null>;
   readProfileByLoginUid(uid: string): Promise<{ id: string } | null>;
   readProfileOwnershipSnapshot: ProfileOwnershipReader["readProfileOwnershipSnapshot"];
-  removeMatchingProfileEventPrizeAssignment(input: {
-    profileId: string;
-    eventId: string;
-    prizeId: string;
-  }): Promise<boolean>;
+  removeMatchingProfileEventPrizeAssignment: EventPrizeRepository["removeMatchingProfileEventPrizeAssignment"];
   resolveWithdrawalProfileId(profileId: string): Promise<string>;
   resolveCanonicalProfilePath(profileId: string): Promise<string[]>;
 };
@@ -116,25 +111,8 @@ export async function createEventPrizeContext(
     readWithdrawal: withdrawalStore.get,
     readProfileByLoginUid,
     readProfileOwnershipSnapshot: repository.readProfileOwnershipSnapshot,
-    async removeMatchingProfileEventPrizeAssignment({
-      profileId,
-      eventId,
-      prizeId,
-    }) {
-      const result = await repository.transactProfileEventPrize(
-        profileId,
-        eventId,
-        (currentAssignment) =>
-          isMatchingProfileEventPrizeAssignment(
-            currentAssignment,
-            eventId,
-            prizeId,
-          )
-            ? { value: null }
-            : { value: currentAssignment ?? null },
-      );
-      return result.committed && result.value === null;
-    },
+    removeMatchingProfileEventPrizeAssignment: (input) =>
+      repository.removeMatchingProfileEventPrizeAssignment(input),
     async resolveWithdrawalProfileId(profileId) {
       const ownership = await requireProfileOwnershipSnapshot(repository, {
         loginUids: [],

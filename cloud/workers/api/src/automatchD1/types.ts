@@ -1,4 +1,5 @@
 import { RETIRED_STATE_BACKEND } from "../stateCompatibility.ts";
+import type { RecoveryScanPage } from "../recoveryScanPage.ts";
 
 export const AUTOMATCH_RECORD_TABLES = {
   automatch: {
@@ -39,6 +40,19 @@ export type AutomatchRecordSnapshot = {
   key: string;
   value: unknown;
   revision: number;
+};
+
+export type AutomatchOutboxClaimSnapshot = AutomatchRecordSnapshot & {
+  root:
+    | "telegramProjectionOutbox/automatch"
+    | "profileGameProjectionOutbox/automatch";
+};
+
+export type AutomatchOutboxRecoveryPage = RecoveryScanPage<Record<
+  string,
+  unknown
+> | null> & {
+  snapshots?: ReadonlyMap<string, AutomatchOutboxClaimSnapshot>;
 };
 
 export type AutomatchRecordMutation = {

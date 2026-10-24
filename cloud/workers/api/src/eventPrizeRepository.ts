@@ -1,5 +1,9 @@
 import { readProfileEventPrizeAssignment } from "./eventD1/reads.ts";
 import { transactProfileEventPrize } from "./eventD1/transactions.ts";
+import {
+  removeMatchingProfileEventPrizeAssignment,
+  type ProfilePrizeCleanupInput,
+} from "./eventD1/profilePrizeCleanup.ts";
 import type { EventD1Connection } from "./eventD1/types.ts";
 import type { EventStore } from "./eventStoreContracts.ts";
 import { withEventWriteAdmission } from "./eventWriteAdmission.ts";
@@ -10,7 +14,11 @@ export type EventPrizeRepository = ProfileOwnershipReader &
   Pick<
     EventStore,
     "readProfileEventPrizeAssignment" | "transactProfileEventPrize"
-  >;
+  > & {
+    removeMatchingProfileEventPrizeAssignment(
+      input: ProfilePrizeCleanupInput,
+    ): Promise<boolean>;
+  };
 
 export function transactProfileEventPrizeWithAdmission(
   db: EventD1Connection,
@@ -45,6 +53,15 @@ export function createEventPrizeRepository(
         eventId,
         updater,
         signal,
+      ),
+    removeMatchingProfileEventPrizeAssignment: (input) =>
+      withEventWriteAdmission(
+        eventDb,
+        { kind: "mutation", context: "event-path-transaction" },
+        (admission) =>
+          removeMatchingProfileEventPrizeAssignment(eventDb, input, {
+            admission,
+          }),
       ),
   };
 }

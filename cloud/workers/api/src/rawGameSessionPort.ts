@@ -1,6 +1,10 @@
 import type { GameSessionChange } from "../../../runtime/gameSessionChanges.js";
 import type { RecoveryScanPage } from "./recoveryScanPage.ts";
 import type {
+  AutomatchOutboxClaimSnapshot,
+  AutomatchOutboxRecoveryPage,
+} from "./automatchD1/types.ts";
+import type {
   TransactionDecision,
   TransactionResult,
 } from "./repositoryContracts.ts";
@@ -31,6 +35,7 @@ export type RawAutomatchProjectionPort = {
     expectedUpdatedAtMs: number,
     nowMs: number,
     signal?: AbortSignal,
+    snapshot?: AutomatchOutboxClaimSnapshot,
   ): Promise<boolean>;
   acknowledgeAutomatchTelegramOutbox(
     inviteId: string,
@@ -47,7 +52,7 @@ export type RawAutomatchProjectionPort = {
     limit: number,
     excludedIdentities?: readonly string[],
     signal?: AbortSignal,
-  ): Promise<RecoveryScanPage<Record<string, unknown> | null>>;
+  ): Promise<AutomatchOutboxRecoveryPage>;
   readAutomatchProfileOutbox(
     inviteId: string,
     signal?: AbortSignal,
@@ -63,6 +68,7 @@ export type RawAutomatchProjectionPort = {
     expectedLastQueuedAtMs: number,
     nowMs: number,
     signal?: AbortSignal,
+    snapshot?: AutomatchOutboxClaimSnapshot,
   ): Promise<boolean>;
   acknowledgeAutomatchProfileOutbox(
     inviteId: string,
@@ -85,7 +91,7 @@ export type RawAutomatchProjectionPort = {
     limit: number,
     excludedIdentities?: readonly string[],
     signal?: AbortSignal,
-  ): Promise<RecoveryScanPage<Record<string, unknown> | null>>;
+  ): Promise<AutomatchOutboxRecoveryPage>;
   listMalformedAutomatchProfileOutboxes(
     limit: number,
     signal?: AbortSignal,

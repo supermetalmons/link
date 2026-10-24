@@ -6,6 +6,7 @@ import {
 } from "../../../runtime/automatchRecords.js";
 import { createTypedGameSessionPort } from "../src/gameSessionRecordAdapter.ts";
 import { rawGameplayTestPort } from "./gameSessionTestPorts.ts";
+import type { AutomatchOutboxClaimSnapshot } from "../src/automatchD1/types.ts";
 
 function fixture(records: Map<string, unknown>) {
   const reads: Array<{ path: string; signal?: AbortSignal }> = [];
@@ -24,6 +25,57 @@ function fixture(records: Map<string, unknown>) {
   });
   return { raw, port: createTypedGameSessionPort(raw), reads };
 }
+
+test("claim adapters forward recovery snapshots and cancellation without serializing them", async () => {
+  const { raw } = fixture(new Map());
+  const signal = new AbortController().signal;
+  const snapshot: AutomatchOutboxClaimSnapshot = {
+    root: "profileGameProjectionOutbox/automatch",
+    key: "invite",
+    value: { requestId: "request" },
+    revision: 7,
+  };
+  const calls: unknown[][] = [];
+  raw.claimAutomatchProfileOutbox = async (...args) => {
+    calls.push(args);
+    return true;
+  };
+  raw.claimAutomatchTelegramOutbox = async (...args) => {
+    calls.push(args);
+    return false;
+  };
+  const port = createTypedGameSessionPort(raw);
+  assert.equal(
+    await port.claimAutomatchProfileOutbox(
+      "invite",
+      "request",
+      1,
+      2,
+      signal,
+      snapshot,
+    ),
+    true,
+  );
+  const telegramSnapshot: AutomatchOutboxClaimSnapshot = {
+    ...snapshot,
+    root: "telegramProjectionOutbox/automatch",
+  };
+  assert.equal(
+    await port.claimAutomatchTelegramOutbox(
+      "invite",
+      "request",
+      1,
+      2,
+      signal,
+      telegramSnapshot,
+    ),
+    false,
+  );
+  assert.equal(calls[0][4], signal);
+  assert.equal(calls[0][5], snapshot);
+  assert.equal(calls[1][4], signal);
+  assert.equal(calls[1][5], telegramSnapshot);
+});
 
 test("entry adapters preserve selected malformed rows, ordering, and read count", async () => {
   const { port, reads } = fixture(

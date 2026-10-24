@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createRatingRepository } from "../src/ratingRepository.ts";
 import {
+  automatchSweepEntries,
   sweepAutomatchProfileGameProjections,
   sweepEventProfileGameProjections,
   sweepProfileLinkProfileGameProjections,
@@ -29,6 +30,7 @@ import {
 import { recoveryRecordPageFixture } from "./recoveryScanPageFixture.ts";
 import { gameplayTestPort } from "./gameSessionTestPorts.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+import type { AutomatchOutboxClaimSnapshot } from "../src/automatchD1/types.ts";
 
 const nowMs = 600_000;
 const logger = { error() {}, info() {} };
@@ -633,5 +635,119 @@ test("Telegram automatch paging never reclaims the first page at the same timest
   assert.deepEqual(
     batches.map((batch) => batch.length),
     [10, 10],
+  );
+});
+
+for (const lane of ["profile-game", "telegram"] as const) {
+  test(`${lane} recovery keeps scanned snapshots local and supports unseeded candidates`, async () => {
+    const root =
+      lane === "profile-game"
+        ? "profileGameProjectionOutbox/automatch"
+        : "telegramProjectionOutbox/automatch";
+    const recordsById = new Map(
+      records(21).map(({ inviteId }) => [
+        inviteId,
+        {
+          schemaVersion: 1,
+          status: "pending",
+          requestId: `request-${inviteId}`,
+          lastQueuedAtMs: 1,
+          sourceUpdatedAtMs: 1,
+          updatedAtMs: 1,
+          future: { keep: true },
+        },
+      ]),
+    );
+    const snapshots = new Map<string, AutomatchOutboxClaimSnapshot>(
+      [...recordsById].flatMap(([key, value], index) =>
+        index % 2 === 0
+          ? [[key, { root, key, value, revision: index + 1 }] as const]
+          : [],
+      ),
+    );
+    const state = gameplayTestPort({
+      getPath: async () => assert.fail("unexpected-read"),
+      patchRoot: async () => assert.fail("unexpected-patch"),
+      transactPath: async () => assert.fail("unexpected-repair"),
+    });
+    const claims: string[] = [];
+    const claim: typeof state.claimAutomatchProfileOutbox = async (
+      inviteId,
+      requestId,
+      expected,
+      atMs,
+      signal,
+      snapshot,
+    ) => {
+      assert.equal(requestId, `request-${inviteId}`);
+      assert.equal(expected, 1);
+      assert.equal(atMs, nowMs);
+      assert.equal(signal, undefined);
+      assert.equal(snapshot, snapshots.get(inviteId));
+      claims.push(inviteId);
+      return true;
+    };
+    const readPage = async (
+      cutoff: number,
+      limit: number,
+      excluded: readonly string[] = [],
+    ) => {
+      assert.equal(cutoff, lane === "profile-game" ? 300_000 : nowMs);
+      const page = recoveryRecordPageFixture(
+        Object.fromEntries(recordsById),
+        limit,
+        excluded,
+      );
+      return { ...page, snapshots };
+    };
+    const { batches, env } = queueFixture();
+    let count: number;
+    if (lane === "profile-game") {
+      state.claimAutomatchProfileOutbox = claim;
+      state.projectionRecovery.listDueAutomatchProfileOutboxesPage = readPage;
+      state.projectionRecovery.listMalformedAutomatchProfileOutboxesPage =
+        async () => ({ entries: null, scannedIdentities: [] });
+      count = await sweepAutomatchProfileGameProjections(env, {
+        createStateRepository: () => state,
+        now: () => nowMs,
+        logger,
+      });
+    } else {
+      state.claimAutomatchTelegramOutbox = claim;
+      state.projectionRecovery.listDueAutomatchTelegramOutboxesPage = readPage;
+      count = await sweepAutomatchProjections(env, state, logger, nowMs);
+    }
+    const expectedIds = [...recordsById.keys()].slice(0, 20);
+    assert.equal(count, 20);
+    assert.deepEqual(claims, expectedIds);
+    assert.deepEqual(
+      batches.map((batch) => batch.length),
+      [10, 10],
+    );
+    assert.deepEqual(
+      batches.flat(),
+      expectedIds.map((inviteId) => ({
+        kind:
+          lane === "profile-game"
+            ? "automatch-profile-game-projection"
+            : "automatch-telegram-projection",
+        inviteId,
+        requestId: `request-${inviteId}`,
+      })),
+    );
+  });
+}
+
+test("malformed profile outboxes never become seeded claim candidates", () => {
+  const value = { status: "broken", lastQueuedAtMs: 1 };
+  const snapshot: AutomatchOutboxClaimSnapshot = {
+    root: "profileGameProjectionOutbox/automatch",
+    key: "invalid",
+    value,
+    revision: 2,
+  };
+  assert.deepEqual(
+    automatchSweepEntries({ invalid: value }, new Map([["invalid", snapshot]])),
+    [{ kind: "invalid", inviteId: "invalid" }],
   );
 });

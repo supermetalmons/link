@@ -4,6 +4,8 @@ import {
   type AutomatchRecordSnapshot,
   type RecordRow,
   type MutationRecordRow,
+  type AutomatchOutboxClaimSnapshot,
+  type AutomatchOutboxRecoveryPage,
 } from "./types.ts";
 import { decodeSnapshot, requireKey, requireRoot } from "./codec.ts";
 import { readD1FirstRow } from "../d1Reads.ts";
@@ -11,7 +13,6 @@ import {
   readRecoveryScanIdentities,
   recoveryScanExclusionSql,
   recoveryScanIdentitySql,
-  type RecoveryScanPage,
 } from "../recoveryScanPage.ts";
 
 const RECOVERY_ORDER_SQL = `recovery_sort_rank, recovery_sort_value,
@@ -145,11 +146,12 @@ export function createAutomatchReads(db: D1Database) {
   }
 
   async function readRecoveryPage(
-    root: AutomatchRoot,
+    root: AutomatchOutboxClaimSnapshot["root"],
     sql: string,
     values: readonly (string | number)[],
     signal?: AbortSignal,
-  ): Promise<RecoveryScanPage<Record<string, unknown> | null>> {
+    retainSnapshots = false,
+  ): Promise<AutomatchOutboxRecoveryPage> {
     signal?.throwIfAborted();
     const rows = await db
       .withSession("first-primary")
@@ -158,7 +160,28 @@ export function createAutomatchReads(db: D1Database) {
       .all<RecordRow & { recovery_scan_identity?: unknown }>();
     signal?.throwIfAborted();
     const scannedIdentities = readRecoveryScanIdentities(rows.results);
-    return { entries: decodeValues(root, rows.results), scannedIdentities };
+    if (!retainSnapshots || rows.results.length === 0) {
+      return { entries: decodeValues(root, rows.results), scannedIdentities };
+    }
+    const snapshots = new Map<string, AutomatchOutboxClaimSnapshot>();
+    const encoder = new TextEncoder();
+    const entries = Object.fromEntries(
+      rows.results.map((row, index) => {
+        const snapshot = { ...decodeSnapshot(root, row), root };
+        const keyIdentity = `text:${Array.from(
+          encoder.encode(snapshot.key),
+          (byte) => byte.toString(16).padStart(2, "0"),
+        )
+          .join("")
+          .toUpperCase()}`;
+        snapshots.delete(snapshot.key);
+        if (scannedIdentities[index] === keyIdentity) {
+          snapshots.set(snapshot.key, snapshot);
+        }
+        return [snapshot.key, snapshot.value];
+      }),
+    );
+    return { entries, scannedIdentities, snapshots };
   }
 
   async function listAutomatchEntriesByLogin(
@@ -224,6 +247,7 @@ export function createAutomatchReads(db: D1Database) {
        ORDER BY ${RECOVERY_ORDER_SQL} LIMIT ?2`,
       [nowMs, limit, ...excludedIdentities],
       signal,
+      true,
     );
   }
 
@@ -256,6 +280,7 @@ export function createAutomatchReads(db: D1Database) {
        ORDER BY ${RECOVERY_ORDER_SQL} LIMIT ?2`,
       [beforeMs, limit, ...excludedIdentities],
       signal,
+      true,
     );
   }
 

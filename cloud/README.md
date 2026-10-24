@@ -80,6 +80,8 @@ Continuation excludes the exact raw identities already scanned before applying t
 
 Automatch outbox recovery uses generated scheduling columns while preserving canonical JSON and legacy ordering. Both old expression indexes and new generated-column indexes remain available. Apply the additive schema before promoting code that requires it, following the [generated recovery columns release procedure](../scripts/deploy-cloudflare.md#generated-recovery-columns).
 
+Healthy automatch recovery claims reuse the scanned outbox snapshot for their first attempt. Seeded writes assert the revision before the existing admission and resource guards; stale or unusable snapshots fall back to primary reads. Snapshots remain local to the sweep, reducing database round trips without changing Queue payloads, malformed-record repair, or scan limits.
+
 Event rating and persisted-outbox recovery emit `event_progress_recovery_record_failed` with scope `event-progress`, source `rating` or `outbox`, the failing phase, and validated identifiers. Failed items retain their original errors while other items continue; stale outbox snapshots are benign no-ops and are not logged as failures.
 
 ## Canonical profile maintenance
@@ -181,6 +183,8 @@ Malformed progress-outbox quarantine archives and removes only the exact observe
 `WAGER_SETTLEMENT_QUEUE` sends initial and deferred settlement retries to `mons-link-wager-settlement`, with exhausted retries retained in `mons-link-wager-settlement-dlq`. The consumer preserves profile and reservation admission checks and runs independently of Telegram delivery. Legacy wager messages in `mons-link-telegram-delivery` forward unchanged without added delay; the original message is acknowledged only after enqueue succeeds and retried if forwarding fails. Inspect legacy Telegram DLQ entries as well as the settlement DLQ during recovery; preserve their operation IDs and reconcile canonical state before replaying a specific task.
 
 Prize withdrawals retain D1 leases, destination identity, signed transaction bytes, exact signature recovery, and completion records. Freeze affected storage before a schema change or terminating an instance. The read-only withdrawal Workflow preflight validates wallet identity and RPC access without sending a transaction. Never manually rewrite assigned prizes or replay a possibly completed transfer.
+
+Completed-withdrawal cleanup checks admission and profile prize revisions even when an assignment is absent or belongs to a different prize. These no-op checks leave prize revisions, timestamps, and cached history validators unchanged. Matching removals retain the existing guarded deletion and advance the prize revision once; generic prize transactions retain their original commit behavior.
 
 ## Telegram recovery and announcements
 

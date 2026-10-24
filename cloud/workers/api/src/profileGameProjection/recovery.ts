@@ -1,4 +1,5 @@
 import { createGameplayRepository } from "../gameplayRepository.ts";
+import type { AutomatchOutboxClaimSnapshot } from "../automatchD1/types.ts";
 import { createRatingRepository } from "../ratingRepository.ts";
 import { createEventProgressOutboxWriter } from "../eventRepository.ts";
 import {
@@ -52,6 +53,7 @@ import type {
 type AutomatchSweepCandidate = {
   lastQueuedAtMs: number;
   task: AutomatchProfileGameProjectionTask;
+  snapshot?: AutomatchOutboxClaimSnapshot;
 };
 
 type AutomatchSweepEntry =
@@ -74,14 +76,19 @@ function toRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-export function automatchSweepEntries(value: unknown): AutomatchSweepEntry[] {
+export function automatchSweepEntries(
+  value: unknown,
+  snapshots?: ReadonlyMap<string, AutomatchOutboxClaimSnapshot>,
+): AutomatchSweepEntry[] {
   const records = toRecord(value) || {};
   return Object.entries(records).map(([inviteId, raw]) => {
     const outbox = parseAutomatchProfileGameProjectionOutbox(raw);
+    const snapshot = snapshots?.get(inviteId);
     return outbox && isSafeRecordKey(inviteId)
       ? {
           kind: "candidate",
           value: {
+            ...(snapshot ? { snapshot } : {}),
             lastQueuedAtMs: outbox.lastQueuedAtMs,
             task: {
               kind: "automatch-profile-game-projection",
@@ -129,6 +136,8 @@ export async function claimAutomatchSweepCandidate(
     candidate.task.requestId,
     candidate.lastQueuedAtMs,
     nowMs,
+    undefined,
+    candidate.snapshot,
   );
 }
 
@@ -415,12 +424,14 @@ export async function sweepAutomatchProfileGameProjections(
     dependencies.createStateRepository ||
     ((workerEnv: Env) => createGameplayRepository(workerEnv))
   )(env);
-  const duePages = projectionRecoveryPages((excludedIdentities) =>
-    state.projectionRecovery.listDueAutomatchProfileOutboxesPage(
-      dueBeforeMs,
-      PROFILE_GAME_PROJECTION_SWEEP_LIMIT,
-      excludedIdentities,
-    ),
+  const duePages = projectionRecoveryPages(
+    (excludedIdentities) =>
+      state.projectionRecovery.listDueAutomatchProfileOutboxesPage(
+        dueBeforeMs,
+        PROFILE_GAME_PROJECTION_SWEEP_LIMIT,
+        excludedIdentities,
+      ),
+    (page) => automatchSweepEntries(page.entries, page.snapshots),
   );
   const malformedPages = projectionRecoveryPages((excludedIdentities) =>
     state.projectionRecovery.listMalformedAutomatchProfileOutboxesPage(
@@ -443,7 +454,7 @@ export async function sweepAutomatchProfileGameProjections(
     if (due.done && malformed.done) break;
     const itemOffset = pageIndex * PROFILE_GAME_PROJECTION_SWEEP_LIMIT * 2;
     const entries = [
-      ...automatchSweepEntries(due.done ? null : due.value.entries),
+      ...(due.done ? [] : due.value.entries),
       ...automatchSweepEntries(malformed.done ? null : malformed.value.entries),
     ];
     const invalidInviteIds = entries.flatMap((entry) =>
