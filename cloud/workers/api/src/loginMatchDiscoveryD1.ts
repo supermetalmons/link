@@ -9,6 +9,7 @@ import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 
 const CAPTURE_BATCH_SIZE = 40;
 const MAX_PAGE_SIZE = 20;
+export const MAX_LOGIN_MATCH_DISCOVERY_READS = 40;
 
 export type LoginMatchDiscoveryInput = {
   loginUid: string;
@@ -26,6 +27,39 @@ type DiscoveryRow = {
   invite_id: string | null;
   resolution: MatchDiscoveryResolution;
 };
+
+type DiscoveryKey = Pick<LoginMatchDiscoveryInput, "loginUid" | "matchId">;
+type ResolvedDiscoveryRow = Pick<DiscoveryRow, "invite_id" | "resolution">;
+
+function assertDiscoveryKey({ loginUid, matchId }: DiscoveryKey): void {
+  if (!isCanonicalLoginUid(loginUid) || !isSafeRecordKey(matchId)) {
+    throw new TypeError("invalid-login-match-discovery-key");
+  }
+}
+
+function prepareResolvedDiscoveryRead(
+  session: D1DatabaseSession,
+  { loginUid, matchId }: DiscoveryKey,
+): D1PreparedStatement {
+  return session
+    .prepare(
+      "SELECT invite_id, resolution FROM login_match_discovery WHERE login_uid = ? AND match_id = ?",
+    )
+    .bind(loginUid, matchId);
+}
+
+function resolvedDiscoveryInviteId(
+  key: DiscoveryKey,
+  row: ResolvedDiscoveryRow,
+): string | null {
+  assertInput({
+    ...key,
+    inviteId: row.invite_id,
+    resolution: row.resolution,
+    provenance: "capture",
+  });
+  return row.resolution === "resolved" ? row.invite_id : null;
+}
 
 function assertInput(row: LoginMatchDiscoveryInput): void {
   if (
@@ -142,28 +176,43 @@ export async function readResolvedLoginMatchInviteId(
   loginUid: string,
   matchId: string,
 ): Promise<string | null> {
-  if (!isCanonicalLoginUid(loginUid) || !isSafeRecordKey(matchId)) {
-    throw new TypeError("invalid-login-match-discovery-key");
-  }
-  const row = await db
-    .withSession("first-primary")
-    .prepare(
-      "SELECT invite_id, resolution FROM login_match_discovery WHERE login_uid = ? AND match_id = ?",
-    )
-    .bind(loginUid, matchId)
-    .first<{
-      invite_id: string | null;
-      resolution: MatchDiscoveryResolution;
-    }>();
+  const key = { loginUid, matchId };
+  assertDiscoveryKey(key);
+  const row = await prepareResolvedDiscoveryRead(
+    db.withSession("first-primary"),
+    key,
+  ).first<ResolvedDiscoveryRow>();
   if (!row) return null;
-  assertInput({
-    loginUid,
-    matchId,
-    inviteId: row.invite_id,
-    resolution: row.resolution,
-    provenance: "capture",
+  return resolvedDiscoveryInviteId(key, row);
+}
+
+export async function readResolvedLoginMatchInviteIds(
+  db: D1Database,
+  inputs: readonly DiscoveryKey[],
+  signal?: AbortSignal,
+): Promise<Array<string | null>> {
+  signal?.throwIfAborted();
+  if (!Array.isArray(inputs) || inputs.length > MAX_LOGIN_MATCH_DISCOVERY_READS)
+    throw new TypeError("invalid-login-match-discovery-read-batch");
+  for (const input of inputs) assertDiscoveryKey(input);
+  if (inputs.length === 0) return [];
+  const session = db.withSession("first-primary");
+  const results = await session.batch<ResolvedDiscoveryRow>(
+    inputs.map((input) => prepareResolvedDiscoveryRead(session, input)),
+  );
+  signal?.throwIfAborted();
+  if (!Array.isArray(results) || results.length !== inputs.length)
+    throw new Error("login-match-discovery-unavailable");
+  return Array.from(results, (result, index) => {
+    if (
+      result?.success !== true ||
+      !Array.isArray(result.results) ||
+      result.results.length > 1
+    )
+      throw new Error("login-match-discovery-unavailable");
+    if (result.results.length === 0) return null;
+    return resolvedDiscoveryInviteId(inputs[index], result.results[0]);
   });
-  return row.resolution === "resolved" ? row.invite_id : null;
 }
 
 export async function listLoginMatchDiscoveryPage(

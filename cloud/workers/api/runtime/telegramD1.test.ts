@@ -151,6 +151,37 @@ describe("Telegram D1 repositories", () => {
     expect(await repositories[0].getMessage("counter")).toEqual({ count: 12 });
   });
 
+  it("returns the proposed object and rounds only the storage timestamp", async () => {
+    const value = { count: 1, omitted: undefined, updatedAtMs: 900 };
+    const repository = createD1TelegramRepository(testEnv.TELEGRAM_DB, {
+      now: () => 100.9,
+    });
+    const result = await repository.transactMessage("identity", () => ({
+      value,
+    }));
+    expect(result.value).toBe(value);
+    expect(await repository.getMessage("identity")).toEqual({
+      count: 1,
+      updatedAtMs: 900,
+    });
+    expect(
+      await testEnv.TELEGRAM_DB.prepare(
+        "SELECT updated_at_ms FROM telegram_messages WHERE message_key = ?",
+      )
+        .bind("identity")
+        .first<number>("updated_at_ms"),
+    ).toBe(100);
+  });
+
+  it("passes through provider failures from message reads", async () => {
+    const cause = new Error("provider-read-failure");
+    const repository = createD1TelegramRepository(failingDatabase(cause));
+    await expect(repository.getMessage("message-1")).rejects.toBe(cause);
+    await expect(
+      repository.transactMessage("message-1", () => ({ value: {} })),
+    ).rejects.toBe(cause);
+  });
+
   it("preserves delivery state across queued retries and cold engine instances", async () => {
     let nowMs = 1_000;
     let sends = 0;

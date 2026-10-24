@@ -31,6 +31,7 @@ import type {
   ProfileEventPrizePageQuery,
 } from "../../../../runtime/eventReads.js";
 import { readD1FirstRow } from "../d1Reads.ts";
+import { PROFILE_EVENT_PRIZES_PAGE_SIZE } from "@mons/shared/event-prizes";
 import {
   readRecoveryScanIdentities,
   recoveryScanExclusionSql,
@@ -389,6 +390,88 @@ export async function readProfileEventPrizesIfChanged(
   return {
     notModified: false,
     snapshot: { prizes, profileId: normalizedProfileId, revision },
+  };
+}
+
+export async function readProfileEventPrizePage(
+  db: EventD1Connection,
+  profileId: string,
+  {
+    afterEventId = null,
+    knownRevision = null,
+    expectedRevision = null,
+  }: {
+    afterEventId?: string | null;
+    knownRevision?: number | null;
+    expectedRevision?: number | null;
+  } = {},
+): Promise<{
+  revision: number;
+  entries: Array<{ eventId: string; assignment: EventPrizeAssignmentRecord }>;
+}> {
+  if (
+    !exactKey(profileId) ||
+    (afterEventId !== null && !exactKey(afterEventId))
+  )
+    throw new EventD1Failure("invalid-profile-prize-page");
+  if (knownRevision !== null) safeInteger(knownRevision);
+  if (expectedRevision !== null) safeInteger(expectedRevision);
+  const results = await db.batch([
+    db
+      .prepare(
+        "SELECT revision FROM profile_event_prize_revisions WHERE profile_id = ?",
+      )
+      .bind(profileId),
+    db
+      .prepare(
+        `SELECT profile_id, event_id, assignment_json
+         FROM profile_event_prizes
+         WHERE profile_id = CASE WHEN EXISTS (
+           SELECT 1 FROM profile_event_prize_revisions
+           WHERE profile_id = ? AND revision = ?
+         ) THEN NULL ELSE ? END
+           AND event_id > ?
+           AND (? IS NULL OR COALESCE((
+             SELECT revision FROM profile_event_prize_revisions WHERE profile_id = ?
+           ), 0) = ?)
+         ORDER BY event_id LIMIT ?`,
+      )
+      .bind(
+        profileId,
+        knownRevision,
+        profileId,
+        afterEventId ?? "",
+        expectedRevision,
+        profileId,
+        expectedRevision,
+        PROFILE_EVENT_PRIZES_PAGE_SIZE + 1,
+      ),
+  ]);
+  if (
+    results.length !== 2 ||
+    results.some(
+      (result) => !result.success || !Array.isArray(result.results),
+    ) ||
+    results[0].results.length > 1 ||
+    results[1].results.length > PROFILE_EVENT_PRIZES_PAGE_SIZE + 1
+  ) {
+    throw new EventD1Failure("profile-prize-page-unavailable");
+  }
+  const revisionRow = results[0].results[0] as { revision: number } | undefined;
+  const revision = revisionRow ? safeInteger(revisionRow.revision, 1) : 0;
+  return {
+    revision,
+    entries: (results[1].results as AssignmentRow[]).map((row) => {
+      if (row.profile_id !== profileId) throw new EventD1Failure();
+      return {
+        eventId: row.event_id,
+        assignment: parseStoredEventPrizeAssignment(
+          profileId,
+          row.event_id,
+          decodeJson(row.assignment_json),
+        ),
+      };
+    }),
   };
 }
 

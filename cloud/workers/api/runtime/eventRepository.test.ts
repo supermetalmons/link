@@ -1294,24 +1294,48 @@ describe("typed event repository", () => {
           if (property === "withSession") {
             return (constraint?: string) => {
               const session = target.withSession(constraint);
+              const discoveryStatements = new WeakSet<D1PreparedStatement>();
               return new Proxy(session, {
                 get(reader, method) {
+                  if (method === "batch") {
+                    return async (statements: D1PreparedStatement[]) => {
+                      if (
+                        statements.some((statement) =>
+                          discoveryStatements.has(statement),
+                        )
+                      ) {
+                        lookupStarted.resolve();
+                        if (failure === "blocked") await releaseLookup.promise;
+                        throw new Error("discovery-unavailable");
+                      }
+                      return reader.batch(statements);
+                    };
+                  }
                   if (method === "prepare") {
                     return (sql: string) => {
                       if (
                         sql ===
                         "SELECT invite_id, resolution FROM login_match_discovery WHERE login_uid = ? AND match_id = ?"
                       ) {
-                        return {
-                          bind: () => ({
-                            first: async () => {
-                              lookupStarted.resolve();
-                              if (failure === "blocked")
-                                await releaseLookup.promise;
-                              throw new Error("discovery-unavailable");
-                            },
-                          }),
-                        } as unknown as D1PreparedStatement;
+                        return new Proxy(reader.prepare(sql), {
+                          get(statement, operation) {
+                            if (operation === "bind") {
+                              return (...values: unknown[]) => {
+                                const bound = statement.bind(...values);
+                                discoveryStatements.add(bound);
+                                return bound;
+                              };
+                            }
+                            const member = Reflect.get(
+                              statement,
+                              operation,
+                              statement,
+                            );
+                            return typeof member === "function"
+                              ? member.bind(statement)
+                              : member;
+                          },
+                        });
                       }
                       return reader.prepare(sql);
                     };

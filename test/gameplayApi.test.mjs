@@ -1046,7 +1046,10 @@ test("reads conditional event snapshots and profile prizes with transport metada
     calls[0].input,
     `https://api.mons.link/events/snapshot?eventId=${LEGACY_CORE_PRIZES_EVENT_ID}`,
   );
-  assert.equal(calls[1].input, "https://api.mons.link/events/prizes");
+  assert.equal(
+    calls[1].input,
+    "https://api.mons.link/events/prizes?pagination=1",
+  );
   const headers = new Headers(calls[0].init.headers);
   assert.equal(headers.get("Authorization"), "Bearer session-token");
   assert.equal(headers.get("If-None-Match"), 'W/"event-2"');

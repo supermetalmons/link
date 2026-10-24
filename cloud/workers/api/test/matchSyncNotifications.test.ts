@@ -1,36 +1,52 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setImmediate } from "node:timers/promises";
 import {
   notifyMatchSyncChanged,
   notifyMatchSyncInvites,
 } from "../src/matchSyncNotifications.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
+type DiscoveryRead = () => Promise<{
+  success: true;
+  results: Array<{ invite_id: string; resolution: "resolved" }>;
+}>;
+
 function environment({
   resolve = async (_playerId: string, _matchId: string) =>
     "invite-one" as string | null,
   notify = async (_inviteId: string, _matchIds?: string[]) => undefined,
+  batch = (reads) => Promise.all(reads.map((read) => read())),
+  session = () => undefined,
 }: {
   resolve?: (playerId: string, matchId: string) => Promise<string | null>;
   notify?: (inviteId: string, matchIds?: string[]) => Promise<void>;
+  batch?: (reads: readonly DiscoveryRead[]) => Promise<unknown>;
+  session?: () => void;
 } = {}): Env {
   return {
     ...TELEGRAM_TEST_ENV,
     PROFILE_GAMES_DB: {
       withSession: (constraint: string) => {
         assert.equal(constraint, "first-primary");
+        session();
         return {
+          batch,
           prepare: (sql: string) => {
             assert.match(sql, /WHERE login_uid = \? AND match_id = \?$/);
             return {
-              bind: (playerId: string, matchId: string) => ({
-                first: async () => {
+              bind:
+                (playerId: string, matchId: string): DiscoveryRead =>
+                async () => {
                   const inviteId = await resolve(playerId, matchId);
-                  return inviteId === null
-                    ? null
-                    : { invite_id: inviteId, resolution: "resolved" };
+                  return {
+                    success: true,
+                    results:
+                      inviteId === null
+                        ? []
+                        : [{ invite_id: inviteId, resolution: "resolved" }],
+                  };
                 },
-              }),
             };
           },
         };
@@ -216,4 +232,123 @@ test("failed and stuck room RPCs stay bounded without rejecting committed work",
     );
     assert.equal(failures, 1);
   }
+});
+
+function notificationTargets(count: number) {
+  return Array.from({ length: count }, (_, index) => ({
+    playerId: "host",
+    matchId: `match-${index}`,
+  }));
+}
+
+test("forty-one targets use two primary batches before any room notification", async () => {
+  const sizes: number[] = [];
+  const notices: unknown[] = [];
+  let sessions = 0;
+  let completed = 0;
+  const targets = notificationTargets(41);
+  const env = environment({
+    session: () => {
+      sessions++;
+    },
+    batch: async (reads) => {
+      assert.equal(sessions, sizes.length + 1);
+      assert.equal(completed, sizes.length);
+      sizes.push(reads.length);
+      const results = await Promise.all(reads.map((read) => read()));
+      completed++;
+      return results;
+    },
+    notify: async (inviteId, matchIds) => {
+      assert.equal(completed, 2);
+      notices.push([inviteId, matchIds]);
+    },
+  });
+  await notifyMatchSyncChanged(env, [...targets, targets[0]]);
+  assert.equal(sessions, 2);
+  assert.deepEqual(sizes, [40, 1]);
+  assert.deepEqual(notices, [
+    ["invite-one", targets.map(({ matchId }) => matchId)],
+  ]);
+});
+
+test("failed or malformed later batches suppress all notifications", async () => {
+  const failures = [
+    async () => {
+      throw new Error("discovery-unavailable");
+    },
+    async () => [],
+    async () => [{ success: false, results: [] }],
+    async () => [{ success: true, results: null }],
+    async () => [
+      {
+        success: true,
+        results: [{ invite_id: null, resolution: "resolved" }],
+      },
+    ],
+  ];
+  for (const failBatch of failures) {
+    let batches = 0;
+    let notices = 0;
+    let logged = 0;
+    const env = environment({
+      batch: async (reads) => {
+        batches++;
+        if (batches === 2) return failBatch();
+        return Promise.all(reads.map((read) => read()));
+      },
+      notify: async () => {
+        notices++;
+      },
+    });
+    await notifyMatchSyncChanged(env, notificationTargets(81), {
+      logFailure: () => {
+        logged++;
+      },
+    });
+    assert.equal(batches, 2);
+    assert.equal(notices, 0);
+    assert.equal(logged, 1);
+  }
+});
+
+test("a timed-out batch cannot start another batch or notify after it resolves", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let batches = 0;
+  let sessions = 0;
+  let notices = 0;
+  let logged = 0;
+  const env = environment({
+    session: () => {
+      sessions++;
+    },
+    batch: async (reads) => {
+      batches++;
+      await gate;
+      return Promise.all(reads.map((read) => read()));
+    },
+    notify: async () => {
+      notices++;
+    },
+  });
+  try {
+    await notifyMatchSyncChanged(env, notificationTargets(41), {
+      timeoutMs: 1,
+      logFailure: () => {
+        logged++;
+      },
+    });
+    assert.equal(batches, 1);
+    assert.equal(logged, 1);
+  } finally {
+    release();
+    await setImmediate();
+  }
+  assert.equal(sessions, 1);
+  assert.equal(batches, 1);
+  assert.equal(notices, 0);
+  assert.equal(logged, 1);
 });

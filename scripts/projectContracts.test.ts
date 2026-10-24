@@ -794,6 +794,9 @@ test("browser event subscriptions use Worker polling without Firebase event path
   const eventClient = readText("src/connection/eventClient.ts");
   const gameplayApi = readText("src/services/gameplayApi.ts");
   const eventReadApi = readText("src/services/eventReadApi.ts");
+  const profileEventPrizesApi = readText(
+    "src/services/profileEventPrizesApi.ts",
+  );
 
   for (const retiredPath of [
     "eventPrizeSelections/",
@@ -811,7 +814,11 @@ test("browser event subscriptions use Worker polling without Firebase event path
     gameplayApi,
     /export \{ readEventSnapshotViaApi \} from "\.\/eventReadApi"/,
   );
-  assert.match(gameplayApi, /\/events\/prizes/);
+  assert.match(profileEventPrizesApi, /\/events\/prizes/);
+  assert.match(
+    gameplayApi,
+    /export \{ readProfileEventPrizesViaApi \} from "\.\/profileEventPrizesApi"/,
+  );
 });
 
 test("provider verification and auth mutations use Worker routes", () => {

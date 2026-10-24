@@ -153,6 +153,36 @@ describe("event prize withdrawal D1 repository", () => {
     });
   });
 
+  it("returns the proposed object and retains its valid stored timestamp", async () => {
+    let clockCalls = 0;
+    const store = createD1EventPrizeWithdrawalStore(
+      testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
+      { now: () => ++clockCalls },
+    );
+    const value = {
+      ...processing(100),
+      updatedAtMs: "200",
+      omitted: undefined,
+    };
+    const result = await store
+      .record(eventId, prizeId)
+      .transaction(() => ({ value }));
+    expect(result.value).toBe(value);
+    expect(clockCalls).toBe(0);
+    expect(await store.get(eventId, prizeId)).toEqual({
+      ...processing(100),
+      updatedAtMs: "200",
+    });
+    expect(
+      await testEnv.EVENT_PRIZE_WITHDRAWALS_DB.prepare(
+        `SELECT updated_at_ms FROM event_prize_withdrawals
+         WHERE event_id = ? AND prize_id = ?`,
+      )
+        .bind(eventId, prizeId)
+        .first<number>("updated_at_ms"),
+    ).toBe(200);
+  });
+
   it("deletes existing and absent records without consulting the fallback clock", async () => {
     const store = createD1EventPrizeWithdrawalStore(
       testEnv.EVENT_PRIZE_WITHDRAWALS_DB,

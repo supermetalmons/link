@@ -3,6 +3,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.isToggleEventPrizeSelectionResponse =
   exports.isToggleEventPrizeSelectionRequest =
+  exports.isProfileEventPrizesPageResponse =
   exports.isProfileEventPrizesResponse =
   exports.isEventPrizeWithdrawalStatusRequest =
   exports.isEventPrizeWithdrawalRequest =
@@ -38,9 +39,17 @@ exports.isToggleEventPrizeSelectionResponse =
   exports.ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID =
   exports.ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID =
   exports.AAHNGEEZ_PRIZES_EVENT_ID =
+  exports.MAX_PROFILE_EVENT_PRIZES_CURSOR_LENGTH =
+  exports.PROFILE_EVENT_PRIZES_PAGE_SIZE =
     void 0;
+exports.profileEventPrizesPageEtag = profileEventPrizesPageEtag;
 const ids_js_1 = require("./ids.js");
 const solana_js_1 = require("./solana.js");
+exports.PROFILE_EVENT_PRIZES_PAGE_SIZE = 100;
+exports.MAX_PROFILE_EVENT_PRIZES_CURSOR_LENGTH = 8_192;
+function profileEventPrizesPageEtag(epoch, profileId, revision) {
+  return `W/"profile-event-prizes-page-v1-${epoch}-${encodeURIComponent(profileId || "none")}-${revision}"`;
+}
 const EVENT_PRIZE_REVEAL_WINDOW_MS = 3_600_000;
 exports.EVENT_PRIZE_REVEAL_WINDOW_MS = EVENT_PRIZE_REVEAL_WINDOW_MS;
 const LEGACY_CORE_PRIZES_EVENT_ID = "NN3eRzoZo80";
@@ -949,6 +958,37 @@ const isProfileEventPrizesResponse = (value) => {
   );
 };
 exports.isProfileEventPrizesResponse = isProfileEventPrizesResponse;
+const isProfileEventPrizesPageResponse = (value) => {
+  if (
+    !isExactRecord(value, [
+      "ok",
+      "profileId",
+      "revision",
+      "prizes",
+      "nextCursor",
+    ]) ||
+    !isProfileEventPrizesResponse({
+      ok: value.ok,
+      profileId: value.profileId,
+      revision: value.revision,
+      prizes: value.prizes,
+    })
+  ) {
+    return false;
+  }
+  const count = Object.keys(value.prizes).length;
+  return (
+    count <= exports.PROFILE_EVENT_PRIZES_PAGE_SIZE &&
+    (value.nextCursor === null ||
+      (value.profileId !== null &&
+        count > 0 &&
+        typeof value.nextCursor === "string" &&
+        value.nextCursor.length <=
+          exports.MAX_PROFILE_EVENT_PRIZES_CURSOR_LENGTH &&
+        /^[A-Za-z0-9_-]+$/.test(value.nextCursor)))
+  );
+};
+exports.isProfileEventPrizesPageResponse = isProfileEventPrizesPageResponse;
 const isEventPrizeWithdrawalOperationId = (value) =>
   typeof value === "string" && /^epw_[0-9a-f]{64}$/.test(value);
 exports.isEventPrizeWithdrawalOperationId = isEventPrizeWithdrawalOperationId;

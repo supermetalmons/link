@@ -3,12 +3,8 @@ import type {
   TransactionResult,
 } from "./repositoryContracts.ts";
 import { runOptimisticTransaction } from "./optimisticTransaction.ts";
+import { createVersionedJsonRowStore } from "./versionedJsonD1.ts";
 const MAX_TRANSACTION_ATTEMPTS = 12;
-
-type JsonRow = {
-  record_json: string;
-  version: number;
-};
 
 export type EventPrizeWithdrawalStorageMode = "d1" | "frozen";
 
@@ -145,14 +141,10 @@ async function readRow(
   prizeId: string,
 ): Promise<{ record: Record<string, unknown>; version: number } | null> {
   try {
-    const row = await db
-      .prepare(
-        `SELECT record_json, version
-         FROM event_prize_withdrawals
-         WHERE event_id = ? AND prize_id = ?`,
-      )
-      .bind(eventId, prizeId)
-      .first<JsonRow>();
+    const row = await createVersionedJsonRowStore(db, {
+      table: "event_prize_withdrawals",
+      key: [eventId, prizeId],
+    }).read();
     return row
       ? {
           record: decodeRecord(eventId, prizeId, row.record_json),
@@ -174,6 +166,10 @@ async function transactRow(
   ) => TransactionDecision<Record<string, unknown>>,
   now: () => number,
 ): Promise<TransactionResult<Record<string, unknown>>> {
+  const rows = createVersionedJsonRowStore(db, {
+    table: "event_prize_withdrawals",
+    key: [eventId, prizeId],
+  });
   return runOptimisticTransaction({
     maxAttempts: MAX_TRANSACTION_ATTEMPTS,
     read: () => readRow(db, eventId, prizeId),
@@ -182,39 +178,22 @@ async function transactRow(
     async write(current, next) {
       if (next === null) {
         if (!current) return { applied: true, value: null };
-        const deleted = await db
-          .prepare(
-            `DELETE FROM event_prize_withdrawals
-           WHERE event_id = ? AND prize_id = ? AND version = ?`,
-          )
-          .bind(eventId, prizeId, current.version)
-          .run();
-        return { applied: deleted.meta.changes > 0, value: null };
+        const changes = await rows.deleteIfVersion(current.version);
+        return { applied: changes > 0, value: null };
       }
       const normalized = normalizeRecord(eventId, prizeId, next);
       const encoded = encodeRecord(eventId, prizeId, normalized);
       const timestamp = updatedAtMs(normalized, now);
       if (!current) {
-        const inserted = await db
-          .prepare(
-            `INSERT INTO event_prize_withdrawals (
-             event_id, prize_id, record_json, version, updated_at_ms
-           ) VALUES (?, ?, ?, 1, ?)
-           ON CONFLICT (event_id, prize_id) DO NOTHING`,
-          )
-          .bind(eventId, prizeId, encoded, timestamp)
-          .run();
-        return { applied: inserted.meta.changes > 0, value: normalized };
+        const changes = await rows.insertIfAbsent(encoded, timestamp);
+        return { applied: changes > 0, value: normalized };
       }
-      const updated = await db
-        .prepare(
-          `UPDATE event_prize_withdrawals
-         SET record_json = ?, version = version + 1, updated_at_ms = ?
-         WHERE event_id = ? AND prize_id = ? AND version = ?`,
-        )
-        .bind(encoded, timestamp, eventId, prizeId, current.version)
-        .run();
-      return { applied: updated.meta.changes > 0, value: normalized };
+      const changes = await rows.updateIfVersion(
+        current.version,
+        encoded,
+        timestamp,
+      );
+      return { applied: changes > 0, value: normalized };
     },
     conflictError: () =>
       new EventPrizeWithdrawalD1Failure("event-prize-withdrawal-d1-conflict"),

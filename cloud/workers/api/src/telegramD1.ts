@@ -11,13 +11,9 @@ import { validateTelegramMessageKey } from "../../../runtime/telegram/desiredSta
 import { validateTelegramTransactionDecision } from "./telegramTransaction.ts";
 import type { EventAnnouncementKind } from "./eventAnnouncementKinds.ts";
 import { runOptimisticTransaction } from "./optimisticTransaction.ts";
+import { createVersionedJsonRowStore } from "./versionedJsonD1.ts";
 
 const MAX_D1_TRANSACTION_ATTEMPTS = 25;
-
-type JsonRow = {
-  record_json: string;
-  version: number;
-};
 
 export type TelegramStorageMode = "d1" | "frozen";
 
@@ -115,13 +111,12 @@ function encodeJsonRecord(value: unknown): string {
 async function readRow(
   db: D1Database,
   table: "telegram_delivery_control" | "telegram_messages",
-  keyColumn: "message_key" | "singleton",
   key: string | number,
 ): Promise<{ record: Record<string, unknown>; version: number } | null> {
-  const row = await db
-    .prepare(`SELECT record_json, version FROM ${table} WHERE ${keyColumn} = ?`)
-    .bind(key)
-    .first<JsonRow>();
+  const row = await createVersionedJsonRowStore(db, {
+    table,
+    key: [key],
+  }).read();
   if (!row) return null;
   return {
     record: parseJsonRecord(row.record_json),
@@ -133,7 +128,6 @@ async function transactRow(
   db: D1Database,
   input: {
     key: string | number;
-    keyColumn: "message_key" | "singleton";
     now: () => number;
     table: "telegram_delivery_control" | "telegram_messages";
     updater: (
@@ -141,9 +135,13 @@ async function transactRow(
     ) => TransactionDecision<TelegramStoredRecord>;
   },
 ): Promise<TransactionResult<TelegramStoredRecord>> {
+  const rows = createVersionedJsonRowStore(db, {
+    table: input.table,
+    key: [input.key],
+  });
   return runOptimisticTransaction({
     maxAttempts: MAX_D1_TRANSACTION_ATTEMPTS,
-    read: () => readRow(db, input.table, input.keyColumn, input.key),
+    read: () => readRow(db, input.table, input.key),
     getValue: (current) => current?.record ?? null,
     decide(current) {
       const decision = validateTelegramTransactionDecision(
@@ -159,37 +157,20 @@ async function transactRow(
         if (!current) {
           return { applied: true, value: null };
         }
-        const deleted = await db
-          .prepare(
-            `DELETE FROM ${input.table}
-           WHERE ${input.keyColumn} = ? AND version = ?`,
-          )
-          .bind(input.key, current.version)
-          .run();
-        return { applied: deleted.meta.changes === 1, value: null };
+        const changes = await rows.deleteIfVersion(current.version);
+        return { applied: changes === 1, value: null };
       }
       const encoded = encodeJsonRecord(next);
       if (!current) {
-        const inserted = await db
-          .prepare(
-            `INSERT INTO ${input.table} (
-             ${input.keyColumn}, record_json, version, updated_at_ms
-           ) VALUES (?, ?, 1, ?)
-           ON CONFLICT (${input.keyColumn}) DO NOTHING`,
-          )
-          .bind(input.key, encoded, updatedAtMs)
-          .run();
-        return { applied: inserted.meta.changes === 1, value: asRecord(next) };
+        const changes = await rows.insertIfAbsent(encoded, updatedAtMs);
+        return { applied: changes === 1, value: asRecord(next) };
       }
-      const updated = await db
-        .prepare(
-          `UPDATE ${input.table}
-         SET record_json = ?, version = version + 1, updated_at_ms = ?
-         WHERE ${input.keyColumn} = ? AND version = ?`,
-        )
-        .bind(encoded, updatedAtMs, input.key, current.version)
-        .run();
-      return { applied: updated.meta.changes === 1, value: asRecord(next) };
+      const changes = await rows.updateIfVersion(
+        current.version,
+        encoded,
+        updatedAtMs,
+      );
+      return { applied: changes === 1, value: asRecord(next) };
     },
     conflictError: () => new TelegramD1Failure(),
   });
@@ -202,30 +183,22 @@ export function createD1TelegramRepository(
   return createTelegramRepository({
     async readMessage(messageKey) {
       const key = validateTelegramMessageKey(messageKey);
-      return (
-        (await readRow(db, "telegram_messages", "message_key", key))?.record ??
-        null
-      );
+      return (await readRow(db, "telegram_messages", key))?.record ?? null;
     },
     transactMessage(messageKey, updater) {
       return transactRow(db, {
         table: "telegram_messages",
-        keyColumn: "message_key",
         key: validateTelegramMessageKey(messageKey),
         updater,
         now,
       });
     },
     async readControl() {
-      return (
-        (await readRow(db, "telegram_delivery_control", "singleton", 1))
-          ?.record ?? {}
-      );
+      return (await readRow(db, "telegram_delivery_control", 1))?.record ?? {};
     },
     transactControl(updater) {
       return transactRow(db, {
         table: "telegram_delivery_control",
-        keyColumn: "singleton",
         key: 1,
         updater,
         now,

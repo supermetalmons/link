@@ -260,11 +260,13 @@
     "EVENT_PRIZE_REVEAL_WINDOW_MS",
     "FLOPAWRETTES_PRIZES_EVENT_ID",
     "LEGACY_CORE_PRIZES_EVENT_ID",
+    "MAX_PROFILE_EVENT_PRIZES_CURSOR_LENGTH",
     "MI_NOTE_CARDS_PRIZES_EVENT_ID",
     "PEER_STUDY_3_AFELLA_2_PRIZES_EVENT_ID",
     "PICKME_PORTS_PRIZES_EVENT_ID",
     "PLANET_PEPPA_PRIZES_EVENT_ID",
     "PLASTIC_FOOLS_POCKET_PRIZES_EVENT_ID",
+    "PROFILE_EVENT_PRIZES_PAGE_SIZE",
     "RARE_WEITSMANS_PRIZES_EVENT_ID",
     "REVERIE_BANNERS_PRIZES_EVENT_ID",
     "SHELVES_PRIZES_EVENT_ID",
@@ -284,9 +286,11 @@
     "isEventPrizeWithdrawalProcessingResponse",
     "isEventPrizeWithdrawalRequest",
     "isEventPrizeWithdrawalStatusRequest",
+    "isProfileEventPrizesPageResponse",
     "isProfileEventPrizesResponse",
     "isToggleEventPrizeSelectionRequest",
-    "isToggleEventPrizeSelectionResponse"
+    "isToggleEventPrizeSelectionResponse",
+    "profileEventPrizesPageEtag"
   ],
   "shared/events.js": [
     "EVENT_BOOKMARK_HEADER",

@@ -7,6 +7,7 @@ import {
   listLoginMatchDiscoveryPage,
   readLoginMatchDiscoveryBackend,
   readResolvedLoginMatchInviteId,
+  readResolvedLoginMatchInviteIds,
   type LoginMatchDiscoveryInput,
 } from "../src/loginMatchDiscoveryD1.ts";
 
@@ -119,6 +120,42 @@ describe("login match discovery D1", () => {
     expect(
       await readResolvedLoginMatchInviteId(db, LOGIN, "invite12345"),
     ).toBeNull();
+  });
+
+  it("batch reads retain exact identities, order, duplicates, and unresolved nulls", async () => {
+    await db.batch(
+      buildLoginMatchDiscoveryStatements(
+        db,
+        [
+          resolved("invite12", "invite1"),
+          {
+            ...resolved("invite12", "other-invite"),
+            loginUid: "other-login",
+          },
+          { ...resolved("ambiguous"), inviteId: null, resolution: "ambiguous" },
+          { ...resolved("missing"), inviteId: null, resolution: "missing" },
+        ],
+        1,
+      ),
+    );
+    const inputs = [
+      { loginUid: "other-login", matchId: "invite12" },
+      { loginUid: LOGIN, matchId: "absent" },
+      { loginUid: LOGIN, matchId: "invite12" },
+      { loginUid: LOGIN, matchId: "ambiguous" },
+      { loginUid: LOGIN, matchId: "missing" },
+    ];
+    expect(
+      await readResolvedLoginMatchInviteIds(
+        db,
+        Array.from({ length: 40 }, (_, index) => inputs[index % inputs.length]),
+      ),
+    ).toEqual(
+      Array.from(
+        { length: 40 },
+        (_, index) => ["other-invite", null, "invite1", null, null][index % 5],
+      ),
+    );
   });
 
   it("captures idempotently, upgrades unresolved rows, and protects resolved mappings", async () => {

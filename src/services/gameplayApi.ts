@@ -87,9 +87,7 @@ import {
   type RatingUpdateResponse,
 } from "@mons/shared/ratings";
 import {
-  isProfileEventPrizesResponse,
   isToggleEventPrizeSelectionResponse,
-  type ProfileEventPrizesResponse,
   type ToggleEventPrizeSelectionRequest,
   type ToggleEventPrizeSelectionResponse,
 } from "@mons/shared/event-prizes";
@@ -125,12 +123,9 @@ import {
   GAMEPLAY_API_TIMEOUT_MS,
   GameplayApiError,
   cancelBody,
-  conditionalGameplayRead,
   isRecord,
   readBoundedJson,
   responseError,
-  type ConditionalRead,
-  type ConditionalReadOptions,
 } from "./gameplayTransport";
 
 export { GameplayApiError } from "./gameplayTransport";
@@ -139,6 +134,7 @@ export type {
   ConditionalReadOptions,
 } from "./gameplayTransport";
 export { readEventSnapshotViaApi } from "./eventReadApi";
+export { readProfileEventPrizesViaApi } from "./profileEventPrizesApi";
 
 const RATING_API_TIMEOUT_MS = 60_000;
 const RATING_BUSY_RETRY_DELAY_MS = 31_000;
@@ -348,22 +344,6 @@ export async function readHistoricalMatchPairViaApi(
   } finally {
     clearTimeout(timeoutId);
   }
-}
-
-export function readProfileEventPrizesViaApi(
-  profileId: string,
-  tokenProvider: AuthTokenProvider,
-  options: ConditionalReadOptions = {},
-): Promise<ConditionalRead<ProfileEventPrizesResponse>> {
-  const normalizedProfileId = profileId.trim();
-  return conditionalGameplayRead(
-    new URL(`${GAMEPLAY_API_ROOT}/events/prizes`),
-    tokenProvider,
-    (value): value is ProfileEventPrizesResponse =>
-      isProfileEventPrizesResponse(value) &&
-      value.profileId === normalizedProfileId,
-    options,
-  );
 }
 
 async function retryGameSessionMutation<T>(

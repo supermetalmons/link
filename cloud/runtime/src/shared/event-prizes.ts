@@ -128,6 +128,21 @@ export type ProfileEventPrizesResponse = {
   prizes: Record<string, EventPrizeAssignmentWireRecord>;
 };
 
+export type ProfileEventPrizesPageResponse = ProfileEventPrizesResponse & {
+  nextCursor: string | null;
+};
+
+export const PROFILE_EVENT_PRIZES_PAGE_SIZE = 100;
+export const MAX_PROFILE_EVENT_PRIZES_CURSOR_LENGTH = 8_192;
+
+export function profileEventPrizesPageEtag(
+  epoch: string,
+  profileId: string | null,
+  revision: number,
+): string {
+  return `W/"profile-event-prizes-page-v1-${epoch}-${encodeURIComponent(profileId || "none")}-${revision}"`;
+}
+
 export type EventPrizeWithdrawalRequest = {
   eventId: EventPrizeEventId;
   prizeId: EventPrizeId;
@@ -1081,6 +1096,38 @@ const isProfileEventPrizesResponse = (
   );
 };
 
+const isProfileEventPrizesPageResponse = (
+  value: unknown,
+): value is ProfileEventPrizesPageResponse => {
+  if (
+    !isExactRecord(value, [
+      "ok",
+      "profileId",
+      "revision",
+      "prizes",
+      "nextCursor",
+    ]) ||
+    !isProfileEventPrizesResponse({
+      ok: value.ok,
+      profileId: value.profileId,
+      revision: value.revision,
+      prizes: value.prizes,
+    })
+  ) {
+    return false;
+  }
+  const count = Object.keys(value.prizes as Record<string, unknown>).length;
+  return (
+    count <= PROFILE_EVENT_PRIZES_PAGE_SIZE &&
+    (value.nextCursor === null ||
+      (value.profileId !== null &&
+        count > 0 &&
+        typeof value.nextCursor === "string" &&
+        value.nextCursor.length <= MAX_PROFILE_EVENT_PRIZES_CURSOR_LENGTH &&
+        /^[A-Za-z0-9_-]+$/.test(value.nextCursor)))
+  );
+};
+
 const isEventPrizeWithdrawalOperationId = (value: unknown): value is string =>
   typeof value === "string" && /^epw_[0-9a-f]{64}$/.test(value);
 
@@ -1169,6 +1216,7 @@ export {
   isEventPrizeWithdrawalRequest,
   isEventPrizeWithdrawalStatusRequest,
   isProfileEventPrizesResponse,
+  isProfileEventPrizesPageResponse,
   isToggleEventPrizeSelectionRequest,
   isToggleEventPrizeSelectionResponse,
 };

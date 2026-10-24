@@ -38,6 +38,7 @@ import {
   scopeEventBookmark,
 } from "./eventBookmarks.ts";
 import { readEventSnapshotResponse } from "./eventSnapshotResponse.ts";
+import { readProfileEventPrizesPageResponse } from "./profileEventPrizePagination.ts";
 
 export const EVENT_SNAPSHOT_PATH = "/events/snapshot";
 export const PROFILE_EVENT_PRIZES_PATH = "/events/prizes";
@@ -209,21 +210,33 @@ export async function handleEventReadRoute(
         dependencies.repository ||
         createD1ProfileOwnershipReader(env.PROFILE_DB);
       const profileId = await callerProfileId(repository, identity);
-      result = await readPrizeResponse(
-        session,
-        profileId,
-        knownRevision(
+      if (url.searchParams.get("pagination") === "1") {
+        const page = await readProfileEventPrizesPageResponse(
+          session,
+          profileId,
+          bookmarkEpoch,
+          url.searchParams,
           conditionalHeader,
+        );
+        result = page.result;
+        valueEtag = page.etag;
+      } else {
+        result = await readPrizeResponse(
+          session,
+          profileId,
+          knownRevision(
+            conditionalHeader,
+            "profile-event-prizes",
+            profileId || "none",
+          ),
+        );
+        valueEtag = etag(
           "profile-event-prizes",
           profileId || "none",
-        ),
-      );
+          result.notModified ? result.revision : result.snapshot.revision,
+        );
+      }
       if (!result.notModified) assertBounded(result.snapshot);
-      valueEtag = etag(
-        "profile-event-prizes",
-        profileId || "none",
-        result.notModified ? result.revision : result.snapshot.revision,
-      );
     } else {
       throw new AuthApiFailure(404, "not-found", "not-found");
     }

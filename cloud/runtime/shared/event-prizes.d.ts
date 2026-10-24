@@ -116,6 +116,16 @@ export type ProfileEventPrizesResponse = {
   revision: number;
   prizes: Record<string, EventPrizeAssignmentWireRecord>;
 };
+export type ProfileEventPrizesPageResponse = ProfileEventPrizesResponse & {
+  nextCursor: string | null;
+};
+export declare const PROFILE_EVENT_PRIZES_PAGE_SIZE = 100;
+export declare const MAX_PROFILE_EVENT_PRIZES_CURSOR_LENGTH = 8192;
+export declare function profileEventPrizesPageEtag(
+  epoch: string,
+  profileId: string | null,
+  revision: number,
+): string;
 export type EventPrizeWithdrawalRequest = {
   eventId: EventPrizeEventId;
   prizeId: EventPrizeId;
@@ -208,6 +218,9 @@ declare const isEventPrizeAssignmentRecord: (
 declare const isProfileEventPrizesResponse: (
   value: unknown,
 ) => value is ProfileEventPrizesResponse;
+declare const isProfileEventPrizesPageResponse: (
+  value: unknown,
+) => value is ProfileEventPrizesPageResponse;
 declare const isEventPrizeWithdrawalOperationId: (
   value: unknown,
 ) => value is string;
@@ -259,6 +272,7 @@ export {
   isEventPrizeWithdrawalRequest,
   isEventPrizeWithdrawalStatusRequest,
   isProfileEventPrizesResponse,
+  isProfileEventPrizesPageResponse,
   isToggleEventPrizeSelectionRequest,
   isToggleEventPrizeSelectionResponse,
 };
