@@ -11,6 +11,7 @@ import {
   type InviteSourceAdmission,
 } from "./inviteSourceD1.ts";
 import { assertAutomatchBackend } from "./automatchReadD1.ts";
+import { runD1AdmissionAcquire, runD1AdmissionRelease } from "./d1Admission.ts";
 
 export type AutomatchAdmissions = {
   automatch: AutomatchWriteAdmission;
@@ -117,11 +118,9 @@ export async function acquireAutomatchAdmissions(
       throw error;
     }
   };
-  let failure: unknown;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    let acquiredRows: D1Result[] | undefined;
-    try {
-      acquiredRows = await session.batch([
+  return runD1AdmissionAcquire({
+    write: () =>
+      session.batch([
         insert("automatch_write_admissions", "automatch_runtime_control", true),
         insert(
           "invite_source_write_admissions",
@@ -131,11 +130,8 @@ export async function acquireAutomatchAdmissions(
         guard("automatch_write_admissions", "automatch_runtime_control"),
         guard("invite_source_write_admissions", "invite_source_control"),
         ...reads,
-      ]);
-    } catch (error) {
-      failure = error;
-    }
-    if (acquiredRows) {
+      ]),
+    written(acquiredRows) {
       const automatch = decodeAdmission(
         acquiredRows[6].results[0],
         admissionId,
@@ -155,44 +151,42 @@ export async function acquireAutomatchAdmissions(
         acquiredRows[4].results[0],
         acquiredRows[5].results[0],
       );
-    }
-    let rows: D1Result[];
-    try {
-      rows = await db.withSession("first-primary").batch(reads);
-    } catch (error) {
-      failure = error;
-      continue;
-    }
-    const automatch = decodeAdmission(
-      rows[2].results[0],
-      admissionId,
-      kind,
-      createdAtMs,
-    );
-    const invite = decodeAdmission(
-      rows[3].results[0],
-      admissionId,
-      kind,
-      createdAtMs,
-    );
-    if (automatch && invite)
-      return validateControls(
-        { automatch, invite },
-        rows[0].results[0],
-        rows[1].results[0],
+    },
+    readback: () => db.withSession("first-primary").batch(reads),
+    confirmed(rows) {
+      const automatch = decodeAdmission(
+        rows[2].results[0],
+        admissionId,
+        kind,
+        createdAtMs,
       );
-    if (automatch || invite) throw new Error("automatch-admission-partial");
-    const mode = parseAutomatchRuntimeControlRow(rows[0].results[0]);
-    const control = parseInviteSourceControlRow(rows[1].results[0]);
-    assertAutomatchBackend(mode);
-    if (mode.state !== "active")
-      throw new AutomatchD1Failure("automatch-writes-frozen");
-    if (control.backend !== "d1")
-      throw new InviteSourceFailure("invite-source-backend-retired");
-    if (control.state !== "active")
-      throw new InviteSourceFailure("invite-source-writes-frozen");
-  }
-  throw new Error("automatch-admission-unconfirmed", { cause: failure });
+      const invite = decodeAdmission(
+        rows[3].results[0],
+        admissionId,
+        kind,
+        createdAtMs,
+      );
+      if (automatch && invite)
+        return validateControls(
+          { automatch, invite },
+          rows[0].results[0],
+          rows[1].results[0],
+        );
+      if (automatch || invite) throw new Error("automatch-admission-partial");
+      const mode = parseAutomatchRuntimeControlRow(rows[0].results[0]);
+      const control = parseInviteSourceControlRow(rows[1].results[0]);
+      assertAutomatchBackend(mode);
+      if (mode.state !== "active")
+        throw new AutomatchD1Failure("automatch-writes-frozen");
+      if (control.backend !== "d1")
+        throw new InviteSourceFailure("invite-source-backend-retired");
+      if (control.state !== "active")
+        throw new InviteSourceFailure("invite-source-writes-frozen");
+      return null;
+    },
+    unconfirmed: (cause) =>
+      new Error("automatch-admission-unconfirmed", { cause }),
+  });
 }
 
 export async function releaseAutomatchAdmissions(
@@ -213,15 +207,10 @@ export async function releaseAutomatchAdmissions(
         admission.kind,
         admission.createdAtMs,
       );
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      await db.batch([
-        statement("invite_source_write_admissions", pair.invite),
-        statement("automatch_write_admissions", pair.automatch),
-      ]);
-      return;
-    } catch (error) {
-      if (attempt === 2) throw error;
-    }
-  }
+  await runD1AdmissionRelease(() =>
+    db.batch([
+      statement("invite_source_write_admissions", pair.invite),
+      statement("automatch_write_admissions", pair.automatch),
+    ]),
+  );
 }

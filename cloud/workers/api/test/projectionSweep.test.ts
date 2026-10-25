@@ -4,6 +4,7 @@ import {
   claimAndEnqueueProjectionTasks,
   collectProjectionRepairs,
   collectSuccessfulClaims,
+  recoverAndEnqueueProjectionPages,
   recoverAndEnqueueProjectionScan,
   sendQueueTasks,
 } from "../src/projectionSweep.ts";
@@ -199,6 +200,231 @@ test("scan recovery skips empty and entirely skipped batches", async () => {
       }),
       { sentCount: 0, failures: [] },
     );
+  }
+});
+
+test("paged recovery awaits dispatch before requesting the next page", async () => {
+  const events: string[] = [];
+  const sending = Promise.withResolvers<void>();
+  const dispatched = Promise.withResolvers<void>();
+  async function* pages() {
+    for (const value of ["first", "second"]) {
+      events.push(`read-${value}`);
+      yield {
+        entries: [{ kind: "candidate" as const, value }],
+        itemOffset: 0,
+      };
+    }
+  }
+  const recovery = recoverAndEnqueueProjectionPages({
+    pages: pages(),
+    quarantine: async () => assert.fail("unexpected-quarantine"),
+    async processCandidate(value) {
+      events.push(`claim-${value}`);
+      return { value };
+    },
+    queue: {
+      async sendBatch(messages) {
+        const [{ body }] = Array.from(messages);
+        events.push(`send-${body.value}`);
+        if (body.value === "first") {
+          sending.resolve();
+          await dispatched.promise;
+        }
+        events.push(`sent-${body.value}`);
+        return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
+      },
+    },
+  });
+  await sending.promise;
+  assert.deepEqual(events, ["read-first", "claim-first", "send-first"]);
+  dispatched.resolve();
+  assert.deepEqual(await recovery, { sentCount: 2, failures: [] });
+  assert.deepEqual(events, [
+    "read-first",
+    "claim-first",
+    "send-first",
+    "sent-first",
+    "read-second",
+    "claim-second",
+    "send-second",
+    "sent-second",
+  ]);
+});
+
+test("paged recovery forwards concurrency and preserves raw failures, global indices, and reporter containment", async () => {
+  const firstEntries = ["slow", "fast", "healthy"].map((value) => ({
+    kind: "candidate" as const,
+    value,
+  }));
+  const secondEntries = [
+    { kind: "failure" as const, error: undefined },
+    { kind: "candidate" as const, value: "later" },
+  ];
+  const invalid = { kind: "invalid" as const, key: "raw-key" };
+  async function* pages() {
+    yield { entries: firstEntries, itemOffset: 7 };
+    yield { entries: secondEntries, itemOffset: 25 };
+    yield { entries: [invalid], itemOffset: 50 };
+  }
+  const failure = new Error("slow-failure");
+  const gates = firstEntries.map(() => Promise.withResolvers<void>());
+  const started = firstEntries.map(() => Promise.withResolvers<void>());
+  const reports: unknown[][] = [];
+  const batches: object[][] = [];
+  let active = 0;
+  let maximum = 0;
+  const recovery = recoverAndEnqueueProjectionPages({
+    pages: pages(),
+    concurrency: 2,
+    async quarantine(entry) {
+      assert.equal(entry, invalid);
+      throw 0;
+    },
+    async processCandidate(value, setPhase) {
+      active++;
+      maximum = Math.max(maximum, active);
+      try {
+        const index = firstEntries.findIndex((entry) => entry.value === value);
+        if (index >= 0) started[index].resolve();
+        if (value === "slow") {
+          setPhase("quarantine");
+          await gates[0].promise;
+          throw failure;
+        }
+        if (value === "fast") {
+          await gates[1].promise;
+          throw false;
+        }
+        return { value };
+      } finally {
+        active--;
+      }
+    },
+    onFailure(entry, error, index, phase) {
+      reports.push([entry, error, index, phase]);
+      throw new Error("reporter-failed");
+    },
+    queue: {
+      async sendBatch(messages) {
+        assert.equal(active, 0);
+        batches.push(Array.from(messages, ({ body }) => body));
+        return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
+      },
+    },
+  });
+  await started[1].promise;
+  gates[1].resolve();
+  await started[2].promise;
+  assert.deepEqual(batches, []);
+  gates[0].resolve();
+
+  assert.deepEqual(await recovery, {
+    sentCount: 2,
+    failures: [false, failure, undefined, 0],
+  });
+  assert.equal(maximum, 2);
+  assert.deepEqual(batches, [[{ value: "healthy" }], [{ value: "later" }]]);
+  assert.deepEqual(reports, [
+    [firstEntries[1], false, 8, "claim"],
+    [firstEntries[0], failure, 7, "quarantine"],
+    [secondEntries[0], undefined, 25, "inspect"],
+    [invalid, 0, 50, "quarantine"],
+  ]);
+});
+
+test("paged recovery preserves scan and Queue failure precedence and stops later pages", async () => {
+  for (const stage of ["scan", "queue"] as const) {
+    const failure = new Error(`${stage}-failed`);
+    const events: string[] = [];
+    async function* pages() {
+      try {
+        events.push("read-first");
+        yield {
+          entries: [
+            { kind: "failure" as const, error: null },
+            { kind: "candidate" as const, value: "healthy" },
+          ],
+          itemOffset: 3,
+        };
+        events.push("read-second");
+        if (stage === "scan") throw failure;
+        assert.fail("unexpected-next-page");
+      } finally {
+        events.push("closed");
+      }
+    }
+    await assert.rejects(
+      recoverAndEnqueueProjectionPages({
+        pages: pages(),
+        quarantine: async () => assert.fail("unexpected-quarantine"),
+        async processCandidate(value) {
+          events.push("claim");
+          return { value };
+        },
+        onFailure(_entry, error, index) {
+          assert.equal(error, null);
+          assert.equal(index, 3);
+          events.push("report");
+        },
+        queue: {
+          async sendBatch(messages) {
+            assert.deepEqual(Array.from(messages), [
+              { body: { value: "healthy" } },
+            ]);
+            events.push("send");
+            if (stage === "queue") throw failure;
+            return {
+              metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+            };
+          },
+        },
+      }),
+      (error) => error === failure,
+    );
+    assert.deepEqual(events, [
+      "read-first",
+      "report",
+      "claim",
+      "send",
+      ...(stage === "scan" ? ["read-second"] : []),
+      "closed",
+    ]);
+  }
+});
+
+test("paged recovery accepts no pages and continues through empty or skipped pages without dispatch", async () => {
+  for (const includePages of [false, true]) {
+    const visited: string[] = [];
+    async function* pages() {
+      if (!includePages) return;
+      yield { entries: [], itemOffset: 0 };
+      yield {
+        entries: [{ kind: "candidate" as const, value: "stale" }],
+        itemOffset: 10,
+      };
+      yield {
+        entries: [{ kind: "invalid" as const }],
+        itemOffset: 20,
+      };
+    }
+    assert.deepEqual(
+      await recoverAndEnqueueProjectionPages({
+        pages: pages(),
+        async quarantine() {
+          visited.push("quarantine");
+        },
+        async processCandidate(value) {
+          visited.push(value);
+          return undefined;
+        },
+        queue: {
+          sendBatch: async () => assert.fail("unexpected-send"),
+        },
+      }),
+      { sentCount: 0, failures: [] },
+    );
+    assert.deepEqual(visited, includePages ? ["stale", "quarantine"] : []);
   }
 });
 

@@ -23,7 +23,7 @@ import {
 import {
   claimAndEnqueueProjectionTasks,
   collectProjectionRepairs,
-  recoverAndEnqueueProjectionScan,
+  recoverAndEnqueueProjectionPages,
   sendQueueTasks,
 } from "../projectionSweep.ts";
 import { PROJECTION_SWEEP_LIMIT } from "./policy.ts";
@@ -177,60 +177,52 @@ export async function sweepRatingProjections(
         excludedIdentities,
       ),
     );
-    let sentCount = 0;
-    const failures: unknown[] = [];
-    for await (const { entries, itemOffset } of pages) {
-      const result = await recoverAndEnqueueProjectionScan({
-        entries,
-        queue: queueFor(env, "TELEGRAM_PROJECTION_QUEUE"),
-        async quarantine(entry) {
-          const quarantined = await rating.quarantineRatingRecoveryEntry(
-            entry,
+    const { sentCount, failures } = await recoverAndEnqueueProjectionPages({
+      pages,
+      queue: queueFor(env, "TELEGRAM_PROJECTION_QUEUE"),
+      async quarantine(entry) {
+        const quarantined = await rating.quarantineRatingRecoveryEntry(
+          entry,
+          nowMs,
+        );
+        if (quarantined) {
+          logRecoveryEvent(logger, "error", {
+            event: "telegram_projection_recovery_record_quarantined",
+            scope: "telegram",
+            source: "rating",
+            ...quarantined,
+          });
+        }
+      },
+      async processCandidate(record) {
+        if (
+          await rating.claimRatingTelegramProjection(
+            record.operationId,
+            record.revision,
             nowMs,
-          );
-          if (quarantined) {
-            logRecoveryEvent(logger, "error", {
-              event: "telegram_projection_recovery_record_quarantined",
-              scope: "telegram",
-              source: "rating",
-              ...quarantined,
-            });
-          }
-        },
-        async processCandidate(record) {
-          if (
-            await rating.claimRatingTelegramProjection(
-              record.operationId,
-              record.revision,
-              nowMs,
-            )
-          ) {
-            return {
-              kind: "rating-telegram-projection",
-              operationId: record.operationId,
-            } satisfies TelegramProjectionTask;
-          }
-        },
-        onFailure: (entry, error, itemIndex, phase) =>
-          reportRecoveryFailure(
-            logger,
-            {
-              event: "telegram_projection_recovery_record_failed",
-              scope: "telegram",
-              source: "rating",
-              phase,
-              itemIndex: itemOffset + itemIndex,
-              operationId:
-                entry.kind === "candidate"
-                  ? entry.value.operationId
-                  : undefined,
-            },
-            error,
-          ),
-      });
-      sentCount += result.sentCount;
-      failures.push(...result.failures.map(({ error }) => error));
-    }
+          )
+        ) {
+          return {
+            kind: "rating-telegram-projection",
+            operationId: record.operationId,
+          } satisfies TelegramProjectionTask;
+        }
+      },
+      onFailure: (entry, error, itemIndex, phase) =>
+        reportRecoveryFailure(
+          logger,
+          {
+            event: "telegram_projection_recovery_record_failed",
+            scope: "telegram",
+            source: "rating",
+            phase,
+            itemIndex,
+            operationId:
+              entry.kind === "candidate" ? entry.value.operationId : undefined,
+          },
+          error,
+        ),
+    });
     if (failures.length > 0) {
       const error = failures[0];
       throw error instanceof Error

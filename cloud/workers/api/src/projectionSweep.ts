@@ -23,19 +23,11 @@ type ProjectionScanEntry<Candidate, Invalid extends { kind: "invalid" }> =
 
 type ProjectionScanPhase = "inspect" | "claim" | "quarantine";
 
-export async function recoverAndEnqueueProjectionScan<
+type ProjectionScanOptions<
   Candidate,
   Invalid extends { kind: "invalid" },
   Task extends object,
->({
-  entries,
-  queue,
-  concurrency = 1,
-  quarantine,
-  processCandidate,
-  onFailure,
-}: {
-  entries: readonly ProjectionScanEntry<Candidate, Invalid>[];
+> = {
   queue: Pick<QueueProducer<Task>, "sendBatch">;
   concurrency?: number;
   quarantine: (entry: Invalid) => Promise<void>;
@@ -49,6 +41,21 @@ export async function recoverAndEnqueueProjectionScan<
     index: number,
     phase: ProjectionScanPhase,
   ) => void;
+};
+
+export async function recoverAndEnqueueProjectionScan<
+  Candidate,
+  Invalid extends { kind: "invalid" },
+  Task extends object,
+>({
+  entries,
+  queue,
+  concurrency = 1,
+  quarantine,
+  processCandidate,
+  onFailure,
+}: ProjectionScanOptions<Candidate, Invalid, Task> & {
+  entries: readonly ProjectionScanEntry<Candidate, Invalid>[];
 }): Promise<{
   sentCount: number;
   failures: Array<{
@@ -90,6 +97,35 @@ export async function recoverAndEnqueueProjectionScan<
   );
   await sendQueueTasks(queue, tasks);
   return { sentCount: tasks.length, failures };
+}
+
+export async function recoverAndEnqueueProjectionPages<
+  Candidate,
+  Invalid extends { kind: "invalid" },
+  Task extends object,
+>({
+  pages,
+  onFailure,
+  ...options
+}: ProjectionScanOptions<Candidate, Invalid, Task> & {
+  pages: AsyncIterable<{
+    entries: readonly ProjectionScanEntry<Candidate, Invalid>[];
+    itemOffset: number;
+  }>;
+}): Promise<{ sentCount: number; failures: unknown[] }> {
+  let sentCount = 0;
+  const failures: unknown[] = [];
+  for await (const { entries, itemOffset } of pages) {
+    const result = await recoverAndEnqueueProjectionScan({
+      ...options,
+      entries,
+      onFailure: (entry, error, itemIndex, phase) =>
+        onFailure?.(entry, error, itemOffset + itemIndex, phase),
+    });
+    sentCount += result.sentCount;
+    failures.push(...result.failures.map(({ error }) => error));
+  }
+  return { sentCount, failures };
 }
 
 type ProjectionRepairResult<Task> =

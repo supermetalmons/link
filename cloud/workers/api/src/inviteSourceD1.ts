@@ -9,6 +9,7 @@ import {
 } from "./stateCompatibility.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import { classifyD1Failure } from "./d1Failure.ts";
+import { runD1AdmissionAcquire, runD1AdmissionRelease } from "./d1Admission.ts";
 
 const RETIRED_FIELDS = new Set([
   "reactions",
@@ -270,19 +271,12 @@ export async function acquireInviteSourceAdmission(
       control.epoch,
       control.freezeGeneration,
     );
-  let failure: unknown;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    let insertFailed = false;
-    try {
-      const inserted = await insert.first<{ admission_id: string }>();
-      if (inserted?.admission_id === admissionId) return admission;
-    } catch (error) {
-      failure = error;
-      insertFailed = true;
-    }
-    let absent = false;
-    try {
-      const existing = await db
+  return runD1AdmissionAcquire({
+    write: () => insert.first<{ admission_id: string }>(),
+    written: (inserted) =>
+      inserted?.admission_id === admissionId ? admission : null,
+    readback: () =>
+      db
         .withSession("first-primary")
         .prepare(
           `SELECT admission_id FROM invite_source_write_admissions
@@ -297,23 +291,24 @@ export async function acquireInviteSourceAdmission(
           kind,
           createdAtMs,
         )
-        .first<{ admission_id: string }>();
+        .first<{ admission_id: string }>(),
+    confirmed(existing, writeFailed) {
       if (existing?.admission_id === admissionId) return admission;
-      absent = true;
-    } catch (error) {
-      failure = error;
-    }
-    if (!insertFailed && absent)
-      throw new InviteSourceFailure("invite-source-writes-frozen");
-  }
-  console.error(
-    JSON.stringify({
-      event: "invite_source_admission_acquire_unconfirmed",
-      ...admission,
-    }),
-  );
-  throw new InviteSourceFailure("invite-source-admission-unconfirmed", {
-    cause: failure,
+      if (!writeFailed)
+        throw new InviteSourceFailure("invite-source-writes-frozen");
+      return null;
+    },
+    unconfirmed(cause) {
+      console.error(
+        JSON.stringify({
+          event: "invite_source_admission_acquire_unconfirmed",
+          ...admission,
+        }),
+      );
+      return new InviteSourceFailure("invite-source-admission-unconfirmed", {
+        cause,
+      });
+    },
   });
 }
 
@@ -335,21 +330,16 @@ export async function releaseInviteSourceAdmission(
       admission.kind,
       admission.createdAtMs,
     );
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      await statement.run();
-      return;
-    } catch (error) {
-      if (attempt === 2) {
-        console.error(
-          JSON.stringify({
-            event: "invite_source_admission_release_failed",
-            ...admission,
-          }),
-        );
-        throw error;
-      }
-    }
+  try {
+    await runD1AdmissionRelease(() => statement.run());
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "invite_source_admission_release_failed",
+        ...admission,
+      }),
+    );
+    throw error;
   }
 }
 

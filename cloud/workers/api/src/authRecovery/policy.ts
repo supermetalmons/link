@@ -1,0 +1,5 @@
+export const MERGE_GAME_FINALIZE_DELAY_MS = 60 * 1_000;
+export const MERGE_PRIZE_RECOVERY_PAGE_SIZE = 20;
+export const LOGIN_RECOVERY_PAGE_SIZE = 20;
+export const AUTH_RECOVERY_EVENT_PRIZE_OWNER_UID = "auth-recovery-worker";
+export const AUTH_RECOVERY_PRIZE_OPERATION_TIMEOUT_MS = 20_000;

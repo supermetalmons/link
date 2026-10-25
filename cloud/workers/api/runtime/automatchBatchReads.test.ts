@@ -24,6 +24,43 @@ const raw = matchTestPort({
   },
 });
 
+type AdmissionBatchHook = (
+  run: () => Promise<D1Result[]>,
+) => Promise<D1Result[]>;
+
+function withAdmissionBatchHooks(hooks: {
+  write?: AdmissionBatchHook;
+  readback?: AdmissionBatchHook;
+  release?: AdmissionBatchHook;
+}): D1Database {
+  let acquisitionSession = true;
+  return new Proxy(db, {
+    get(target, property) {
+      if (property === "batch" && hooks.release)
+        return (statements: D1PreparedStatement[]) =>
+          hooks.release!(() => target.batch(statements));
+      if (property === "withSession")
+        return (constraint?: string) => {
+          expect(constraint).toBe("first-primary");
+          const hook = acquisitionSession ? hooks.write : hooks.readback;
+          acquisitionSession = false;
+          const session = target.withSession(constraint);
+          return new Proxy(session, {
+            get(value, name) {
+              if (name === "batch" && hook)
+                return (statements: D1PreparedStatement[]) =>
+                  hook(() => value.batch(statements));
+              const method = Reflect.get(value, name, value);
+              return typeof method === "function" ? method.bind(value) : method;
+            },
+          });
+        };
+      const method = Reflect.get(target, property, target);
+      return typeof method === "function" ? method.bind(target) : method;
+    },
+  });
+}
+
 describe("batched automatch coordination", () => {
   beforeAll(() =>
     applyStrictMatchStateTestMigrations(db, testEnv.TEST_D1_MIGRATIONS),
@@ -362,5 +399,156 @@ describe("batched automatch coordination", () => {
         .first("n"),
     ).toBe(1);
     await releaseAutomatchAdmissions(db, pair);
+  });
+
+  it.each(["before", "after"] as const)(
+    "retries paired release failures %s commit without deleting another pair",
+    async (failureStage) => {
+      const pair = await acquireAutomatchAdmissions(db, "release", () => 10);
+      const other = await acquireAutomatchAdmissions(db, "other", () => 20);
+      let attempts = 0;
+      const connection = withAdmissionBatchHooks({
+        async release(run) {
+          attempts++;
+          if (failureStage === "before" && attempts < 3)
+            throw new Error("release-unavailable");
+          const result = await run();
+          if (failureStage === "after" && attempts < 3)
+            throw new Error("release-response-lost");
+          return result;
+        },
+      });
+      await releaseAutomatchAdmissions(connection, pair);
+      expect(attempts).toBe(3);
+      for (const table of [
+        "automatch_write_admissions",
+        "invite_source_write_admissions",
+      ]) {
+        expect(
+          (await db.prepare(`SELECT admission_id FROM ${table}`).all()).results,
+        ).toEqual([{ admission_id: other.automatch.admissionId }]);
+      }
+    },
+  );
+
+  it("retains uncertain paired admissions with the original identity after exhaustion", async () => {
+    let writes = 0;
+    let reads = 0;
+    let clockReads = 0;
+    let lastReadFailure: Error | undefined;
+    const connection = withAdmissionBatchHooks({
+      async write(run) {
+        writes++;
+        await run();
+        throw new Error(`lost-write-${writes}`);
+      },
+      async readback() {
+        reads++;
+        lastReadFailure = new Error(`failed-read-${reads}`);
+        throw lastReadFailure;
+      },
+    });
+    await expect(
+      acquireAutomatchAdmissions(connection, "uncertain-retained", () => {
+        clockReads++;
+        return 10;
+      }),
+    ).rejects.toSatisfy(
+      (error: Error) =>
+        error.message === "automatch-admission-unconfirmed" &&
+        error.cause === lastReadFailure,
+    );
+    expect({ writes, reads, clockReads }).toEqual({
+      writes: 3,
+      reads: 3,
+      clockReads: 1,
+    });
+    const automatch = await db
+      .prepare(
+        "SELECT admission_id, kind, created_at_ms FROM automatch_write_admissions",
+      )
+      .all();
+    const invite = await db
+      .prepare(
+        "SELECT admission_id, kind, created_at_ms FROM invite_source_write_admissions",
+      )
+      .all();
+    expect(automatch.results).toHaveLength(1);
+    expect(invite.results).toEqual(automatch.results);
+    expect(automatch.results[0]).toMatchObject({
+      kind: "uncertain-retained",
+      created_at_ms: 10,
+    });
+  });
+
+  it("fails immediately on a partially confirmed pair and retains its evidence", async () => {
+    let writes = 0;
+    let reads = 0;
+    const connection = withAdmissionBatchHooks({
+      async write(run) {
+        writes++;
+        await run();
+        await db
+          .prepare(
+            "DELETE FROM invite_source_write_admissions WHERE kind = 'partial-pair'",
+          )
+          .run();
+        throw new Error("response-lost");
+      },
+      async readback(run) {
+        reads++;
+        return run();
+      },
+    });
+    await expect(
+      acquireAutomatchAdmissions(connection, "partial-pair", () => 10),
+    ).rejects.toThrow("automatch-admission-partial");
+    expect({ writes, reads }).toEqual({ writes: 1, reads: 1 });
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS n FROM automatch_write_admissions")
+        .first("n"),
+    ).toBe(1);
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS n FROM invite_source_write_admissions")
+        .first("n"),
+    ).toBe(0);
+  });
+
+  it("propagates failed validation cleanup without retrying acquisition", async () => {
+    await db
+      .prepare(
+        "UPDATE invite_source_control SET verified_at_ms = NULL, activated_at_ms = NULL",
+      )
+      .run();
+    let writes = 0;
+    let releases = 0;
+    const releaseFailure = new Error("cleanup-unavailable");
+    const connection = withAdmissionBatchHooks({
+      async write(run) {
+        writes++;
+        return run();
+      },
+      readback: async () => {
+        throw new Error("unexpected-readback");
+      },
+      release: async () => {
+        releases++;
+        throw releaseFailure;
+      },
+    });
+    await expect(
+      acquireAutomatchAdmissions(connection, "cleanup-failed", () => 10),
+    ).rejects.toBe(releaseFailure);
+    expect({ writes, releases }).toEqual({ writes: 1, releases: 3 });
+    for (const table of [
+      "automatch_write_admissions",
+      "invite_source_write_admissions",
+    ]) {
+      expect(
+        await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first("n"),
+      ).toBe(1);
+    }
   });
 });

@@ -32,7 +32,7 @@ import {
 import {
   claimAndEnqueueProjectionTasks,
   collectProjectionRepairs,
-  recoverAndEnqueueProjectionScan,
+  recoverAndEnqueueProjectionPages,
   sendQueueTasks,
 } from "../projectionSweep.ts";
 import {
@@ -191,74 +191,68 @@ export async function sweepRatingProfileGameProjections(
       excludedIdentities,
     ),
   );
-  let sentCount = 0;
-  const failures: unknown[] = [];
-  for await (const { entries, itemOffset } of pages) {
-    const result = await recoverAndEnqueueProjectionScan({
-      entries,
-      queue: queueFor(env, "PROFILE_GAME_PROJECTION_QUEUE"),
-      concurrency: PROFILE_GAME_PROJECTION_SWEEP_CONCURRENCY,
-      async quarantine(entry) {
-        const quarantined = await rating.quarantineRatingRecoveryEntry(
-          entry,
-          nowMs,
-        );
-        if (quarantined) {
-          logRecoveryEvent(logger, "error", {
-            event: "profile_game_projection_recovery_record_quarantined",
-            scope: "profile-game",
-            source: "rating",
-            ...quarantined,
-          });
-        }
-      },
-      async processCandidate(record, setPhase) {
-        const claimed = await rating.claimRatingProfileGameProjection(
+  const { sentCount, failures } = await recoverAndEnqueueProjectionPages({
+    pages,
+    queue: queueFor(env, "PROFILE_GAME_PROJECTION_QUEUE"),
+    concurrency: PROFILE_GAME_PROJECTION_SWEEP_CONCURRENCY,
+    async quarantine(entry) {
+      const quarantined = await rating.quarantineRatingRecoveryEntry(
+        entry,
+        nowMs,
+      );
+      if (quarantined) {
+        logRecoveryEvent(logger, "error", {
+          event: "profile_game_projection_recovery_record_quarantined",
+          scope: "profile-game",
+          source: "rating",
+          ...quarantined,
+        });
+      }
+    },
+    async processCandidate(record, setPhase) {
+      const claimed = await rating.claimRatingProfileGameProjection(
+        record.operationId,
+        record.revision,
+        nowMs,
+      );
+      if (!claimed) {
+        return;
+      }
+      if (
+        record.version !== PROFILE_GAME_PROJECTION_SCHEMA_VERSION ||
+        !isSafeRecordKey(record.inviteId) ||
+        !isSafeRecordKey(record.matchId) ||
+        record.operationId !== `${record.inviteId}__${record.matchId}`
+      ) {
+        setPhase("quarantine");
+        await rating.markRatingProfileGameProjection(
           record.operationId,
-          record.revision,
-          nowMs,
+          "dead",
+          now(),
+          "invalid-recovery-marker",
         );
-        if (!claimed) {
-          return;
-        }
-        if (
-          record.version !== PROFILE_GAME_PROJECTION_SCHEMA_VERSION ||
-          !isSafeRecordKey(record.inviteId) ||
-          !isSafeRecordKey(record.matchId) ||
-          record.operationId !== `${record.inviteId}__${record.matchId}`
-        ) {
-          setPhase("quarantine");
-          await rating.markRatingProfileGameProjection(
-            record.operationId,
-            "dead",
-            now(),
-            "invalid-recovery-marker",
-          );
-          return;
-        }
-        return {
-          kind: "rating-profile-game-projection",
-          operationId: record.operationId,
-        } satisfies ProfileGameProjectionTask;
-      },
-      onFailure: (entry, error, itemIndex, phase) =>
-        reportRecoveryFailure(
-          logger,
-          {
-            event: "profile_game_projection_recovery_record_failed",
-            scope: "profile-game",
-            source: "rating",
-            phase,
-            itemIndex: itemOffset + itemIndex,
-            operationId:
-              entry.kind === "candidate" ? entry.value.operationId : undefined,
-          },
-          error,
-        ),
-    });
-    sentCount += result.sentCount;
-    failures.push(...result.failures.map(({ error }) => error));
-  }
+        return;
+      }
+      return {
+        kind: "rating-profile-game-projection",
+        operationId: record.operationId,
+      } satisfies ProfileGameProjectionTask;
+    },
+    onFailure: (entry, error, itemIndex, phase) =>
+      reportRecoveryFailure(
+        logger,
+        {
+          event: "profile_game_projection_recovery_record_failed",
+          scope: "profile-game",
+          source: "rating",
+          phase,
+          itemIndex,
+          operationId:
+            entry.kind === "candidate" ? entry.value.operationId : undefined,
+        },
+        error,
+      ),
+  });
   if (failures.length > 0) {
     throw failures[0];
   }
@@ -523,57 +517,51 @@ export async function sweepProfileLinkProfileGameProjections(
       excludedIdentities,
     ),
   );
-  let sentCount = 0;
-  const failures: unknown[] = [];
-  for await (const { entries, itemOffset } of pages) {
-    const result = await recoverAndEnqueueProjectionScan({
-      entries,
-      queue: queueFor(env, "PROFILE_GAME_PROJECTION_QUEUE"),
-      async quarantine(entry) {
-        const quarantined = await jobs.quarantineInvalidEntry(entry, nowMs);
-        if (quarantined) {
-          logRecoveryEvent(logger, "error", {
-            event: "profile_game_projection_recovery_record_quarantined",
-            scope: "profile-game",
-            source: "profile-link",
-            ...quarantined,
-          });
-        }
-      },
-      async processCandidate(job) {
-        if (
-          await jobs.claimDispatch(
-            job.loginUid,
-            job.requestId,
-            job.lastQueuedAtMs,
-            nowMs,
-          )
-        ) {
-          return {
-            kind: "profile-link-profile-game-projection",
-            loginUid: job.loginUid,
-            requestId: job.requestId,
-          } satisfies ProfileGameProjectionTask;
-        }
-      },
-      onFailure: (entry, error, itemIndex, phase) =>
-        reportRecoveryFailure(
-          logger,
-          {
-            event: "profile_game_projection_recovery_record_failed",
-            scope: "profile-game",
-            source: "profile-link",
-            phase,
-            itemIndex: itemOffset + itemIndex,
-            loginUid:
-              entry.kind === "candidate" ? entry.value.loginUid : undefined,
-          },
-          error,
-        ),
-    });
-    sentCount += result.sentCount;
-    failures.push(...result.failures.map(({ error }) => error));
-  }
+  const { sentCount, failures } = await recoverAndEnqueueProjectionPages({
+    pages,
+    queue: queueFor(env, "PROFILE_GAME_PROJECTION_QUEUE"),
+    async quarantine(entry) {
+      const quarantined = await jobs.quarantineInvalidEntry(entry, nowMs);
+      if (quarantined) {
+        logRecoveryEvent(logger, "error", {
+          event: "profile_game_projection_recovery_record_quarantined",
+          scope: "profile-game",
+          source: "profile-link",
+          ...quarantined,
+        });
+      }
+    },
+    async processCandidate(job) {
+      if (
+        await jobs.claimDispatch(
+          job.loginUid,
+          job.requestId,
+          job.lastQueuedAtMs,
+          nowMs,
+        )
+      ) {
+        return {
+          kind: "profile-link-profile-game-projection",
+          loginUid: job.loginUid,
+          requestId: job.requestId,
+        } satisfies ProfileGameProjectionTask;
+      }
+    },
+    onFailure: (entry, error, itemIndex, phase) =>
+      reportRecoveryFailure(
+        logger,
+        {
+          event: "profile_game_projection_recovery_record_failed",
+          scope: "profile-game",
+          source: "profile-link",
+          phase,
+          itemIndex,
+          loginUid:
+            entry.kind === "candidate" ? entry.value.loginUid : undefined,
+        },
+        error,
+      ),
+  });
   if (failures.length > 0) {
     const error = failures[0];
     throw error instanceof Error

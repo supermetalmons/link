@@ -142,6 +142,19 @@ test("auth recovery retains its exact public facade and function identities", ()
   }
 });
 
+test("auth recovery phases stay independent of their coordinator", () => {
+  const recoveryRoot = resolve(import.meta.dirname, "../src/authRecovery");
+  const coordinator = resolve(recoveryRoot, "processing.ts");
+  for (const phase of ["prizes", "games", "finalization", "policy"]) {
+    const filename = resolve(recoveryRoot, `${phase}.ts`);
+    assert.ok(existsSync(filename), `${phase} module is missing`);
+    assert.ok(
+      !reachableRuntimeFiles(filename).includes(coordinator),
+      `${phase} depends on the recovery coordinator`,
+    );
+  }
+});
+
 test("Telegram projection retains its exact public facade and function identities", () => {
   const expected = {
     MAX_PROJECTION_RETRY_DELAY_SECONDS:
