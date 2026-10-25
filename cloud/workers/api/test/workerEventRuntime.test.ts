@@ -1,11 +1,17 @@
 import { eventDocumentFixture } from "./eventCompatibilityFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { EventCommand } from "../../../runtime/eventCommands.js";
+import type {
+  EventCommand,
+  EventRuntimeStore,
+} from "../../../runtime/eventCommands.js";
 import type { EventLeaseRecord } from "../../../runtime/eventLeases.js";
 import { createWorkflowEventRuntime } from "../src/eventProgress.ts";
 import type { EventGameplayRepository } from "../src/eventRepository.ts";
-import { createWorkerEventRuntime } from "../src/workerEventRuntime.ts";
+import {
+  createEventRuntimeStore,
+  createWorkerEventRuntime,
+} from "../src/workerEventRuntime.ts";
 import { eventReadFixture } from "./eventReadFixture.ts";
 import { attachEventTestPorts } from "./eventTestPorts.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
@@ -116,6 +122,184 @@ const synchronization = {
   enforceThrottle: false,
   syncLog: {},
 };
+
+const runtimeMethods = [
+  "readEvent",
+  "readEventSnapshot",
+  "commitEventPlan",
+  "transactEventSyncThrottle",
+  "transactProfileEventPrize",
+] as const;
+
+for (const capturedSignal of [undefined, new AbortController().signal]) {
+  for (const outcome of ["success", "reject", "throw"] as const) {
+    test(`runtime adapter forwards ${outcome} with ${capturedSignal ? "the captured" : "no captured"} signal and lazy receiver lookup`, async () => {
+      const failure = new Error("repository-failed");
+      const accesses: PropertyKey[] = [];
+      const calls: Array<{ method: string; args: unknown[] }> = [];
+      let returned: Promise<unknown> | undefined;
+      let repository: EventRuntimeStore;
+      const complete = <T>(
+        receiver: unknown,
+        method: string,
+        args: unknown[],
+        value: T,
+      ): Promise<T> => {
+        assert.equal(receiver, repository);
+        calls.push({ method, args });
+        if (outcome === "throw") throw failure;
+        const result =
+          outcome === "reject"
+            ? Promise.reject(failure)
+            : Promise.resolve(value);
+        returned = result;
+        return result;
+      };
+      const source: EventRuntimeStore = {
+        readEvent(...args) {
+          return complete(this, "readEvent", args, null);
+        },
+        readEventSnapshot(...args) {
+          return complete(this, "readEventSnapshot", args, {
+            event: null,
+            eventId: EVENT_ID,
+            prizeSelections: {},
+            revision: 0,
+          });
+        },
+        commitEventPlan(...args) {
+          return complete(this, "commitEventPlan", args, undefined);
+        },
+        transactEventSyncThrottle(...args) {
+          return complete(this, "transactEventSyncThrottle", args, {
+            committed: false,
+            value: null,
+          });
+        },
+        transactProfileEventPrize(...args) {
+          return complete(this, "transactProfileEventPrize", args, {
+            committed: false,
+            value: null,
+          });
+        },
+      };
+      repository = new Proxy(source, {
+        ownKeys: () => assert.fail("unexpected-repository-enumeration"),
+        get(target, property, receiver) {
+          assert.ok(runtimeMethods.some((name) => name === property));
+          accesses.push(property);
+          return Reflect.get(target, property, receiver);
+        },
+      });
+      const store = createEventRuntimeStore(repository, capturedSignal);
+      assert.deepEqual(Object.keys(store).sort(), [...runtimeMethods].sort());
+      assert.deepEqual(accesses, []);
+      const perCallSignal = AbortSignal.abort(new Error("per-call-abort"));
+      const plan: EventCommand[] = [];
+      const throttle: Parameters<
+        EventRuntimeStore["transactEventSyncThrottle"]
+      >[1] = () => ({ commit: false });
+      const prize: Parameters<
+        EventRuntimeStore["transactProfileEventPrize"]
+      >[2] = () => ({ commit: false });
+      const operations = [
+        {
+          run: () => store.readEvent(EVENT_ID, perCallSignal),
+          args: [EVENT_ID],
+        },
+        {
+          run: () => store.readEventSnapshot(EVENT_ID, perCallSignal),
+          args: [EVENT_ID],
+        },
+        { run: () => store.commitEventPlan(plan, perCallSignal), args: [plan] },
+        {
+          run: () =>
+            store.transactEventSyncThrottle(EVENT_ID, throttle, perCallSignal),
+          args: [EVENT_ID, throttle],
+        },
+        {
+          run: () =>
+            store.transactProfileEventPrize(
+              "profile",
+              EVENT_ID,
+              prize,
+              perCallSignal,
+            ),
+          args: ["profile", EVENT_ID, prize],
+        },
+      ];
+      for (const [index, operation] of operations.entries()) {
+        if (outcome === "throw") {
+          assert.throws(operation.run, (error) => error === failure);
+        } else {
+          const result = operation.run();
+          assert.equal(result, returned);
+          if (outcome === "reject") {
+            await assert.rejects(result, (error) => error === failure);
+          } else {
+            await result;
+          }
+        }
+        assert.equal(accesses.length, index + 1);
+        assert.equal(accesses[index], runtimeMethods[index]);
+        assert.equal(calls[index].method, runtimeMethods[index]);
+        const expectedArgs = [...operation.args, capturedSignal];
+        assert.equal(calls[index].args.length, expectedArgs.length);
+        for (const [argumentIndex, expected] of expectedArgs.entries()) {
+          assert.equal(calls[index].args[argumentIndex], expected);
+        }
+      }
+      if (outcome === "success") {
+        const replacement = Promise.resolve(null);
+        source.readEvent = function (...args) {
+          assert.equal(this, repository);
+          assert.deepEqual(args, [EVENT_ID, capturedSignal]);
+          return replacement;
+        };
+        assert.equal(store.readEvent(EVENT_ID), replacement);
+      }
+    });
+  }
+}
+
+test("event synchronization accepts only its nine required repository capabilities", async () => {
+  const memory = fixture();
+  const source = memory.repository;
+  const repository: Parameters<
+    typeof createWorkerEventRuntime
+  >[0]["repository"] = {
+    readEvent: (...args) => source.readEvent(...args),
+    readEventSnapshot: (...args) => source.readEventSnapshot(...args),
+    commitEventPlan: (...args) => source.commitEventPlan(...args),
+    transactEventSyncThrottle: (...args) =>
+      source.transactEventSyncThrottle(...args),
+    transactProfileEventPrize: (...args) =>
+      source.transactProfileEventPrize(...args),
+    transactEventLease: (...args) => source.transactEventLease(...args),
+    readProfileOwnershipSnapshot: (...args) =>
+      source.readProfileOwnershipSnapshot(...args),
+    readMatchPair: (...args) => source.readMatchPair(...args),
+    readMatchPairs: (...args) => source.readMatchPairs(...args),
+  };
+  const signal = new AbortController().signal;
+  const runtime = createWorkerEventRuntime({
+    repository,
+    signal,
+    withdrawalDb: memory.env.EVENT_PRIZE_WITHDRAWALS_DB,
+    lockFailureEvent: "event_control_lock_failure",
+    now: () => 100,
+    enqueueEventProgressTask: async () => assert.fail("unexpected-scheduling"),
+  });
+  const result = await runtime.runEventSyncState({
+    ...synchronization,
+    syncLog: {},
+  });
+  assert.equal(result.didChange, true);
+  assert.equal(memory.event.status, "dismissed");
+  assert.equal(memory.commits.length, 1);
+  assert.equal(memory.lease(), null);
+  assert.deepEqual(memory.leaseSignals, [signal, signal, undefined]);
+});
 
 test("aborted event work releases its lease using the wall clock and an uncancelled transaction", async () => {
   const controller = new AbortController();

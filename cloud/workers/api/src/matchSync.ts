@@ -7,10 +7,7 @@ import {
   isMatchSyncSnapshot,
   type MatchSyncSnapshot,
 } from "@mons/shared/match-sync";
-import {
-  parseInviteMatchIndex,
-  parseRematchIndices,
-} from "@mons/shared/rematches";
+import { registeredInviteMatchIndex } from "./inviteMatchPolicy.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import type { InviteMetadataReadResult } from "./inviteMetadata.ts";
 
@@ -28,12 +25,12 @@ export function isRegisteredSyncMatch(
   matchId: string,
 ): boolean {
   if (matchId !== matchId.trim() || !isSafeRecordKey(matchId)) return false;
-  const index = parseInviteMatchIndex(metadata.snapshot.inviteId, matchId);
   return (
-    index !== null &&
-    (index === 0 ||
-      parseRematchIndices(metadata.snapshot.hostRematches).includes(index) ||
-      parseRematchIndices(metadata.snapshot.guestRematches).includes(index))
+    registeredInviteMatchIndex(
+      metadata.snapshot.inviteId,
+      matchId,
+      metadata.snapshot,
+    ) !== null
   );
 }
 

@@ -7,14 +7,13 @@ import {
   type MatchPresentationSnapshot,
 } from "@mons/shared/match-presentation";
 import {
-  getLatestApprovedRematchIndex,
   parseInviteMatchIndex,
-  parseRematchIndices,
-  rematchSeriesEnded,
+  selectInviteMatch,
 } from "@mons/shared/rematches";
 import { AuthApiFailure } from "./authErrors.ts";
 import { decodeCanonicalInviteParticipants } from "./canonicalInviteParticipants.ts";
 import type { InviteReadRepository } from "./inviteReadRepository.ts";
+import { registeredInviteMatchIndex } from "./inviteMatchPolicy.ts";
 import {
   readMatchPresentationControl,
   readRegisteredMatchPresentations,
@@ -67,24 +66,9 @@ export function requireCurrentPresentationMatch(
   invite: PresentationInvite,
   actorUid: string,
 ): void {
-  const field =
-    actorUid === invite.hostId
-      ? "hostRematches"
-      : actorUid === invite.guestId
-        ? "guestRematches"
-        : null;
-  if (!field)
+  if (actorUid !== invite.hostId && actorUid !== invite.guestId)
     throw new AuthApiFailure(403, "permission-denied", "permission-denied");
-  const ownIndices = parseRematchIndices(invite[field]);
-  const otherIndices = parseRematchIndices(
-    invite[field === "hostRematches" ? "guestRematches" : "hostRematches"],
-  );
-  const approvedIndex = getLatestApprovedRematchIndex(invite);
-  const latestIndex =
-    !rematchSeriesEnded(invite) && ownIndices.length > otherIndices.length
-      ? approvedIndex + 1
-      : approvedIndex;
-  if (matchId !== (latestIndex ? `${inviteId}${latestIndex}` : inviteId)) {
+  if (matchId !== selectInviteMatch(inviteId, invite, actorUid).matchId) {
     throw new AuthApiFailure(409, "failed-precondition", "match-not-current");
   }
 }
@@ -94,15 +78,8 @@ function requireRegisteredPresentationMatch(
   matchId: string,
   invite: PresentationInvite,
 ): number {
-  const index = parseInviteMatchIndex(inviteId, matchId);
-  if (
-    index === null ||
-    (index !== 0 &&
-      ![
-        ...parseRematchIndices(invite.hostRematches),
-        ...parseRematchIndices(invite.guestRematches),
-      ].includes(index))
-  ) {
+  const index = registeredInviteMatchIndex(inviteId, matchId, invite);
+  if (index === null) {
     throw new AuthApiFailure(404, "not-found", "match-not-found");
   }
   return index;

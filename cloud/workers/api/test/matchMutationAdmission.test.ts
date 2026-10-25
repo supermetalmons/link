@@ -162,6 +162,22 @@ for (const command of ["move", "surrender"] as const) {
     }
   });
 
+  test(`${command} admits historical and one-sided registered matches after the series ends`, async () => {
+    for (const rematches of [
+      { hostRematches: "1;2x", guestRematches: "1" },
+      { hostRematches: "1", guestRematches: "1;2x" },
+    ]) {
+      for (const matchId of ["invite1", "invite2"]) {
+        const h = harness(command, {
+          body: { ...request, matchId },
+          inviteValue: { ...invite, ...rematches },
+        });
+        await h.run();
+        assert.deepEqual(h.steps, ["invite", "guard", "canonical"]);
+      }
+    }
+  });
+
   test(`${command} rejects invalid requests before reading or mutating`, async () => {
     for (const body of [
       { ...request, playerId: "" },

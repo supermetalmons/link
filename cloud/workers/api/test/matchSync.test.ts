@@ -12,9 +12,13 @@ import {
   type MatchSyncMetadata,
 } from "../src/matchSync.ts";
 import { normalizeInviteMetadata } from "../src/inviteMetadata.ts";
+import { MAX_RECORD_KEY_BYTES } from "../src/recordKeys.ts";
 
-function metadata(value: Record<string, unknown> = {}): MatchSyncMetadata {
-  const result = normalizeInviteMetadata("invite-10", {
+function metadata(
+  value: Record<string, unknown> = {},
+  inviteId = "invite-10",
+): MatchSyncMetadata {
+  const result = normalizeInviteMetadata(inviteId, {
     hostId: "host-login",
     guestId: "guest-login",
     hostColor: "white",
@@ -105,12 +109,36 @@ test("match sync rejects foreign targets, records, extra fields and invalid revi
 });
 
 test("registered pending rematches are readable without accepting arbitrary suffixes", () => {
-  const source = metadata({ hostRematches: "1;2", guestRematches: "1" });
-  assert.equal(isRegisteredSyncMatch(source, "invite-10"), true);
-  assert.equal(isRegisteredSyncMatch(source, "invite-101"), true);
-  assert.equal(isRegisteredSyncMatch(source, "invite-102"), true);
-  assert.equal(isRegisteredSyncMatch(source, "invite-103"), false);
-  assert.equal(isRegisteredSyncMatch(source, "invite-1001"), false);
+  for (const rematches of [
+    { hostRematches: "1;2", guestRematches: "1" },
+    { hostRematches: "1", guestRematches: "1;2" },
+    { hostRematches: "1;2x", guestRematches: "1" },
+    { hostRematches: "1x", guestRematches: "1;2" },
+  ]) {
+    const source = metadata(rematches);
+    assert.equal(isRegisteredSyncMatch(source, "invite-10"), true);
+    assert.equal(isRegisteredSyncMatch(source, "invite-101"), true);
+    assert.equal(isRegisteredSyncMatch(source, "invite-102"), true);
+    assert.equal(isRegisteredSyncMatch(source, "invite-103"), false);
+    assert.equal(isRegisteredSyncMatch(source, "invite-1001"), false);
+  }
+});
+
+test("sync registration retains canonical and bounded record-key checks", () => {
+  const source = metadata({ hostRematches: "1" });
+  for (const matchId of [
+    " invite-101",
+    "invite-101 ",
+    "invite-10/1",
+    "invite-101#",
+    "invite-101\u0000",
+  ]) {
+    assert.equal(isRegisteredSyncMatch(source, matchId), false, matchId);
+  }
+  const inviteId = "a".repeat(MAX_RECORD_KEY_BYTES);
+  const bounded = metadata({ hostRematches: "1" }, inviteId);
+  assert.equal(isRegisteredSyncMatch(bounded, inviteId), true);
+  assert.equal(isRegisteredSyncMatch(bounded, `${inviteId}1`), false);
 });
 
 test("invalid upstream records are errors rather than missing records", () => {

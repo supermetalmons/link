@@ -1,8 +1,5 @@
 import { inviteRematchState } from "@mons/shared/invite-records";
-import {
-  parseInviteMatchIndex,
-  parseRematchIndices,
-} from "@mons/shared/rematches";
+import { registeredInviteMatchIndex } from "./inviteMatchPolicy.ts";
 import { AuthApiFailure } from "./authErrors.ts";
 import { decodeCanonicalInviteParticipants } from "./canonicalInviteParticipants.ts";
 import type { InviteAccessRepository } from "./gameplayContracts.ts";
@@ -48,14 +45,9 @@ export async function authorizeMatchMutation(
     throw new AuthApiFailure(403, "permission-denied", "permission-denied");
   }
   await authorizeMatchPlayer(identity, request.playerId, repository);
-  const index = parseInviteMatchIndex(request.inviteId, request.matchId);
   if (
-    index === null ||
-    (index !== 0 &&
-      ![
-        ...parseRematchIndices(invite.hostRematches),
-        ...parseRematchIndices(invite.guestRematches),
-      ].includes(index))
+    registeredInviteMatchIndex(request.inviteId, request.matchId, invite) ===
+    null
   ) {
     throw new AuthApiFailure(404, "not-found", "match-not-found");
   }

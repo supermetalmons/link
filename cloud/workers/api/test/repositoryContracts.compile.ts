@@ -1,4 +1,7 @@
-import type { EventMutation } from "../../../runtime/eventCommands.js";
+import type {
+  EventMutation,
+  EventRuntimeStore,
+} from "../../../runtime/eventCommands.js";
 import type { GameSessionChange } from "../../../runtime/gameSessionChanges.js";
 import type { EventStore } from "../src/eventStoreContracts.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
@@ -59,6 +62,11 @@ import type {
 import type { createEventPrizeRuntimeDependencies } from "../src/eventPrizeWithdrawal/runtime.ts";
 import type { EventPrizeWithdrawalStore } from "../src/eventPrizeWithdrawalD1.ts";
 import type { EventGameplayRepository } from "../src/eventRepository.ts";
+import type { EventParticipationRepository } from "../src/eventParticipation.ts";
+import type {
+  createEventRuntimeStore,
+  createWorkerEventRuntime,
+} from "../src/workerEventRuntime.ts";
 import type { ProfileOwnershipReader } from "../src/profileOwnership.ts";
 import type { EventPrizeRepository } from "../src/eventPrizeRepository.ts";
 import type { WithdrawalRuntimeDependencies } from "../../../runtime/eventPrizes/solanaTypes.js";
@@ -95,6 +103,77 @@ export type DomainPortsHaveNoPathMethods = Assert<
 export type MatchMethodsAreRequired = Assert<
   MatchStatePort extends Required<MatchStatePort> ? true : false
 >;
+
+type EventRuntimeMethod =
+  | "readEvent"
+  | "readEventSnapshot"
+  | "commitEventPlan"
+  | "transactEventSyncThrottle"
+  | "transactProfileEventPrize";
+type EventParticipationMethod =
+  | "readEvent"
+  | "readEventSnapshot"
+  | "commitEventPlan"
+  | "transactEventLease"
+  | "transactEventPrizeSelection"
+  | "readProfileOwnershipSnapshot";
+type WorkerEventRuntimeMethod =
+  | EventRuntimeMethod
+  | "transactEventLease"
+  | "readProfileOwnershipSnapshot"
+  | "readMatchPair"
+  | "readMatchPairs";
+type EventRuntimeAdapterInput = Parameters<typeof createEventRuntimeStore>[0];
+type WorkerEventRuntimeInput = Parameters<
+  typeof createWorkerEventRuntime
+>[0]["repository"];
+
+export type EventParticipationHasOnlyRequiredCapabilities = Assert<
+  | Equal<keyof EventParticipationRepository, EventParticipationMethod>
+  | (EventParticipationRepository extends Required<EventParticipationRepository>
+      ? true
+      : false)
+  | (Pick<
+      EventGameplayRepository,
+      EventParticipationMethod
+    > extends EventParticipationRepository
+      ? true
+      : false)
+>;
+export type EventRuntimeHasOnlyRequiredCapabilities = Assert<
+  | Equal<keyof EventRuntimeStore, EventRuntimeMethod>
+  | (EventRuntimeStore extends Required<EventRuntimeStore> ? true : false)
+  | (Pick<EventGameplayRepository, EventRuntimeMethod> extends EventRuntimeStore
+      ? true
+      : false)
+>;
+export type EventRuntimeAdapterHasOnlyRequiredCapabilities = Assert<
+  | Equal<EventRuntimeAdapterInput, EventRuntimeStore>
+  | Equal<keyof EventRuntimeAdapterInput, EventRuntimeMethod>
+  | (EventRuntimeAdapterInput extends Required<EventRuntimeAdapterInput>
+      ? true
+      : false)
+>;
+export type WorkerEventRuntimeHasOnlyRequiredCapabilities = Assert<
+  | Equal<keyof WorkerEventRuntimeInput, WorkerEventRuntimeMethod>
+  | (WorkerEventRuntimeInput extends Required<WorkerEventRuntimeInput>
+      ? true
+      : false)
+  | (Pick<
+      EventGameplayRepository,
+      WorkerEventRuntimeMethod
+    > extends WorkerEventRuntimeInput
+      ? true
+      : false)
+>;
+export type FullEventGameplayRepositorySuppliesEventCapabilities = Assert<
+  | (EventGameplayRepository extends EventParticipationRepository
+      ? true
+      : false)
+  | (EventGameplayRepository extends EventRuntimeAdapterInput ? true : false)
+  | (EventGameplayRepository extends WorkerEventRuntimeInput ? true : false)
+>;
+
 export type InvalidEventStatusIsRejected = Assert<
   Rejects<
     { kind: "event-field"; eventId: "event"; field: "status"; value: 123 },

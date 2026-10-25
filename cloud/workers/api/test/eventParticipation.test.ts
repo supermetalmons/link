@@ -10,7 +10,7 @@ import {
 import type { EventDocument } from "../../../runtime/events/documents.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { EventSnapshot } from "../../../runtime/eventReads.js";
+import type { EventReads, EventSnapshot } from "../../../runtime/eventReads.js";
 import type { EventLeaseRecord } from "../../../runtime/eventLeases.js";
 import type { EventLockManager } from "../../../runtime/events/lockManagerCore.js";
 import { AuthApiFailure } from "../src/authErrors.ts";
@@ -32,6 +32,7 @@ const profileId = "creator-profile";
 const identity = { uid: "creator-login" };
 
 type TestEventParticipationRepository = EventParticipationRepository &
+  Pick<EventReads, "readEventPrizeSelections"> &
   Required<
     Pick<
       EventTestSource,
@@ -536,10 +537,20 @@ test("reads one join ownership snapshot under the event lock", async () => {
       ? { loginUids: ["alternate-login"], profile: canonicalProfile }
       : { loginUids: [identity.uid], profile: creatorProfile };
   };
+  const participationRepository: EventParticipationRepository = {
+    readEvent: (...args) => repository.readEvent(...args),
+    readEventSnapshot: (...args) => repository.readEventSnapshot(...args),
+    commitEventPlan: (...args) => repository.commitEventPlan(...args),
+    transactEventLease: (...args) => repository.transactEventLease(...args),
+    transactEventPrizeSelection: (...args) =>
+      repository.transactEventPrizeSelection(...args),
+    readProfileOwnershipSnapshot: (...args) =>
+      repository.readProfileOwnershipSnapshot(...args),
+  };
   const response = await joinEvent(
     { uid: "alternate-login" },
     { eventId: "event-1" },
-    repository,
+    participationRepository,
     {
       lockManager: createLockManager({
         onAcquire: () => {

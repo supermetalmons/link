@@ -4,7 +4,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
-import { readPresentationInvite } from "../src/matchPresentationAccess.ts";
+import {
+  readPresentationInvite,
+  requireCurrentPresentationMatch,
+} from "../src/matchPresentationAccess.ts";
 import {
   handleMatchPresentationRoute,
   isMatchPresentationPath,
@@ -360,25 +363,38 @@ test("linked accounts write the original player's presentation", async () => {
 });
 
 test("updates target each actor's latest match, including only their own pending rematch", async () => {
-  for (const uid of ["host-login", "guest-login"]) {
-    const state = setup(
-      { ...paired, hostRematches: "1;2", guestRematches: "1" },
-      uid,
-    );
-    const expected = uid === "host-login" ? 2 : 1;
-    for (const index of [0, 1, 2]) {
-      const path = `/invites/invite-one/matches/invite-one${index || ""}/presentation`;
-      assert.equal(
-        (
-          await handleMatchPresentationRoute(
-            request("POST", { path }),
-            state.env,
-            ctx,
-            state.dependencies,
-          )
-        ).status,
-        index === expected ? 200 : 409,
+  for (const proposer of ["host-login", "guest-login"]) {
+    for (const uid of ["host-login", "guest-login"]) {
+      const state = setup(
+        {
+          ...paired,
+          hostRematches: proposer === "host-login" ? "1;2" : "1",
+          guestRematches: proposer === "guest-login" ? "1;2" : "1",
+        },
+        uid,
       );
+      const expected = uid === proposer ? 2 : 1;
+      for (const index of [0, 1, 2]) {
+        const path = `/invites/invite-one/matches/invite-one${index || ""}/presentation`;
+        assert.equal(
+          (
+            await handleMatchPresentationRoute(
+              request("POST", { path }),
+              state.env,
+              ctx,
+              state.dependencies,
+            )
+          ).status,
+          index === expected ? 200 : 409,
+        );
+      }
+      assert.deepEqual(state.calls.updated, [
+        {
+          actorUid: uid,
+          matchId: `invite-one${expected}`,
+          update: payload,
+        },
+      ]);
     }
   }
   const finished = setup({
@@ -399,6 +415,31 @@ test("updates target each actor's latest match, including only their own pending
     ).status,
     200,
   );
+});
+
+test("current presentation checks reject unrelated actors before match eligibility", async () => {
+  const state = setup({
+    ...paired,
+    hostRematches: "1;2",
+    guestRematches: "1",
+  });
+  const invite = await readPresentationInvite(state.repository, "invite-one");
+  for (const matchId of ["invite-one1", "invite-one2", "invite-one9"]) {
+    assert.throws(
+      () =>
+        requireCurrentPresentationMatch(
+          "invite-one",
+          matchId,
+          invite,
+          "unrelated-login",
+        ),
+      {
+        status: 403,
+        code: "permission-denied",
+        message: "permission-denied",
+      },
+    );
+  }
 });
 
 test("an ended series keeps the latest approved match current when a proposal was unanswered", async () => {
@@ -430,6 +471,19 @@ test("an ended series keeps the latest approved match current when a proposal wa
         )
       ).status,
       409,
+    );
+    assert.equal(
+      (
+        await handleMatchPresentationRoute(
+          request("GET", {
+            path: "/invites/invite-one/matches/invite-one1/presentation",
+          }),
+          state.env,
+          ctx,
+          state.dependencies,
+        )
+      ).status,
+      200,
     );
   }
 });

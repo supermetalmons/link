@@ -31,7 +31,7 @@ import {
   type RemoveEventParticipantResponse,
 } from "@mons/shared/events";
 import * as monsRules from "mons-rules";
-import type { EventReads, EventSnapshot } from "../../../runtime/eventReads.js";
+import type { EventSnapshot } from "../../../runtime/eventReads.js";
 import {
   createEventLockManagerCore,
   withEventLease,
@@ -46,9 +46,11 @@ import {
 } from "../../../runtime/events/ownership.js";
 import { AuthApiFailure } from "./authErrors.ts";
 import { EventNotUpcoming } from "./eventD1.ts";
-import type { GameplayRepository } from "./gameplayRepository.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
-import { requireProfileOwnershipSnapshot } from "./profileOwnership.ts";
+import {
+  requireProfileOwnershipSnapshot,
+  type ProfileOwnershipReader,
+} from "./profileOwnership.ts";
 import {
   applyOwnershipPolicy,
   assertRemovalAllowed,
@@ -70,12 +72,15 @@ const EVENT_OPERATION_TIMEOUT_MS = 25_000;
 const EVENT_RECONCILIATION_TIMEOUT_MS = 2_000;
 const gameVariantHelpers = createGameVariantHelpers(monsRules);
 
-export type EventParticipationRepository = EventStore &
-  Pick<GameplayRepository, "readProfileOwnershipSnapshot"> &
-  Pick<
-    EventReads,
-    "readEvent" | "readEventPrizeSelections" | "readEventSnapshot"
-  >;
+export type EventParticipationRepository = Pick<
+  EventStore,
+  | "readEvent"
+  | "readEventSnapshot"
+  | "commitEventPlan"
+  | "transactEventLease"
+  | "transactEventPrizeSelection"
+> &
+  ProfileOwnershipReader;
 
 export type EventParticipationDependencies = {
   buildDueUpdates?: (input: {

@@ -211,7 +211,10 @@ export type EventEffect =
     };
 export type EventCommand = EventMutation | EventEffect;
 export type EventCommitPlan = EventCommand[];
-export type EventRuntimeStore = import("./eventReads.js").EventReads & {
+export type EventRuntimeStore = Pick<
+  import("./eventReads.js").EventReads,
+  "readEvent" | "readEventSnapshot"
+> & {
   commitEventPlan(
     plan: readonly EventCommand[],
     signal?: AbortSignal,

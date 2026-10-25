@@ -1,18 +1,27 @@
 import type { EventRuntimeStore } from "../../../runtime/eventCommands.js";
+import type { EventLeaseStore } from "../../../runtime/eventLeases.js";
 import { createEventRuntime } from "../../../runtime/events.js";
 import { createEventLockManagerCore } from "../../../runtime/events/lockManagerCore.js";
 import { createD1EventPrizeWithdrawalReader } from "./eventPrizeWithdrawalD1.ts";
-import type { EventGameplayRepository } from "./eventRepository.ts";
 import {
   readGameplayMatchPair,
   readGameplayMatchPairs,
 } from "./gameplayMatchReads.ts";
-import { requireProfileOwnershipSnapshot } from "./profileOwnership.ts";
+import {
+  requireProfileOwnershipSnapshot,
+  type ProfileOwnershipReader,
+} from "./profileOwnership.ts";
+import type { MatchStatePort } from "./repositoryContracts.ts";
 
 type RuntimeDependencies = Parameters<typeof createEventRuntime>[0];
 
+type WorkerEventRuntimeRepository = EventRuntimeStore &
+  EventLeaseStore &
+  ProfileOwnershipReader &
+  Pick<MatchStatePort, "readMatchPair" | "readMatchPairs">;
+
 type WorkerEventRuntimeOptions = {
-  repository: EventGameplayRepository;
+  repository: WorkerEventRuntimeRepository;
   signal: AbortSignal;
   withdrawalDb: D1Database;
   enqueueEventProgressTask: RuntimeDependencies["enqueueEventProgressTask"];
@@ -29,14 +38,11 @@ function secureRandom(): number {
 }
 
 export function createEventRuntimeStore(
-  repository: EventGameplayRepository,
+  repository: EventRuntimeStore,
   signal?: AbortSignal,
 ): EventRuntimeStore {
   return {
-    ...repository,
     readEvent: (id) => repository.readEvent(id, signal),
-    readEventPrizeSelections: (id) =>
-      repository.readEventPrizeSelections(id, signal),
     readEventSnapshot: (id) => repository.readEventSnapshot(id, signal),
     commitEventPlan: (plan) => repository.commitEventPlan(plan, signal),
     transactEventSyncThrottle: (id, updater) =>
