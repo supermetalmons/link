@@ -1,3 +1,4 @@
+import { timerStartStoreFixture } from "../test/matchClaimFixture.ts";
 import { env } from "cloudflare:workers";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
@@ -133,14 +134,14 @@ describe("invite room schema initialization", () => {
       ensureInviteRoomSchema(storage);
       expectCompleteSchema(storage);
       const store = new MatchStateStore(storage, {
-        timerStarts: {
+        timerStarts: timerStartStoreFixture({
           getOrAdvance: async () => {
             throw new Error("unexpected-timer-write");
           },
           deletePair: async () => {
             throw new Error("unexpected-timer-write");
           },
-        },
+        }),
         newMatchTimerStorage: "local",
       });
       const input = {

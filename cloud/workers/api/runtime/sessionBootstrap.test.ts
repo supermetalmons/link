@@ -1,3 +1,4 @@
+import { unwrapMatchStateWireFixture } from "../test/matchRecordFixture.ts";
 import {
   buildSessionRefreshToken,
   isSessionTokenResponse,
@@ -17,7 +18,7 @@ import {
 import { env } from "cloudflare:workers";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { InviteReactions } from "../src/inviteReactions.ts";
-import { getMatchStateRpc, unwrapMatchStateRpc } from "../src/matchStateRpc.ts";
+import { getMatchStateRpc } from "../src/matchStateRpc.ts";
 import { handleRequest } from "../src/router.ts";
 import { createSessionRepository } from "../src/sessionD1.ts";
 import { applyEventTestMigrations } from "./eventTestMigrations.ts";
@@ -60,7 +61,7 @@ async function fixture(hostId: string) {
   )
     .bind(inviteId, JSON.stringify({ hostId, guestId, hostColor: "white" }))
     .run();
-  unwrapMatchStateRpc(
+  unwrapMatchStateWireFixture(
     await getMatchStateRpc(env, inviteId).createCanonicalMatch({
       inviteId,
       epoch: 2,

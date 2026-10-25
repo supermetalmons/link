@@ -51,6 +51,7 @@ export function createAutomatchD1Store(
     buildWriteGuardStatements,
     buildRevisionGuardStatements,
     buildCommitStatements,
+    buildRetainedCommitStatements,
     commit,
     prepareChanges,
     transactRecord,
@@ -122,6 +123,7 @@ export function createAutomatchD1Store(
     listEntriesByLogins,
     buildRevisionGuardStatements,
     buildCommitStatements,
+    buildRetainedCommitStatements,
     commit,
     expireReceipts,
   };

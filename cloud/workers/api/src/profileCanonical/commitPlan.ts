@@ -1,16 +1,5 @@
-import type {
-  JsonObject,
-  CanonicalCommitPlan,
-  CanonicalExpectation,
-} from "./types.ts";
-
-function sameJsonObject(left: JsonObject, right: JsonObject): boolean {
-  try {
-    return JSON.stringify(left) === JSON.stringify(right);
-  } catch {
-    return false;
-  }
-}
+import { sameCanonicalProfileLegacy } from "./retainedRecords.ts";
+import type { CanonicalCommitPlan, CanonicalExpectation } from "./types.ts";
 
 export function validateCanonicalCommitPlan(plan: CanonicalCommitPlan): void {
   const has = (
@@ -129,7 +118,7 @@ export function validateCanonicalCommitPlan(plan: CanonicalCommitPlan): void {
             mutation.redirect.sourceProfileId === sourceProfileId &&
             mutation.redirect.mergedAtMs === mutation.profile.mergedAtMs &&
             sourceProfileId !== targetProfileId &&
-            sameJsonObject(
+            sameCanonicalProfileLegacy(
               mutation.profile.legacyFields,
               mutation.redirect.sourceLegacyFields,
             ),

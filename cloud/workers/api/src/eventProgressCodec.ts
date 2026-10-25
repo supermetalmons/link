@@ -1,3 +1,7 @@
+import type {
+  EventProgressDocument,
+  RetainedEventProgressParams,
+} from "../../../runtime/eventProgressRecords.js";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import type { EventProgressOutboxRecord } from "../../../runtime/events.js";
 
@@ -19,6 +23,13 @@ export type EventProgressPlan = {
   workflowId: string;
 };
 
+export type RetainedEventProgressPlan = {
+  outbox: EventProgressDocument<"pending">;
+  outboxId: string;
+  params: RetainedEventProgressParams;
+  workflowId: string;
+};
+
 function toRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -31,7 +42,7 @@ function bytesToHex(value: ArrayBuffer): string {
   ).join("");
 }
 
-async function digestIdentity(eventId: string, sourceKey: string) {
+async function digestIdentity(eventId: unknown, sourceKey: unknown) {
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(`${eventId}\n${sourceKey}`),
@@ -39,15 +50,15 @@ async function digestIdentity(eventId: string, sourceKey: string) {
   return bytesToHex(digest);
 }
 
-export async function buildEventProgressPlan(
+async function assembleEventProgressPlan<EventId, SourceKey, Reason, Timestamp>(
   input: {
-    eventId: string;
-    sourceKey: string;
-    reason: string;
+    eventId: EventId;
+    sourceKey: SourceKey;
+    reason: Reason;
     runAtMs?: number | null;
   },
-  nowMs = Date.now(),
-): Promise<EventProgressPlan> {
+  nowMs: Timestamp,
+) {
   const digest = await digestIdentity(input.eventId, input.sourceKey);
   const outboxId = `ep_${digest}`;
   const workflowId = `event-progress-${digest}`;
@@ -60,13 +71,13 @@ export async function buildEventProgressPlan(
     runAtMs,
     firstQueuedAtMs: nowMs,
     lastQueuedAtMs: nowMs,
-  } satisfies EventProgressOutboxRecord;
+  } as const;
   return {
     outbox,
     outboxId,
     workflowId,
     params: {
-      schemaVersion: EVENT_PROGRESS_SCHEMA_VERSION,
+      schemaVersion: outbox.schemaVersion,
       eventId: input.eventId,
       outboxId,
       reason: input.reason,
@@ -74,6 +85,40 @@ export async function buildEventProgressPlan(
       sourceKey: input.sourceKey,
     },
   };
+}
+
+export function buildEventProgressPlan(
+  input: {
+    eventId: string;
+    sourceKey: string;
+    reason: string;
+    runAtMs?: number | null;
+  },
+  nowMs?: number,
+): Promise<EventProgressPlan> {
+  try {
+    return assembleEventProgressPlan(
+      input,
+      nowMs === undefined ? Date.now() : nowMs,
+    );
+  } catch (error) {
+    return Promise.reject(error);
+  }
+}
+
+export function buildRetainedEventProgressPlan(
+  input: { eventId: unknown; sourceKey: unknown; reason: unknown },
+  nowMs?: unknown,
+): Promise<RetainedEventProgressPlan> {
+  try {
+    const retained: unknown = assembleEventProgressPlan(
+      input,
+      nowMs === undefined ? Date.now() : nowMs,
+    );
+    return retained as Promise<RetainedEventProgressPlan>;
+  } catch (error) {
+    return Promise.reject(error);
+  }
 }
 
 export function workflowIdFromOutboxId(outboxId: string): string | null {

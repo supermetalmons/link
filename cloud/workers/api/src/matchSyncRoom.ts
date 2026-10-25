@@ -1,6 +1,8 @@
+import type { ApiTransportStatus } from "@mons/shared/api-contracts";
 import {
   MATCH_SYNC_REFRESH_MS,
   MATCH_SYNC_SOCKET_PROTOCOL,
+  type MatchSyncMessage,
   type MatchSyncSnapshot,
 } from "@mons/shared/match-sync";
 import { isSafeRecordKey } from "./recordKeys.ts";
@@ -13,7 +15,21 @@ import {
   type MatchSyncReadResult,
 } from "./matchSync.ts";
 import { createMatchSyncSnapshotStore } from "./matchSyncSnapshotStore.ts";
-import type { SocketSession, SocketSessions } from "./socketSession.ts";
+import type { SocketSessions } from "./socketSession.ts";
+import {
+  readOptionalSocketAttachment,
+  readSocketAttachment,
+  readSocketMatchGroupKey,
+  socketAttachmentChannel,
+  socketAttachmentInviteKey,
+  socketAttachmentMatchKey,
+  socketAttachmentMatches,
+  untrimmedSocketMatchKey,
+  type InviteSocketAccessPolicy,
+  type MatchSocketAttachment,
+  type SocketInviteKey,
+  type SocketMatchKey,
+} from "./socketAttachmentRecords.ts";
 import {
   readSocketAdmission,
   validateCurrentSocketAdmission,
@@ -29,18 +45,8 @@ import type {
   MatchStateSyncReadRequest,
   MatchStateSyncReadResult,
 } from "./matchStateTypes.ts";
-
 export const MATCH_SYNC_REPAIR_MS = 5_000;
 export const MAX_CACHED_MATCH_SYNC_STATES = 64;
-
-type MatchSocketAttachment = {
-  channel: "matches";
-  schemaVersion: 1;
-  inviteId: string;
-  matchId: string;
-  role: SocketRole;
-  actorUid: string | null;
-} & SocketSession;
 
 type MatchReadState = {
   generation: number;
@@ -58,7 +64,7 @@ type MatchReadState = {
 };
 
 type MatchRoomDependencies = {
-  pinInvite: (inviteId: string) => void;
+  pinInvite: (inviteId: SocketInviteKey) => asserts inviteId is string;
   readMetadata: (inviteId: string) => Promise<InviteMetadataReadResult>;
   inviteGeneration: () => number;
   sourceEpoch: () => number;
@@ -67,16 +73,13 @@ type MatchRoomDependencies = {
   ) => MatchStateSyncReadResult | Promise<MatchStateSyncReadResult>;
   scheduleAlarm: (atMs: number) => Promise<void>;
   capacityFull: (role: SocketRole, ip: string) => boolean;
-  canReceive: (
-    attachment: MatchSocketAttachment,
-    metadata: MatchSyncMetadata,
-  ) => boolean;
+  canReceive: InviteSocketAccessPolicy<MatchSyncMetadata>;
   socketSessions: SocketSessions;
 };
 
 export class MatchSyncRoom {
   private readonly states = new Map<string, MatchReadState>();
-  private readonly admissions = new Map<string, number>();
+  private readonly admissions = new Map<SocketMatchKey, number>();
   private readonly snapshots: ReturnType<typeof createMatchSyncSnapshotStore>;
   private readSyncState: MatchRoomDependencies["readSyncState"];
 
@@ -88,25 +91,24 @@ export class MatchSyncRoom {
     this.readSyncState = dependencies.readSyncState;
   }
 
-  private sockets(matchId?: string): WebSocket[] {
+  private sockets(matchId?: SocketMatchKey): WebSocket[] {
     return this.ctx
       .getWebSockets(channelSocketTag("matches"))
       .filter((socket) => {
-        const attachment =
-          socket.deserializeAttachment() as MatchSocketAttachment;
+        const attachment = readSocketAttachment(socket);
         return (
           this.dependencies.socketSessions.active(socket) &&
-          attachment?.channel === "matches" &&
-          (matchId === undefined || attachment.matchId === matchId)
+          socketAttachmentChannel(attachment) === "matches" &&
+          (matchId === undefined ||
+            socketAttachmentMatches(attachment, matchId))
         );
       });
   }
 
-  private socketGroups(): Map<string, WebSocket[]> {
-    const groups = new Map<string, WebSocket[]>();
+  private socketGroups(): Map<SocketMatchKey, WebSocket[]> {
+    const groups = new Map<SocketMatchKey, WebSocket[]>();
     for (const socket of this.sockets()) {
-      const { matchId } =
-        socket.deserializeAttachment() as MatchSocketAttachment;
+      const matchId = readSocketMatchGroupKey(socket);
       const group = groups.get(matchId);
       if (group) group.push(socket);
       else groups.set(matchId, [socket]);
@@ -131,10 +133,9 @@ export class MatchSyncRoom {
 
   private pruneStates(): void {
     if (this.states.size <= MAX_CACHED_MATCH_SYNC_STATES) return;
-    const subscribed = new Set(
-      this.sockets().map(
-        (socket) =>
-          (socket.deserializeAttachment() as MatchSocketAttachment).matchId,
+    const subscribed = new Set<SocketMatchKey>(
+      this.sockets().map((socket) =>
+        socketAttachmentMatchKey(readSocketAttachment(socket)),
       ),
     );
     for (const [matchId, state] of this.states) {
@@ -177,7 +178,11 @@ export class MatchSyncRoom {
       this.snapshots.write(next.matchId, JSON.stringify(next), next.revision);
     }
     const message = changed
-      ? JSON.stringify({ schemaVersion: 1, type: "snapshot", snapshot: next })
+      ? JSON.stringify({
+          schemaVersion: 1,
+          type: "snapshot",
+          snapshot: next,
+        } satisfies MatchSyncMessage)
       : null;
     this.updateSubscribers(next.matchId, metadata, message);
     return next;
@@ -189,8 +194,7 @@ export class MatchSyncRoom {
     message: string | null,
   ): void {
     for (const socket of this.sockets(matchId)) {
-      const attachment =
-        socket.deserializeAttachment() as MatchSocketAttachment;
+      const attachment = readSocketAttachment(socket);
       if (!this.dependencies.canReceive(attachment, metadata)) {
         socket.close(1008, "Invite access changed");
       } else if (message) {
@@ -330,12 +334,12 @@ export class MatchSyncRoom {
   }
 
   read(
-    inviteId: string,
-    matchId: string,
+    inviteId: SocketInviteKey,
+    matchId: SocketMatchKey,
     force = false,
   ): Promise<MatchSyncReadResult> {
     this.dependencies.pinInvite(inviteId);
-    if (matchId !== matchId.trim() || !isSafeRecordKey(matchId))
+    if (untrimmedSocketMatchKey(matchId) || !isSafeRecordKey(matchId))
       throw new TypeError("invalid-match-sync-target");
     const state = this.state(matchId);
     if (state.pending) return state.pending;
@@ -369,7 +373,7 @@ export class MatchSyncRoom {
 
   async notify(inviteId: string, matchIds?: string[]): Promise<void> {
     this.dependencies.pinInvite(inviteId);
-    let groups: Map<string, WebSocket[]> | undefined;
+    let groups: Map<SocketMatchKey, WebSocket[]> | undefined;
     const ids =
       matchIds === undefined
         ? [...this.states.keys(), ...(groups = this.socketGroups()).keys()]
@@ -378,7 +382,7 @@ export class MatchSyncRoom {
     let subscribed = false;
     const now = Date.now();
     for (const matchId of targets) {
-      if (matchId !== matchId.trim() || !isSafeRecordKey(matchId))
+      if (untrimmedSocketMatchKey(matchId) || !isSafeRecordKey(matchId))
         throw new TypeError("invalid-match-sync-target");
       const state = this.states.get(matchId);
       if (state) {
@@ -403,9 +407,8 @@ export class MatchSyncRoom {
   async refreshSubscribed(inviteId: string): Promise<void> {
     const matchIds = [
       ...new Set(
-        this.sockets().map(
-          (socket) =>
-            (socket.deserializeAttachment() as MatchSocketAttachment).matchId,
+        this.sockets().map((socket) =>
+          socketAttachmentMatchKey(readSocketAttachment(socket)),
         ),
       ),
     ];
@@ -434,7 +437,12 @@ export class MatchSyncRoom {
       if (matchId !== matchId.trim() || !isSafeRecordKey(matchId))
         throw new TypeError();
     } catch {
-      return new Response("Invalid match target", { status: 400 });
+      return new Response("Invalid match target", {
+        status: 400 satisfies ApiTransportStatus<
+          "GET /invites/:inviteId/matches/:matchId/socket",
+          "text"
+        >,
+      });
     }
     const parsed = readSocketAdmission(request, {
       headerPrefix: "Match",
@@ -442,13 +450,26 @@ export class MatchSyncRoom {
       actorUid,
     });
     if (parsed.status === "invalid")
-      return new Response("Invalid match admission", { status: 400 });
+      return new Response("Invalid match admission", {
+        status: 400 satisfies ApiTransportStatus<
+          "GET /invites/:inviteId/matches/:matchId/socket",
+          "text"
+        >,
+      });
     if (parsed.status === "expired")
-      return new Response("Session expired", { status: 401 });
+      return new Response("Session expired", {
+        status: 401 satisfies ApiTransportStatus<
+          "GET /invites/:inviteId/matches/:matchId/socket",
+          "text"
+        >,
+      });
     const { role, ip, session } = parsed.admission;
     if (this.dependencies.capacityFull(role, ip))
       return new Response("Match room is full", {
-        status: 429,
+        status: 429 satisfies ApiTransportStatus<
+          "GET /invites/:inviteId/matches/:matchId/socket",
+          "text"
+        >,
         headers: { "Retry-After": "60" },
       });
     let acceptedSocket: WebSocket | null = null;
@@ -457,7 +478,12 @@ export class MatchSyncRoom {
       const initial = await this.read(inviteId, matchId);
       if (initial.status !== "ok")
         return new Response("Match unavailable", {
-          status: initial.status === "missing" ? 404 : 409,
+          status: (initial.status === "missing"
+            ? 404
+            : 409) satisfies ApiTransportStatus<
+            "GET /invites/:inviteId/matches/:matchId/socket",
+            "text"
+          >,
         });
       await this.scheduleMatch(
         matchId,
@@ -470,7 +496,12 @@ export class MatchSyncRoom {
       const latest = await this.read(inviteId, matchId);
       if (latest.status !== "ok")
         return new Response("Match unavailable", {
-          status: latest.status === "missing" ? 404 : 409,
+          status: (latest.status === "missing"
+            ? 404
+            : 409) satisfies ApiTransportStatus<
+            "GET /invites/:inviteId/matches/:matchId/socket",
+            "text"
+          >,
         });
       const attachment: MatchSocketAttachment = {
         channel: "matches",
@@ -514,7 +545,12 @@ export class MatchSyncRoom {
         acceptedSocket.close(1011, "Match admission failed");
         this.closed(acceptedSocket);
       }
-      return new Response("Match source unavailable", { status: 503 });
+      return new Response("Match source unavailable", {
+        status: 503 satisfies ApiTransportStatus<
+          "GET /invites/:inviteId/matches/:matchId/socket",
+          "text"
+        >,
+      });
     } finally {
       const pending = (this.admissions.get(matchId) ?? 1) - 1;
       if (pending > 0) this.admissions.set(matchId, pending);
@@ -530,7 +566,7 @@ export class MatchSyncRoom {
 
   async alarm(): Promise<void> {
     const due = this.snapshots.listDue(Date.now());
-    let groups: Map<string, WebSocket[]> | undefined;
+    let groups: Map<SocketMatchKey, WebSocket[]> | undefined;
     let cursor = 0;
     const run = async () => {
       while (cursor < due.length) {
@@ -540,9 +576,9 @@ export class MatchSyncRoom {
           ?.find((candidate) =>
             this.dependencies.socketSessions.active(candidate),
           );
-        const inviteId = (
-          socket?.deserializeAttachment() as MatchSocketAttachment | undefined
-        )?.inviteId;
+        const inviteId = socketAttachmentInviteKey(
+          readOptionalSocketAttachment(socket),
+        );
         if (!inviteId) {
           if (this.admissions.get(matchId)) {
             this.snapshots.setDeadline(
@@ -584,13 +620,13 @@ export class MatchSyncRoom {
   }
 
   closed(socket: WebSocket): void {
-    const attachment = socket.deserializeAttachment() as MatchSocketAttachment;
+    const attachment = readSocketAttachment(socket);
     if (
-      attachment?.channel === "matches" &&
-      !this.admissions.get(attachment.matchId) &&
-      this.sockets(attachment.matchId).length === 0
+      socketAttachmentChannel(attachment) === "matches" &&
+      !this.admissions.get(socketAttachmentMatchKey(attachment)) &&
+      this.sockets(socketAttachmentMatchKey(attachment)).length === 0
     ) {
-      this.snapshots.clearDeadline(attachment.matchId);
+      this.snapshots.clearDeadline(socketAttachmentMatchKey(attachment));
       this.pruneStates();
     }
   }

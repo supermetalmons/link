@@ -1,3 +1,4 @@
+import { matchDocumentFixture } from "../test/matchRecordFixture.ts";
 import { INVITE_METADATA_SOCKET_PROTOCOL } from "@mons/shared/invite-metadata";
 import { INVITE_WAGERS_SOCKET_PROTOCOL } from "@mons/shared/invite-wagers";
 import { MATCH_SYNC_SOCKET_PROTOCOL } from "@mons/shared/match-sync";
@@ -56,17 +57,18 @@ async function fixture() {
       hostColor: "white",
     });
     mutable.wagerReader = async () => [];
-    const readMatch = (playerId: string) => ({
-      version: 2,
-      color: playerId === "host-login" ? "white" : "black",
-      emojiId: 1,
-      aura: "",
-      gameVariant: "standard",
-      fen: "initial",
-      status: "",
-      flatMovesString: "",
-      timer: "",
-    });
+    const readMatch = (playerId: string) =>
+      matchDocumentFixture({
+        version: 2,
+        color: playerId === "host-login" ? "white" : "black",
+        emojiId: 1,
+        aura: "",
+        gameVariant: "standard",
+        fen: "initial",
+        status: "",
+        flatMovesString: "",
+        timer: "",
+      });
     mutable.matchSync.readSyncState = async (input) =>
       input.knownRevision === 1
         ? { epoch: input.epoch, revision: 1, status: "unchanged" }

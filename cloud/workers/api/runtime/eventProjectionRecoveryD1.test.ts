@@ -1,3 +1,4 @@
+import { claimRecoveryFixture } from "../test/eventProjectionRecoveryFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -114,7 +115,9 @@ describe("event projection recovery scopes", () => {
       expect(first.entries).toHaveLength(10);
       await store.withAdmission(async (writer) => {
         for (const snapshot of first.entries)
-          expect(await writer.claim(snapshot, "request", 100, 100)).toBe(true);
+          expect(
+            await claimRecoveryFixture(writer, snapshot, "request", 100, 100),
+          ).toBe(true);
       });
       const second = await store.listDuePage(
         100,
@@ -162,6 +165,12 @@ describe("event projection recovery scopes", () => {
     it("shares one admission across claims and repair work until the callback settles", async () => {
       await seed(kind, "event-a");
       await seed(kind, "event-b");
+      await seed(
+        kind,
+        "event-repair",
+        500,
+        JSON.stringify({ schemaVersion: 0, updatedAtMs: 100 }),
+      );
       const observed = observe();
       const store = createEventProjectionRecoveryStore(observed.database, kind);
       const snapshots = await store.listDue(100, 10);
@@ -169,13 +178,20 @@ describe("event projection recovery scopes", () => {
       const complete = Promise.withResolvers<void>();
       const operation = store.withAdmission(async (writer) => {
         for (const snapshot of snapshots) {
-          expect(await writer.claim(snapshot, "request", 100, 200)).toBe(true);
+          expect(
+            await claimRecoveryFixture(writer, snapshot, "request", 100, 200),
+          ).toBe(true);
         }
         expect(
           (
-            await writer.transact("event-a", (current) => ({
-              value: { ...current, recovered: true },
-            }))
+            await ("repairInvalid" in writer
+              ? writer.repairInvalid("event-repair", {
+                  eventId: "event-repair",
+                  safeEventId: true,
+                  requestId: "repair-request",
+                  nowMs: 200,
+                })
+              : writer.markInvalid("event-repair", 200))
           ).committed,
         ).toBe(true);
         ready.resolve();
@@ -214,7 +230,9 @@ describe("event projection recovery scopes", () => {
       const failure = new Error("enqueue-failed");
       await expect(
         store.withAdmission(async (writer) => {
-          expect(await writer.claim(snapshot, "request", 100, 200)).toBe(true);
+          expect(
+            await claimRecoveryFixture(writer, snapshot, "request", 100, 200),
+          ).toBe(true);
           throw failure;
         }),
       ).rejects.toBe(failure);
@@ -245,15 +263,15 @@ describe("event projection recovery scopes", () => {
       const store = createEventProjectionRecoveryStore(db, kind);
       const snapshots = await store.listDue(100, 10);
       await store.withAdmission(async (writer) => {
-        expect(await writer.claim(snapshots[0], "request", 100, 200)).toBe(
-          true,
-        );
+        expect(
+          await claimRecoveryFixture(writer, snapshots[0], "request", 100, 200),
+        ).toBe(true);
         await expect(freezeWrites()).rejects.toThrow(
           "event write admissions are active",
         );
-        expect(await writer.claim(snapshots[1], "request", 100, 200)).toBe(
-          true,
-        );
+        expect(
+          await claimRecoveryFixture(writer, snapshots[1], "request", 100, 200),
+        ).toBe(true);
       });
       expect(await admissionCount()).toBe(0);
       await freezeWrites();
@@ -267,15 +285,21 @@ describe("event projection recovery scopes", () => {
       const snapshots = await store.listDue(100, 10);
       await expect(
         store.withAdmission(async (writer) => {
-          expect(await writer.claim(snapshots[0], "request", 100, 200)).toBe(
-            true,
-          );
+          expect(
+            await claimRecoveryFixture(
+              writer,
+              snapshots[0],
+              "request",
+              100,
+              200,
+            ),
+          ).toBe(true);
           await db
             .prepare(
               "UPDATE event_write_admissions SET created_at_ms = 1, expires_at_ms = 2",
             )
             .run();
-          await writer.claim(snapshots[1], "request", 100, 200);
+          await claimRecoveryFixture(writer, snapshots[1], "request", 100, 200);
         }),
       ).rejects.toThrow("event-write-admission-invalid");
       expect(await admissionCount()).toBe(0);
@@ -290,7 +314,8 @@ describe("event projection recovery scopes", () => {
       const [snapshot] = await store.listDue(100, 10);
       await expect(
         store.withAdmission((writer) =>
-          writer.claim(
+          claimRecoveryFixture(
+            writer,
             {
               ...snapshot,
               kind: kind === "profile-game" ? "telegram" : "profile-game",

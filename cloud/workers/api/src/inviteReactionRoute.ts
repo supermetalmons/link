@@ -1,3 +1,8 @@
+import type {
+  ApiQuery,
+  ApiParameters,
+  ApiRequest,
+} from "@mons/shared/api-contracts";
 import {
   REACTION_AUTH_PROTOCOL_PREFIX,
   REACTION_MAX_MESSAGE_BYTES,
@@ -33,7 +38,6 @@ import {
   type WorkerExecutionContext,
 } from "./sessionAuth.ts";
 import { socketSessionHeaders } from "./socketSession.ts";
-
 const REACTION_ROUTE_PATTERN = /^\/invites\/([^/]+)\/reactions(\/socket)?$/;
 
 function readSocketToken(request: Request): string | null {
@@ -107,10 +111,12 @@ export function isInviteReactionPath(pathname: string): boolean {
   return REACTION_ROUTE_PATTERN.test(pathname);
 }
 
-function readRoute(request: Request): {
-  inviteId: string;
+function readRoute(
+  request: Request,
+): ApiParameters<"GET /invites/:inviteId/reactions/socket"> & {
   socket: boolean;
-  matchId: string | null;
+  matchId:
+    ApiQuery<"GET /invites/:inviteId/reactions/socket">["matchId"] | null;
 } {
   const url = new URL(request.url);
   const match = url.pathname.match(REACTION_ROUTE_PATTERN);
@@ -126,11 +132,15 @@ function readRoute(request: Request): {
     (url.search &&
       (!match?.[2] ||
         url.searchParams.size !== 1 ||
-        !url.searchParams.has("matchId")))
+        !url.searchParams.has(
+          "matchId" satisfies keyof ApiQuery<"GET /invites/:inviteId/reactions/socket">,
+        )))
   ) {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-invite-id");
   }
-  const matchId = url.searchParams.get("matchId");
+  const matchId = url.searchParams.get(
+    "matchId" satisfies keyof ApiQuery<"GET /invites/:inviteId/reactions/socket">,
+  );
   if (matchId !== null && !isPresentationMatchId(inviteId, matchId))
     throw new AuthApiFailure(400, "invalid-argument", "invalid-match-id");
   return { inviteId, socket: Boolean(match?.[2]), matchId };
@@ -261,7 +271,14 @@ export async function handleInviteReactionRoute(
     } catch {
       throw new AuthApiFailure(400, "invalid-argument", "invalid-reaction");
     }
-    if (!isInviteReactionForInvite(route.inviteId, reaction)) {
+    if (
+      !(
+        isInviteReactionForInvite satisfies (
+          inviteId: string,
+          value: unknown,
+        ) => value is ApiRequest<"POST /invites/:inviteId/reactions">
+      )(route.inviteId, reaction)
+    ) {
       throw new AuthApiFailure(400, "invalid-argument", "invalid-reaction");
     }
     const role = await resolveInviteRole(
@@ -285,7 +302,11 @@ export async function handleInviteReactionRoute(
         "reaction-room-participants-full",
       );
     }
-    return authJsonResponse({ ok: true }, 200, corsHeaders);
+    return authJsonResponse<"POST /invites/:inviteId/reactions", 200>(
+      { ok: true },
+      200,
+      corsHeaders,
+    );
   } catch (error) {
     if (error instanceof AuthApiFailure) {
       return authErrorResponse(error, corsHeaders);

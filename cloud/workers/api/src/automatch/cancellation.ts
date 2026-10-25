@@ -1,4 +1,8 @@
 import {
+  inviteProjectionState,
+  inviteTrimmedParticipants,
+} from "@mons/shared/invite-records";
+import {
   TELEGRAM_AUTOMATCH_VERSION,
   buildAutomatchTelegramProjectionChanges,
   buildAutomatchTelegramLifecycleChanges,
@@ -27,12 +31,6 @@ import type { AutomatchDependencies, QueuedAutomatch } from "./types.ts";
 
 const AUTOMATCH_CANCELLATION_RECONCILE_DELAY_MS = 50;
 const AUTOMATCH_CANCELLATION_FINAL_READ_TIMEOUT_MS = 250;
-
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
 
 function normalizeString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -69,7 +67,7 @@ async function readAutomatchCancellationProof(
       repository.readInviteMetadata(inviteId, signal),
       repository.readAutomatchProfileOutbox(inviteId, signal),
     ]);
-    const invite = toRecord(inviteValue);
+    const invite = inviteProjectionState(inviteValue);
     return Boolean(
       queueValue.isNull &&
       normalizeString(invite?.hostId) === expectedUid &&
@@ -77,7 +75,7 @@ async function readAutomatchCancellationProof(
       invite?.automatchStateHint === "canceled" &&
       typeof invite.automatchCanceledAt === "number" &&
       Number.isFinite(invite.automatchCanceledAt) &&
-      normalizeString(toRecord(outboxRequestId.raw)?.requestId) === requestId,
+      outboxRequestId.matchesCancellationRequest(requestId),
     );
   } catch {
     return false;
@@ -159,8 +157,8 @@ export async function cancelQueuedAutomatch(
           repository.readAutomatchEntry(queued.inviteId, signal),
           repository.readInviteMetadata(queued.inviteId, signal),
         ]);
-        const currentGuestId = currentInvite?.guestId;
-        const currentHostId = currentInvite?.hostId;
+        const { guestId: currentGuestId, hostId: currentHostId } =
+          inviteTrimmedParticipants(currentInvite);
         const currentQueue = currentQueueValue.record;
         const currentUid = normalizeString(currentQueue?.uid);
         if (

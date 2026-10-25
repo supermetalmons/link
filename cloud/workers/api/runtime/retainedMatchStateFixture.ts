@@ -1,4 +1,4 @@
-import type { MatchStateRecord } from "../src/matchStateTypes.ts";
+import type { MatchWireValue } from "../src/matchRecordCodec.ts";
 
 export function seedRetainedMatchState(
   storage: DurableObjectStorage,
@@ -9,9 +9,9 @@ export function seedRetainedMatchState(
     records: {
       matchId: string;
       playerId: string;
-      value: MatchStateRecord;
+      value: MatchWireValue;
     }[];
-    claims?: { matchId: string; value: MatchStateRecord }[];
+    claims?: { matchId: string; value: MatchWireValue }[];
   },
 ): void {
   storage.transactionSync(() => {

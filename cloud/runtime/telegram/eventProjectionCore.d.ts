@@ -1,5 +1,13 @@
 // Generated from src/telegram/eventProjectionCore.ts. Run npm run generate:runtime.
+import { type EventTelegramEndedResultsDocument } from "./eventProjectionRecords.js";
 import type { TelegramDesired } from "./desiredStateCore.js";
+import type { EventDocument } from "../events/documents.js";
+import {
+  type EventTelegramProjectionGuard,
+  type EventTelegramProjectionStateDocument,
+  type RetainedStartedMatchLines,
+} from "./eventProjectionRecords.js";
+export type { EventTelegramProjectionGuard } from "./eventProjectionRecords.js";
 type ProjectionState = {
   upcomingText: string;
   reminderText: string;
@@ -7,7 +15,7 @@ type ProjectionState = {
   endedText: string;
   endedAnnouncementArmed: boolean;
   startedMatchKeys: string[];
-  startedMatchLinesByKey: Record<string, unknown>;
+  startedMatchLinesByKey: RetainedStartedMatchLines;
   lastProjectedSignature: string;
 };
 type StartedState = {
@@ -21,16 +29,25 @@ type EndedState = {
   matchLines: string[];
   placementLines: string[];
 };
-export type EventTelegramProjectionOperation = {
+type EventTelegramProjectionOperationFields = {
   channel: "upcoming" | "reminder" | "started" | "ended";
   generation?: string;
-  ifMissing: "send" | "skip" | null;
   instanceKey: string;
   messageKey: string;
-  operation: "send" | "edit";
   sourceRevision: string;
   text: string;
 };
+type EventTelegramProjectionAction =
+  | {
+      operation: "send";
+      ifMissing: null;
+    }
+  | {
+      operation: "edit";
+      ifMissing: "send" | "skip";
+    };
+export type EventTelegramProjectionOperation =
+  EventTelegramProjectionOperationFields & EventTelegramProjectionAction;
 export type EventTelegramProjection =
   | {
       action: "skip";
@@ -44,15 +61,8 @@ export type EventTelegramProjection =
       action: "project";
       operations: EventTelegramProjectionOperation[];
       signature: string;
-      state: Record<string, unknown>;
+      state: EventTelegramProjectionStateDocument;
     };
-export type EventTelegramProjectionGuard = {
-  eventId: string;
-  generation?: number;
-  lockId: string;
-  lockRoot: string;
-  ownerUid: string;
-};
 export type EventTelegramDesiredChange = {
   messageKey: string;
   value: TelegramDesired & {
@@ -63,7 +73,7 @@ export type EventTelegramDesiredChange = {
 };
 export type EventTelegramProjectionChanges = {
   eventId: string;
-  state: Record<string, unknown>;
+  state: EventTelegramProjectionStateDocument;
   desired: EventTelegramDesiredChange[];
 };
 declare const EVENT_TELEGRAM_PROJECTION_LOCK_ROOT =
@@ -79,10 +89,10 @@ declare const loadEndedMatchResults: (
       operationIds: readonly string[],
     ): Promise<readonly unknown[]>;
   },
-) => Promise<Record<string, unknown>>;
+) => Promise<EventTelegramEndedResultsDocument>;
 declare const isV2TelegramEvent: (
   eventData: unknown,
-) => eventData is Record<string, unknown>;
+) => eventData is EventDocument;
 declare const buildEventSignature: (
   eventData: unknown,
   nowMs?: number,
@@ -113,12 +123,12 @@ declare const buildStartedState: (
 declare const buildEndedState: (
   eventId: string,
   eventData: unknown,
-  resultsByKey?: Record<string, unknown>,
+  resultsByKey?: EventTelegramEndedResultsDocument,
 ) => EndedState;
 declare const buildEventTelegramProjection: (input: {
   eventId: string;
   eventData: unknown;
-  endedMatchResults?: Record<string, unknown>;
+  endedMatchResults?: EventTelegramEndedResultsDocument;
   state?: unknown;
   upcomingMessage?: unknown;
   reminderMessage?: unknown;

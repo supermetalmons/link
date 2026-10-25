@@ -1,11 +1,34 @@
+import type { EventProgressOutboxRecord } from "./events.js";
 import type {
-  EventJsonRecord,
-  EventPrizeAssignmentRecord,
-} from "./eventReads.js";
+  EventProgressDocument,
+  EventProgressDeadLetter,
+} from "./eventProgressRecords.js";
+import type {
+  EventProjectionOutboxDocument,
+  EventProfileGameProjectionRequest,
+  EventTelegramProjectionRequest,
+} from "./eventProjectionOutboxRecords.js";
+import type { InviteDocument } from "./shared/invite-records.js";
+import type { EventTelegramProjectionStateDocument } from "./telegram/eventProjectionRecords.js";
+import type { MatchCreationRecord } from "./shared/match-protocol.js";
+import type {
+  ClaimedTimerWrite,
+  MATCH_TIMER_TERMINAL,
+} from "./shared/timers.js";
+import type {
+  EventDocument,
+  EventParticipantsDocument,
+  EventRoundsDocument,
+  EventMatchDocument,
+  EventRoundDocument,
+  EventParticipantDocument,
+} from "./events/documents.js";
+import type { EventMatchStatus } from "./shared/events.js";
+import type { EventPrizeAssignmentRecord } from "./eventReads.js";
 export type EventFieldValues = {
   createdAtMs: number;
   endedAtMs: number | null;
-  participants: Record<string, EventJsonRecord>;
+  participants: EventParticipantsDocument;
   startAtMs: number;
   startedAtMs: number | null;
   status: "scheduled" | "active" | "ended" | "dismissed";
@@ -14,11 +37,11 @@ export type EventFieldValues = {
   currentRoundIndex: number | null;
   bracketSize: number;
   roundCount: number;
-  rounds: Record<string, unknown>;
-  thirdPlaceMatch: EventJsonRecord | null;
+  rounds: EventRoundsDocument;
+  thirdPlaceMatch: EventMatchDocument | null;
   updatedAtMs: number;
   prizeSelectionsLockedAtMs: number | null;
-  prizeAssignments: Record<string, unknown>;
+  prizeAssignments: Record<string, EventPrizeAssignmentRecord>;
   isSundayMons: boolean;
   telegramAnnouncements: {
     invite: boolean;
@@ -38,7 +61,7 @@ export type EventFieldMutation = {
 }[EventField];
 export type EventProfileGameOutboxFieldValues = {
   schemaVersion: 1;
-  status: "pending" | "dead";
+  status: "pending";
   requestId: string;
   lastQueuedAtMs: number | null;
   reason: string | null;
@@ -53,26 +76,26 @@ export type EventProfileGameOutboxFieldMutation = {
   };
 }[keyof EventProfileGameOutboxFieldValues];
 export type EventMutation =
-  | { kind: "event"; eventId: string; value: EventJsonRecord }
+  | { kind: "event"; eventId: string; value: EventDocument }
   | EventFieldMutation
   | {
       kind: "event-round";
       eventId: string;
       roundKey: string;
-      value: EventJsonRecord | null;
+      value: EventRoundDocument | null;
     }
   | {
       kind: "event-match-status";
       eventId: string;
       roundKey: string;
       matchKey: string;
-      value: string;
+      value: EventMatchStatus;
     }
   | {
       kind: "event-participant";
       eventId: string;
       profileId: string;
-      value: EventJsonRecord | null;
+      value: EventParticipantDocument | null;
     }
   | {
       kind: "event-disqualification";
@@ -104,15 +127,32 @@ export type EventMutation =
       value: EventPrizeAssignmentRecord | null;
     }
   | {
-      kind: "progress-outbox" | "progress-dead";
+      kind: "progress-outbox";
       outboxId: string;
-      value: EventJsonRecord | null;
+      value:
+        EventProgressOutboxRecord | EventProgressDocument<"pending"> | null;
+    }
+  | {
+      kind: "progress-dead";
+      outboxId: string;
+      value: EventProgressDeadLetter | EventProgressDocument<"dead"> | null;
     }
   | { kind: "progress-dispatched"; outboxId: string; value: number }
   | {
-      kind: "profile-game-outbox" | "telegram-outbox";
+      kind: "profile-game-outbox";
       eventId: string;
-      value: EventJsonRecord | null;
+      value:
+        | EventProjectionOutboxDocument<"profile-game">
+        | EventProfileGameProjectionRequest
+        | null;
+    }
+  | {
+      kind: "telegram-outbox";
+      eventId: string;
+      value:
+        | EventProjectionOutboxDocument<"telegram">
+        | EventTelegramProjectionRequest
+        | null;
     }
   | EventProfileGameOutboxFieldMutation
   | {
@@ -121,7 +161,11 @@ export type EventMutation =
       profileId: string;
       value: true | null;
     }
-  | { kind: "telegram-state"; eventId: string; value: EventJsonRecord | null }
+  | {
+      kind: "telegram-state";
+      eventId: string;
+      value: EventTelegramProjectionStateDocument | null;
+    }
   | {
       kind: "telegram-generation";
       eventId: string;
@@ -129,21 +173,21 @@ export type EventMutation =
       increment?: boolean;
     };
 export type EventEffect =
-  | { kind: "invite"; inviteId: string; value: EventJsonRecord }
+  | { kind: "invite"; inviteId: string; value: InviteDocument }
   | {
       kind: "match-creation";
       playerId: string;
       matchId: string;
-      value: EventJsonRecord;
+      value: MatchCreationRecord;
     }
   | {
       kind: "match-terminal-timer";
       playerId: string;
       matchId: string;
-      value: string;
+      value: typeof MATCH_TIMER_TERMINAL;
     }
   | { kind: "match-timer-start-cleanup"; playerId: string; matchId: string }
-  | { kind: "match-timer-claim"; matchId: string; value: EventJsonRecord };
+  | { kind: "match-timer-claim"; matchId: string; value: ClaimedTimerWrite };
 export type EventCommand = EventMutation | EventEffect;
 export type EventCommitPlan = EventCommand[];
 export type EventRuntimeStore = import("./eventReads.js").EventReads & {
@@ -188,7 +232,9 @@ const EFFECT_KIND_REGISTRY = {
   "match-timer-claim": true,
 } satisfies Record<EventEffect["kind"], true>;
 const EFFECT_KINDS = new Set(Object.keys(EFFECT_KIND_REGISTRY));
-const isEventMutation = (command: EventCommand): command is EventMutation =>
+const isEventMutation = <Command extends { kind: EventCommand["kind"] }>(
+  command: Command,
+): command is Extract<Command, { kind: EventMutation["kind"] }> =>
   !EFFECT_KINDS.has(command.kind);
 const eventField = <K extends EventField>(
   eventId: string,

@@ -1,4 +1,21 @@
 import {
+  type EventDocument,
+  type EventParticipantDocument,
+  type EventParticipantsDocument,
+  eventState,
+  eventParticipantState,
+  plainEventParticipants,
+  plainEventParticipantAt,
+  plainEventParticipantEntries,
+  readPlainEventParticipantDocument,
+  createEventParticipantsDocument,
+  createEventParticipantDocument,
+  copyEventParticipant,
+  copyEventDocument,
+  cloneEventDocument,
+  withEventParticipant,
+} from "../../../runtime/events/documents.js";
+import {
   MAX_EVENT_PARTICIPANTS,
   buildEventParticipantSnapshot,
   isEventParticipantSnapshot,
@@ -21,7 +38,7 @@ import {
 import { AuthApiFailure } from "./authErrors.ts";
 import type { GameplayProfile } from "./gameplayRepository.ts";
 
-export type EventRecord = Record<string, unknown>;
+export type EventRecord = EventDocument;
 
 export type EventDueTransition = {
   didChange: boolean;
@@ -56,17 +73,11 @@ export type RemovalContext = {
   creatorLoginUid: string;
   creatorProfileId: string;
   directCreator: boolean;
-  targetParticipant: EventRecord | null;
+  targetParticipant: EventParticipantDocument | null;
   targetLoginUid: string;
   targetProfileId: string;
   ownershipSnapshot: EventOwnershipSnapshot | null;
 };
-
-export function toRecord(value: unknown): EventRecord | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as EventRecord)
-    : null;
-}
 
 export function normalizeString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -111,10 +122,7 @@ export function buildParticipant(
 }
 
 export function participantCount(event: EventRecord): number {
-  const participants = toRecord(event.participants) || {};
-  return Object.values(participants).filter(
-    (participant) => toRecord(participant) !== null,
-  ).length;
+  return plainEventParticipantEntries(plainEventParticipants(event)).length;
 }
 
 function directParticipantSnapshot(
@@ -122,9 +130,9 @@ function directParticipantSnapshot(
   profileId: string,
   loginUid: string,
 ): EventParticipantSnapshot {
-  const participant = toRecord(value);
+  const participant = readPlainEventParticipantDocument(value);
   const normalized = participant
-    ? { ...participant, profileId, loginUid }
+    ? copyEventParticipant(participant, { profileId, loginUid })
     : null;
   if (!isEventParticipantSnapshot(normalized)) {
     throw new AuthApiFailure(
@@ -137,12 +145,12 @@ function directParticipantSnapshot(
 }
 
 function participantFromCanonicalParent(
-  value: unknown,
+  value: EventParticipantsDocument,
   loginUid: string,
 ): EventParticipantSnapshot {
-  const matches = Object.entries(toRecord(value) || {}).filter(
+  const matches = plainEventParticipantEntries(value).filter(
     ([, participant]) =>
-      normalizeString(toRecord(participant)?.loginUid) === loginUid,
+      normalizeString(eventParticipantState(participant).loginUid) === loginUid,
   );
   if (matches.length !== 1) {
     throw new AuthApiFailure(
@@ -159,10 +167,11 @@ export function inspectJoin(
   loginUid: string,
   nowMs: number,
 ): JoinInspection {
+  const state = eventState(event);
   if (
-    event.status === "scheduled" &&
-    typeof event.startAtMs === "number" &&
-    nowMs >= event.startAtMs &&
+    state.status === "scheduled" &&
+    typeof state.startAtMs === "number" &&
+    nowMs >= state.startAtMs &&
     participantCount(event) < 2
   ) {
     return { kind: "settle-due" };
@@ -175,7 +184,7 @@ export function inspectJoin(
     directParticipation,
     needsOwnership:
       !directParticipation.isParticipant ||
-      (typeof event.startAtMs === "number" && nowMs >= event.startAtMs),
+      (typeof state.startAtMs === "number" && nowMs >= state.startAtMs),
   };
 }
 
@@ -194,6 +203,7 @@ export function planJoin({
   inspection: Extract<JoinInspection, { kind: "resolve-participant" }>;
   ownershipSnapshot: EventOwnershipSnapshot | null;
 }): JoinDraft | { kind: "settle-due" } {
+  const state = eventState(event);
   const { directParticipation } = inspection;
   let profile: GameplayProfile | null = null;
   let existingParticipantProfileId = directParticipation.profileId || "";
@@ -220,19 +230,21 @@ export function planJoin({
     existingParticipantProfileId =
       ownedParticipation.profileId || profile.profileId;
   }
-  if (event.status !== "scheduled") {
+  if (state.status !== "scheduled") {
     throw new AuthApiFailure(
       409,
       "failed-precondition",
       "This event has already started.",
     );
   }
-  if (typeof event.startAtMs === "number" && nowMs >= event.startAtMs) {
+  if (typeof state.startAtMs === "number" && nowMs >= state.startAtMs) {
     return { kind: "settle-due" };
   }
-  const participants = toRecord(event.participants) || {};
-  const existingParticipant = toRecord(
-    participants[existingParticipantProfileId],
+  const participants =
+    plainEventParticipants(event) || createEventParticipantsDocument();
+  const existingParticipant = plainEventParticipantAt(
+    participants,
+    existingParticipantProfileId,
   );
   if (
     !existingParticipant &&
@@ -244,7 +256,8 @@ export function planJoin({
       `This event is full (${MAX_EVENT_PARTICIPANTS} players max).`,
     );
   }
-  const existingJoinedAtMs = existingParticipant?.joinedAtMs;
+  const existingJoinedAtMs =
+    eventParticipantState(existingParticipant).joinedAtMs;
   const participant = directParticipation.isParticipant
     ? directParticipantSnapshot(
         existingParticipant,
@@ -259,20 +272,23 @@ export function planJoin({
   return {
     kind: "join",
     participant,
-    eventForSettlement: structuredClone({
-      ...event,
-      participants: {
-        ...participants,
-        [existingParticipantProfileId]: participant,
-      },
-      updatedAtMs: nowMs,
-    }),
+    eventForSettlement: cloneEventDocument(
+      copyEventDocument(event, {
+        participants: withEventParticipant(
+          participants,
+          existingParticipantProfileId,
+          createEventParticipantDocument(participant),
+        ),
+        updatedAtMs: nowMs,
+      }),
+      "structured",
+    ),
     updates: [
       {
         kind: "event-participant",
         eventId,
         profileId: existingParticipantProfileId,
-        value: participant,
+        value: createEventParticipantDocument(participant),
       },
       eventField(eventId, "updatedAtMs", nowMs),
     ],
@@ -331,11 +347,13 @@ export function resolveRemovalContext({
   participantProfileId: string | null;
   ownershipSnapshot: EventOwnershipSnapshot | null;
 }): RemovalContext {
+  const state = eventState(event);
   const isLeaving = requestedProfileId === null;
   let participantProfileId = requestedProfileId || "";
-  const creatorLoginUid = normalizeString(event.createdByLoginUid);
-  const creatorProfileId = normalizeString(event.createdByProfileId);
-  const participants = toRecord(event.participants) || {};
+  const creatorLoginUid = normalizeString(state.createdByLoginUid);
+  const creatorProfileId = normalizeString(state.createdByProfileId);
+  const participants =
+    plainEventParticipants(event) || createEventParticipantsDocument();
   const directCreator = loginUid === creatorLoginUid;
   if (
     !directCreator &&
@@ -361,24 +379,33 @@ export function resolveRemovalContext({
         resolveParticipantParticipation(event, loginUid, ownershipSnapshot),
       ).profileId || "";
   }
-  const targetParticipant = toRecord(participants[participantProfileId]);
-  const targetLoginUid = normalizeString(targetParticipant?.loginUid);
+  const targetParticipant = plainEventParticipantAt(
+    participants,
+    participantProfileId,
+  );
+  const targetLoginUid = normalizeString(
+    eventParticipantState(targetParticipant).loginUid,
+  );
   const targetProfileId =
-    normalizeString(targetParticipant?.profileId) || participantProfileId;
+    normalizeString(eventParticipantState(targetParticipant).profileId) ||
+    participantProfileId;
   if (isLeaving && targetParticipant && ownershipSnapshot) {
     const snapshot = ownershipSnapshot;
     const ownedParticipantIds = applyOwnershipPolicy(() => {
       const ownerProfileId = getLoginProfileId(snapshot, loginUid);
       if (!ownerProfileId) return [];
-      return Object.entries(participants).flatMap(([key, value]) => {
-        const candidate = toRecord(value);
-        if (!candidate) return [];
-        const candidateProfileId = normalizeString(candidate.profileId) || key;
-        return getCanonicalProfileId(snapshot, candidateProfileId) ===
-          ownerProfileId
-          ? [key]
-          : [];
-      });
+      return plainEventParticipantEntries(participants).flatMap(
+        ([key, value]) => {
+          const candidate = readPlainEventParticipantDocument(value);
+          if (!candidate) return [];
+          const candidateProfileId =
+            normalizeString(eventParticipantState(candidate).profileId) || key;
+          return getCanonicalProfileId(snapshot, candidateProfileId) ===
+            ownerProfileId
+            ? [key]
+            : [];
+        },
+      );
     });
     if (
       ownedParticipantIds.length !== 1 ||
@@ -391,7 +418,7 @@ export function resolveRemovalContext({
       );
     }
   }
-  if (event.status !== "scheduled") {
+  if (state.status !== "scheduled") {
     throw new AuthApiFailure(
       409,
       "failed-precondition",
@@ -447,18 +474,21 @@ export function assertRemovalAllowed({
     targetProfileId === creatorProfileId ||
     targetLoginUid === creatorLoginUid;
   if (!targetIsCreator && directCreator) {
-    const participants = toRecord(event.participants) || {};
-    const hasSeparateCreatorParticipant = Object.entries(participants).some(
-      ([candidateProfileId, value]) => {
-        if (candidateProfileId === participantProfileId) return false;
-        const candidate = toRecord(value);
-        return (
-          candidateProfileId === creatorProfileId ||
-          normalizeString(candidate?.profileId) === creatorProfileId ||
-          normalizeString(candidate?.loginUid) === creatorLoginUid
-        );
-      },
-    );
+    const participants =
+      plainEventParticipants(event) || createEventParticipantsDocument();
+    const hasSeparateCreatorParticipant = plainEventParticipantEntries(
+      participants,
+    ).some(([candidateProfileId, value]) => {
+      if (candidateProfileId === participantProfileId) return false;
+      const candidate = readPlainEventParticipantDocument(value);
+      return (
+        candidateProfileId === creatorProfileId ||
+        normalizeString(eventParticipantState(candidate).profileId) ===
+          creatorProfileId ||
+        normalizeString(eventParticipantState(candidate).loginUid) ===
+          creatorLoginUid
+      );
+    });
     targetIsCreator = !hasSeparateCreatorParticipant;
   }
   if (!targetIsCreator && ownershipSnapshot) {

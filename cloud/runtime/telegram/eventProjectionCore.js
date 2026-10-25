@@ -75,15 +75,22 @@ exports.renderUpcomingMessage =
   exports.EVENT_TELEGRAM_PROJECTION_GUARD_FIELD =
   exports.EVENT_TELEGRAM_DELIVERY_VERSION =
     void 0;
+const eventProjectionRecords_js_1 = require("./eventProjectionRecords.js");
+const documents_js_1 = require("../events/documents.js");
 const values_js_1 = require("./values.js");
 const crypto = __importStar(require("node:crypto"));
 const eventParticipants_js_1 = require("./eventParticipants.js");
 const sundayMonsReminder_js_1 = require("./sundayMonsReminder.js");
 const desiredStateCore_js_1 = require("./desiredStateCore.js");
 const bracket_js_1 = require("../events/bracket.js");
+const eventProjectionRecords_js_2 = require("./eventProjectionRecords.js");
 const events_1 = require("@mons/shared/events");
 const objectProperties = (value) =>
   value && typeof value === "object" ? value : {};
+const telegramAnnouncements = (value) => {
+  const retained = value;
+  return (0, events_1.resolveEventTelegramAnnouncements)(retained);
+};
 const EVENT_TELEGRAM_PROJECTION_LOCK_ROOT = "eventTelegramProjectionLocks";
 exports.EVENT_TELEGRAM_PROJECTION_LOCK_ROOT =
   EVENT_TELEGRAM_PROJECTION_LOCK_ROOT;
@@ -267,7 +274,9 @@ const loadEndedMatchResults = async (eventData, { readRatingUpdates } = {}) => {
     scoreRequests.push({ entry, inviteId, hostLoginUid, guestLoginUid });
   }
   if (scoreRequests.length === 0) {
-    return resultsByKey;
+    return (0, eventProjectionRecords_js_1.retainEventTelegramEndedResults)(
+      resultsByKey,
+    );
   }
   const snapshots = await readRatingUpdates(
     scoreRequests.map(({ inviteId }) => `${inviteId}__${inviteId}`),
@@ -306,7 +315,9 @@ const loadEndedMatchResults = async (eventData, { readRatingUpdates } = {}) => {
         : result.playerManaPoints,
     };
   }
-  return resultsByKey;
+  return (0, eventProjectionRecords_js_1.retainEventTelegramEndedResults)(
+    resultsByKey,
+  );
 };
 exports.loadEndedMatchResults = loadEndedMatchResults;
 const buildStartedThreadMatchKey = (eventData) =>
@@ -327,11 +338,13 @@ const buildEventSignature = (eventData, nowMs = Date.now()) => {
   if (!isV2TelegramEvent(eventData)) {
     return "skip";
   }
-  const status = normalizeString(eventData.status) || EVENT_STATUS_SCHEDULED;
-  const startAtMs = normalizePositiveNumberOrNull(eventData.startAtMs);
-  const announcements = (0, events_1.resolveEventTelegramAnnouncements)(
-    eventData,
+  const status =
+    normalizeString((0, values_js_1.readProperty)(eventData, "status")) ||
+    EVENT_STATUS_SCHEDULED;
+  const startAtMs = normalizePositiveNumberOrNull(
+    (0, values_js_1.readProperty)(eventData, "startAtMs"),
   );
+  const announcements = telegramAnnouncements(eventData);
   const active = !isTerminalStatus(status);
   const upcomingEnabled = announcements.invite && active;
   const includeDateLine = Boolean(
@@ -445,7 +458,10 @@ const parseProjectionState = (raw) => {
     endedText: normalizeText(value.endedText),
     endedAnnouncementArmed: value.endedAnnouncementArmed === true,
     startedMatchKeys,
-    startedMatchLinesByKey,
+    startedMatchLinesByKey: (0,
+    eventProjectionRecords_js_2.retainStartedMatchLines)(
+      startedMatchLinesByKey,
+    ),
     lastProjectedSignature: normalizeString(value.lastProjectedSignature),
   };
 };
@@ -462,12 +478,10 @@ const buildStartedState = (eventId, eventData, rawState = {}) => {
       nextOrder.push(key);
     }
   }
-  const nextLinesByKey = {};
-  for (const [key, value] of Object.entries(state.startedMatchLinesByKey)) {
-    if (nextOrderSet.has(key) && typeof value === "string" && value !== "") {
-      nextLinesByKey[key] = value;
-    }
-  }
+  const nextLinesByKey = (0, eventProjectionRecords_js_2.copyStartedMatchLines)(
+    state.startedMatchLinesByKey,
+    nextOrderSet,
+  );
   let appendedCount = 0;
   for (const entry of activeMatchEntries) {
     const hostProfileId = normalizeString(entry.match.hostProfileId);
@@ -507,7 +521,12 @@ const buildStartedState = (eventId, eventData, rawState = {}) => {
   };
 };
 exports.buildStartedState = buildStartedState;
-const buildEndedState = (eventId, rawEventData, resultsByKey = {}) => {
+const buildEndedState = (
+  eventId,
+  rawEventData,
+  resultsByKey = (0,
+  eventProjectionRecords_js_1.retainEventTelegramEndedResults)({}),
+) => {
   const eventData = objectProperties(rawEventData);
   const participantsByProfileId = getParticipantsByProfileId(eventData);
   const matchLines = collectActiveMatchEntries(eventData).map((entry) => {
@@ -517,7 +536,8 @@ const buildEndedState = (eventId, rawEventData, resultsByKey = {}) => {
     const guestParticipant =
       participantsByProfileId.get(guestProfileId) || null;
     const matchup = `${(0, eventParticipants_js_1.resolveParticipantToken)(hostParticipant, entry.match.hostDisplayName)} vs. ${(0, eventParticipants_js_1.resolveParticipantToken)(guestParticipant, entry.match.guestDisplayName)}`;
-    const result = objectProperties(resultsByKey[entry.key]);
+    const retainedResults = resultsByKey;
+    const result = objectProperties(retainedResults[entry.key]);
     if (
       entry.match.winnerDisqualified === true ||
       result?.status === "disqualified"
@@ -539,18 +559,16 @@ const buildEndedState = (eventId, rawEventData, resultsByKey = {}) => {
     ),
   );
   const placements = (0, bracket_js_1.getEventPrizePlacements)({
-    event: eventData,
+    event: (0, documents_js_1.readEventDocument)(eventData),
     rounds:
-      eventData && eventData.rounds && typeof eventData.rounds === "object"
-        ? objectProperties(eventData.rounds)
-        : {},
-    participantsById,
-    thirdPlaceMatch:
-      eventData &&
-      eventData.thirdPlaceMatch &&
-      typeof eventData.thirdPlaceMatch === "object"
-        ? objectProperties(eventData.thirdPlaceMatch)
-        : null,
+      (0, documents_js_1.readEventRoundsDocument)(eventData?.rounds) ||
+      (0, documents_js_1.createEventRoundsDocument)(),
+    participantsById: (0, documents_js_1.readEventParticipantsDocument)(
+      participantsById,
+    ),
+    thirdPlaceMatch: (0, documents_js_1.readEventMatchDocument)(
+      eventData?.thirdPlaceMatch,
+    ),
   });
   const placementLines = placements.map(({ place, profileId }) => {
     const participant = participantsByProfileId.get(profileId) || null;
@@ -634,14 +652,23 @@ const buildDesiredOperation = ({
 }) => {
   if (desiredText) {
     const edit = Boolean(previousText || hasAppliedMessage || !allowSend);
-    return {
-      operation: edit ? "edit" : "send",
-      channel,
-      messageKey: `event:${eventId}:${channel}`,
-      instanceKey: `event:${eventId}:${channel}:v2`,
-      text: desiredText,
-      ifMissing: edit ? (allowSend ? "send" : "skip") : null,
-    };
+    return edit
+      ? {
+          operation: "edit",
+          channel,
+          messageKey: `event:${eventId}:${channel}`,
+          instanceKey: `event:${eventId}:${channel}:v2`,
+          text: desiredText,
+          ifMissing: allowSend ? "send" : "skip",
+        }
+      : {
+          operation: "send",
+          channel,
+          messageKey: `event:${eventId}:${channel}`,
+          instanceKey: `event:${eventId}:${channel}:v2`,
+          text: desiredText,
+          ifMissing: null,
+        };
   }
   if (!active && previousText) {
     return {
@@ -658,7 +685,8 @@ const buildDesiredOperation = ({
 const buildEventTelegramProjection = ({
   eventId,
   eventData,
-  endedMatchResults = {},
+  endedMatchResults = (0,
+  eventProjectionRecords_js_1.retainEventTelegramEndedResults)({}),
   state: rawState,
   upcomingMessage,
   reminderMessage,
@@ -669,10 +697,10 @@ const buildEventTelegramProjection = ({
     return { action: "skip", reason: "not-v2" };
   }
   const state = parseProjectionState(rawState);
-  const status = normalizeString(eventData.status) || EVENT_STATUS_SCHEDULED;
-  const announcements = (0, events_1.resolveEventTelegramAnnouncements)(
-    eventData,
-  );
+  const status =
+    normalizeString((0, values_js_1.readProperty)(eventData, "status")) ||
+    EVENT_STATUS_SCHEDULED;
+  const announcements = telegramAnnouncements(eventData);
   const active = !isTerminalStatus(status);
   const upcoming = parseEventMessage(
     normalizedEventId,
@@ -813,7 +841,8 @@ const buildEventTelegramProjection = ({
     action: "project",
     signature,
     operations,
-    state: {
+    state: (0,
+    eventProjectionRecords_js_2.createEventTelegramProjectionDocument)({
       schemaVersion: EVENT_TELEGRAM_DELIVERY_VERSION,
       upcomingText: nextUpcomingText,
       reminderText: nextReminderText,
@@ -824,7 +853,7 @@ const buildEventTelegramProjection = ({
       startedMatchLinesByKey: startedState.startedMatchLinesByKey,
       lastProjectedSignature: signature,
       updatedAtMs: Math.floor(nowMs),
-    },
+    }),
   };
 };
 exports.buildEventTelegramProjection = buildEventTelegramProjection;
@@ -873,10 +902,10 @@ const addEventTelegramProjectionGuard = ({ changes, guard }) => {
   }
   return {
     ...changes,
-    state: {
-      ...changes.state,
-      [EVENT_TELEGRAM_PROJECTION_GUARD_FIELD]: { ...guard },
-    },
+    state: (0, eventProjectionRecords_js_2.withEventTelegramProjectionGuard)(
+      changes.state,
+      guard,
+    ),
     desired: changes.desired.map(({ messageKey, value }) => ({
       messageKey,
       value: {

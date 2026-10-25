@@ -1,3 +1,8 @@
+import {
+  eventDocumentFixture,
+  eventParticipantsFixture,
+  eventRecordFixture,
+} from "./eventCompatibilityFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { EventParticipantSnapshot } from "@mons/shared/events";
@@ -42,8 +47,8 @@ function participant(
   };
 }
 
-function event(overrides: EventRecord = {}): EventRecord {
-  return {
+function event(overrides: Record<string, unknown> = {}) {
+  return eventDocumentFixture({
     eventId: "event-1",
     status: "scheduled",
     startAtMs: 100,
@@ -55,7 +60,7 @@ function event(overrides: EventRecord = {}): EventRecord {
       guest: participant("guest", "guest-login"),
     },
     ...overrides,
-  };
+  });
 }
 
 function ownershipSnapshot(
@@ -160,7 +165,7 @@ test("join drafts preserve the source roster and isolate the settlement copy fro
     },
     eventField("event-1", "updatedAtMs", 50),
   ]);
-  const settlementParticipants = draft.eventForSettlement
+  const settlementParticipants = eventRecordFixture(draft.eventForSettlement)
     .participants as Record<string, EventParticipantSnapshot>;
   settlementParticipants.creator.displayName = "mutated-by-due-builder";
   delete settlementParticipants.guest;
@@ -212,10 +217,14 @@ test("join finalization replaces the retired child with the canonical parent wit
   const transition = freeze<EventDueTransition>({
     didChange: true,
     updates: [
-      eventField("event-1", "participants", {
-        canonical,
-        guest: participant("guest", "guest-login"),
-      }),
+      eventField(
+        "event-1",
+        "participants",
+        eventParticipantsFixture({
+          canonical,
+          guest: participant("guest", "guest-login"),
+        }),
+      ),
       eventField("event-1", "status", "active"),
       eventField("event-1", "updatedAtMs", 100),
     ],
@@ -246,10 +255,14 @@ test("join finalization rejects invalid transitions and ambiguous canonical part
       didChange: true,
       updates: [
         eventField("event-1", "status", "active"),
-        eventField("event-1", "participants", {
-          first: participant("first", "creator-login"),
-          second: participant("second", "creator-login"),
-        }),
+        eventField(
+          "event-1",
+          "participants",
+          eventParticipantsFixture({
+            first: participant("first", "creator-login"),
+            second: participant("second", "creator-login"),
+          }),
+        ),
       ],
     },
   ];

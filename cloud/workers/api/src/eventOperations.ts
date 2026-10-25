@@ -120,10 +120,7 @@ function createRuntime(env: Env, dependencies: EventControlDependencies) {
   });
 }
 
-function runtimeRequest(
-  identity: RequestIdentity,
-  data: Record<string, unknown>,
-) {
+function runtimeRequest(identity: RequestIdentity, data: unknown) {
   return {
     auth: { uid: identity.uid },
     data,

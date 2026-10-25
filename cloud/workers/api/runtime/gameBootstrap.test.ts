@@ -1,3 +1,5 @@
+import { retainedInviteSourceFixture } from "../test/inviteDocumentFixture.ts";
+import { unwrapMatchStateWireFixture } from "../test/matchRecordFixture.ts";
 import { env, exports } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,7 +10,7 @@ import {
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { handleGameBootstrapRoute } from "../src/gameBootstrapRoute.ts";
 import type { InviteReactions } from "../src/inviteReactions.ts";
-import { getMatchStateRpc, unwrapMatchStateRpc } from "../src/matchStateRpc.ts";
+import { getMatchStateRpc } from "../src/matchStateRpc.ts";
 import { socketTestIdentity } from "../test/socketTestSession.ts";
 
 const rooms: DurableObjectStub<InviteReactions>[] = [];
@@ -46,7 +48,7 @@ async function fixture({ rematch = false, guest = true } = {}) {
     Reflect.set(instance, "inviteReader", async () => structuredClone(invite));
   });
   const matchId = rematch ? `${inviteId}1` : inviteId;
-  unwrapMatchStateRpc(
+  unwrapMatchStateWireFixture(
     await getMatchStateRpc(env, inviteId).createCanonicalMatch({
       inviteId,
       epoch: 2,
@@ -71,11 +73,12 @@ async function fixture({ rematch = false, guest = true } = {}) {
     }),
   );
   const repository = createGameplayRepository(env);
-  repository.readInviteMetadata = async () => ({
-    hostId: invite.hostId,
-    guestId: invite.guestId,
-    hostColor: invite.hostColor,
-  });
+  repository.readInviteMetadata = async () =>
+    retainedInviteSourceFixture({
+      hostId: invite.hostId,
+      guestId: invite.guestId,
+      hostColor: invite.hostColor,
+    });
   repository.readMatchRecord = async () => {
     throw new Error("unexpected-record-route-read");
   };
@@ -183,7 +186,7 @@ describe("game bootstrap Worker and canonical room", () => {
       expect(cached.metadata.snapshot.guestId).toBeNull();
       state.invite.guestId = "guest-login";
       state.repository.readInviteMetadata = async () =>
-        structuredClone(state.invite);
+        retainedInviteSourceFixture(structuredClone(state.invite));
       const body = await bootstrap(state, "guest-login");
       expect(body.viewer.role).toBe("guest");
       expect(body.viewer.actorUid).toBe("guest-login");
@@ -202,7 +205,7 @@ describe("game bootstrap Worker and canonical room", () => {
     expect(cached.status).toBe("ok");
     state.invite.hostRematches = "1x";
     state.repository.readInviteMetadata = async () =>
-      structuredClone(state.invite);
+      retainedInviteSourceFixture(structuredClone(state.invite));
     const body = await bootstrap(state);
     expect(body.match.matchId).toBe(state.matchId);
     expect(body.metadata.hostRematches).toBe("1x");
@@ -216,7 +219,7 @@ describe("game bootstrap Worker and canonical room", () => {
     expect(cached.status).toBe("ok");
     state.invite.guestRematches = "1";
     state.repository.readInviteMetadata = async () =>
-      structuredClone(state.invite);
+      retainedInviteSourceFixture(structuredClone(state.invite));
     const body = await bootstrap(state, "guest-login");
     expect(body.viewer.role).toBe("guest");
     expect(body.match.matchId).toBe(state.matchId);

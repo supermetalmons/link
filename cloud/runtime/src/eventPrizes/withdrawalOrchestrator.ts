@@ -1,4 +1,13 @@
-import type { WithdrawalData } from "./types.js";
+import type { WithdrawalDocument } from "./records.js";
+import {
+  withdrawalIdentity,
+  withdrawalOwnership,
+  withdrawalRecipientAddress,
+  withdrawalSubmissionStrings,
+  withdrawalStatus,
+  withdrawalPlace,
+} from "./records.js";
+import { readWithdrawalRequest } from "./requests.js";
 import type {
   WithdrawalRuntimeDependencies,
   SubmittedTransaction,
@@ -55,15 +64,16 @@ const normalizeString = (value: unknown): string =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 
 const buildCompletedResponse = (
-  withdrawal: WithdrawalData,
+  withdrawal: WithdrawalDocument,
 ): WithdrawalCompletedResponse => ({
   ok: true,
   status: "completed",
-  eventId: normalizeString(withdrawal.eventId),
-  prizeId: normalizeString(withdrawal.prizeId),
-  assetAddress: normalizeString(withdrawal.assetAddress),
-  recipientAddress: normalizeString(withdrawal.recipientAddress),
-  transactionSignature: normalizeString(withdrawal.transactionSignature),
+  eventId: withdrawalIdentity(withdrawal).eventId,
+  prizeId: withdrawalIdentity(withdrawal).prizeId,
+  assetAddress: withdrawalIdentity(withdrawal).assetAddress,
+  recipientAddress: withdrawalRecipientAddress(withdrawal),
+  transactionSignature:
+    withdrawalSubmissionStrings(withdrawal).transactionSignature,
 });
 
 const handleWithdrawEventPrize = async (
@@ -76,11 +86,9 @@ const handleWithdrawEventPrize = async (
       "The function must be called while authenticated.",
     );
   }
-  const requestData = (
-    request.data && typeof request.data === "object" ? request.data : {}
-  ) as WithdrawalData;
-  const eventId = normalizeString(requestData.eventId);
-  const prizeId = normalizeString(requestData.prizeId);
+  const requestData = readWithdrawalRequest(request.data);
+  const eventId = requestData.eventId;
+  const prizeId = requestData.prizeId;
   if (!eventId || !prizeId) {
     throw new HttpsError(
       "invalid-argument",
@@ -127,7 +135,7 @@ const handleWithdrawEventPrize = async (
   }
   const withdrawalRecord = withdrawals.record(eventId, prizeId);
   const existingWithdrawal = await withdrawalRecord.read();
-  const existingProfileId = normalizeString(existingWithdrawal?.profileId);
+  const existingProfileId = withdrawalOwnership(existingWithdrawal).profileId;
   let canonicalRecordProfileId = existingProfileId;
   let existingRecordOwnedByRequest = isWithdrawalRecordOwnedByRequest(
     existingWithdrawal,
@@ -151,7 +159,7 @@ const handleWithdrawEventPrize = async (
   }
   if (isCompletedEventPrizeWithdrawal(existingWithdrawal, eventId, prizeId)) {
     const completedRecipientAddress = normalizeSolanaAddress(
-      existingWithdrawal!.recipientAddress,
+      withdrawalRecipientAddress(existingWithdrawal),
     );
     if (
       !existingRecordOwnedByRequest ||
@@ -176,7 +184,7 @@ const handleWithdrawEventPrize = async (
   }
 
   const submittedRecordCanResume =
-    existingWithdrawal?.status === "submitted" &&
+    withdrawalStatus(existingWithdrawal) === "submitted" &&
     isWithdrawalRecordForPrize(
       existingWithdrawal,
       eventId,
@@ -184,9 +192,11 @@ const handleWithdrawEventPrize = async (
       assetAddress,
     ) &&
     existingRecordOwnedByRequest &&
-    Boolean(normalizeSolanaAddress(existingWithdrawal.recipientAddress)) &&
-    [1, 2, 3].includes(Number(existingWithdrawal.place));
-  let place = Number(existingWithdrawal?.place);
+    Boolean(
+      normalizeSolanaAddress(withdrawalRecipientAddress(existingWithdrawal)),
+    ) &&
+    [1, 2, 3].includes(withdrawalPlace(existingWithdrawal));
+  let place = withdrawalPlace(existingWithdrawal);
   if (!submittedRecordCanResume) {
     const assignment = await dependencies.readProfileEventPrizeAssignment(
       profileId,
@@ -255,7 +265,7 @@ const handleWithdrawEventPrize = async (
   try {
     const umi = createEventPrizeUmi(prize.standard);
     let submittedInspection: SubmittedInspection | null = null;
-    if (withdrawal.status === "submitted") {
+    if (withdrawalStatus(withdrawal) === "submitted") {
       submittedInspection = await inspectSubmittedWithdrawal({
         umi,
         withdrawal,
@@ -271,10 +281,10 @@ const handleWithdrawEventPrize = async (
       umi,
       prize,
       recipientAddress,
-      needsTransferBuilder: withdrawal.status !== "submitted",
+      needsTransferBuilder: withdrawalStatus(withdrawal) !== "submitted",
     });
     let assetOwner;
-    if (withdrawal.status === "submitted") {
+    if (withdrawalStatus(withdrawal) === "submitted") {
       const resolution = await reconcileSubmittedAssetState({
         umi,
         withdrawal,

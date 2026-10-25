@@ -1,11 +1,17 @@
 import {
+  startedAuthOperation,
+  finishedAuthOperation,
+  successfulAuthOperation,
+  type AuthOperationOutcome,
+  type AuthOperationStartInput,
+} from "./operationRecords.ts";
+import {
   isAuthProfileResponse,
   isLinkedAuthMethodsResponse,
   type AuthMethodKey,
   type AuthProfileResponse,
   type LinkedAuthMethodsResponse,
 } from "@mons/shared/auth";
-import { AuthApiFailure } from "../authErrors.ts";
 import {
   assertAuthOperationContext,
   canCompleteVerifyOperation,
@@ -20,7 +26,6 @@ import {
   commitCanonicalPlan,
   readCanonicalAuthOperation,
   type CanonicalAuthOperationSnapshot,
-  type CanonicalAuthOperationValue,
 } from "../profileCanonicalD1.ts";
 import {
   authFailure,
@@ -28,12 +33,32 @@ import {
   methodFromAggregate,
   methodValue,
   profileResponse,
-  record,
 } from "./policy.ts";
 import type {
   CanonicalIdentityReads,
   RepairedVerifiedCaller,
 } from "./types.ts";
+
+type BegunAuthOperation = {
+  operation: CanonicalAuthOperationSnapshot;
+  replay: AuthProfileResponse | LinkedAuthMethodsResponse | null;
+};
+type BeginAuthOperation = {
+  (
+    operationId: string,
+    kind: "verify",
+    method: AuthMethodKey,
+    uid: string,
+    meta: VerifyOperationMeta,
+  ): Promise<BegunAuthOperation>;
+  (
+    operationId: string,
+    kind: "unlink",
+    method: AuthMethodKey,
+    uid: string,
+    meta: null,
+  ): Promise<BegunAuthOperation>;
+};
 
 export function createCanonicalAuthOperations({
   db,
@@ -80,12 +105,12 @@ export function createCanonicalAuthOperations({
     };
   };
 
-  const beginOperation = async (
-    operationId: string,
-    kind: "unlink" | "verify",
-    method: AuthMethodKey,
-    uid: string,
-    meta: VerifyOperationMeta | null,
+  const beginOperation: BeginAuthOperation = async (
+    operationId,
+    kind,
+    method,
+    uid,
+    meta,
   ) => {
     for (let attempt = 0; attempt < 3; attempt++) {
       const existing = await readCanonicalAuthOperation(db, operationId);
@@ -103,19 +128,14 @@ export function createCanonicalAuthOperations({
         return { operation: existing, replay: null };
       }
       const timestamp = now();
-      const value: CanonicalAuthOperationValue = {
+      const value = startedAuthOperation({
         operationId,
         kind,
         method,
         loginUid: uid,
-        status: "started",
         meta,
-        result: null,
-        errorCode: null,
-        errorMessage: null,
-        startedAtMs: timestamp,
-        updatedAtMs: timestamp,
-      };
+        timestamp,
+      } as AuthOperationStartInput);
       try {
         await commitCanonicalPlan(db, {
           expectations: [{ kind: "auth-operation-absent", operationId }],
@@ -134,32 +154,13 @@ export function createCanonicalAuthOperations({
 
   const finishOperation = async (
     operationId: string,
-    outcome:
-      | { result: AuthProfileResponse | LinkedAuthMethodsResponse }
-      | { error: unknown },
+    outcome: AuthOperationOutcome,
   ): Promise<void> => {
     for (let attempt = 0; attempt < 3; attempt++) {
       const operation = await readCanonicalAuthOperation(db, operationId);
       if (!operation || operation.status === "success") return;
       const timestamp = now();
-      const value: CanonicalAuthOperationValue = {
-        ...operation,
-        status: "result" in outcome ? "success" : "failed",
-        result: "result" in outcome ? record(outcome.result) : null,
-        errorCode:
-          "error" in outcome && outcome.error instanceof AuthApiFailure
-            ? outcome.error.code
-            : "error" in outcome
-              ? "unavailable"
-              : null,
-        errorMessage:
-          "error" in outcome && outcome.error instanceof AuthApiFailure
-            ? outcome.error.message
-            : "error" in outcome
-              ? "auth-service-unavailable"
-              : null,
-        updatedAtMs: timestamp,
-      };
+      const value = finishedAuthOperation(operation, outcome, timestamp);
       try {
         await commitCanonicalPlan(db, {
           expectations: [
@@ -181,9 +182,7 @@ export function createCanonicalAuthOperations({
 
   const finishBestEffort = async (
     operationId: string,
-    outcome:
-      | { result: AuthProfileResponse | LinkedAuthMethodsResponse }
-      | { error: unknown },
+    outcome: AuthOperationOutcome,
   ) => {
     try {
       await finishOperation(operationId, outcome);
@@ -200,14 +199,7 @@ export function createCanonicalAuthOperations({
     if (!canCompleteVerifyOperation(operation, verified.method)) {
       return false;
     }
-    const value: CanonicalAuthOperationValue = {
-      ...operation,
-      status: "success",
-      result: record(result),
-      errorCode: null,
-      errorMessage: null,
-      updatedAtMs: now(),
-    };
+    const value = successfulAuthOperation(operation, result, now);
     try {
       await commitCanonicalPlan(db, {
         expectations: [

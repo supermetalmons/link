@@ -1,7 +1,10 @@
+import type { EventProgressOutboxRecord } from "../../../runtime/events.js";
+import type { EventProgressDocument } from "../../../runtime/eventProgressRecords.js";
+import type { EventProjectionOutboxDocument } from "../../../runtime/eventProjectionOutboxRecords.js";
 import type { EventCommitPlan } from "../../../runtime/eventCommands.js";
+import type { EventTelegramProjectionStateDocument } from "../../../runtime/telegram/eventProjectionRecords.js";
 import type {
   EventReads,
-  EventJsonRecord,
   EventPrizeAssignmentRecord,
 } from "../../../runtime/eventReads.js";
 import type { EventLeaseStore } from "../../../runtime/eventLeases.js";
@@ -20,19 +23,12 @@ export type EventLockGuard = {
 export type EventCommitOptions = {
   upcomingEventId?: string;
 };
-export type EventRecordTransaction = (
-  id: string,
-  updater: (
-    current: EventJsonRecord | null,
-  ) => TransactionDecision<EventJsonRecord>,
-  signal?: AbortSignal,
-) => Promise<TransactionResult<EventJsonRecord>>;
 export type EventStore = EventReads &
   EventOutboxReads &
   EventLeaseStore & {
     putEventProgressOutbox(
       outboxId: string,
-      record: EventJsonRecord,
+      record: EventProgressOutboxRecord,
       signal?: AbortSignal,
     ): Promise<void>;
     commitEventPlan(
@@ -73,25 +69,23 @@ export type EventStore = EventReads &
     readEventProgressOutbox(
       outboxId: string,
       signal?: AbortSignal,
-    ): Promise<EventJsonRecord | null>;
+    ): Promise<EventProgressDocument<"pending"> | null>;
     readEventProfileGameProjectionOutbox(
       eventId: string,
       signal?: AbortSignal,
-    ): Promise<EventJsonRecord | null>;
+    ): Promise<EventProjectionOutboxDocument<"profile-game"> | null>;
     readEventTelegramProjectionOutbox(
       eventId: string,
       signal?: AbortSignal,
-    ): Promise<EventJsonRecord | null>;
+    ): Promise<EventProjectionOutboxDocument<"telegram"> | null>;
     readEventTelegramProjectionState(
       eventId: string,
       signal?: AbortSignal,
     ): Promise<{
       generation: number;
       revision: number;
-      state: EventJsonRecord;
+      state: EventTelegramProjectionStateDocument;
     } | null>;
-    transactEventProgressOutbox: EventRecordTransaction;
-    transactEventProgressDeadOutbox: EventRecordTransaction;
     claimEventProfileGameProjectionOutbox(
       eventId: string,
       requestId: string,
@@ -116,9 +110,13 @@ export type EventStore = EventReads &
       requestId: string,
       signal?: AbortSignal,
     ): Promise<boolean>;
-    transactEventProfileGameProjectionOutbox: EventRecordTransaction;
-    transactEventTelegramProjectionOutbox: EventRecordTransaction;
-    transactEventTelegramProjectionState: EventRecordTransaction;
+    transactEventTelegramProjectionState(
+      eventId: string,
+      updater: (
+        current: EventTelegramProjectionStateDocument | null,
+      ) => TransactionDecision<EventTelegramProjectionStateDocument>,
+      signal?: AbortSignal,
+    ): Promise<TransactionResult<EventTelegramProjectionStateDocument>>;
   };
 
 export type EventProgressOutboxWriter = Pick<

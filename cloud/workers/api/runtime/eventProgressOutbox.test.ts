@@ -1,3 +1,4 @@
+import { retainEventProgressRecord } from "../../../runtime/eventProgressRecords.js";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -312,7 +313,11 @@ describe("event progress outbox writer", () => {
       await expect(
         commitEventMutations(observed.database, changes, {
           admission,
-          expectedRecords: { progress: { [outboxId]: outbox } },
+          expectedRecords: {
+            progress: {
+              [outboxId]: retainEventProgressRecord("pending", outbox),
+            },
+          },
         }),
       ).rejects.toBeInstanceOf(EventD1Conflict);
       expect(observed.writeBatches).toHaveLength(1);

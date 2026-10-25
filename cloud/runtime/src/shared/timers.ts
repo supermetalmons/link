@@ -29,6 +29,17 @@ export interface ClaimMatchVictoryByTimerResponse {
   ok: true;
 }
 
+export type ClaimedTimerWrite = {
+  status: "claimed";
+  inviteId: string;
+  playerId: string;
+  opponentId: string;
+  timer: string;
+  turnNumber: number;
+  claimedAtMs: number;
+  expiresAtMs: null;
+};
+
 const MATCH_TIMER_DURATION_MS = 90000;
 const MATCH_TIMER_DURATION_SECONDS: 90 = (MATCH_TIMER_DURATION_MS / 1000) as 90;
 const MATCH_TIMER_TERMINAL = "gg";

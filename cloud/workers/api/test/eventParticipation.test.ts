@@ -2,7 +2,12 @@ import {
   attachEventTestPorts,
   type EventTestSource,
 } from "./eventTestPorts.ts";
-import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
+import {
+  decodeEventCompatibilityPlanFixture,
+  eventDocumentFixture,
+  eventRecordFixture,
+} from "./eventCompatibilityFixture.ts";
+import type { EventDocument } from "../../../runtime/events/documents.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { EventSnapshot } from "../../../runtime/eventReads.js";
@@ -84,7 +89,7 @@ const creatorParticipant = (joinedAtMs: number) => ({
 });
 
 function scheduledEvent(overrides: Record<string, unknown> = {}) {
-  return {
+  return eventDocumentFixture({
     eventId: "event-1",
     status: "scheduled",
     startAtMs: 10_000,
@@ -95,7 +100,7 @@ function scheduledEvent(overrides: Record<string, unknown> = {}) {
       [profileId]: participant(profileId, identity.uid, 1),
     },
     ...overrides,
-  };
+  });
 }
 
 function createRepository({
@@ -114,7 +119,9 @@ function createRepository({
   patchError?: Error;
 } = {}) {
   const patches: Record<string, unknown>[] = [];
-  const readEventValue = (eventId: string): Record<string, unknown> | null => {
+  const readEventValue = (
+    eventId: string,
+  ): (EventDocument & Record<string, unknown>) | null => {
     const value = structuredClone(
       pathValues[`events/${eventId}`] ??
         (eventId === (event?.eventId || "event-1") ? event : null),
@@ -134,7 +141,7 @@ function createRepository({
         else parent[key] = structuredClone(fieldValue);
       }
     }
-    return value;
+    return value ? eventDocumentFixture(value) : null;
   };
   const readSelections = (eventId: string): Record<string, string> => {
     const prefix = `eventPrizeSelections/${eventId}`;
@@ -373,7 +380,7 @@ function createLockManager({
 
 const noDueTransition = async () => ({
   didChange: false,
-  updates: decodeEventUpdates({}),
+  updates: decodeEventCompatibilityPlanFixture({}),
 });
 
 async function expectFailure(
@@ -763,7 +770,7 @@ test("persists an overdue transition before rejecting a late join", async () => 
       now: () => 100,
       buildDueUpdates: async () => ({
         didChange: true,
-        updates: decodeEventUpdates({
+        updates: decodeEventCompatibilityPlanFixture({
           "events/event-1/status": "active",
           "events/event-1/updatedAtMs": 100,
         }),
@@ -915,7 +922,7 @@ test("uses one locked prize snapshot when a join crosses the start deadline", as
         assert.deepEqual(input.prizeSelections, selections);
         return {
           didChange: true,
-          updates: decodeEventUpdates({
+          updates: decodeEventCompatibilityPlanFixture({
             [`events/${eventId}/status`]: "active",
             [`events/${eventId}/updatedAtMs`]: 101,
           }),
@@ -968,12 +975,13 @@ test("refreshes event and prize selections together after the participation lock
         },
       }).manager,
       now: () => 100,
-      buildDueUpdates: async (input: {
-        event: Record<string, unknown>;
-        prizeSelections?: unknown;
-      }) => {
+      buildDueUpdates: async (
+        input: Parameters<
+          NonNullable<EventParticipationDependencies["buildDueUpdates"]>
+        >[0],
+      ) => {
         dueBuilds += 1;
-        assert.equal(input.event.startAtMs, 100);
+        assert.equal(eventRecordFixture(input.event).startAtMs, 100);
         assert.deepEqual(input.prizeSelections, { [profileId]: "1111" });
         return noDueTransition();
       },
@@ -1077,9 +1085,10 @@ test("deadline-crossing join persists and reconciles its canonical participant",
   );
   assert.equal(reconciliationSnapshots.length, 1);
   assert.deepEqual(
-    (reconciliationSnapshots[0].event?.participants as Record<string, unknown>)[
-      canonicalProfileId
-    ],
+    (
+      eventRecordFixture(reconciliationSnapshots[0].event)
+        .participants as Record<string, unknown>
+    )[canonicalProfileId],
     canonicalParticipant,
   );
 });
@@ -1095,7 +1104,7 @@ test("does not persist an overdue transition after losing the lock", async () =>
       now: () => 100,
       buildDueUpdates: async () => ({
         didChange: true,
-        updates: decodeEventUpdates({
+        updates: decodeEventCompatibilityPlanFixture({
           "events/event-1/status": "active",
           "events/event-1/updatedAtMs": 100,
         }),
@@ -1190,7 +1199,9 @@ test("requires an ambiguous join to include its due transition", async () => {
       now: () => 100,
       buildDueUpdates: async () => ({
         didChange: true,
-        updates: decodeEventUpdates({ "events/event-1/status": "active" }),
+        updates: decodeEventCompatibilityPlanFixture({
+          "events/event-1/status": "active",
+        }),
       }),
     }),
     (error) => error === patchError,
@@ -1214,7 +1225,9 @@ test("reconciles an ambiguous join with its committed due transition", async () 
       now: () => 100,
       buildDueUpdates: async () => ({
         didChange: true,
-        updates: decodeEventUpdates({ "events/event-1/status": "active" }),
+        updates: decodeEventCompatibilityPlanFixture({
+          "events/event-1/status": "active",
+        }),
       }),
     }),
     { ok: true, eventId: "event-1", participant: stored },
@@ -1342,10 +1355,11 @@ test("leaves an upcoming prize event and can rejoin with a fresh entry", async (
   assert.equal(lock.stopped(), 1);
   assert.equal(lock.released(), 1);
   const leftSnapshot = await repository.readEventSnapshot(eventId);
-  assert.equal(leftSnapshot.event?.status, "scheduled");
-  assert.deepEqual(Object.keys(leftSnapshot.event?.participants || {}), [
-    profileId,
-  ]);
+  assert.equal(eventRecordFixture(leftSnapshot.event).status, "scheduled");
+  assert.deepEqual(
+    Object.keys(eventRecordFixture(leftSnapshot.event).participants || {}),
+    [profileId],
+  );
   assert.deepEqual(leftSnapshot.prizeSelections, {});
   await expectFailure(
     leaveEvent({ uid: "target-login" }, { eventId }, repository, {
@@ -1492,12 +1506,15 @@ test("retains the original roster at the leave deadline and when crossing it", a
         now: () => times.shift() || 100,
         buildDueUpdates: async (input) => {
           dueCalls++;
-          assert.deepEqual(input.event.participants, event.participants);
+          assert.deepEqual(
+            eventRecordFixture(input.event).participants,
+            event.participants,
+          );
           assert.deepEqual(input.prizeSelections, { "target-profile": "1092" });
           assert.ok(input.ownershipSnapshot);
           return {
             didChange: true,
-            updates: decodeEventUpdates({
+            updates: decodeEventCompatibilityPlanFixture({
               [`events/${eventId}/status`]: "active",
               [`events/${eventId}/updatedAtMs`]: 100,
             }),
@@ -1670,7 +1687,7 @@ test("storage deadline rejection starts the unchanged roster without reconciling
     reconciliationReads++;
     return {
       eventId: "event-1",
-      event: { updatedAtMs: 99, participants: {} },
+      event: eventDocumentFixture({ updatedAtMs: 99, participants: {} }),
       prizeSelections: {},
       revision: 1,
     };
@@ -1683,10 +1700,13 @@ test("storage deadline rejection starts the unchanged roster without reconciling
       buildDueUpdates: async (input) => {
         dueCalls++;
         assert.equal(input.nowMs, 100);
-        assert.deepEqual(input.event.participants, event.participants);
+        assert.deepEqual(
+          eventRecordFixture(input.event).participants,
+          event.participants,
+        );
         return {
           didChange: true,
-          updates: decodeEventUpdates({
+          updates: decodeEventCompatibilityPlanFixture({
             "events/event-1/status": "active",
             "events/event-1/updatedAtMs": 100,
           }),
@@ -2000,12 +2020,12 @@ test("requires one removal snapshot to confirm participant, selection, and times
       snapshotReads += 1;
       return {
         eventId,
-        event: {
+        event: eventDocumentFixture({
           updatedAtMs: stale === "timestamp" ? 99 : 100,
           ...(stale === "participant"
             ? { participants: { "target-profile": target } }
             : {}),
-        },
+        }),
         prizeSelections:
           stale === "selection" ? { "target-profile": "1092" } : {},
         revision: 1,
@@ -2310,7 +2330,7 @@ test("rejects missing participants and rechecks the start boundary", async () =>
         now: () => times.shift() || 101,
         buildDueUpdates: async () => ({
           didChange: true,
-          updates: decodeEventUpdates({
+          updates: decodeEventCompatibilityPlanFixture({
             "events/event-1/status": "active",
             "events/event-1/updatedAtMs": 101,
           }),

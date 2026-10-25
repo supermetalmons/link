@@ -1,8 +1,6 @@
 // Generated from src/eventPrizeWithdrawalState.ts. Run npm run generate:runtime.
-import type {
-  WithdrawalData,
-  WithdrawalCompletionInput,
-} from "./eventPrizes/types.js";
+import type { WithdrawalCompletionInput } from "./eventPrizes/types.js";
+import { type WithdrawalDocument } from "./eventPrizes/records.js";
 import {
   filterProjectableEventPrizeAssignments,
   getCompletedEventPrizeProjectionCleanupRequest,
@@ -18,7 +16,7 @@ declare const WITHDRAWAL_LEASE_MS: number;
 declare const normalizeSolanaAddress: (value: unknown) => string;
 declare const decodeAdminSecretKey: (value: unknown) => Uint8Array | null;
 declare const isWithdrawalRecordOwnedByRequest: (
-  value: unknown,
+  value: WithdrawalDocument | null | undefined,
   profileId: unknown,
   requesterUid: unknown,
   canonicalRecordProfileId?: unknown,
@@ -28,7 +26,7 @@ declare const getWithdrawalProjectionProfileIds: ({
   withdrawal,
   profileIds,
 }: {
-  withdrawal: WithdrawalData | null | undefined;
+  withdrawal: WithdrawalDocument | null | undefined;
   profileIds?: unknown;
 }) => string[];
 declare const buildWithdrawalCompletion: ({
@@ -42,25 +40,9 @@ declare const buildWithdrawalCompletion: ({
   completedAtMs,
 }: WithdrawalCompletionInput & {
   completedAtMs: number;
-}) => {
-  eventId: string;
-  prizeId: string;
-  assetAddress: string;
-  assetStandard: string;
-  profileId: string;
-  entitledProfileId: string;
-  place: number;
-  recipientAddress: string;
-  requesterUid: string;
-  status: "completed";
-  transactionSignature: string;
-  startedAtMs: number;
-  submittedAtMs: number;
-  completedAtMs: number;
-  updatedAtMs: number;
-};
+}) => import("./eventPrizes/records.js").CompletedWithdrawalDocument;
 export type WithdrawalClaimInput = {
-  current: unknown;
+  current: WithdrawalDocument | null;
   eventId: string;
   prizeId: string;
   assetAddress: string;
@@ -81,7 +63,7 @@ export type WithdrawalClaimDecision = {
     | "destination-mismatch"
     | "busy"
     | "acquired";
-  value: WithdrawalData;
+  value: WithdrawalDocument;
 };
 declare const decideWithdrawalClaim: ({
   current,

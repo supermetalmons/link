@@ -1,3 +1,9 @@
+import type {
+  ApiSocketUrl,
+  ApiRoutePath,
+  ApiRequest,
+  ApiResponse,
+} from "@mons/shared/api-contracts";
 import {
   REACTION_AUTH_PROTOCOL_PREFIX,
   REACTION_MAX_MESSAGE_BYTES,
@@ -5,10 +11,11 @@ import {
   isInviteReactionForInvite,
   isReactionSocketToken,
   isSendInviteReactionResponse,
-  type InviteReaction,
-  type SendInviteReactionResponse,
 } from "@mons/shared/reactions";
 import type { AuthTokenProvider } from "./authApi";
+type InviteReaction = ApiRequest<"POST /invites/:inviteId/reactions">;
+type SendInviteReactionResponse =
+  ApiResponse<"POST /invites/:inviteId/reactions">;
 
 const REACTIONS_API_ROOT = "https://api.mons.link";
 export const REACTION_SEND_TIMEOUT_MS = 5_000;
@@ -23,11 +30,15 @@ export class InviteReactionApiError extends Error {
   }
 }
 
-function reactionPath(inviteId: string): string {
+function reactionPath(
+  inviteId: string,
+): ApiRoutePath<"POST /invites/:inviteId/reactions"> {
   return `/invites/${encodeURIComponent(inviteId)}/reactions`;
 }
 
-export function getInviteReactionSocketUrl(inviteId: string): string {
+export function getInviteReactionSocketUrl(
+  inviteId: string,
+): ApiSocketUrl<"GET /invites/:inviteId/reactions/socket"> {
   return `${REACTIONS_API_ROOT.replace("https:", "wss:")}${reactionPath(inviteId)}/socket`;
 }
 

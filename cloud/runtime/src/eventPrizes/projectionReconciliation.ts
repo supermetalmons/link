@@ -1,5 +1,6 @@
+import type { WithdrawalDocument } from "./records.js";
+import { withdrawalOwnership } from "./records.js";
 import type {
-  WithdrawalData,
   WithdrawalCompletionInput,
   WithdrawalProjectionDependencies,
   WithdrawalCompletionDependencies,
@@ -12,7 +13,7 @@ import {
 } from "../eventPrizeWithdrawalState.js";
 
 type ProjectionReconciliationInput = {
-  withdrawal: WithdrawalData;
+  withdrawal: WithdrawalDocument;
   profileIds?: readonly string[];
   eventId: string;
   prizeId: string;
@@ -85,7 +86,7 @@ const finalizeWithdrawal = async (
   dependencies: WithdrawalCompletionDependencies,
 ) => {
   const { withdrawals, readProfileByLoginUid } = dependencies;
-  const requesterUid = normalizeString(withdrawal.requesterUid);
+  const requesterUid = withdrawalOwnership(withdrawal).requesterUid;
   if (!requesterUid) {
     throw new HttpsError(
       "failed-precondition",
@@ -128,7 +129,7 @@ const finalizeWithdrawal = async (
     transactionSignature,
     completedAtMs,
   });
-  await withdrawals.replaceRecords([{ eventId, prizeId, value: completed }]);
+  await withdrawals.replaceCompleted([{ eventId, prizeId, value: completed }]);
   await reconcileCompletedWithdrawalProjections(
     {
       withdrawal: completed,

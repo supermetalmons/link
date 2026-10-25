@@ -1,3 +1,8 @@
+import type {
+  ApiQuery,
+  ApiRequest,
+  ApiResponse,
+} from "@mons/shared/api-contracts";
 import type { StoredSession, SessionRevocation } from "../session/sessionStore";
 import {
   SESSION_ANONYMOUS_PATH,
@@ -25,17 +30,24 @@ import {
   type SessionEventBootstrapTarget,
   type SessionIdentityBootstrap,
 } from "@mons/shared/session-bootstrap";
-
 export type { SessionTokenResponse } from "@mons/shared/session-auth";
 export type SessionTokenResult = SessionTokenResponse & {
   accessDeadlineMs: number;
 };
-export type SessionTokenReadResult = SessionTokenResult & {
-  gameBootstrap?: SessionBootstrap;
-  eventBootstrap?: SessionEventBootstrap;
-  identityBootstrap?: SessionIdentityBootstrap;
-};
+export type SessionTokenReadResult = ApiResponse<
+  "POST /auth/session/anonymous" | "POST /auth/session/refresh"
+> & { accessDeadlineMs: number };
 type SessionReadTarget = SessionBootstrapTarget | SessionEventBootstrapTarget;
+
+const hasNumericTokenTimestamps = (
+  value: unknown,
+): value is { iat: number; exp: number } => {
+  return (
+    !!value &&
+    typeof (value as { iat?: unknown }).iat === "number" &&
+    typeof (value as { exp?: unknown }).exp === "number"
+  );
+};
 
 export class SessionApiError extends Error {
   readonly code: string;
@@ -48,9 +60,20 @@ export class SessionApiError extends Error {
   }
 }
 
-async function request(
-  path: string,
-  options: RequestInit,
+type SessionPath =
+  | typeof SESSION_ANONYMOUS_PATH
+  | typeof SESSION_REFRESH_PATH
+  | typeof SESSION_LOGOUT_PATH;
+type SessionRequestOptions<Path extends SessionPath> = Omit<
+  RequestInit,
+  "body"
+> &
+  (Path extends typeof SESSION_ANONYMOUS_PATH
+    ? { body: string }
+    : { body?: never });
+async function request<const Path extends SessionPath>(
+  path: Path | `${Path}?${string}`,
+  options: SessionRequestOptions<NoInfer<Path>>,
   signal?: AbortSignal,
 ): Promise<Response> {
   const controller = new AbortController();
@@ -197,14 +220,9 @@ async function tokenResponse(
         .split(".")[1]
         .replace(/-/g, "+")
         .replace(/_/g, "/");
-      const claims = JSON.parse(atob(encodedClaims)) as {
-        iat?: unknown;
-        exp?: unknown;
-      };
+      const claims: unknown = JSON.parse(atob(encodedClaims));
       if (
-        !claims ||
-        typeof claims.iat !== "number" ||
-        typeof claims.exp !== "number" ||
+        !hasNumericTokenTimestamps(claims) ||
         !Number.isSafeInteger(claims.iat) ||
         !Number.isSafeInteger(claims.exp) ||
         claims.iat <= 0 ||
@@ -238,9 +256,12 @@ async function tokenResponse(
   }
 }
 
-async function requestToken(
-  path: string,
-  options: RequestInit,
+async function requestToken<
+  const Path extends
+    typeof SESSION_ANONYMOUS_PATH | typeof SESSION_REFRESH_PATH,
+>(
+  path: Path,
+  options: SessionRequestOptions<NoInfer<Path>>,
   sessionId: string,
   target?: SessionReadTarget,
   includeIdentity = false,
@@ -258,13 +279,21 @@ async function requestToken(
     !target
       ? {}
       : "eventId" in target
-        ? { bootstrapEventId: target.eventId }
-        : {
+        ? ({
+            bootstrapEventId: target.eventId,
+          } satisfies ApiQuery<"POST /auth/session/anonymous">)
+        : ({
             bootstrapInviteId: target.inviteId,
             bootstrapSelection: target.selection,
-          },
+          } satisfies ApiQuery<"POST /auth/session/anonymous">),
   );
-  if (includeIdentity) query.set("bootstrapIdentity", "1");
+  if (includeIdentity)
+    query.set(
+      "bootstrapIdentity" satisfies keyof ApiQuery<"POST /auth/session/anonymous">,
+      "1" satisfies NonNullable<
+        ApiQuery<"POST /auth/session/anonymous">["bootstrapIdentity"]
+      >,
+    );
   const controller = new AbortController();
   const deadline = startedAt + SESSION_BOOTSTRAP_REQUEST_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout>;
@@ -326,7 +355,7 @@ export const sessionApi = {
           sessionId: session.sessionId,
           refreshSecret: session.refreshSecret,
           revokeSecret: session.revokeSecret,
-        }),
+        } satisfies ApiRequest<`POST ${typeof SESSION_ANONYMOUS_PATH}`>),
       },
       session.sessionId,
       target,

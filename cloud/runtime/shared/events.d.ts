@@ -1,4 +1,26 @@
 // Generated from src/shared/events.ts. Run npm run generate:runtime.
+import { THIRD_PLACE_MATCH_KEY } from "./event-types.js";
+export type {
+  EventStatus,
+  EventParticipantState,
+  EventMatchStatus,
+  EventRoundStatus,
+  EventParticipantView,
+  EventMatchView,
+  EventRoundView,
+  EventPrizeAssignmentView,
+  EventPrizeAssignmentsView,
+  EventView,
+} from "./event-types.js";
+export {
+  decodeEventParticipantView,
+  decodeEventMatchView,
+  decodeEventRoundView,
+  decodeEventPrizeAssignmentView,
+  decodeEventPrizeAssignmentsView,
+  decodeEventView,
+  normalizeEventPrizeId,
+} from "./event-views.js";
 export type MonsLinkAdminUsername = (typeof MONS_LINK_ADMIN_USERNAMES)[number];
 export type EventScheduleTimezone = "local" | "ET" | "PT" | "CT";
 export type EventCreateDateTimePayload = {
@@ -35,11 +57,12 @@ export type DisqualifyEventMatchWinnersRequest = {
 export type SyncEventStateRequest = {
   eventId: string;
 };
-export type EventApiRecord = Record<string, unknown> & {
+export type EventCompatibilityRecord = {
   eventId: string;
   status: string;
   isSundayMons?: boolean;
 };
+export type EventApiRecord = EventCompatibilityRecord;
 export type CreateEventResponse = {
   ok: true;
   eventId: string;
@@ -143,7 +166,6 @@ declare function isMonsLinkAdmin(
 ): value is MonsLinkAdminUsername;
 declare function isEventOwnedInvite(value: unknown): boolean;
 declare const EVENT_SCHEMA_VERSION = 2;
-declare const THIRD_PLACE_MATCH_KEY = "third_place";
 declare const MIN_STARTS_IN_MINUTES = 1;
 declare const MAX_STARTS_IN_DAYS = 50;
 declare const MAX_STARTS_IN_MINUTES: 72000;

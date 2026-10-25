@@ -1,3 +1,11 @@
+import type { InviteDocument } from "@mons/shared/invite-records";
+import { matchWireValue } from "./matchRecordCodec.ts";
+import {
+  matchPairWire,
+  matchCreateWireResult,
+  type MatchStateCreateWireRequest,
+  type MatchStateEventEffectsWireRequest,
+} from "./matchStateWire.ts";
 import type {
   MatchPresentationSnapshot,
   UpdateMatchPresentationRequest,
@@ -31,12 +39,10 @@ import {
   type MatchPresentationSeedRegistration,
   type RegisteredMatchPresentationSnapshot,
 } from "./matchPresentationRegistry.ts";
-import { captureMatchStateRpc, type MatchStateRpc } from "./matchStateRpc.ts";
+import { captureMatchStateRpc } from "./matchStateRpc.ts";
 import { MatchStateStore } from "./matchStateStore.ts";
 import type {
   MatchStateClaimTimerRequest,
-  MatchStateCreateRequest,
-  MatchStateEventEffectsRequest,
   MatchStateMoveRequest,
   MatchStatePairRequest,
   MatchStateRecordRequest,
@@ -84,15 +90,12 @@ const MAX_INVITE_ROOM_SPECTATOR_SOCKETS =
   MAX_INVITE_ROOM_SOCKETS -
   PARTICIPANT_SOCKET_TAGS.length * MAX_INVITE_REACTION_SOCKETS_PER_PARTICIPANT;
 
-export class InviteReactions
-  extends DurableObject<Env>
-  implements MatchStateRpc
-{
+export class InviteReactions extends DurableObject<Env> {
   private readonly matchSync: MatchSyncRoom;
   private readonly matchState: MatchStateStore;
   private readonly socketSessions: SocketSessions;
   private readonly matchEffects: MatchEffectsDispatcher;
-  private inviteReader: (inviteId: string) => Promise<unknown>;
+  private inviteReader: (inviteId: string) => Promise<InviteDocument | null>;
   private wagerReader: (inviteId: string) => Promise<WagerStateSnapshot[]>;
   private readonly alarmCoordinator: InviteAlarmCoordinator;
   private readonly reactions: ReactionChannel;
@@ -150,7 +153,7 @@ export class InviteReactions
     });
     this.matchEffects = new MatchEffectsDispatcher(this.matchState.effects, {
       deliver: createMatchEffectDelivery(env, (effect) =>
-        this.matchState.cleanupLegacyTimerStarts(effect),
+        this.matchState.cleanupRetainedTimerStarts(effect),
       ),
       scheduleAlarm: (atMs) => this.alarmCoordinator.schedule(atMs),
     });
@@ -212,7 +215,7 @@ export class InviteReactions
   async readCanonicalMatchRecord(input: MatchStateRecordRequest) {
     return captureMatchStateRpc(() => {
       this.inviteChannels.pinInvite(input.inviteId);
-      return this.matchState.readRecord(input);
+      return matchWireValue(this.matchState.readRecord(input));
     });
   }
 
@@ -226,21 +229,21 @@ export class InviteReactions
         throw new TypeError("match-state-invalid-read-batch");
       }
       this.inviteChannels.pinInvite(input.inviteId);
-      return this.matchState.readRecords(input);
+      return this.matchState.readRecords(input).map(matchWireValue);
     });
   }
 
   async readCanonicalMatchPair(input: MatchStatePairRequest) {
     return captureMatchStateRpc(() => {
       this.inviteChannels.pinInvite(input.inviteId);
-      return this.matchState.readPair(input);
+      return matchPairWire(this.matchState.readPair(input));
     });
   }
 
-  async createCanonicalMatch(input: MatchStateCreateRequest) {
+  async createCanonicalMatch(input: MatchStateCreateWireRequest) {
     return this.mutateCanonicalMatch(
       input,
-      () => this.matchState.createRecords(input),
+      () => matchCreateWireResult(this.matchState.createRecords(input)),
       (result) => result.changedMatchIds,
     );
   }
@@ -278,12 +281,15 @@ export class InviteReactions
   }
 
   async applyCanonicalMatchEventEffects(
-    input: MatchStateEventEffectsRequest,
+    input: MatchStateEventEffectsWireRequest,
     options: { deferNotifications?: boolean } = {},
   ) {
     return this.mutateCanonicalMatch(
       input,
-      () => Promise.resolve(this.matchState.applyEventEffects(input)),
+      () =>
+        Promise.resolve(
+          matchCreateWireResult(this.matchState.applyEventEffects(input)),
+        ),
       (result) => (options.deferNotifications ? null : result.changedMatchIds),
     );
   }

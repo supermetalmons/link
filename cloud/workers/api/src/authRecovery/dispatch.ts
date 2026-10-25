@@ -1,3 +1,4 @@
+import { queueFor } from "../queueProducers.ts";
 import { STATE_FAILURE_MESSAGES } from "../stateCompatibility.ts";
 import { isCanonicalLoginUid } from "../recordKeys.ts";
 import type { ProfileLinkCatchupStore } from "../profileLinkCatchupD1.ts";
@@ -17,7 +18,7 @@ export async function enqueueAuthRecovery(
   if (!canonicalProfileId) {
     throw new TypeError("invalid-profile-id");
   }
-  await env.AUTH_RECOVERY_QUEUE.send(
+  await queueFor(env, "AUTH_RECOVERY_QUEUE").send(
     {
       kind: "auth-profile-recovery",
       profileId: canonicalProfileId,

@@ -1,3 +1,4 @@
+import type { EventProgressDocument } from "../../../runtime/eventProgressRecords.js";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { EVENT_PRIZE_ANNOUNCEMENT_GRACE_MS } from "../../../runtime/telegram/eventPrizeAnnouncement.js";
 import {
@@ -21,7 +22,9 @@ export type EventPrizeAnnouncementWorkflowDependencies = {
   deliver(
     input: EventPrizeAnnouncementDeliveryInput,
   ): Promise<EventPrizeAnnouncementDeliveryResult>;
-  readOutbox(outboxId: string): Promise<unknown>;
+  readOutbox(
+    outboxId: string,
+  ): Promise<EventProgressDocument<"pending"> | null>;
   refreshReminder(eventId: string): Promise<SundayMonsReminderRefreshResult>;
   now?: () => number;
 };

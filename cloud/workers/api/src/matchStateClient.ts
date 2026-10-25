@@ -1,5 +1,16 @@
+import {
+  inviteTimerEventId,
+  type InviteDocument,
+} from "@mons/shared/invite-records";
 import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
-import { getMatchStateRpc, unwrapMatchStateRpc } from "./matchStateRpc.ts";
+import {
+  getMatchStateRpc,
+  unwrapMatchStateRpc,
+  decodeMatchMoveResponse,
+  decodeMatchSurrenderResponse,
+  decodeMatchTimerStartResponse,
+  decodeMatchTimerClaimResponse,
+} from "./matchStateRpc.ts";
 import type {
   SubmitMoveRequest,
   SurrenderMatchRequest,
@@ -30,6 +41,7 @@ export async function canonicalMatchOperations(
             ...request,
             epoch,
           }),
+          decodeMatchMoveResponse,
         ),
       ),
     surrenderCanonical: (request: SurrenderMatchRequest) =>
@@ -38,6 +50,7 @@ export async function canonicalMatchOperations(
           await getMatchStateRpc(env, request.inviteId).surrenderCanonicalMatch(
             { ...request, epoch },
           ),
+          decodeMatchSurrenderResponse,
         ),
       ),
     startCanonical: (request: StartMatchTimerRequest) =>
@@ -47,19 +60,14 @@ export async function canonicalMatchOperations(
             env,
             request.inviteId,
           ).startCanonicalMatchTimer({ ...request, epoch }),
+          decodeMatchTimerStartResponse,
         ),
       ),
     claimCanonical: (
       request: ClaimMatchVictoryByTimerRequest,
-      inviteValue: unknown,
+      inviteValue: InviteDocument,
     ) =>
       execute(async (epoch) => {
-        const invite =
-          inviteValue &&
-          typeof inviteValue === "object" &&
-          !Array.isArray(inviteValue)
-            ? (inviteValue as Record<string, unknown>)
-            : null;
         return unwrapMatchStateRpc(
           await getMatchStateRpc(
             env,
@@ -67,11 +75,9 @@ export async function canonicalMatchOperations(
           ).claimCanonicalMatchTimer({
             ...request,
             epoch,
-            eventId:
-              invite?.eventOwned === true && typeof invite.eventId === "string"
-                ? invite.eventId
-                : null,
+            eventId: inviteTimerEventId(inviteValue),
           }),
+          decodeMatchTimerClaimResponse,
         );
       }),
   };

@@ -582,6 +582,7 @@ test("shared package preserves every direct export subpath", () => {
     "cloud/runtime/shared/package.json",
   );
   const expectedExports = {
+    "./api-contracts": "./api-contracts.js",
     "./auth": "./auth.js",
     "./event-prizes": "./event-prizes.js",
     "./events": "./events.js",
@@ -590,6 +591,7 @@ test("shared package preserves every direct export subpath", () => {
     "./game-variants": "./game-variants.js",
     "./ids": "./ids.js",
     "./invite-metadata": "./invite-metadata.js",
+    "./invite-records": "./invite-records.js",
     "./invite-wagers": "./invite-wagers.js",
     "./match-protocol": "./match-protocol.js",
     "./match-presentation": "./match-presentation.js",

@@ -92,10 +92,12 @@ export type AutomatchProjectionRecoveryPort = Pick<
   | "listDueAutomatchProfileOutboxesPage"
   | "listMalformedAutomatchProfileOutboxes"
   | "listMalformedAutomatchProfileOutboxesPage"
-> & {
-  transactRawAutomatchTelegramOutbox: RawGameSessionPort["transactAutomatchTelegramOutbox"];
-  transactRawAutomatchProfileOutbox: RawGameSessionPort["transactAutomatchProfileOutbox"];
-};
+> &
+  Pick<
+    AutomatchProjectionCommands,
+    | "repairInvalidAutomatchTelegramOutbox"
+    | "repairInvalidAutomatchProfileOutbox"
+  >;
 
 export type GameSessionRecoveryContext = {
   projectionRecovery: AutomatchProjectionRecoveryPort;

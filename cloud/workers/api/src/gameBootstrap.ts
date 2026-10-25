@@ -1,3 +1,4 @@
+import type { InviteDocument } from "@mons/shared/invite-records";
 import {
   GAME_BOOTSTRAP_MAX_RESPONSE_BYTES,
   isReadGameBootstrapResponse,
@@ -24,7 +25,10 @@ export type GameBootstrapMeasure = <T>(
 ) => Promise<T>;
 
 export type GameBootstrapDependencies = {
-  readAdmission?: (inviteId: string, signal: AbortSignal) => Promise<unknown>;
+  readAdmission?: (
+    inviteId: string,
+    signal: AbortSignal,
+  ) => Promise<InviteDocument | null>;
   repository?: ProfileOwnershipReader;
   room?: {
     readMetadata(inviteId: string): Promise<InviteMetadataReadResult>;

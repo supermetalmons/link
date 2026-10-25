@@ -1,7 +1,8 @@
 // Generated from src/telegram/eventParticipants.ts. Run npm run generate:runtime.
+import { type EventParticipantDocument } from "../events/documents.js";
 declare const getParticipantRecords: (eventData: unknown) => {
   profileId: string;
-  participant: Record<string, unknown>;
+  participant: EventParticipantDocument;
 }[];
 declare const buildParticipantRenderKey: (eventData: unknown) => string;
 declare const resolveParticipantToken: (

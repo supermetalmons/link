@@ -315,3 +315,56 @@ test("the transaction shares the opening operation's 10-second deadline", async 
   assert.equal(h.transactions[0].aborted, true);
   assert.equal(calls, 0);
 });
+
+test("malformed present session rows fail closed before callbacks or writes", async () => {
+  const valid = createEmptySessionState();
+  for (const value of [
+    false,
+    0,
+    "legacy",
+    [],
+    {},
+    { ...valid, revision: "0" },
+    { ...valid, session: undefined },
+    { ...valid, revocations: [null] },
+    {
+      ...valid,
+      revocations: [{ sessionId: "invalid", revokeSecret: "invalid" }],
+    },
+  ]) {
+    const h = harness(value);
+    let changes = 0;
+    const pending = h.store.update((state) => {
+      changes++;
+      return state;
+    });
+    const rejected = assert.rejects(pending, SessionStorageError);
+    h.open();
+    await flush();
+    h.transactions[0].read();
+    h.transactions[0].complete();
+    await rejected;
+    assert.equal(changes, 0);
+    assert.deepEqual(h.writes, []);
+    assert.deepEqual(h.stored(), value);
+  }
+});
+
+test("validated session rows retain extension evidence and do not write unchanged reads", async () => {
+  const state = {
+    ...createEmptySessionState(),
+    retained: { nested: [null, false] },
+  };
+  const h = harness(state);
+  let observed;
+  const pending = h.store.update((value) => {
+    observed = value;
+    return value;
+  });
+  h.open();
+  await flush();
+  const result = await h.complete(pending);
+  assert.equal(result, observed);
+  assert.deepEqual(result, state);
+  assert.deepEqual(h.writes, []);
+});

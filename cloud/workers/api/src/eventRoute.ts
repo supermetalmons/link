@@ -1,3 +1,4 @@
+import type { ApiQuery, EventPath } from "@mons/shared/api-contracts";
 import { authenticatedPost } from "./authenticatedPost.ts";
 import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
 import { authJsonResponse, getAuthCorsHeaders } from "./authHttp.ts";
@@ -28,7 +29,6 @@ import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 import type { WorkerExecutionContext } from "./sessionAuth.ts";
-
 export const EVENT_PATHS = new Set(eventRoutes.keys());
 
 export type EventRouteDependencies = EventSnapshotSeedDependencies & {
@@ -157,12 +157,20 @@ async function handleEventRequest(
         participation: { ...dependencies.participation, signal },
         control: { ...dependencies.control, repository, signal },
       });
-      const value = toRecord(response);
+      const value = toRecord(response) as
+        (typeof response & Record<string, unknown>) | null;
       const params = new URL(request.url).searchParams;
       if (
         !isParticipationPath &&
-        params.getAll("eventSnapshot").length === 1 &&
-        params.get("eventSnapshot") === "v1" &&
+        params.getAll(
+          "eventSnapshot" satisfies keyof ApiQuery<"POST /events/create">,
+        ).length === 1 &&
+        params.get(
+          "eventSnapshot" satisfies keyof ApiQuery<"POST /events/create">,
+        ) ===
+          ("v1" satisfies NonNullable<
+            ApiQuery<"POST /events/create">["eventSnapshot"]
+          >) &&
         value?.ok === true &&
         value.skipped !== true &&
         typeof value.eventId === "string"
@@ -182,10 +190,18 @@ async function handleEventRequest(
         if (eventSnapshot) {
           const enriched = { ...value, eventSnapshot };
           if (isBoundedEventResponse(enriched))
-            return authJsonResponse(enriched, 200, corsHeaders);
+            return authJsonResponse<`POST ${EventPath}`, 200>(
+              enriched,
+              200,
+              corsHeaders,
+            );
         }
       }
-      return authJsonResponse(response, 200, corsHeaders);
+      return authJsonResponse<`POST ${EventPath}`, 200>(
+        response,
+        200,
+        corsHeaders,
+      );
     },
   );
 }

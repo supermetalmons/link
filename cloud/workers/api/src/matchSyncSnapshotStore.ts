@@ -1,3 +1,8 @@
+import {
+  socketMatchKeyBinding,
+  type SocketMatchKey,
+} from "./socketAttachmentRecords.ts";
+
 type StoredMatch = {
   match_id: string;
   snapshot_json: string;
@@ -32,10 +37,10 @@ export function createMatchSyncSnapshotStore(sql: Pick<SqlStorage, "exec">) {
         matchId,
       );
     },
-    clearDeadline(matchId: string): void {
+    clearDeadline(matchId: SocketMatchKey): void {
       sql.exec(
         "UPDATE match_sync_snapshots SET next_at_ms = NULL WHERE match_id = ?",
-        matchId,
+        socketMatchKeyBinding(matchId),
       );
     },
     listDue(nowMs: number): Array<{ match_id: string }> {

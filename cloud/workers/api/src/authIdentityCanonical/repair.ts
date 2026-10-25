@@ -1,3 +1,4 @@
+import { queueFor } from "../queueProducers.ts";
 import type { AuthMethodKey } from "@mons/shared/auth";
 import {
   isAlphanumericUsername,
@@ -121,7 +122,7 @@ export function createCanonicalIdentityRepair({
       await dispatchProfileLinkCatchupForOwner(uid, profile.profile.profileId, {
         catchupStore: createProfileLinkCatchupStore(db),
         enqueueProfileLinkProjection: (task) =>
-          env.PROFILE_GAME_PROJECTION_QUEUE.send(task),
+          queueFor(env, "PROFILE_GAME_PROJECTION_QUEUE").send(task),
         logger: console,
       });
       await removeCanonicalAuthRecoveryLoginUid(

@@ -1,3 +1,4 @@
+import { eventIntentFixture } from "../test/transitionIntentFixture.ts";
 import { expect } from "vitest";
 import {
   acquireEventWriteAdmission,
@@ -67,18 +68,21 @@ async function seedEventTransitions(env: Env, nowMs: number) {
         ],
         { admission },
       );
-      const intent = await prepareInviteEventIntent(env.PROFILE_GAMES_DB, {
-        schemaVersion: 1,
-        transitionId: `intent-${eventId}`,
-        eventId,
-        expectedRevision: 1,
-        canonicalUpdates: { [`events/${eventId}/updatedAtMs`]: nowMs },
-        rtdbEffects: {
-          [`matchTimerStarts/${eventId}/cron-transition-host`]: null,
-        },
-        createdAtMs,
-        updatedAtMs: createdAtMs,
-      });
+      const intent = await prepareInviteEventIntent(
+        env.PROFILE_GAMES_DB,
+        eventIntentFixture({
+          schemaVersion: 1,
+          transitionId: `intent-${eventId}`,
+          eventId,
+          expectedRevision: 1,
+          canonicalUpdates: { [`events/${eventId}/updatedAtMs`]: nowMs },
+          rtdbEffects: {
+            [`matchTimerStarts/${eventId}/cron-transition-host`]: null,
+          },
+          createdAtMs,
+          updatedAtMs: createdAtMs,
+        }),
+      );
       await createEventTransitionIntent(env.EVENT_DB, intent, { admission });
       transitions.push(intent);
     }

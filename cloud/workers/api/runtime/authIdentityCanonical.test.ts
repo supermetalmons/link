@@ -1,3 +1,5 @@
+import { materializeProfileCompatibility as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
+import { profileLegacyFixture } from "../test/profileDataBoundaryFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { USERNAME_MAX_LENGTH } from "@mons/shared/usernames";
@@ -18,7 +20,6 @@ import { createProfileLinkCatchupStore } from "../src/profileLinkCatchupD1.ts";
 import { createProfileCustomizationRepository } from "../src/profileCustomizationRepository.ts";
 import {
   commitCanonicalPlan,
-  materializeCanonicalProfile,
   readCanonicalAuthOperation,
   readCanonicalMergeTarget,
   readCanonicalProfile,
@@ -1512,7 +1513,7 @@ describe("canonical auth and profile runtime", () => {
             profile: { ...targetSnapshot.profile, aura: "   " },
             state: targetSnapshot.state,
             mergedIntoProfileId: targetSnapshot.mergedIntoProfileId,
-            legacyFields: targetLegacyFields,
+            legacyFields: profileLegacyFixture(targetLegacyFields),
             createdAtMs: targetSnapshot.createdAtMs,
             updatedAtMs: nowMs,
             mergedAtMs: 4_000,
@@ -1542,7 +1543,7 @@ describe("canonical auth and profile runtime", () => {
             },
             state: sourceSnapshot.state,
             mergedIntoProfileId: sourceSnapshot.mergedIntoProfileId,
-            legacyFields: sourceLegacyFields,
+            legacyFields: profileLegacyFixture(sourceLegacyFields),
             createdAtMs: sourceSnapshot.createdAtMs,
             updatedAtMs: nowMs,
             mergedAtMs: sourceSnapshot.mergedAtMs,

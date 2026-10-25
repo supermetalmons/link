@@ -1,3 +1,9 @@
+import {
+  eventIntentFixture,
+  retainedEventIntentFixture,
+  retainedEventInviteMutationsFixture,
+} from "../test/transitionIntentFixture.ts";
+import { commitEventCompatibilityFixture } from "../test/eventCompatibilityFixture.ts";
 import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
 import { eventMatchTestPort } from "./eventRepositoryFixture.ts";
 import { env } from "cloudflare:workers";
@@ -94,16 +100,19 @@ function matchEffects(id = inviteId) {
 }
 
 function prepareEffects() {
-  return prepareInviteEventIntent(testEnv.PROFILE_GAMES_DB, {
-    schemaVersion: 1,
-    transitionId: "prepared-event-transition",
-    eventId,
-    expectedRevision: 1,
-    canonicalUpdates: { [`events/${eventId}/status`]: "active" },
-    rtdbEffects: matchEffects(),
-    createdAtMs: 100,
-    updatedAtMs: 100,
-  });
+  return prepareInviteEventIntent(
+    testEnv.PROFILE_GAMES_DB,
+    eventIntentFixture({
+      schemaVersion: 1,
+      transitionId: "prepared-event-transition",
+      eventId,
+      expectedRevision: 1,
+      canonicalUpdates: { [`events/${eventId}/status`]: "active" },
+      rtdbEffects: matchEffects(),
+      createdAtMs: 100,
+      updatedAtMs: 100,
+    }),
+  );
 }
 
 function observeInviteControlReads() {
@@ -219,11 +228,13 @@ function fixture(profileGamesDb = testEnv.PROFILE_GAMES_DB) {
     raw,
     client,
     create: () =>
-      client.commitEventPlan(
+      commitEventCompatibilityFixture(
+        client,
         decodeEventUpdates({ [`events/${eventId}`]: eventRecord() }),
       ),
     start: (extra = {}) =>
-      client.commitEventPlan(
+      commitEventCompatibilityFixture(
+        client,
         decodeEventUpdates({
           [`events/${eventId}/status`]: "active",
           [`events/${eventId}/updatedAtMs`]: 200,
@@ -833,24 +844,30 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     try {
       const prepared = await prepareInviteEventIntent(
         testEnv.PROFILE_GAMES_DB,
-        legacy,
+        eventIntentFixture(legacy),
       );
       await expect(
         createEventTransitionIntent(
           testEnv.EVENT_DB,
-          {
+          retainedEventIntentFixture({
             ...prepared,
-            inviteMutations: prepared.inviteMutations.map((mutation) => ({
+            inviteMutations: retainedEventInviteMutationsFixture(
+              prepared.inviteMutations,
+            ).map((mutation) => ({
               ...mutation,
               current: { ...mutation.current, revision: -1 },
             })),
-          },
+          }),
           { admission },
         ),
       ).rejects.toThrow("invalid-event-transition");
-      await createEventTransitionIntent(testEnv.EVENT_DB, legacy, {
-        admission,
-      });
+      await createEventTransitionIntent(
+        testEnv.EVENT_DB,
+        eventIntentFixture(legacy),
+        {
+          admission,
+        },
+      );
     } finally {
       await releaseEventWriteAdmission(testEnv.EVENT_DB, admission);
     }
@@ -867,7 +884,8 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     await testEnv.PROFILE_GAMES_DB.prepare(
       "INSERT INTO match_timer_starts(player_id,match_id,timer,turn_number,updated_at_ms) VALUES('timer-match','host','pending',0,1)",
     ).run();
-    await f.client.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      f.client,
       decodeEventUpdates({
         [`events/${eventId}/updatedAtMs`]: 200,
         "matchTimerStarts/host/timer-match": null,

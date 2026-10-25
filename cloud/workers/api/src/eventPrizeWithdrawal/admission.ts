@@ -1,4 +1,13 @@
 import {
+  withdrawalOwnership,
+  withdrawalRecipientAddress,
+  withdrawalStatus,
+  withdrawalPlace,
+  withdrawalLeaseId,
+  withdrawalResponseFields,
+  type WithdrawalDocument,
+} from "../../../../runtime/eventPrizes/records.js";
+import {
   getEventPrizeDefinition,
   isEventPrizeStandard,
   isEventPrizeWithdrawalCompletedResponse,
@@ -136,10 +145,10 @@ async function resolveOwnedWithdrawal(
 ): Promise<{
   canonicalRecordProfileId: string;
   profileId: string;
-  withdrawal: Record<string, unknown> | null;
+  withdrawal: WithdrawalDocument | null;
 }> {
   const withdrawal = await runtime.readWithdrawal(eventId, prizeId);
-  const existingProfileId = cleanString(withdrawal?.profileId);
+  const existingProfileId = withdrawalOwnership(withdrawal).profileId;
   const ownership = await requireProfileOwnershipSnapshot(runtime, {
     loginUids: [identity.uid],
     profileIds: existingProfileId ? [existingProfileId] : [],
@@ -176,8 +185,10 @@ async function refreshOwnedWithdrawal(
 ): Promise<OwnedWithdrawal> {
   const withdrawal = await runtime.readWithdrawal(eventId, prizeId);
   if (!withdrawal) return { ...owned, withdrawal: null };
-  const recordProfileId = cleanString(withdrawal.profileId);
-  const previousRecordProfileId = cleanString(owned.withdrawal?.profileId);
+  const recordProfileId = withdrawalOwnership(withdrawal).profileId;
+  const previousRecordProfileId = withdrawalOwnership(
+    owned.withdrawal,
+  ).profileId;
   if (
     !recordProfileId ||
     (recordProfileId !== owned.profileId &&
@@ -245,7 +256,10 @@ async function admitWithdrawal(
       request.prizeId,
     )
   ) {
-    const completed = buildCompletedResponse(operationId, withdrawal);
+    const completed = buildCompletedResponse(
+      operationId,
+      withdrawalResponseFields(withdrawal),
+    );
     await attemptCompletedWithdrawalProjectionReconciliation(
       {
         withdrawal,
@@ -258,18 +272,18 @@ async function admitWithdrawal(
     return completed;
   }
 
-  const existingProfileId = cleanString(withdrawal?.profileId);
+  const existingProfileId = withdrawalOwnership(withdrawal).profileId;
   const submittedRecordCanResume =
-    withdrawal?.status === "submitted" &&
+    withdrawalStatus(withdrawal) === "submitted" &&
     isWithdrawalRecordForPrize(
       withdrawal,
       request.eventId,
       request.prizeId,
       assetAddress,
     ) &&
-    Boolean(normalizeSolanaAddress(withdrawal.recipientAddress)) &&
-    [1, 2, 3].includes(Number(withdrawal.place));
-  let place = Number(withdrawal?.place);
+    Boolean(normalizeSolanaAddress(withdrawalRecipientAddress(withdrawal))) &&
+    [1, 2, 3].includes(withdrawalPlace(withdrawal));
+  let place = withdrawalPlace(withdrawal);
   if (!submittedRecordCanResume) {
     const assignment = await runtime.readProfileEventPrizeAssignment(
       profileId,
@@ -292,9 +306,9 @@ async function admitWithdrawal(
     recipientAddress,
     requesterUid: identity.uid,
   };
-  const activeLeaseId = cleanString(withdrawal?.leaseId);
+  const activeLeaseId = withdrawalLeaseId(withdrawal);
   const activeProcessingIntent =
-    withdrawal?.status === "processing" &&
+    withdrawalStatus(withdrawal) === "processing" &&
     Boolean(activeLeaseId) &&
     isWithdrawalRecordForPrize(
       withdrawal,
@@ -304,7 +318,8 @@ async function admitWithdrawal(
     );
   if (activeProcessingIntent) {
     if (
-      normalizeSolanaAddress(withdrawal.recipientAddress) !== recipientAddress
+      normalizeSolanaAddress(withdrawalRecipientAddress(withdrawal)) !==
+      recipientAddress
     ) {
       throw new EventPrizeWithdrawalError(
         "failed-precondition",
@@ -333,7 +348,10 @@ async function admitWithdrawal(
     canonicalRecordSourceProfileId: existingProfileId,
   });
   if (claim.completed) {
-    return buildCompletedResponse(operationId, claim.completed);
+    return buildCompletedResponse(
+      operationId,
+      withdrawalResponseFields(claim.completed),
+    );
   }
   const leaseId = cleanString(claim.leaseId);
   if (!leaseId) throw new Error("event-prize-withdrawal-lease-missing");
@@ -362,9 +380,12 @@ async function resolveWithdrawalWorkflowRecovery(
       request.prizeId,
     )
   ) {
-    return buildCompletedResponse(request.operationId, owned.withdrawal);
+    return buildCompletedResponse(
+      request.operationId,
+      withdrawalResponseFields(owned.withdrawal),
+    );
   }
-  if (owned.withdrawal?.status === "blocked") {
+  if (withdrawalStatus(owned.withdrawal) === "blocked") {
     throw new AuthApiFailure(
       412,
       "failed-precondition",
@@ -372,20 +393,20 @@ async function resolveWithdrawalWorkflowRecovery(
     );
   }
   if (
-    owned.withdrawal?.status !== "processing" &&
-    owned.withdrawal?.status !== "submitted"
+    withdrawalStatus(owned.withdrawal) !== "processing" &&
+    withdrawalStatus(owned.withdrawal) !== "submitted"
   ) {
     throw terminalWorkflowFailure();
   }
   const recipientAddress = normalizeSolanaAddress(
-    owned.withdrawal.recipientAddress,
+    withdrawalRecipientAddress(owned.withdrawal),
   );
   const prize = getEventPrizeDefinition(request.eventId, request.prizeId);
   const assetAddress = normalizeSolanaAddress(prize?.assetAddress);
   const collectionAddress = normalizeSolanaAddress(prize?.collectionAddress);
-  const place = Number(owned.withdrawal.place);
-  const storedProfileId = cleanString(owned.withdrawal.profileId);
-  const requesterUid = cleanString(owned.withdrawal.requesterUid);
+  const place = withdrawalPlace(owned.withdrawal);
+  const storedProfileId = withdrawalOwnership(owned.withdrawal).profileId;
+  const requesterUid = withdrawalOwnership(owned.withdrawal).requesterUid;
   if (
     !prize ||
     prize.claimAvailable !== true ||
@@ -491,9 +512,12 @@ export async function getEventPrizeWithdrawalStatus(
       request.prizeId,
     )
   ) {
-    return buildCompletedResponse(request.operationId, owned.withdrawal);
+    return buildCompletedResponse(
+      request.operationId,
+      withdrawalResponseFields(owned.withdrawal),
+    );
   }
-  if (owned.withdrawal?.status === "blocked") {
+  if (withdrawalStatus(owned.withdrawal) === "blocked") {
     throw new AuthApiFailure(
       412,
       "failed-precondition",
@@ -554,7 +578,10 @@ export async function getEventPrizeWithdrawalStatus(
         request.prizeId,
       )
     ) {
-      return buildCompletedResponse(request.operationId, owned.withdrawal);
+      return buildCompletedResponse(
+        request.operationId,
+        withdrawalResponseFields(owned.withdrawal),
+      );
     }
     throw terminalWorkflowFailure();
   }

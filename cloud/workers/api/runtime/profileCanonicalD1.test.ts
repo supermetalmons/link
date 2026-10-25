@@ -1,3 +1,14 @@
+import {
+  authMetadataFixture,
+  authResultFixture,
+  legacyAuthStartFixture,
+  legacyAuthUpdateFixture,
+} from "../test/profileDataBoundaryFixture.ts";
+import { materializeProfileCompatibility as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
+import {
+  ratingPayloadFixture,
+  profileLegacyFixture,
+} from "../test/profileDataBoundaryFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -11,7 +22,6 @@ import {
   CanonicalProfileConflict,
   CanonicalProfileCorruption,
   commitCanonicalPlan,
-  materializeCanonicalProfile,
   readCanonicalAuthMethod,
   readCanonicalAuthOperation,
   readCanonicalAuthRecoveryJob,
@@ -98,7 +108,7 @@ function ratingValue(
 ): CanonicalRatingUpdateValue {
   return {
     operationId,
-    payload: { operationId, status: "processing" },
+    payload: ratingPayloadFixture({ operationId, status: "processing" }),
     status: "processing",
     inviteId: "invite-1",
     matchId: "match-1",
@@ -1892,7 +1902,7 @@ describe("canonical profile D1 store", () => {
         method: "apple",
         loginUid: "initial-login",
         status: "started",
-        meta: { z: 0, a: { second: false, first: null } },
+        meta: authMetadataFixture({ z: 0, a: { second: false, first: null } }),
         result: null,
         errorCode: null,
         errorMessage: null,
@@ -1903,7 +1913,12 @@ describe("canonical profile D1 store", () => {
         expectations: [
           { kind: "auth-operation-absent", operationId: initial.operationId },
         ],
-        mutations: [{ kind: "insert-auth-operation", value: initial }],
+        mutations: [
+          {
+            kind: "insert-auth-operation",
+            value: legacyAuthStartFixture(initial),
+          },
+        ],
       });
       await expect(
         readCanonicalAuthOperation(testEnv.PROFILE_DB, initial.operationId),
@@ -1926,7 +1941,10 @@ describe("canonical profile D1 store", () => {
         loginUid: "changed-login",
         status: "failed",
         meta: null,
-        result: { z: ["second", "first"], a: ' line\n"quoted" ' },
+        result: authResultFixture({
+          z: ["second", "first"],
+          a: ' line\n"quoted" ',
+        }),
         errorCode: "changed-code",
         errorMessage: " changed message ",
         startedAtMs: 201,
@@ -1941,7 +1959,12 @@ describe("canonical profile D1 store", () => {
               revision,
             },
           ],
-          mutations: [{ kind: "update-auth-operation", value: updated }],
+          mutations: [
+            {
+              kind: "update-auth-operation",
+              value: legacyAuthUpdateFixture(updated),
+            },
+          ],
         });
         await expect(
           readCanonicalAuthOperation(testEnv.PROFILE_DB, initial.operationId),
@@ -3802,7 +3825,7 @@ describe("canonical profile D1 store", () => {
     };
     const source = profileValue("canonical-redirect-source", {
       profile: profile("canonical-redirect-source", { username: null }),
-      legacyFields: sourceLegacyFields,
+      legacyFields: profileLegacyFixture(sourceLegacyFields),
     });
     await commitCanonicalPlan(testEnv.PROFILE_DB, {
       expectations: [
@@ -4348,7 +4371,7 @@ describe("canonical profile D1 store", () => {
         {
           kind: "update-rating-update",
           value: ratingValue(operationId, {
-            payload: { operationId, status: "done" },
+            payload: ratingPayloadFixture({ operationId, status: "done" }),
             status: "done",
             updatedAtMs: 2_000,
             completedAtMs: 2_000,
@@ -4419,12 +4442,12 @@ describe("canonical profile D1 store", () => {
       eventProgressState: "pending",
       eventProgressUpdatedAtMs: 1_000,
       eventProgressVersion: 1,
-      payload: {
+      payload: ratingPayloadFixture({
         eventProgressState: "pending",
         eventProgressUpdatedAtMs: 1_000,
         eventProgressReason: null,
         retained: [null, { nested: true }],
-      },
+      }),
     });
     await commitCanonicalPlan(testEnv.PROFILE_DB, {
       expectations: [{ kind: "rating-update-absent", operationId }],
@@ -4441,7 +4464,10 @@ describe("canonical profile D1 store", () => {
     const next = {
       ...initial,
       eventProgressUpdatedAtMs: 2_000,
-      payload: { ...stored!.snapshot.payload, eventProgressUpdatedAtMs: 2_000 },
+      payload: ratingPayloadFixture({
+        ...stored!.snapshot.payload,
+        eventProgressUpdatedAtMs: 2_000,
+      }),
     };
     const mutation = buildCanonicalRatingProjectionMutation(
       stored!.snapshot,
@@ -4501,12 +4527,12 @@ describe("canonical profile D1 store", () => {
       {
         ...initial,
         eventProgressUpdatedAtMs: 2_000,
-        payload: {
+        payload: ratingPayloadFixture({
           toJSON() {
             serializations++;
             return payload;
           },
-        },
+        }),
       },
       "event-progress",
     );
@@ -4570,7 +4596,10 @@ describe("canonical profile D1 store", () => {
   it("roundtrips every rating write field on insert and update", async () => {
     const operationId = "canonical-rating-fields";
     const initial = ratingValue(operationId, {
-      payload: { operationId, nested: ["initial", null, { retained: true }] },
+      payload: ratingPayloadFixture({
+        operationId,
+        nested: ["initial", null, { retained: true }],
+      }),
       playerProfileId: "player-profile",
       opponentProfileId: "opponent-profile",
       startedAtMs: 101,
@@ -4594,7 +4623,10 @@ describe("canonical profile D1 store", () => {
       readCanonicalRatingUpdate(testEnv.PROFILE_DB, operationId),
     ).resolves.toEqual({ ...initial, revision: 1 });
     const updated = ratingValue(operationId, {
-      payload: { operationId, nested: ["updated", false, { retained: null }] },
+      payload: ratingPayloadFixture({
+        operationId,
+        nested: ["updated", false, { retained: null }],
+      }),
       status: "done",
       inviteId: "updated-invite",
       matchId: "updated-match",

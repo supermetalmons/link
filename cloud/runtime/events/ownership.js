@@ -16,6 +16,7 @@ exports.resolveRequesterParticipation =
   exports.canonicalizeEventParticipants =
   exports.buildEventOwnershipQuery =
     void 0;
+const documents_js_1 = require("./documents.js");
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 const profileOwnershipUnavailable = () => {
@@ -27,47 +28,33 @@ exports.profileOwnershipUnavailable = profileOwnershipUnavailable;
 const uniqueStrings = (values) =>
   Array.from(new Set(values.map(normalizeString).filter(Boolean)));
 const participantEntries = (event) =>
-  Object.entries(
-    event && event.participants && typeof event.participants === "object"
-      ? event.participants
-      : {},
-  ).flatMap(([profileId, value]) =>
-    value && typeof value === "object"
-      ? [
-          {
-            key: normalizeString(profileId),
-            participant: value,
-            profileId:
-              normalizeString(value.profileId) || normalizeString(profileId),
-            loginUid: normalizeString(value.loginUid),
-          },
-        ]
-      : [],
-  );
+  (0, documents_js_1.eventParticipantEntries)(
+    (0, documents_js_1.eventParticipants)(event),
+  ).map(([profileId, participant]) => {
+    const value = (0, documents_js_1.eventParticipantState)(participant);
+    return {
+      key: normalizeString(profileId),
+      participant,
+      profileId: normalizeString(value.profileId) || normalizeString(profileId),
+      loginUid: normalizeString(value.loginUid),
+    };
+  });
 const buildEventOwnershipQuery = (
   event,
   { loginUids = [], profileIds = [] } = {},
 ) => {
   const entries = participantEntries(event);
-  const assignments =
-    event &&
-    event.prizeAssignments &&
-    typeof event.prizeAssignments === "object"
-      ? Object.values(event.prizeAssignments)
-      : [];
   return {
     loginUids: uniqueStrings([
       ...loginUids,
-      normalizeString(event && event.createdByLoginUid),
+      normalizeString((0, documents_js_1.eventState)(event).createdByLoginUid),
       ...entries.map(({ loginUid }) => loginUid),
     ]),
     profileIds: uniqueStrings([
       ...profileIds,
-      normalizeString(event && event.createdByProfileId),
+      normalizeString((0, documents_js_1.eventState)(event).createdByProfileId),
       ...entries.flatMap(({ key, profileId }) => [key, profileId]),
-      ...assignments.map((assignment) =>
-        normalizeString(assignment && assignment.profileId),
-      ),
+      ...(0, documents_js_1.eventPrizeOwnerProfileIds)(event),
     ]),
   };
 };
@@ -141,10 +128,11 @@ const directRequesterParticipation = (event, requesterUidInput) => {
   if (direct.isParticipant) return direct;
   if (
     requesterUid &&
-    normalizeString(event && event.createdByLoginUid) === requesterUid
+    normalizeString((0, documents_js_1.eventState)(event).createdByLoginUid) ===
+      requesterUid
   ) {
     return requesterParticipation([
-      normalizeString(event && event.createdByProfileId),
+      normalizeString((0, documents_js_1.eventState)(event).createdByProfileId),
     ]);
   }
   return requesterParticipation([]);
@@ -172,7 +160,9 @@ const resolveRequesterParticipation = (event, requesterUidInput, snapshot) => {
       : [],
   );
   if (matches.length > 0) return requesterParticipation(matches);
-  const creatorProfileId = normalizeString(event && event.createdByProfileId);
+  const creatorProfileId = normalizeString(
+    (0, documents_js_1.eventState)(event).createdByProfileId,
+  );
   return requesterParticipation(
     creatorProfileId &&
       getCanonicalProfileId(snapshot, creatorProfileId) === requesterProfileId
@@ -221,7 +211,10 @@ exports.requesterOwnsProfileReference = requesterOwnsProfileReference;
 const canonicalizeEventParticipants = (event, snapshot) => {
   const entries = participantEntries(event);
   if (entries.length === 0) {
-    return { didChange: false, participantsById: {} };
+    return {
+      didChange: false,
+      participantsById: (0, documents_js_1.createEventParticipantsDocument)(),
+    };
   }
   const canonicalProfileIds = resolveOwnedProfileReferences(
     snapshot,
@@ -232,10 +225,10 @@ const canonicalizeEventParticipants = (event, snapshot) => {
   for (let index = 0; index < entries.length; index += 1) {
     const entry = entries[index];
     const canonicalProfileId = canonicalProfileIds[index];
-    participantsById[canonicalProfileId] = {
-      ...entry.participant,
+    participantsById[canonicalProfileId] = (0,
+    documents_js_1.copyEventParticipant)(entry.participant, {
       profileId: canonicalProfileId,
-    };
+    });
     if (
       entry.key !== canonicalProfileId ||
       entry.profileId !== canonicalProfileId
@@ -243,7 +236,12 @@ const canonicalizeEventParticipants = (event, snapshot) => {
       didChange = true;
     }
   }
-  return { didChange, participantsById };
+  return {
+    didChange,
+    participantsById: (0, documents_js_1.createEventParticipantsDocument)(
+      participantsById,
+    ),
+  };
 };
 exports.canonicalizeEventParticipants = canonicalizeEventParticipants;
 const canonicalizeEventPrizeSelections = (event, value, snapshot) => {

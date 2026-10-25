@@ -1,16 +1,11 @@
+import type { ApiParameters, ApiResponse } from "@mons/shared/api-contracts";
+import type { InviteDocument } from "@mons/shared/invite-records";
 import {
   INVITE_METADATA_SOCKET_PROTOCOL,
   type InviteMetadataSnapshot,
-  type ReadInviteMetadataResponse,
 } from "@mons/shared/invite-metadata";
-import {
-  INVITE_WAGERS_SOCKET_PROTOCOL,
-  type ReadInviteWagersResponse,
-} from "@mons/shared/invite-wagers";
-import {
-  MATCH_SYNC_SOCKET_PROTOCOL,
-  type ReadMatchSyncResponse,
-} from "@mons/shared/match-sync";
+import { INVITE_WAGERS_SOCKET_PROTOCOL } from "@mons/shared/invite-wagers";
+import { MATCH_SYNC_SOCKET_PROTOCOL } from "@mons/shared/match-sync";
 import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
 import {
   authJsonResponse,
@@ -34,8 +29,12 @@ import {
 } from "./sessionAuth.ts";
 import { socketSessionHeaders } from "./socketSession.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
-
 type InviteReadChannel = "metadata" | "wagers" | "matches";
+type InviteReadEndpoint<Channel extends InviteReadChannel> = {
+  metadata: "GET /invites/:inviteId/metadata";
+  wagers: "GET /invites/:inviteId/wagers";
+  matches: "GET /invites/:inviteId/matches/:matchId/snapshot";
+}[Channel];
 type InviteReadTarget = { inviteId: string; socket: boolean };
 
 const channels = {
@@ -80,11 +79,8 @@ type InviteReadRole = {
   actorUid: string | null;
 };
 
-type PreparedInviteRead = {
-  body:
-    | ReadInviteMetadataResponse
-    | ReadInviteWagersResponse
-    | ReadMatchSyncResponse;
+type PreparedInviteRead<Channel extends InviteReadChannel> = {
+  body: ApiResponse<InviteReadEndpoint<Channel>>;
   revision: number;
   passwordProtected: boolean;
   role: InviteReadRole;
@@ -92,18 +88,19 @@ type PreparedInviteRead = {
 };
 
 type InviteReadRouteOptions<
+  Channel extends InviteReadChannel,
   Room extends Pick<InviteReactions, "fetch">,
   Target extends InviteReadTarget,
 > = {
-  channel: InviteReadChannel;
+  channel: Channel;
   dependencies: InviteReadRouteDependencies;
   readRoute: (request: Request) => Target;
-  validateInvite?: (invite: unknown, target: Target) => void;
+  validateInvite?: (invite: InviteDocument, target: Target) => void;
   getRoom: (inviteId: string) => Room;
   prepare: (
     room: Room,
     access: InviteReadAccess & Target,
-  ) => Promise<PreparedInviteRead>;
+  ) => Promise<PreparedInviteRead<NoInfer<Channel>>>;
 };
 
 export function isInviteReadPath(
@@ -116,7 +113,9 @@ export function isInviteReadPath(
 export function readInviteRoute(
   request: Request,
   channel: Exclude<InviteReadChannel, "matches">,
-) {
+): ApiParameters<InviteReadEndpoint<"metadata" | "wagers">> & {
+  socket: boolean;
+} {
   const url = new URL(request.url);
   const match = channels[channel].pattern.exec(url.pathname);
   let inviteId = "";
@@ -154,6 +153,7 @@ export async function resolveInviteReadRole(
 }
 
 export async function handleInviteReadRoute<
+  const Channel extends InviteReadChannel,
   Room extends Pick<InviteReactions, "fetch">,
   Target extends InviteReadTarget,
 >(
@@ -167,7 +167,7 @@ export async function handleInviteReadRoute<
     validateInvite,
     getRoom,
     prepare,
-  }: InviteReadRouteOptions<Room, Target>,
+  }: InviteReadRouteOptions<Channel, Room, Target>,
 ): Promise<Response> {
   const { protocol, headerPrefix } = channels[channel];
   const unavailable =
@@ -248,7 +248,12 @@ export async function handleInviteReadRoute<
     const room = getRoom(inviteId);
     for (let attempt = 0; attempt < 2; attempt++) {
       const prepared = await prepare(room, { ...target, identity, repository });
-      if (!socket) return authJsonResponse(prepared.body, 200, corsHeaders);
+      if (!socket)
+        return authJsonResponse<InviteReadEndpoint<InviteReadChannel>, 200>(
+          prepared.body,
+          200,
+          corsHeaders,
+        );
       const { role, actorUid } = prepared.role;
       const response = await room.fetch(
         new Request(`https://reactions.internal/${channel}/socket`, {

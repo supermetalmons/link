@@ -1,11 +1,10 @@
+import type { ApiRequest, ApiResponse } from "@mons/shared/api-contracts";
 import {
   MATERIAL_KEYS,
   createDropsForMiningEvent,
   formatMiningDateUtc,
   normalizeMaterials,
   sumMaterials,
-  type MineRockRequest,
-  type MineRockResponse,
 } from "@mons/shared/mining";
 import { AuthApiFailure } from "./authErrors.ts";
 import { enforceRateLimit } from "./rateLimit.ts";
@@ -20,6 +19,8 @@ import {
 import { readBoundedJson } from "./http.ts";
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 import { profileOwnershipUnavailable } from "./profileOwnership.ts";
+type MineRockRequest = ApiRequest<"POST /mining/rock">;
+type MineRockResponse = ApiResponse<"POST /mining/rock">;
 
 const MAX_WRITE_ATTEMPTS = 3;
 
@@ -157,7 +158,7 @@ export async function handleMiningRoute(
       await enforceMiningRateLimit(env, identity.uid);
       const input = await parseMineRockRequest(request);
       const repository = dependencies.repository || createMiningRepository(env);
-      return authJsonResponse(
+      return authJsonResponse<"POST /mining/rock", 200>(
         await mineRock(
           input,
           identity,

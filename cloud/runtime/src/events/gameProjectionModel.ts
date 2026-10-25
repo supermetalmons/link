@@ -1,17 +1,32 @@
+import type { NavigationGameStatus } from "@mons/shared/navigation";
+import type { ProjectionProfileDocument } from "../profileGameProjectionRecords.js";
+import {
+  inviteIsEventOwned as isEventOwnedInvite,
+  inviteRematchState,
+  inviteTrimmedParticipants,
+  type InviteDocument,
+} from "@mons/shared/invite-records";
 import type { RecomputeInviteProjectionOptions } from "../profileGamesProjectionCore.js";
 
 import { rematchSeriesEnded } from "@mons/shared/rematches";
 import { getNavigationSortBucket } from "@mons/shared/navigation";
 import { cropAddress } from "@mons/shared/profiles";
 import { isAutoInviteId } from "@mons/shared/ids";
-import { isEventOwnedInvite } from "@mons/shared/events";
-export type ProjectionProfile = Record<string, unknown> & {
+export type ProjectionProfile = ProjectionProfileDocument;
+type ProfileEvidence = {
+  username?: unknown;
+  eth?: unknown;
+  sol?: unknown;
+  emoji?: unknown;
   custom?: { emoji?: unknown };
 };
-export type ProjectionInvite = Record<string, unknown> & {
-  hostId?: unknown;
-  guestId?: unknown;
+const profileEvidence = (
+  value: ProjectionProfile | null | undefined,
+): ProfileEvidence | null | undefined => {
+  const retained: unknown = value;
+  return retained as ProfileEvidence | null | undefined;
 };
+export type ProjectionInvite = InviteDocument;
 type InviteProjectionInput = {
   inviteId: string;
   inviteData: ProjectionInvite | null;
@@ -39,8 +54,9 @@ const truncateAddress = (address: unknown) => {
 };
 
 const getProfileDisplayName = (
-  profileData: ProjectionProfile | null | undefined,
+  source: ProjectionProfile | null | undefined,
 ) => {
+  const profileData = profileEvidence(source);
   if (!profileData || typeof profileData !== "object") {
     return "anon";
   }
@@ -59,7 +75,8 @@ const getProfileDisplayName = (
   return "anon";
 };
 
-const getProfileEmoji = (profileData: ProjectionProfile | null | undefined) => {
+const getProfileEmoji = (document: ProjectionProfile | null | undefined) => {
+  const profileData = profileEvidence(document);
   if (!profileData || typeof profileData !== "object") {
     return null;
   }
@@ -99,14 +116,14 @@ const deriveProjectionStatus = ({
   inviteData,
   automatchStateHint,
   latestMatchRatingCompleted,
-}: InviteProjectionInput) => {
-  if (rematchSeriesEnded(inviteData)) {
+}: InviteProjectionInput): NavigationGameStatus => {
+  if (rematchSeriesEnded(inviteData ? inviteRematchState(inviteData) : null)) {
     return "ended";
   }
   if (isEventOwnedInvite(inviteData) && latestMatchRatingCompleted === true) {
     return "ended";
   }
-  const hasGuest = !!normalizeString(inviteData ? inviteData.guestId : null);
+  const hasGuest = !!inviteTrimmedParticipants(inviteData).guestId;
   if (isAutoInviteId(inviteId) && automatchStateHint === "pending") {
     return "pending";
   }
@@ -127,7 +144,7 @@ const shouldProjectInvite = ({
   if (!isAutoInviteId(inviteId)) {
     return true;
   }
-  const hasGuest = !!normalizeString(inviteData.guestId);
+  const hasGuest = !!inviteTrimmedParticipants(inviteData).guestId;
   if (hasGuest) {
     return true;
   }
@@ -206,7 +223,12 @@ const getOwnerContext = ({
   guestProfileId: string | null;
   hostLoginId: string | null;
   guestLoginId: string | null;
-}) => {
+}): {
+  ownerRole: "host" | "guest";
+  ownerLoginId: string | null;
+  opponentProfileId: string | null;
+  opponentLoginId: string | null;
+} => {
   if (ownerProfileId === hostProfileId) {
     return {
       ownerRole: "host",

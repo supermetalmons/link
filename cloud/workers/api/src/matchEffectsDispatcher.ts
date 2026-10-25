@@ -1,10 +1,15 @@
 import type { MatchStateStore } from "./matchStateStore.ts";
 import type { MatchEffectsOutbox } from "./matchEffectsOutbox.ts";
-import type { MatchStateEffect } from "./matchStateTypes.ts";
+import {
+  cleanupRetainedMatchEffect,
+  captureMatchEffectTarget,
+  matchEffectLogIdentity,
+  prepareMatchEffectProgress,
+  type DueMatchEffect,
+} from "./matchEffectCodec.ts";
 import { commitEventMutations } from "./eventD1.ts";
 import { withEventWriteAdmission } from "./eventWriteAdmission.ts";
-import { buildEventProgressPlan } from "./eventProgressCodec.ts";
-import { ensureEventProgressWorkflow } from "./eventProgressDispatch.ts";
+import { ensureRetainedEventProgressWorkflow } from "./eventProgressDispatch.ts";
 import { summarizeError } from "./errorSummary.ts";
 import { assertProfileBackgroundMutationsEnabled } from "./profileCanonicalActivation.ts";
 
@@ -14,27 +19,21 @@ type MatchEffectsStore = Pick<
 >;
 
 type MatchEffectsDependencies = {
-  deliver: (effect: MatchStateEffect) => Promise<void>;
+  deliver: (effect: DueMatchEffect) => Promise<void>;
   scheduleAlarm: (atMs: number) => Promise<void>;
   now?: () => number;
 };
 
 export function createMatchEffectDelivery(
   env: Env,
-  cleanupLegacyTimerStarts: MatchStateStore["cleanupLegacyTimerStarts"],
+  cleanupLegacyTimerStarts: MatchStateStore["cleanupRetainedTimerStarts"],
 ) {
-  return async (effect: MatchStateEffect): Promise<void> => {
+  return async (effect: DueMatchEffect): Promise<void> => {
     await assertProfileBackgroundMutationsEnabled(env);
-    await cleanupLegacyTimerStarts(effect);
-    if (!effect.eventId) return;
-    const plan = await buildEventProgressPlan(
-      {
-        eventId: effect.eventId,
-        sourceKey: effect.sourceKey,
-        reason: effect.reason,
-      },
-      effect.claimedAtMs,
-    );
+    await cleanupRetainedMatchEffect(effect, cleanupLegacyTimerStarts);
+    const prepared = prepareMatchEffectProgress(effect);
+    if (!prepared) return;
+    const plan = await prepared;
     await withEventWriteAdmission(
       env.EVENT_DB,
       { kind: "match-effect" },
@@ -51,7 +50,7 @@ export function createMatchEffectDelivery(
           { admission },
         ),
     );
-    await ensureEventProgressWorkflow(env, plan);
+    await ensureRetainedEventProgressWorkflow(env, plan);
   };
 }
 
@@ -86,13 +85,15 @@ export class MatchEffectsDispatcher {
     for (const effect of this.effects.listDueEffects(this.now(), 20)) {
       try {
         await this.dependencies.deliver(effect);
-        this.effects.completeEffect(effect.effectId);
+        this.effects.completeEffect(captureMatchEffectTarget(effect));
       } catch (error) {
-        await this.effects.retryEffect(effect.effectId, this.now() + 60_000);
+        await this.effects.retryEffect(
+          captureMatchEffectTarget(effect),
+          this.now() + 60_000,
+        );
         console.error({
           event: "canonical_match_effect_retry",
-          inviteId: effect.inviteId,
-          matchId: effect.matchId,
+          ...matchEffectLogIdentity(effect),
           kind: error instanceof Error ? error.name : "unknown",
           error: summarizeError(error),
         });

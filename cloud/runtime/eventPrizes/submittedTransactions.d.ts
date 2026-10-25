@@ -1,14 +1,11 @@
 // Generated from src/eventPrizes/submittedTransactions.ts. Run npm run generate:runtime.
+import type { WithdrawalDocument } from "./records.js";
 import type {
   Umi,
   TransactionBuilder,
   TransactionSignature,
 } from "@metaplex-foundation/umi";
-import type {
-  WithdrawalData,
-  WithdrawalRecord,
-  SubmittedTransactionStatus,
-} from "./types.js";
+import type { WithdrawalRecord, SubmittedTransactionStatus } from "./types.js";
 import type { SubmittedTransaction } from "./solanaTypes.js";
 declare class DefinitiveSubmittedTransactionFailure extends Error {}
 declare const isDefinitiveSubmittedTransactionFailure: (
@@ -16,7 +13,7 @@ declare const isDefinitiveSubmittedTransactionFailure: (
 ) => error is DefinitiveSubmittedTransactionFailure;
 declare const deserializePersistedSubmittedTransaction: (
   umi: Umi,
-  withdrawal: WithdrawalData | null | undefined,
+  withdrawal: WithdrawalDocument | null | undefined,
 ) => SubmittedTransaction | null;
 declare const buildSubmittedTransaction: ({
   umi,
@@ -30,7 +27,7 @@ declare const buildSubmittedTransaction: ({
   leaseId: string;
 }) => Promise<
   SubmittedTransaction & {
-    persistedWithdrawal: WithdrawalData;
+    persistedWithdrawal: WithdrawalDocument;
   }
 >;
 declare const getSubmittedTransactionSignature: (

@@ -1,4 +1,10 @@
 import {
+  readTelegramMessageDocument,
+  readTelegramControlDocument,
+  type TelegramControlDocument,
+} from "../../../runtime/telegram/records.js";
+import type { TransactionResult } from "../../../runtime/transactions.js";
+import {
   projectionRecoveryEntryIdentity,
   projectionRecoveryPage,
 } from "./projectionRecoveryFixtures.ts";
@@ -7,7 +13,6 @@ import { attachProjectionTestPorts } from "./projectionTestPorts.ts";
 import {
   createTelegramRepository,
   type TelegramTransactionResult,
-  type TelegramStoredRecord,
 } from "../../../runtime/telegram/repositoryCore.js";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -87,21 +92,21 @@ function memoryState(initial: Record<string, unknown>) {
     client: attachProjectionTestPorts(client),
     telegram: createTelegramRepository({
       readMessage: async (key) =>
-        (await client.getPath(
-          `telegramMessages/${key}`,
-        )) as TelegramStoredRecord | null,
+        readTelegramMessageDocument(
+          await client.getPath(`telegramMessages/${key}`),
+        ),
       transactMessage: async (key, updater) =>
         (await client.transactPath(`telegramMessages/${key}`, (current) =>
-          updater(current as TelegramStoredRecord | null),
+          updater(readTelegramMessageDocument(current)),
         )) as TelegramTransactionResult,
       readControl: async () =>
-        (await client.getPath(
-          "telegramDeliveryControl",
-        )) as TelegramStoredRecord | null,
+        readTelegramControlDocument(
+          await client.getPath("telegramDeliveryControl"),
+        ),
       transactControl: async (updater) =>
         (await client.transactPath("telegramDeliveryControl", (current) =>
-          updater(current as TelegramStoredRecord | null),
-        )) as TelegramTransactionResult,
+          updater(readTelegramControlDocument(current)),
+        )) as TransactionResult<TelegramControlDocument>,
     }),
     read: (path: string) => state.get(path),
   };

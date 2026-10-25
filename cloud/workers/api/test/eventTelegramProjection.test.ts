@@ -1,3 +1,6 @@
+import { eventProjectionOutboxFixture } from "./profileDataBoundaryFixture.ts";
+import { readTelegramAnnouncementPayloadDocument } from "../src/telegramAnnouncementRecords.ts";
+import type { TelegramRetryScheduleResult } from "../../../runtime/telegram/deliveryTypes.js";
 import { buildEventTelegramProjection } from "../../../runtime/telegram/eventProjectionCore.js";
 import { attachProjectionTestPorts } from "./projectionTestPorts.ts";
 import { eventReadFixture } from "./eventReadFixture.ts";
@@ -12,7 +15,7 @@ import {
 } from "../../../runtime/telegram/deliveryEngine.js";
 import { buildTelegramSendDesired } from "../../../runtime/telegram/desiredStateCore.js";
 import { buildSundayMonsReminder } from "../../../runtime/telegram/sundayMonsReminder.js";
-import type { TelegramResult } from "../../../runtime/telegram/client.js";
+import type { TelegramEditResult } from "../../../runtime/telegram/client.js";
 import type { TelegramRepository } from "../../../runtime/telegram/deliveryEngine.js";
 import type { TelegramAnnouncementRecord } from "../src/telegramD1.ts";
 import { buildEventTelegramProjectionUpdates } from "../../../tests/eventProjectionChangesFixture.js";
@@ -330,7 +333,11 @@ test("a legacy send racing projection retains its heading and retries participan
     /^sunday mons soon\n/,
     "join sunday mons\n",
   );
-  legacyProjection.state.upcomingText = legacyUpcomingOperation.text;
+  Reflect.set(
+    legacyProjection.state,
+    "upcomingText",
+    legacyUpcomingOperation.text,
+  );
   const desired = buildEventTelegramProjectionUpdates({
     eventId: task.eventId,
     projection: legacyProjection,
@@ -422,7 +429,10 @@ test("a legacy send racing projection retains its heading and retries participan
         upcomingText: string;
         lastProjectedSignature: string;
       };
-      assert.equal(deferred.upcomingText, legacyProjection.state.upcomingText);
+      assert.equal(
+        deferred.upcomingText,
+        Reflect.get(legacyProjection.state, "upcomingText"),
+      );
       assert.equal(deferred.lastProjectedSignature, "");
       assert.deepEqual(state.read(outboxPath), marker);
       assert.equal(state.read("eventTelegramProjectionLocks/event-1"), null);
@@ -535,7 +545,8 @@ test("uncertain invites preserve lifecycle and manual recovery decisions", async
             localRetryBarrier: createTelegramLocalRetryBarrier(),
             logger: { error() {}, info() {} },
             client: {
-              async sendTelegramMessage({ text }) {
+              async sendTelegramMessage(input) {
+                const text: unknown = Reflect.get(input, "text");
                 sentTexts.push(String(text));
                 return sentTexts.length === 1
                   ? {
@@ -553,7 +564,8 @@ test("uncertain invites preserve lifecycle and manual recovery decisions", async
                       messageId: 100 + sentTexts.length,
                     };
               },
-              async editTelegramMessage({ text }) {
+              async editTelegramMessage(input) {
+                const text: unknown = Reflect.get(input, "text");
                 editedTexts.push(String(text));
                 return { ok: true, outcome: "edited", httpStatus: 200 };
               },
@@ -1012,7 +1024,8 @@ test("rating read failures retain pending event work for a successful retry", as
   assert.equal(reads, 2);
   assert.deepEqual(deliveries, [messageKey]);
   assert.equal(state.read(outboxPath), null);
-  const message = (await telegram.getMessage(messageKey)) as {
+  const retainedMessage: unknown = await telegram.getMessage(messageKey);
+  const message = retainedMessage as {
     desired: { text: string };
   };
   assert.equal(
@@ -1140,10 +1153,16 @@ test("event sweep claims valid markers and dead-letters malformed records", asyn
     assert.equal(beforeMs, 200);
     assert.equal(limit, 100);
     return [
-      { eventId: "event-1", record: marker },
+      {
+        eventId: "event-1",
+        record: eventProjectionOutboxFixture("telegram", marker),
+      },
       {
         eventId: "event-bad",
-        record: { status: "pending", updatedAtMs: 100 },
+        record: eventProjectionOutboxFixture("telegram", {
+          status: "pending",
+          updatedAtMs: 100,
+        }),
       },
     ];
   };
@@ -1193,7 +1212,11 @@ function eventSweepFixture(
       ]),
     ),
   );
-  state.client.listDueEventTelegramProjectionOutboxes = async () => records;
+  state.client.listDueEventTelegramProjectionOutboxes = async () =>
+    records.map(({ eventId, record }) => ({
+      eventId,
+      record: eventProjectionOutboxFixture("telegram", record),
+    }));
   const transact = state.client.transactEventTelegramProjectionOutbox;
   const claim = state.client.claimEventTelegramProjectionOutbox;
   const visited: string[] = [];
@@ -1426,18 +1449,18 @@ function reminderProjectionFixture() {
     payloadDigest: "original-payload-digest",
     messageIds: [23001],
     status: "sent",
-    payload: {
+    payload: readTelegramAnnouncementPayloadDocument({
       chatId: "community-chat",
       text: buildSundayMonsReminder({ eventId: task.eventId }).text,
       parseMode: "HTML",
       silent: false,
-    },
+    }),
   };
   const edits: Record<string, unknown>[] = [];
   const deliveries: string[] = [];
   let nowMs = 200;
   const controls: {
-    editResult: TelegramResult;
+    editResult: TelegramEditResult;
     failDispatch: boolean;
     readReceipts: number;
   } = {
@@ -1462,7 +1485,10 @@ function reminderProjectionFixture() {
     resolveDestination: () => "community-chat",
     now: () => nowMs,
     localRetryBarrier: createTelegramLocalRetryBarrier(),
-    scheduleRetry: async () => ({}),
+    scheduleRetry: async () => {
+      const incompleteResult: unknown = {};
+      return incompleteResult as TelegramRetryScheduleResult;
+    },
     logger: { error: () => undefined, info: () => undefined },
   });
   const readMessage = () =>

@@ -1,3 +1,14 @@
+import type {
+  RetainedAutomatchValue,
+  AutomatchEntryWrite,
+  AutomatchTelegramSourceWrite,
+  MutationReceiptWrite,
+  MutationReceiptExpirationWrite,
+} from "../../../../runtime/automatchRecords.js";
+import type {
+  TelegramProjectionRequest,
+  ProfileProjectionRequest,
+} from "../../../../runtime/gameSessionChanges.js";
 import { RETIRED_STATE_BACKEND } from "../stateCompatibility.ts";
 import type { RecoveryScanPage } from "../recoveryScanPage.ts";
 
@@ -35,29 +46,59 @@ export const AUTOMATCH_RECORD_TABLES = {
 } as const;
 
 export type AutomatchRoot = keyof typeof AUTOMATCH_RECORD_TABLES;
-export type AutomatchRecordSnapshot = {
-  root: AutomatchRoot;
-  key: string;
-  value: unknown;
-  revision: number;
+export type AutomatchRecordValue<Root extends AutomatchRoot> =
+  RetainedAutomatchValue<Root> | null;
+
+export type AutomatchFreshWrites = {
+  automatch: AutomatchEntryWrite;
+  telegramAutomatches: AutomatchTelegramSourceWrite;
+  "telegramProjectionOutbox/automatch": TelegramProjectionRequest;
+  "profileGameProjectionOutbox/automatch": ProfileProjectionRequest;
+  gameplayMutationReceipts: MutationReceiptWrite;
+  gameplayMutationReceiptExpirations: MutationReceiptExpirationWrite;
 };
 
-export type AutomatchOutboxClaimSnapshot = AutomatchRecordSnapshot & {
-  root:
-    | "telegramProjectionOutbox/automatch"
-    | "profileGameProjectionOutbox/automatch";
-};
+export type AutomatchRecordSnapshot<
+  Root extends AutomatchRoot = AutomatchRoot,
+> = {
+  [Key in Root]: {
+    root: Key;
+    key: string;
+    value: AutomatchRecordValue<Key>;
+    revision: number;
+  };
+}[Root];
 
-export type AutomatchOutboxRecoveryPage = RecoveryScanPage<Record<
-  string,
-  unknown
-> | null> & {
-  snapshots?: ReadonlyMap<string, AutomatchOutboxClaimSnapshot>;
-};
+export type AutomatchOutboxRoot =
+  | "telegramProjectionOutbox/automatch"
+  | "profileGameProjectionOutbox/automatch";
+export type AutomatchOutboxClaimSnapshot<
+  Root extends AutomatchOutboxRoot = AutomatchOutboxRoot,
+> = AutomatchRecordSnapshot<Root>;
 
-export type AutomatchRecordMutation = {
-  current: AutomatchRecordSnapshot;
-  value: unknown;
+export type AutomatchOutboxRecoveryPage<
+  Root extends AutomatchOutboxRoot = AutomatchOutboxRoot,
+> = {
+  [Key in Root]: RecoveryScanPage<Record<
+    string,
+    AutomatchRecordValue<Key>
+  > | null> & {
+    snapshots?: ReadonlyMap<string, AutomatchOutboxClaimSnapshot<Key>>;
+  };
+}[Root];
+
+export type AutomatchRecordMutation<
+  Root extends AutomatchRoot = AutomatchRoot,
+> = {
+  [Key in Root]: {
+    current: AutomatchRecordSnapshot<Key>;
+    value: AutomatchRecordValue<Key> | AutomatchFreshWrites[Key];
+  };
+}[Root];
+
+declare const retainedAutomatchMutations: unique symbol;
+export type RetainedAutomatchMutationBatch = {
+  readonly [retainedAutomatchMutations]: true;
 };
 
 export type AutomatchRuntimeControl = {

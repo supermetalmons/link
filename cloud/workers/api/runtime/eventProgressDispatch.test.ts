@@ -1,3 +1,4 @@
+import { commitEventCompatibilityFixture } from "../test/eventCompatibilityFixture.ts";
 import type { D1Migration } from "cloudflare:test";
 import type { WorkflowStep } from "cloudflare:workers";
 import { env } from "cloudflare:workers";
@@ -122,7 +123,8 @@ async function seedOutbox(): Promise<{
     100,
   );
   const client = createEventStateRepository(testEnv);
-  await client.commitEventPlan(
+  await commitEventCompatibilityFixture(
+    client,
     decodeEventUpdates({
       [`events/${eventId}`]: {
         schemaVersion: 2,
@@ -300,7 +302,7 @@ describe("event-progress Workflow dispatch admissions", () => {
         );
         const current = (await recovery.read(plan.outboxId))!;
         const replacement = { ...plan.outbox, lastQueuedAtMs: 300 };
-        await repository.commitEventPlan([
+        await commitEventCompatibilityFixture(repository, [
           {
             kind: "progress-outbox",
             outboxId: plan.outboxId,
@@ -482,7 +484,7 @@ describe("event-progress Workflow dispatch admissions", () => {
               nowMs,
             );
       if (!plan) throw new Error("missing-recovery-plan");
-      await repository.commitEventPlan([
+      await commitEventCompatibilityFixture(repository, [
         { kind: "event-field", eventId, field: "status", value: event.status },
         {
           kind: "event-field",
@@ -569,7 +571,7 @@ describe("event-progress Workflow dispatch admissions", () => {
           repository: {
             ...repository,
             async commitEventPlan(commands) {
-              await repository.commitEventPlan(commands);
+              await commitEventCompatibilityFixture(repository, commands);
               for (const command of commands) {
                 if (
                   command.kind !== "progress-outbox" ||
@@ -640,7 +642,7 @@ describe("event-progress Workflow dispatch admissions", () => {
           now: () => plan.params.runAtMs!,
           readOutbox: repository.readEventProgressOutbox,
           acknowledge: (outboxId) =>
-            repository.commitEventPlan([
+            commitEventCompatibilityFixture(repository, [
               { kind: "progress-outbox", outboxId, value: null },
             ]),
           deliver: async () => {
@@ -740,7 +742,7 @@ describe("event-progress Workflow dispatch admissions", () => {
   it("shares confirmed deadlines across persisted, scheduled-start, and announcement recovery", async () => {
     const { plan, repository } = await seedOutbox();
     let nowMs = 1_000_000;
-    await repository.commitEventPlan([
+    await commitEventCompatibilityFixture(repository, [
       { kind: "progress-outbox", outboxId: plan.outboxId, value: null },
       { kind: "event-field", eventId, field: "status", value: "scheduled" },
       {
@@ -788,7 +790,8 @@ describe("event-progress Workflow dispatch admissions", () => {
 
   it("keeps the sweep admitted across a failed outbox lane and a delayed scheduled lane", async () => {
     const { plan, repository } = await seedOutbox();
-    await repository.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      repository,
       decodeEventUpdates({
         [`events/${eventId}/status`]: "scheduled",
         [`events/${eventId}/startAtMs`]: 10_000,

@@ -7,75 +7,38 @@ import {
   isMatchFenWithinLimit,
   isMatchHistoryWithinLimits,
 } from "@mons/shared/match-protocol";
-import {
-  MATCH_TIMER_TERMINAL,
-  parseStrictMatchTimer,
-} from "@mons/shared/timers";
 import { AuthApiFailure } from "./authErrors.ts";
-import { canonicalJson } from "./canonicalJson.ts";
-import { isCanonicalLoginUid } from "./recordKeys.ts";
-import type { MatchStateJson, MatchStateRecord } from "./matchStateTypes.ts";
+import {
+  readCommittedTimerClaim,
+  type RetainedTimerClaim,
+} from "./matchClaimCodec.ts";
+import {
+  canonicalMatchDocumentJson,
+  readMatchDocument,
+  normalizeNewMatchDocument,
+  readMoveMatch,
+  writeMovedMatch,
+  type MatchDocument,
+} from "./matchRecordCodec.ts";
 
-export function matchStateRecord(value: unknown): MatchStateRecord | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as MatchStateRecord)
-    : null;
-}
-
-export function normalizeCreatedMatchState(
-  value: MatchStateRecord,
-): MatchStateRecord {
-  const normalize = (entry: unknown): MatchStateJson => {
-    if (entry === null || entry === undefined) return null;
-    if (typeof entry !== "object") {
-      canonicalMatchStateJson(entry);
-      return entry as MatchStateJson;
-    }
-    const children = Object.entries(entry).flatMap(([key, child]) => {
-      const normalized = normalize(child);
-      return normalized === null ? [] : [[key, normalized] as const];
-    });
-    if (children.length === 0) return null;
-    const maximum = children.reduce(
-      (current, [key]) => Math.max(current, Number(key)),
-      0,
-    );
-    if (
-      children.every(([key]) => /^(0|[1-9]\d*)$/.test(key)) &&
-      maximum < children.length * 2
-    ) {
-      const array: MatchStateJson[] = Array(maximum + 1).fill(null);
-      for (const [key, child] of children) array[Number(key)] = child;
-      return array;
-    }
-    return Object.fromEntries(children);
-  };
-  const normalized = matchStateRecord(normalize(value));
-  if (!normalized) throw new TypeError("match-state-invalid-creation");
-  return normalized;
-}
+export const matchStateRecord = readMatchDocument;
+export const normalizeCreatedMatchState = normalizeNewMatchDocument;
 
 export function decideMatchStateMove(
   value: unknown,
   request: SubmitMoveRequest,
 ): {
   outcome: "applied" | "already-applied" | "superseded";
-  value: MatchStateRecord;
+  value: MatchDocument;
 } {
-  if (value === null || value === undefined) {
+  const match = readMoveMatch(value);
+  if (match.kind === "missing") {
     throw new AuthApiFailure(404, "not-found", "match-not-found");
   }
-  const match = matchStateRecord(value);
-  if (
-    !match ||
-    typeof match.fen !== "string" ||
-    !match.fen ||
-    (match.flatMovesString !== undefined &&
-      typeof match.flatMovesString !== "string")
-  ) {
+  if (match.kind === "invalid") {
     throw new AuthApiFailure(409, "failed-precondition", "match-invalid");
   }
-  const history = (match.flatMovesString ?? "") as string;
+  const history = match.flatMovesString;
   if (
     request.previousStates &&
     (!isMatchFenWithinLimit(match.fen) || !isMatchHistoryWithinLimits(history))
@@ -83,14 +46,14 @@ export function decideMatchStateMove(
     throw new AuthApiFailure(409, "failed-precondition", "match-invalid");
   }
   if (history === request.flatMovesString && match.fen === request.fen) {
-    return { outcome: "already-applied", value: match };
+    return { outcome: "already-applied", value: match.document };
   }
   if (
     request.previousStates &&
     history !== request.flatMovesString &&
     isMoveHistoryPrefix(request.flatMovesString, history)
   ) {
-    return { outcome: "superseded", value: match };
+    return { outcome: "superseded", value: match.document };
   }
   const previousState =
     request.previousStates?.[
@@ -105,44 +68,17 @@ export function decideMatchStateMove(
   if (!matchesPreviousState) {
     throw new AuthApiFailure(409, "aborted", "move-chain-conflict");
   }
-  const gameVariant =
-    match.gameVariant === undefined || match.gameVariant === ""
-      ? request.gameVariant
-      : undefined;
   return {
     outcome: "applied",
-    value: {
-      ...match,
-      ...(gameVariant ? { gameVariant } : {}),
-      fen: request.fen,
-      flatMovesString: request.flatMovesString,
-    },
+    value: writeMovedMatch(match.document, request),
   };
 }
 
 export function isCommittedMatchStateClaim(
-  claim: MatchStateRecord,
+  claim: RetainedTimerClaim,
   inviteId: string,
 ): boolean {
-  const timer = parseStrictMatchTimer(claim.timer);
-  return (
-    claim.status === "claimed" &&
-    claim.inviteId === inviteId &&
-    isCanonicalLoginUid(claim.playerId) &&
-    isCanonicalLoginUid(claim.opponentId) &&
-    claim.playerId !== claim.opponentId &&
-    Number.isSafeInteger(claim.turnNumber) &&
-    (claim.turnNumber as number) >= 0 &&
-    (claim.timer === MATCH_TIMER_TERMINAL ||
-      timer?.turnNumber === claim.turnNumber) &&
-    Number.isSafeInteger(claim.claimedAtMs) &&
-    (claim.claimedAtMs as number) >= 0 &&
-    claim.expiresAtMs == null
-  );
+  return readCommittedTimerClaim(claim, inviteId) !== null;
 }
 
-export function canonicalMatchStateJson(value: unknown): string {
-  return canonicalJson(value, () => {
-    throw new TypeError("match-state-invalid-json");
-  });
-}
+export const canonicalMatchStateJson = canonicalMatchDocumentJson;

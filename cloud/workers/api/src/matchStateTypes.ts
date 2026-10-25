@@ -11,15 +11,17 @@ import type {
   StartMatchTimerResponse,
 } from "@mons/shared/timers";
 
-export type MatchStateJson =
-  | null
-  | boolean
-  | number
-  | string
-  | MatchStateJson[]
-  | { [key: string]: MatchStateJson };
+import type {
+  MatchCreationInput,
+  RetainedMatchValue,
+} from "./matchRecordCodec.ts";
+import type {
+  RetainedTimerClaim,
+  TimerClaimDocument,
+} from "./matchClaimCodec.ts";
 
-export type MatchStateRecord = { [key: string]: MatchStateJson };
+export type MatchStateRecord = import("./matchRecordCodec.ts").MatchDocument;
+export type MatchStateJson = RetainedMatchValue;
 
 export type MatchStateAuthority = { inviteId: string; epoch: number };
 
@@ -40,9 +42,9 @@ export type MatchStatePairRequest = MatchStateRecordRequest & {
 
 export type MatchStatePair = MatchStatePairRequest & {
   revision: number;
-  playerMatch: MatchStateRecord | null;
-  opponentMatch: MatchStateRecord | null;
-  claim: MatchStateRecord | null;
+  playerMatch: RetainedMatchValue;
+  opponentMatch: RetainedMatchValue;
+  claim: RetainedTimerClaim;
 };
 
 export type MatchStateSyncReadRequest = MatchStatePairRequest & {
@@ -56,8 +58,8 @@ export type MatchStateSyncReadResult = {
   | { status: "unchanged" }
   | {
       status: "changed";
-      playerMatch: MatchStateRecord | null;
-      opponentMatch: MatchStateRecord | null;
+      playerMatch: RetainedMatchValue;
+      opponentMatch: RetainedMatchValue;
     }
 );
 
@@ -73,7 +75,7 @@ export type MatchStateSource = {
 export type MatchStateCreation = {
   matchId: string;
   playerId: string;
-  value: MatchStateRecord;
+  value: MatchCreationInput;
   marker: string;
 };
 
@@ -86,7 +88,7 @@ export type MatchStateCreateResult = {
     matchId: string;
     playerId: string;
     outcome: "created" | "already-created";
-    value: MatchStateRecord;
+    value: RetainedMatchValue;
   }>;
   changedMatchIds: string[];
 };
@@ -103,20 +105,7 @@ export type MatchStateClaimTimerRequest = ClaimMatchVictoryByTimerRequest & {
   eventId?: string | null;
 };
 
-export type MatchStateEffect = {
-  effectId: string;
-  inviteId: string;
-  matchId: string;
-  playerId: string;
-  opponentId: string;
-  epoch: number;
-  claimedAtMs: number;
-  eventId: string | null;
-  sourceKey: string;
-  reason: "timer-claimed";
-  nextAtMs: number;
-  attempts: number;
-};
+export type MatchStateEffect = import("./matchEffectCodec.ts").DueMatchEffect;
 
 export type MatchStateEventEffectsRequest = MatchStateAuthority & {
   operationId: string;
@@ -126,13 +115,13 @@ export type MatchStateEventEffectsRequest = MatchStateAuthority & {
     matchId: string;
     playerId: string;
     opponentId: string;
-    claim: MatchStateRecord;
+    claim: TimerClaimDocument;
   }>;
 };
 
 export type MatchStateOperations = {
-  readRecord(input: MatchStateRecordRequest): MatchStateRecord | null;
-  readRecords(input: MatchStateRecordsRequest): Array<MatchStateRecord | null>;
+  readRecord(input: MatchStateRecordRequest): RetainedMatchValue;
+  readRecords(input: MatchStateRecordsRequest): RetainedMatchValue[];
   readPair(input: MatchStatePairRequest): MatchStatePair;
   createRecords(input: MatchStateCreateRequest): MatchStateCreateResult;
   move(input: MatchStateMoveRequest): SubmitMoveResponse;

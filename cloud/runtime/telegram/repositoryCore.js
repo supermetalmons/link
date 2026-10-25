@@ -5,17 +5,11 @@ exports.createTelegramRepository = void 0;
 const values_js_1 = require("./values.js");
 const desiredStateCore_js_1 = require("./desiredStateCore.js");
 const deliveryPolicy_js_1 = require("./deliveryPolicy.js");
+const records_js_1 = require("./records.js");
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 const asObject = (value) =>
   value && typeof value === "object" && !Array.isArray(value) ? value : {};
-const omitKeys = (value, keys) => {
-  const output = { ...asObject(value) };
-  for (const key of keys) {
-    delete output[key];
-  }
-  return output;
-};
 const createTelegramRepository = ({
   readMessage,
   transactMessage,
@@ -42,7 +36,9 @@ const createTelegramRepository = ({
       );
     },
     async getRetryNotBeforeMs() {
-      const value = Number((await readControl())?.retryNotBeforeMs);
+      const value = Number(
+        (0, values_js_1.readProperty)(await readControl(), "retryNotBeforeMs"),
+      );
       return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
     },
     async extendRetryNotBeforeMs(candidateMs) {
@@ -54,15 +50,17 @@ const createTelegramRepository = ({
         const control = asObject(current);
         const previous = Number(control.retryNotBeforeMs);
         return {
-          value: {
-            ...control,
-            retryNotBeforeMs: Math.max(
-              Number.isFinite(previous) && previous > 0
-                ? Math.floor(previous)
-                : 0,
-              Math.floor(normalizedCandidate),
-            ),
-          },
+          value: (0, records_js_1.updateTelegramControl)(
+            (0, records_js_1.controlDocument)(control),
+            {
+              retryNotBeforeMs: Math.max(
+                Number.isFinite(previous) && previous > 0
+                  ? Math.floor(previous)
+                  : 0,
+                Math.floor(normalizedCandidate),
+              ),
+            },
+          ),
           decision: "retry-barrier-extended",
         };
       });
@@ -72,7 +70,9 @@ const createTelegramRepository = ({
         });
         throw error;
       }
-      const persistedMs = Number(result.value?.retryNotBeforeMs);
+      const persistedMs = Number(
+        (0, values_js_1.readProperty)(result.value, "retryNotBeforeMs"),
+      );
       if (!Number.isFinite(persistedMs) || persistedMs < normalizedCandidate) {
         const error = Object.assign(new Error("retry-barrier-invalid-result"), {
           code: "retry-barrier-invalid-result",
@@ -117,29 +117,34 @@ const createTelegramRepository = ({
         }
         if (currentGateOwner === owner) {
           decision = "acquired";
-          return { value: control, decision: "api-gate-reclaimed" };
+          return {
+            value: (0, records_js_1.controlDocument)(control),
+            decision: "api-gate-reclaimed",
+          };
         }
         decision = "acquired";
         return {
-          value: {
-            ...control,
-            apiGate: {
-              owner,
-              messageKey,
-              revision,
-              operation,
-              acquiredAtMs,
-              ...(normalizeString(input?.taskGeneration)
-                ? { taskGeneration: normalizeString(input.taskGeneration) }
-                : {}),
-              ...(normalizeString(input?.attemptId)
-                ? { attemptId: normalizeString(input.attemptId) }
-                : {}),
-              ...(normalizeString(input?.pendingDeleteId)
-                ? { pendingDeleteId: normalizeString(input.pendingDeleteId) }
-                : {}),
+          value: (0, records_js_1.updateTelegramControl)(
+            (0, records_js_1.controlDocument)(control),
+            {
+              apiGate: (0, records_js_1.apiGateDocument)({
+                owner,
+                messageKey,
+                revision,
+                operation,
+                acquiredAtMs,
+                ...(normalizeString(input?.taskGeneration)
+                  ? { taskGeneration: normalizeString(input.taskGeneration) }
+                  : {}),
+                ...(normalizeString(input?.attemptId)
+                  ? { attemptId: normalizeString(input.attemptId) }
+                  : {}),
+                ...(normalizeString(input?.pendingDeleteId)
+                  ? { pendingDeleteId: normalizeString(input.pendingDeleteId) }
+                  : {}),
+              }),
             },
-          },
+          ),
           decision,
         };
       });
@@ -150,7 +155,7 @@ const createTelegramRepository = ({
         retryNotBeforeMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
           control.retryNotBeforeMs,
         ),
-        gate: asObject(control.apiGate),
+        gate: (0, records_js_1.apiGateDocument)(control.apiGate),
       };
     },
     async releaseApiGate(ownerInput) {
@@ -170,7 +175,9 @@ const createTelegramRepository = ({
         }
         released = true;
         return {
-          value: omitKeys(control, ["apiGate"]),
+          value: (0, records_js_1.clearTelegramApiGate)(
+            (0, records_js_1.controlDocument)(control),
+          ),
           decision: "api-gate-released",
         };
       });
@@ -204,10 +211,14 @@ const createTelegramRepository = ({
         }
         applied = true;
         return {
-          value: {
-            ...omitKeys(control, ["apiGate"]),
-            retryNotBeforeMs: Math.max(currentMs, candidateMs),
-          },
+          value: (0, records_js_1.updateTelegramControl)(
+            (0, records_js_1.clearTelegramApiGate)(
+              (0, records_js_1.controlDocument)(control),
+            ),
+            {
+              retryNotBeforeMs: Math.max(currentMs, candidateMs),
+            },
+          ),
           decision: "barrier-proof-applied",
         };
       });
@@ -217,7 +228,7 @@ const createTelegramRepository = ({
         retryNotBeforeMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
           control.retryNotBeforeMs,
         ),
-        gate: asObject(control.apiGate),
+        gate: (0, records_js_1.apiGateDocument)(control.apiGate),
       };
     },
   };

@@ -1,3 +1,5 @@
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
+import { eventRecordFixture } from "./eventCompatibilityFixture.ts";
 import { LEGACY_CORE_PRIZES_EVENT_ID } from "@mons/shared/event-prizes";
 import type {
   CreateEventRequest,
@@ -117,7 +119,12 @@ function createRepository(initial: Record<string, unknown> = {}) {
   repository = attachEventTestPorts<TestGameplayRepository>({
     ...eventReadFixture(async (path) => getPath(values, path)),
     readInviteMetadata: async (inviteId) =>
-      getPath(values, `invites/${inviteId}`) as Record<string, unknown> | null,
+      retainedInviteSourceFixture(
+        getPath(values, `invites/${inviteId}`) as Record<
+          string,
+          unknown
+        > | null,
+      ),
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     findProfileId: async () => profileId,
@@ -388,12 +395,12 @@ test("creates a scheduled event only after its Workflow exists", async () => {
   assert.deepEqual(order, ["workflow", "patch"]);
   assert.equal(response.eventId, "aaaaaaaaaaa");
   assert.equal(response.event.status, "scheduled");
-  assert.deepEqual(response.event.telegramAnnouncements, {
+  assert.deepEqual(eventRecordFixture(response.event).telegramAnnouncements, {
     invite: true,
     matches: true,
     results: true,
   });
-  assert.equal(response.event.telegramDeliveryVersion, 2);
+  assert.equal(eventRecordFixture(response.event).telegramDeliveryVersion, 2);
   const update = repository.patches[0];
   assert.deepEqual(update["events/aaaaaaaaaaa"], response.event);
   const outboxEntry = Object.entries(update).find(([path]) =>
@@ -437,7 +444,7 @@ test("creates events 15 and 50 days ahead using relative and calendar schedules"
       { repository: state.repository, now: () => nowMs, random: () => 0 },
     );
     assert.equal(workflowCreates, 1);
-    assert.equal(response.event.startAtMs, startAtMs);
+    assert.equal(eventRecordFixture(response.event).startAtMs, startAtMs);
     assert.equal(
       getPath(state.values, `events/${response.eventId}/startAtMs`),
       startAtMs,
@@ -457,7 +464,10 @@ test("direct relative event creation clamps to 50 days", async () => {
       random: () => 0,
     },
   );
-  assert.equal(response.event.startAtMs, Date.UTC(2026, 1, 20));
+  assert.equal(
+    eventRecordFixture(response.event).startAtMs,
+    Date.UTC(2026, 1, 20),
+  );
 });
 
 test("creation and fresh joining persist identical participant snapshots", async () => {
@@ -512,7 +522,12 @@ test("creation and fresh joining persist identical participant snapshots", async
       eliminatedByProfileId: null,
     };
     assert.deepEqual(
-      (created.event.participants as Record<string, unknown>)[profileId],
+      (
+        eventRecordFixture(created.event).participants as Record<
+          string,
+          unknown
+        >
+      )[profileId],
       expected,
     );
     assert.deepEqual(joined.participant, expected);
@@ -588,8 +603,11 @@ test("persists independent Telegram preferences including all-off and omitted de
         sleep: async () => undefined,
       },
     );
-    assert.deepEqual(response.event.telegramAnnouncements, expected);
-    assert.equal(response.event.telegramDeliveryVersion, 2);
+    assert.deepEqual(
+      eventRecordFixture(response.event).telegramAnnouncements,
+      expected,
+    );
+    assert.equal(eventRecordFixture(response.event).telegramDeliveryVersion, 2);
     assert.equal(Object.hasOwn(response.event, "announceOnTelegram"), false);
     assert.deepEqual(
       state.patches[0][`events/${response.eventId}`],
@@ -718,8 +736,12 @@ test("ignores stale Firebase profile claims when creating an event", async () =>
       sleep: async () => undefined,
     },
   );
-  assert.equal(response.event.createdByProfileId, profileId);
-  const participants = response.event.participants as Record<string, unknown>;
+  assert.equal(
+    eventRecordFixture(response.event).createdByProfileId,
+    profileId,
+  );
+  const participants = eventRecordFixture(response.event)
+    .participants as Record<string, unknown>;
   assert.ok(participants[profileId]);
   assert.equal(participants["forged-profile"], undefined);
 });
@@ -1906,7 +1928,7 @@ test("progresses resolved semifinal winners into an active final", async () => {
   assert.ok("didChange" in response);
   assert.equal(response.didChange, true);
   assert.equal(response.event.status, "active");
-  assert.equal(response.event.currentRoundIndex, 1);
+  assert.equal(eventRecordFixture(response.event).currentRoundIndex, 1);
   const final = getPath(
     state.values,
     "events/event-1/rounds/1/matches/1_0",

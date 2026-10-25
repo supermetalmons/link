@@ -1,10 +1,15 @@
 // Generated from src/telegram/deliveryRecovery.ts. Run npm run generate:runtime.
+import {
+  type RetainedTelegramProofInput,
+  type RetainedTelegramOwner,
+} from "./retryRecords.js";
+import type { TelegramRetryProofDocument } from "./records.js";
 import type { TelegramDeliveryControl } from "./deliveryControl.js";
-import { type ProofInput, type RawRecord } from "./deliveryState.js";
+import { type ProofInput } from "./deliveryState.js";
 import type { TelegramRepository } from "./deliveryTypes.js";
 type RateLimitProofRecoveryInput = {
   messageKey: string;
-  proof: RawRecord;
+  proof: TelegramRetryProofDocument;
   requestedRevision: string;
   nowMs: number;
   target:
@@ -33,29 +38,13 @@ export declare function createTelegramDeliveryRecovery({
 }): {
   applySafeRetryProof: (
     messageKey: string,
-    {
-      requestedRevision,
-      safeRejectedAttemptId,
-      retryStartedAtMs,
-      retryDeadlineAtMs,
-      retryAtMs,
-      retrySequence,
-    }: ProofInput,
+    input: ProofInput | RetainedTelegramProofInput,
   ) => Promise<{
     applied: boolean;
   }>;
   applyDesiredRetryWindowProof: (
     messageKey: string,
-    {
-      requestedRevision,
-      safeRejectedAttemptId,
-      retryStartedAtMs,
-      retryDeadlineAtMs,
-      retryAtMs,
-      retrySequence,
-      retryProofLeaseOwner,
-      apiGateReclaimOwner,
-    }: ProofInput,
+    input: ProofInput | RetainedTelegramProofInput,
   ) => Promise<{
     applied: boolean;
   }>;
@@ -67,19 +56,11 @@ export declare function createTelegramDeliveryRecovery({
   }>;
   settleManualApiGateRelease: (
     messageKey: string,
-    ownerInput: unknown,
+    ownerInput: string | RetainedTelegramOwner | undefined,
   ) => Promise<void>;
   applyPendingDeleteRetryWindowProof: (
     messageKey: string,
-    {
-      pendingDeleteId,
-      retryStartedAtMs,
-      retryDeadlineAtMs,
-      retryAtMs,
-      retrySequence,
-      retryProofLeaseOwner,
-      apiGateReclaimOwner,
-    }: ProofInput,
+    input: ProofInput | RetainedTelegramProofInput,
   ) => Promise<{
     applied: boolean;
   }>;

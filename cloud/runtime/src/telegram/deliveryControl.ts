@@ -1,7 +1,18 @@
 import {
-  normalizeRetrySequence,
-  normalizeTimestamp,
-} from "./deliveryPolicy.js";
+  buildTelegramRetrySchedule,
+  readBarrierProofInput,
+  type TelegramBarrierInput,
+  type RetainedTelegramBarrierInput,
+  type RetainedTelegramOwner,
+} from "./retryRecords.js";
+import { messageDeliveryDocument } from "./records.js";
+import {
+  clearRateLimitProofRecord,
+  prepareDesiredGateRecord,
+  settleApiGateRecord,
+} from "./deliveryControlRecords.js";
+import { messageDocument } from "./records.js";
+
 import { createTelegramRetryCoordinator } from "./deliveryRetryCoordinator.js";
 import type {
   TelegramBarrierProofResult,
@@ -9,13 +20,9 @@ import type {
   TelegramRetryFailure,
 } from "./deliveryRetryTypes.js";
 import {
-  asObject,
-  buildApiGateOwner,
   ensureCommitted,
   normalizeString,
-  omitKeys,
   readDelivery,
-  readPendingDelete,
   type ExactRetryInput,
   type MessageMutation,
   type OwnedMutation,
@@ -25,8 +32,9 @@ import type {
   TelegramRepository,
   TelegramRetryScheduler,
 } from "./deliveryTypes.js";
-import { TELEGRAM_DESIRED_TASK_KIND } from "./taskKinds.js";
+
 import { readProperty } from "./values.js";
+import type { TelegramApiOperation } from "./records.js";
 export function createTelegramDeliveryControl({
   repository,
   logger,
@@ -56,63 +64,12 @@ export function createTelegramDeliveryControl({
   };
   const transact = (messageKey: string, updater: MessageMutation) =>
     repository.transactMessage(messageKey, (current) => {
-      const record = asObject(current);
+      const record = messageDocument(current);
       return updater(record);
     });
-  const scheduleExactRetry = async ({
-    messageKey,
-    revision,
-    taskKind,
-    retryState,
-    safeRejectedAttemptId = "",
-    pendingDeleteId = "",
-    retryProofLeaseOwner = "",
-    sourceGeneration = "",
-    proofTaskKind = "",
-    barrierProofOwner = "",
-    barrierRetryNotBeforeMs = 0,
-    scheduleTimeMs = 0,
-    apiGateReclaimOwner = "",
-    apiGateSettleOwner = "",
-  }: ExactRetryInput) => {
-    const normalizedTaskKind =
-      normalizeString(taskKind) || TELEGRAM_DESIRED_TASK_KIND;
-    const retrySequence = normalizeRetrySequence(retryState.retrySequence);
-    const generation = [
-      normalizedTaskKind,
-      retrySequence,
-      normalizeTimestamp(retryState.retryAtMs),
-      safeRejectedAttemptId || pendingDeleteId || revision,
-      normalizeString(retryProofLeaseOwner),
-      normalizeString(sourceGeneration),
-      normalizeString(proofTaskKind),
-      normalizeString(barrierProofOwner),
-      normalizeTimestamp(barrierRetryNotBeforeMs),
-      normalizeString(apiGateReclaimOwner),
-      normalizeString(apiGateSettleOwner),
-    ].join(":");
-    return scheduleRetry({
-      messageKey,
-      revision,
-      taskKind: normalizedTaskKind,
-      retrySequence,
-      generation,
-      retryStartedAtMs: normalizeTimestamp(retryState.retryStartedAtMs),
-      retryDeadlineAtMs: normalizeTimestamp(retryState.retryDeadlineAtMs),
-      retryAtMs: normalizeTimestamp(retryState.retryAtMs),
-      scheduleTimeMs:
-        normalizeTimestamp(scheduleTimeMs) ||
-        normalizeTimestamp(retryState.retryAtMs),
-      ...(safeRejectedAttemptId ? { safeRejectedAttemptId } : {}),
-      ...(pendingDeleteId ? { pendingDeleteId } : {}),
-      ...(retryProofLeaseOwner ? { retryProofLeaseOwner } : {}),
-      ...(proofTaskKind ? { proofTaskKind } : {}),
-      ...(barrierProofOwner ? { barrierProofOwner } : {}),
-      ...(barrierRetryNotBeforeMs ? { barrierRetryNotBeforeMs } : {}),
-      ...(apiGateReclaimOwner ? { apiGateReclaimOwner } : {}),
-      ...(apiGateSettleOwner ? { apiGateSettleOwner } : {}),
-    });
-  };
+  const scheduleExactRetry = async (input: ExactRetryInput) =>
+    scheduleRetry(buildTelegramRetrySchedule(input));
+
   const retryCoordinator = createTelegramRetryCoordinator({
     now,
     scheduleExactRetry,
@@ -121,15 +78,10 @@ export function createTelegramDeliveryControl({
       repository.extendRetryBarrierAndReleaseApiGate(proof),
     localRetryBarrier,
   });
-  const applyRateLimitBarrierProof = async ({
-    barrierProofOwner,
-    barrierRetryNotBeforeMs,
-  }: {
-    barrierProofOwner?: unknown;
-    barrierRetryNotBeforeMs?: unknown;
-  }): Promise<Partial<TelegramBarrierProofResult> & { applied: boolean }> => {
-    const owner = normalizeString(barrierProofOwner);
-    const retryNotBeforeMs = normalizeTimestamp(barrierRetryNotBeforeMs);
+  const applyRateLimitBarrierProof = async (
+    input: TelegramBarrierInput | RetainedTelegramBarrierInput,
+  ): Promise<Partial<TelegramBarrierProofResult> & { applied: boolean }> => {
+    const { owner, retryNotBeforeMs } = readBarrierProofInput(input);
     if (!owner || !retryNotBeforeMs) {
       return { applied: false };
     }
@@ -144,45 +96,15 @@ export function createTelegramDeliveryControl({
   };
   const clearAppliedRateLimitProofMarker = async (
     messageKey: string,
-    ownerInput: unknown,
+    ownerInput: string | RetainedTelegramOwner | undefined,
   ) => {
     const owner = normalizeString(ownerInput);
     if (!owner) {
       return;
     }
-    await transact(messageKey, (record) => {
-      const delivery = readDelivery(record.delivery);
-      const pendingDelete = readPendingDelete(delivery.pendingDelete);
-      const clearsDesired =
-        normalizeString(
-          readProperty(delivery.apiGateProofRequired, "owner"),
-        ) === owner;
-      const clearsPending =
-        normalizeString(
-          readProperty(pendingDelete.apiGateProofRequired, "owner"),
-        ) === owner;
-      if (!clearsDesired && !clearsPending) {
-        return { commit: false, decision: "rate-limit-proof-marker-stale" };
-      }
-      return {
-        value: {
-          ...record,
-          delivery: {
-            ...(clearsDesired
-              ? omitKeys(delivery, ["apiGateProofRequired"])
-              : delivery.source),
-            ...(clearsPending
-              ? {
-                  pendingDelete: omitKeys(pendingDelete, [
-                    "apiGateProofRequired",
-                  ]),
-                }
-              : {}),
-          },
-        },
-        decision: "rate-limit-proof-marker-cleared",
-      };
-    });
+    await transact(messageKey, (record) =>
+      clearRateLimitProofRecord(messageDocument(record), { owner }),
+    );
   };
   const acquireApiGate = ({
     messageKey,
@@ -196,7 +118,7 @@ export function createTelegramDeliveryControl({
   }: {
     messageKey: string;
     revision: string;
-    operation: string;
+    operation: TelegramApiOperation;
     owner: string;
     attemptId?: string;
     pendingDeleteId?: string;
@@ -233,7 +155,7 @@ export function createTelegramDeliveryControl({
     updater: OwnedMutation,
   ) =>
     transact(messageKey, (record) => {
-      const delivery = readDelivery(record.delivery);
+      const delivery = readDelivery(messageDeliveryDocument(record));
       if (normalizeString(delivery.leaseOwner) !== ownerToken) {
         return { commit: false, decision: "lease-lost" };
       }
@@ -258,25 +180,17 @@ export function createTelegramDeliveryControl({
       normalizeString(requestedGeneration) || `direct:${revision}`;
     const preparedAtMs = now();
     const prepared = ensureCommitted(
-      await updateOwned(messageKey, ownerToken, (record, delivery) => {
-        const existingOwner = normalizeString(delivery.apiGateOwner);
-        return {
-          ...record,
-          delivery: {
-            ...delivery.source,
-            apiGateOwner:
-              existingOwner ||
-              buildApiGateOwner(messageKey, "desired", revision, generation),
-            apiGateGeneration:
-              normalizeString(delivery.apiGateGeneration) || generation,
-            apiGateStartedAtMs:
-              normalizeTimestamp(delivery.apiGateStartedAtMs) || preparedAtMs,
-          },
-        };
-      }),
+      await updateOwned(messageKey, ownerToken, (record, delivery) =>
+        prepareDesiredGateRecord(messageDocument(record), delivery, {
+          generation,
+          messageKey,
+          preparedAtMs,
+          revision,
+        }),
+      ),
       "api-gate-identity-not-persisted",
     );
-    const delivery = readDelivery(prepared.value?.delivery);
+    const delivery = readDelivery(messageDeliveryDocument(prepared.value));
     const owner = normalizeString(delivery.apiGateOwner);
     const persistedGeneration = normalizeString(delivery.apiGateGeneration);
     const proofRequiredOwner = normalizeString(
@@ -297,26 +211,16 @@ export function createTelegramDeliveryControl({
   }: {
     messageKey: string;
     field: "apiGateSettleOwner" | "pendingDeleteApiGateSettleOwner";
-    owner: unknown;
+    owner: string | RetainedTelegramOwner | undefined;
   }) => {
     const settleOwner = normalizeString(ownerInput);
     if (!settleOwner) {
       return null;
     }
     await repository.releaseApiGate(settleOwner);
-    const result = await transact(messageKey, (record) => {
-      const delivery = readDelivery(record.delivery);
-      if (delivery.settlementOwner(field) !== settleOwner) {
-        return { commit: false, decision: "api-gate-settle-stale" };
-      }
-      return {
-        value: {
-          ...record,
-          delivery: omitKeys(delivery, [field]),
-        },
-        decision: "api-gate-settled",
-      };
-    });
+    const result = await transact(messageKey, (record) =>
+      settleApiGateRecord(messageDocument(record), { field, settleOwner }),
+    );
     if (!result.committed && result.decision !== "api-gate-settle-stale") {
       ensureCommitted(result, "api-gate-settle-finalization-failed");
     }

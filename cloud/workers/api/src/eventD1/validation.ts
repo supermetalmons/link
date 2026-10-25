@@ -1,9 +1,14 @@
+import type { EventProgressDocument } from "../../../../runtime/eventProgressRecords.js";
+import {
+  retainEventProjectionOutbox,
+  type EventProjectionOutboxDocument,
+  type EventProjectionOutboxKind,
+} from "../../../../runtime/eventProjectionOutboxRecords.js";
 import {
   EventD1Failure,
   type EventRow,
   type DecodedEventRow,
   type EventTransitionIntent,
-  type EventOutboxRecord,
 } from "./types.ts";
 import type {
   EventJsonRecord,
@@ -239,20 +244,21 @@ export function decodeEventRow(row: EventRow): DecodedEventRow {
 }
 
 export function validateTransitionIntent(
-  value: EventTransitionIntent,
+  input: unknown,
 ): EventTransitionIntent {
+  const value = input as Record<string, unknown>;
   if (
     (value.schemaVersion !== 1 && value.schemaVersion !== 2) ||
     !exactKey(value.transitionId) ||
     !exactKey(value.eventId) ||
     !Number.isSafeInteger(value.expectedRevision) ||
-    value.expectedRevision < 1 ||
+    (value.expectedRevision as number) < 1 ||
     !isRecord(value[STATE_EFFECTS_FIELD]) ||
     !isRecord(value.canonicalUpdates) ||
     !Number.isSafeInteger(value.createdAtMs) ||
-    value.createdAtMs < 0 ||
+    (value.createdAtMs as number) < 0 ||
     !Number.isSafeInteger(value.updatedAtMs) ||
-    value.updatedAtMs < value.createdAtMs ||
+    (value.updatedAtMs as number) < (value.createdAtMs as number) ||
     !isJsonValue(value)
   ) {
     throw new EventD1Failure("invalid-event-transition");
@@ -260,7 +266,7 @@ export function validateTransitionIntent(
   if (
     value.schemaVersion === 2 &&
     (!Number.isSafeInteger(value.sourceEpoch) ||
-      value.sourceEpoch < 1 ||
+      (value.sourceEpoch as number) < 1 ||
       typeof value.payloadDigest !== "string" ||
       !/^[a-f0-9]{64}$/.test(value.payloadDigest) ||
       !Array.isArray(value.inviteMutations) ||
@@ -271,11 +277,11 @@ export function validateTransitionIntent(
           !isRecord(mutation.current) ||
           !exactKey(mutation.current.inviteId) ||
           !Number.isSafeInteger(mutation.current.revision) ||
-          mutation.current.revision < 0 ||
+          (mutation.current.revision as number) < 0 ||
           (mutation.current.value === null
             ? mutation.current.revision !== 0
             : !isRecord(mutation.current.value) ||
-              mutation.current.revision < 1) ||
+              (mutation.current.revision as number) < 1) ||
           !isRecord(mutation.value),
       ) ||
       new Set(value.inviteMutations.map(({ current }) => current.inviteId))
@@ -283,13 +289,16 @@ export function validateTransitionIntent(
   ) {
     throw new EventD1Failure("invalid-event-transition");
   }
-  return cloneJson(value);
+  const retained: unknown = cloneJson(value);
+  return retained as EventTransitionIntent;
 }
 
 export function validateEventProgressOutbox(
   outboxId: string,
   value: unknown,
-): EventOutboxRecord & {
+): EventProgressDocument<"pending"> & {
+  reason?: unknown;
+  firstQueuedAtMs?: unknown;
   eventId: string;
   lastQueuedAtMs: number;
   runAtMs: number | null;
@@ -303,15 +312,29 @@ export function validateEventProgressOutbox(
   if (!eventId || value.schemaVersion !== 1) {
     throw new EventD1Failure("invalid-event-progress-outbox");
   }
-  return { ...cloneJson(value), eventId, runAtMs, lastQueuedAtMs };
+  const retained: unknown = {
+    ...cloneJson(value),
+    eventId,
+    runAtMs,
+    lastQueuedAtMs,
+  };
+  return retained as EventProgressDocument<"pending"> & {
+    reason?: unknown;
+    firstQueuedAtMs?: unknown;
+    eventId: string;
+    runAtMs: number | null;
+    lastQueuedAtMs: number;
+  };
 }
 
-export function validateProjectionOutbox(
-  kind: "profile-game" | "telegram",
+export function validateProjectionOutbox<
+  Kind extends EventProjectionOutboxKind,
+>(
+  kind: Kind,
   eventId: string,
   value: unknown,
-): EventOutboxRecord & {
-  raw: EventOutboxRecord;
+): {
+  raw: EventProjectionOutboxDocument<Kind>;
   status: "dead" | "pending";
   firstQueuedAtMs?: number;
   lastQueuedAtMs?: number;
@@ -321,7 +344,7 @@ export function validateProjectionOutbox(
   if (!exactKey(eventId) || !isRecord(value) || !isJsonValue(value)) {
     throw new EventD1Failure("invalid-event-projection-outbox");
   }
-  const raw = cloneJson(value);
+  const raw = retainEventProjectionOutbox(kind, cloneJson(value));
   if (kind === "telegram" && value.status === "dead") {
     const deadAtMs = safeInteger(value.deadAtMs);
     return {

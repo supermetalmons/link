@@ -329,7 +329,7 @@ const isProfileCustomizationUpdateRequest = (
       if (typeof value.value !== "string") {
         return false;
       }
-      let stickers;
+      let stickers: unknown;
       try {
         stickers = JSON.parse(value.value);
       } catch {

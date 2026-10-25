@@ -7,6 +7,8 @@ import type {
 } from "@mons/shared/game-sessions";
 import type {
   GameSessionMutationKind,
+  GameSessionMutationResponseMap,
+  GameSessionMutationReceiptWrite,
   GameSessionResponse,
 } from "../../../runtime/automatchRecords.js";
 import { AuthApiFailure } from "./authErrors.ts";
@@ -286,19 +288,25 @@ export async function withGameSessionMutationLease<T>(
   return value as T;
 }
 
-export async function runGameSessionMutation<T extends GameSessionResponse>(
-  kind: GameSessionMutationKind,
+export async function runGameSessionMutation<
+  Kind extends GameSessionMutationKind,
+>(
+  kind: Kind,
   requesterUid: string,
   request: GameSessionRequest,
   repository: Pick<
     GameSessionRepository,
     "readGameSessionMutationReceipt" | "commitSessionChanges"
   >,
-  validateResponse: (value: unknown) => value is T,
-  build: () => Promise<GameSessionMutationOutcome<T>>,
+  validateResponse: (
+    value: unknown,
+  ) => value is GameSessionMutationResponseMap[NoInfer<Kind>],
+  build: () => Promise<
+    GameSessionMutationOutcome<GameSessionMutationResponseMap[NoInfer<Kind>]>
+  >,
   dependencies: GameSessionMutationRunnerDependencies,
   { acquireRetryTimeoutMs }: { acquireRetryTimeoutMs?: number } = {},
-): Promise<T> {
+): Promise<GameSessionMutationResponseMap[Kind]> {
   const fingerprint = await mutationFingerprint(kind, request, requesterUid);
   const outcome = await withGameSessionMutationLease(
     request.inviteId,
@@ -346,7 +354,7 @@ export async function runGameSessionMutation<T extends GameSessionResponse>(
             requesterUid,
             response: outcome.response,
             completedAtMs: STATE_SERVER_TIMESTAMP,
-          },
+          } as GameSessionMutationReceiptWrite,
           expiration: { completedAtMs: STATE_SERVER_TIMESTAMP },
         },
       ];

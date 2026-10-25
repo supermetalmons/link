@@ -1,7 +1,7 @@
+import type { ApiParameters, ApiResponse } from "@mons/shared/api-contracts";
 import {
   MATCH_SYNC_MAX_MESSAGE_BYTES,
   isReadMatchSyncResponse,
-  type ReadMatchSyncResponse,
 } from "@mons/shared/match-sync";
 import { AuthApiFailure } from "./authErrors.ts";
 import type { WorkerExecutionContext } from "./sessionAuth.ts";
@@ -16,6 +16,8 @@ import {
   isRegisteredSyncMatch,
   type MatchSyncReadResult,
 } from "./matchSync.ts";
+type ReadMatchSyncResponse =
+  ApiResponse<"GET /invites/:inviteId/matches/:matchId/snapshot">;
 
 const MATCH_SYNC_ROUTE_PATTERN =
   /^\/invites\/([^/]+)\/matches\/([^/]+)\/(snapshot|socket)$/;
@@ -34,7 +36,11 @@ export function isMatchSyncPath(pathname: string): boolean {
   return MATCH_SYNC_ROUTE_PATTERN.test(pathname);
 }
 
-function readRoute(request: Request) {
+function readRoute(
+  request: Request,
+): ApiParameters<"GET /invites/:inviteId/matches/:matchId/snapshot"> & {
+  socket: boolean;
+} {
   const url = new URL(request.url);
   const match = MATCH_SYNC_ROUTE_PATTERN.exec(url.pathname);
   let inviteId = "";

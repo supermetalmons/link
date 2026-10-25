@@ -11,6 +11,7 @@ const runtimeDirectory = path.resolve(__dirname, "../runtime");
 const sharedDirectory = path.join(runtimeDirectory, "shared");
 
 const expectedSharedExports = {
+  "./api-contracts": "./api-contracts.js",
   "./auth": "./auth.js",
   "./event-prizes": "./event-prizes.js",
   "./events": "./events.js",
@@ -19,6 +20,7 @@ const expectedSharedExports = {
   "./game-variants": "./game-variants.js",
   "./ids": "./ids.js",
   "./invite-metadata": "./invite-metadata.js",
+  "./invite-records": "./invite-records.js",
   "./invite-wagers": "./invite-wagers.js",
   "./match-protocol": "./match-protocol.js",
   "./match-presentation": "./match-presentation.js",
@@ -83,6 +85,21 @@ test("preserves every portable runtime and shared value export", () => {
       "utf8",
     ),
   );
+  const generatedModules = fs
+    .readdirSync(path.join(runtimeDirectory, "src"), { recursive: true })
+    .filter((file) => file.endsWith(".ts") && !file.endsWith(".d.ts"))
+    .map((file) => file.replace(/\.ts$/, ".js").split(path.sep).join("/"))
+    .sort();
+  const generatedFiles = (directory, prefix = "") =>
+    fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+      if (entry.name === "node_modules" || entry.name === "src") return [];
+      const relative = `${prefix}${entry.name}`;
+      if (entry.isDirectory())
+        return generatedFiles(path.join(directory, entry.name), `${relative}/`);
+      return entry.isFile() && entry.name.endsWith(".js") ? [relative] : [];
+    });
+  assert.deepEqual(Object.keys(expected).sort(), generatedModules);
+  assert.deepEqual(generatedFiles(runtimeDirectory).sort(), generatedModules);
   for (const [modulePath, exports] of Object.entries(expected)) {
     assert.deepEqual(
       Object.keys(require(path.join(runtimeDirectory, modulePath))).sort(),

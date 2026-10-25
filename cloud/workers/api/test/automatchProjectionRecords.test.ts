@@ -1,3 +1,4 @@
+import { inviteDocumentFixture } from "./inviteDocumentFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -105,31 +106,36 @@ test("source snapshots defer lifecycle resolution to the concurrent invite read"
   };
   const snapshot = createAutomatchTelegramSourceSnapshot(inviteId, raw);
   assert.equal(snapshot.project(null), null);
-  const projection = snapshot.project("  guest  ");
+  const projection = snapshot.project(
+    inviteDocumentFixture({ guestId: "  guest  " }),
+  );
   assert.equal(projection?.lifecycle, "matched");
   assert.equal(projection?.sourceGeneration, 0);
   assert.equal(projection?.text, "matched\n\nlegacy result\n\nnext result");
   assert.equal(projection?.instanceKey, "matched:auto_example");
   assert.equal(
-    snapshot.fingerprint("  guest  "),
+    snapshot.fingerprint(inviteDocumentFixture({ guestId: "  guest  " })),
     JSON.stringify({ source: raw, guestId: "  guest  " }),
   );
   assert.notEqual(
-    snapshot.fingerprint("guest"),
+    snapshot.fingerprint(inviteDocumentFixture({ guestId: "guest" })),
     createAutomatchTelegramSourceSnapshot(inviteId, {
       ...raw,
       extra: { preserve: false },
-    }).fingerprint("guest"),
+    }).fingerprint(inviteDocumentFixture({ guestId: "guest" })),
   );
 });
 
 test("source snapshots retain raw fingerprints for missing and malformed values", () => {
   for (const raw of [undefined, null, false, "malformed", ["malformed"]]) {
     const snapshot = createAutomatchTelegramSourceSnapshot(inviteId, raw);
-    assert.equal(snapshot.project("guest"), null);
+    assert.equal(
+      snapshot.project(inviteDocumentFixture({ guestId: "guest" })),
+      null,
+    );
     for (const guestId of [undefined, null, false, 0, "", "guest", { id: 1 }]) {
       assert.equal(
-        snapshot.fingerprint(guestId),
+        snapshot.fingerprint(inviteDocumentFixture({ guestId: guestId })),
         JSON.stringify({ source: raw, guestId: guestId || null }),
       );
     }
@@ -140,10 +146,13 @@ test("source snapshots retain raw fingerprints for missing and malformed values"
     matchedText: "matched",
     matchedInstanceKey: "matched:auto_example",
   });
-  assert.equal(snapshot.project("guest"), null);
+  assert.equal(
+    snapshot.project(inviteDocumentFixture({ guestId: "guest" })),
+    null,
+  );
 });
 
-test("Telegram outbox snapshots preserve raw fields while flooring the parsed timestamp", () => {
+test("Telegram outbox snapshots keep source fields intact while exposing the parsed timestamp", () => {
   const raw = {
     schemaVersion: 1,
     status: "pending",
@@ -151,8 +160,10 @@ test("Telegram outbox snapshots preserve raw fields while flooring the parsed ti
     updatedAtMs: 123.75,
     extra: { preserve: true },
   };
+  const before = structuredClone(raw);
   const snapshot = createAutomatchTelegramOutboxSnapshot(raw);
-  assert.equal(snapshot.raw, raw);
+  assert.equal("raw" in snapshot, false);
+  assert.deepEqual(raw, before);
   assert.deepEqual(snapshot.value, {
     schemaVersion: 1,
     status: "pending",
@@ -168,8 +179,10 @@ test("Telegram outbox snapshots preserve raw fields while flooring the parsed ti
     { ...raw, updatedAtMs: Number.NaN },
     { ...raw, requestId: "unsafe/path" },
   ]) {
+    const before = structuredClone(invalid);
     const invalidSnapshot = createAutomatchTelegramOutboxSnapshot(invalid);
-    assert.equal(invalidSnapshot.raw, invalid);
+    assert.equal("raw" in invalidSnapshot, false);
+    assert.deepEqual(invalid, before);
     assert.equal(invalidSnapshot.value, null);
   }
 });
@@ -179,8 +192,10 @@ test("profile snapshots separate parsed arrays and defaults from the stored maps
     ...profileOutbox(),
     archiveRetry: { requestId: "unsafe/path", notBeforeMs: 1 },
   };
+  const before = structuredClone(raw);
   const snapshot = createAutomatchProfileOutboxSnapshot(raw);
-  assert.equal(snapshot.raw, raw);
+  assert.equal("raw" in snapshot, false);
+  assert.deepEqual(raw, before);
   assert.deepEqual(snapshot.value, {
     schemaVersion: 1,
     status: "pending",
@@ -212,8 +227,10 @@ test("profile snapshots separate parsed arrays and defaults from the stored maps
     ...raw,
     historicalMatches: { ...raw.historicalMatches, broken: {} },
   };
+  const beforeMalformed = structuredClone(malformed);
   const malformedSnapshot = createAutomatchProfileOutboxSnapshot(malformed);
-  assert.equal(malformedSnapshot.raw, malformed);
+  assert.equal("raw" in malformedSnapshot, false);
+  assert.deepEqual(malformed, beforeMalformed);
   assert.equal(malformedSnapshot.value, null);
 });
 

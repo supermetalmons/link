@@ -1,6 +1,11 @@
 import {
+  readTelegramMessageDocument,
+  readTelegramControlDocument,
+  type TelegramControlDocument,
+} from "../../../runtime/telegram/records.js";
+import type { TransactionResult } from "../../../runtime/transactions.js";
+import {
   createTelegramRepository,
-  type TelegramStoredRecord,
   type TelegramTransactionResult,
 } from "../../../runtime/telegram/repositoryCore.js";
 
@@ -13,20 +18,20 @@ export function telegramRepositoryFixture(storage: {
 }) {
   return createTelegramRepository({
     readMessage: async (key) =>
-      (await storage.getPath(
-        `telegramMessages/${key}`,
-      )) as TelegramStoredRecord | null,
+      readTelegramMessageDocument(
+        await storage.getPath(`telegramMessages/${key}`),
+      ),
     transactMessage: async (key, updater) =>
       (await storage.transactPath(`telegramMessages/${key}`, (current) =>
-        updater(current as TelegramStoredRecord | null),
+        updater(readTelegramMessageDocument(current)),
       )) as TelegramTransactionResult,
     readControl: async () =>
-      (await storage.getPath(
-        "telegramDeliveryControl",
-      )) as TelegramStoredRecord | null,
+      readTelegramControlDocument(
+        await storage.getPath("telegramDeliveryControl"),
+      ),
     transactControl: async (updater) =>
       (await storage.transactPath("telegramDeliveryControl", (current) =>
-        updater(current as TelegramStoredRecord | null),
-      )) as TelegramTransactionResult,
+        updater(readTelegramControlDocument(current)),
+      )) as TransactionResult<TelegramControlDocument>,
   });
 }

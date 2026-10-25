@@ -17,6 +17,13 @@ exports.shouldProjectInvite =
   exports.deriveProjectionStatus =
   exports.PROJECTOR_SCHEMA_VERSION =
     void 0;
+const invite_records_1 = require("@mons/shared/invite-records");
+Object.defineProperty(exports, "isEventOwnedInvite", {
+  enumerable: true,
+  get: function () {
+    return invite_records_1.inviteIsEventOwned;
+  },
+});
 const rematches_1 = require("@mons/shared/rematches");
 const navigation_1 = require("@mons/shared/navigation");
 Object.defineProperty(exports, "getNavigationSortBucket", {
@@ -27,13 +34,10 @@ Object.defineProperty(exports, "getNavigationSortBucket", {
 });
 const profiles_1 = require("@mons/shared/profiles");
 const ids_1 = require("@mons/shared/ids");
-const events_1 = require("@mons/shared/events");
-Object.defineProperty(exports, "isEventOwnedInvite", {
-  enumerable: true,
-  get: function () {
-    return events_1.isEventOwnedInvite;
-  },
-});
+const profileEvidence = (value) => {
+  const retained = value;
+  return retained;
+};
 const PROJECTOR_SCHEMA_VERSION = 2;
 exports.PROJECTOR_SCHEMA_VERSION = PROJECTOR_SCHEMA_VERSION;
 const normalizeString = (value) =>
@@ -52,7 +56,8 @@ const truncateAddress = (address) => {
   }
   return (0, profiles_1.cropAddress)(address);
 };
-const getProfileDisplayName = (profileData) => {
+const getProfileDisplayName = (source) => {
+  const profileData = profileEvidence(source);
   if (!profileData || typeof profileData !== "object") {
     return "anon";
   }
@@ -71,7 +76,8 @@ const getProfileDisplayName = (profileData) => {
   return "anon";
 };
 exports.getProfileDisplayName = getProfileDisplayName;
-const getProfileEmoji = (profileData) => {
+const getProfileEmoji = (document) => {
+  const profileData = profileEvidence(document);
   if (!profileData || typeof profileData !== "object") {
     return null;
   }
@@ -112,16 +118,21 @@ const deriveProjectionStatus = ({
   automatchStateHint,
   latestMatchRatingCompleted,
 }) => {
-  if ((0, rematches_1.rematchSeriesEnded)(inviteData)) {
+  if (
+    (0, rematches_1.rematchSeriesEnded)(
+      inviteData ? (0, invite_records_1.inviteRematchState)(inviteData) : null,
+    )
+  ) {
     return "ended";
   }
   if (
-    (0, events_1.isEventOwnedInvite)(inviteData) &&
+    (0, invite_records_1.inviteIsEventOwned)(inviteData) &&
     latestMatchRatingCompleted === true
   ) {
     return "ended";
   }
-  const hasGuest = !!normalizeString(inviteData ? inviteData.guestId : null);
+  const hasGuest = !!(0, invite_records_1.inviteTrimmedParticipants)(inviteData)
+    .guestId;
   if ((0, ids_1.isAutoInviteId)(inviteId) && automatchStateHint === "pending") {
     return "pending";
   }
@@ -138,7 +149,8 @@ const shouldProjectInvite = ({ inviteId, inviteData, automatchStateHint }) => {
   if (!(0, ids_1.isAutoInviteId)(inviteId)) {
     return true;
   }
-  const hasGuest = !!normalizeString(inviteData.guestId);
+  const hasGuest = !!(0, invite_records_1.inviteTrimmedParticipants)(inviteData)
+    .guestId;
   if (hasGuest) {
     return true;
   }

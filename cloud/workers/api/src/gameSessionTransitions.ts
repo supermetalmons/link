@@ -1,3 +1,4 @@
+import { matchCreationWireValue } from "./matchRecordCodec.ts";
 import { normalizeHistoricalMatchRecord } from "@mons/shared/game-sessions";
 import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
 import { measureAutomatchPhase } from "./automatchTelemetry.ts";
@@ -9,7 +10,6 @@ import {
 import type { MatchStatePort } from "./repositoryContracts.ts";
 import type { GameSessionChange } from "./gameSessionContracts.ts";
 import {
-  canonical,
   digest,
   readField,
   resolveValue,
@@ -17,7 +17,11 @@ import {
   decodeSessionMatchCreation,
   encodeSessionMatchCreations,
   GameSessionTransitionFailure,
-  type StoredSessionMatchCreation,
+  readGameSessionIntent,
+  serializeGameSessionIntent,
+  gameSessionIntentResources,
+  type GameSessionIntentWrite,
+  type RetainedGameSessionIntent,
 } from "./gameSessionCodec.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import { buildLoginMatchDiscoveryStatements } from "./loginMatchDiscoveryD1.ts";
@@ -35,7 +39,6 @@ import {
   isInviteSourceRevisionConflict,
   readInviteSourceControl,
   releaseInviteSourceAdmission,
-  type InviteSourceMutation,
 } from "./inviteSourceD1.ts";
 export {
   GAME_SESSION_CREATION_FIELD,
@@ -55,18 +58,6 @@ export type GameSessionLeaseProof = {
 };
 
 type JsonRecord = Record<string, unknown>;
-type TransitionPayload = {
-  version: 2;
-  inviteId: string;
-  inviteSourceEpoch: number;
-  inviteMutations: InviteSourceMutation[];
-  transitionId: string;
-  digest: string;
-  resources: string[];
-  mutations: AutomatchRecordMutation[];
-  creations: StoredSessionMatchCreation[];
-  createdAtMs: number;
-};
 type TransitionRow = {
   transition_id: string;
   invite_id: string;
@@ -75,11 +66,15 @@ type TransitionRow = {
 };
 type TransitionStore = Pick<
   ReturnType<typeof createAutomatchD1Store>,
-  "prepareChanges" | "buildCommitStatements" | "buildRevisionGuardStatements"
+  | "prepareChanges"
+  | "buildRetainedCommitStatements"
+  | "buildRevisionGuardStatements"
 >;
 type InviteTransitionStore = Pick<
   ReturnType<typeof createInviteSourceD1Store>,
-  "prepareChanges" | "buildCommitStatements" | "buildRevisionGuardStatements"
+  | "prepareChanges"
+  | "buildRetainedCommitStatements"
+  | "buildRevisionGuardStatements"
 >;
 type InviteAdmission = Awaited<ReturnType<typeof acquireInviteSourceAdmission>>;
 type InviteControl = Awaited<ReturnType<typeof readInviteSourceControl>>;
@@ -132,50 +127,35 @@ export function gameSessionResourceGuardStatements(
   );
 }
 
+function gameSessionIntentResourceGuards(
+  db: Pick<D1Database, "prepare">,
+  intent: RetainedGameSessionIntent,
+): D1PreparedStatement[] {
+  return gameSessionIntentResources(intent).map((key) =>
+    db
+      .prepare(
+        `INSERT INTO game_session_transition_guards (singleton)
+          SELECT 0 WHERE NOT EXISTS (
+            SELECT 1 FROM game_session_transition_resources WHERE resource_key = ? AND transition_id = ?
+          )`,
+      )
+      .bind(key, intent.transitionId),
+  );
+}
+
 function loginResources(mutations: AutomatchRecordMutation[]): string[] {
   const uids = new Set<string>();
   for (const mutation of mutations) {
     for (const value of [mutation.current.value, mutation.value]) {
-      if (!record(value)) continue;
+      const evidence: unknown = value;
+      if (!record(evidence)) continue;
       for (const key of ["uid", "requesterUid"]) {
-        const uid = value[key];
+        const uid = evidence[key];
         if (typeof uid === "string" && isSafeRecordKey(uid)) uids.add(uid);
       }
     }
   }
   return [...uids].map((uid) => `automatch-login:${uid}`);
-}
-
-function readPayload(row: TransitionRow): TransitionPayload {
-  const payload: TransitionPayload = JSON.parse(row.payload_json);
-  if (
-    payload.version !== 2 ||
-    payload.transitionId !== row.transition_id ||
-    payload.inviteId !== row.invite_id ||
-    !Array.isArray(payload.resources) ||
-    !Array.isArray(payload.mutations) ||
-    !Array.isArray(payload.creations)
-  )
-    fail("invalid-intent");
-  if (
-    !Number.isSafeInteger(payload.inviteSourceEpoch) ||
-    payload.inviteSourceEpoch < 1 ||
-    !Array.isArray(payload.inviteMutations) ||
-    payload.inviteMutations.length !== 1 ||
-    payload.inviteMutations.some(
-      ({ current, value }) =>
-        !current ||
-        current.inviteId !== payload.inviteId ||
-        !Number.isSafeInteger(current.revision) ||
-        current.revision < 0 ||
-        (current.value !== null && !record(current.value)) ||
-        !record(value) ||
-        isEventOwnedInviteSource(current.value) ||
-        isEventOwnedInviteSource(value),
-    )
-  )
-    fail("invalid-invite-source-intent");
-  return payload;
 }
 
 export function prepareGameSessionResourceTransitionRead(
@@ -285,7 +265,7 @@ export function createGameSessionTransitions({
     assertGameSessionResourceAvailable(db, resourceKey);
 
   async function materialize(
-    payload: TransitionPayload,
+    payload: RetainedGameSessionIntent,
     operation: InviteOperation,
     signal?: AbortSignal,
   ): Promise<MatchPresentationRegistration[]> {
@@ -310,7 +290,9 @@ export function createGameSessionTransitions({
           payload.creations.map((stored) => {
             const creation = decodeSessionMatchCreation(stored);
             const { playerId: actorUid, matchId } = creation;
-            const match = normalizeHistoricalMatchRecord(creation.value);
+            const match = normalizeHistoricalMatchRecord(
+              matchCreationWireValue(creation.value),
+            );
             if (!match) fail("invalid-match-presentation-creation");
             return {
               inviteId: payload.inviteId,
@@ -342,7 +324,7 @@ export function createGameSessionTransitions({
     signal?: AbortSignal,
   ): Promise<void> {
     if (row.status === "completed") return;
-    const payload = readPayload(row);
+    const payload = readGameSessionIntent(row);
     try {
       const presentations = await materialize(payload, operation, signal);
       signal?.throwIfAborted();
@@ -364,16 +346,7 @@ export function createGameSessionTransitions({
           )`,
           )
           .bind(payload.transitionId),
-        ...payload.resources.map((key) =>
-          db
-            .prepare(
-              `INSERT INTO game_session_transition_guards (singleton)
-          SELECT 0 WHERE NOT EXISTS (
-            SELECT 1 FROM game_session_transition_resources WHERE resource_key = ? AND transition_id = ?
-          )`,
-            )
-            .bind(key, payload.transitionId),
-        ),
+        ...gameSessionIntentResourceGuards(db, payload),
         ...buildLoginMatchDiscoveryStatements(
           db,
           payload.creations.map((stored) => {
@@ -389,8 +362,11 @@ export function createGameSessionTransitions({
           }),
           now(),
         ),
-        ...store.buildCommitStatements(payload.mutations, now()),
-        ...inviteStore.buildCommitStatements(payload.inviteMutations, now()),
+        ...store.buildRetainedCommitStatements(payload.mutations, now()),
+        ...inviteStore.buildRetainedCommitStatements(
+          payload.inviteMutations,
+          now(),
+        ),
         db
           .prepare(
             "UPDATE game_session_transitions SET status = 'completed', updated_at_ms = ?, last_error = NULL WHERE transition_id = ? AND status = 'pending'",
@@ -571,7 +547,7 @@ export function createGameSessionTransitions({
         contentDigest,
         createdAtMs,
       );
-      const payload: TransitionPayload = {
+      const payload: GameSessionIntentWrite = {
         inviteId: split.inviteId,
         transitionId,
         digest: contentDigest,
@@ -612,7 +588,7 @@ export function createGameSessionTransitions({
           .bind(
             transitionId,
             split.inviteId,
-            canonical(payload),
+            serializeGameSessionIntent(payload),
             createdAtMs,
             createdAtMs,
           ),
@@ -638,7 +614,8 @@ export function createGameSessionTransitions({
           }
           throw error;
         }
-        if (existing.payload_json !== canonical(payload)) throw error;
+        if (existing.payload_json !== serializeGameSessionIntent(payload))
+          throw error;
       }
       const row = await read(transitionId);
       if (!row) fail("intent-missing");

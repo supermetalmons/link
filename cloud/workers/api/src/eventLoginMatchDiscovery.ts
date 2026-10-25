@@ -1,3 +1,4 @@
+import { inviteSourceEventState } from "@mons/shared/invite-records";
 import { MAX_EVENT_PARTICIPANTS } from "@mons/shared/events";
 import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
@@ -110,7 +111,7 @@ export async function captureEventMatchDiscovery(
       throw new Error("event-match-discovery-invite-unavailable");
     }
     const inviteRows = chunk.map((inviteId, index) => {
-      const invite = record(invites[index]);
+      const invite = inviteSourceEventState(invites[index]);
       const hostId = invite?.hostId;
       const guestId = invite?.guestId;
       if (
@@ -199,10 +200,12 @@ export async function ensureEventMatchDiscovery(
   }
   const incomplete = rows.flatMap((row) => {
     assertNoGameSessionResourceTransition(row.transition_id);
-    const invite = decodeInviteSourceSnapshot(
-      row.invite_id,
-      row.source_json === null && row.revision === null ? null : row,
-    ).value;
+    const invite = inviteSourceEventState(
+      decodeInviteSourceSnapshot(
+        row.invite_id,
+        row.source_json === null && row.revision === null ? null : row,
+      ).value,
+    );
     const covered =
       isCanonicalLoginUid(invite?.hostId) &&
       isCanonicalLoginUid(invite?.guestId) &&

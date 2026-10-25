@@ -23,7 +23,7 @@ import {
   readInviteSourceControl,
   releaseInviteSourceAdmission,
 } from "../src/inviteSourceD1.ts";
-import { createAutomatchPersistence } from "../src/automatchPersistence.ts";
+import { createAutomatchPersistenceCompatibility as createAutomatchPersistence } from "../src/automatchPersistence.ts";
 import { isAutomatchRevisionConflict } from "../src/automatchD1.ts";
 import { classifyD1Failure } from "../src/d1Failure.ts";
 import { observeD1FailureDatabase } from "./d1FailureTestUtils.ts";

@@ -1,3 +1,4 @@
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { SubmitMoveRequest } from "@mons/shared/game-sessions";
@@ -92,7 +93,7 @@ function harness(
       readSignal.throwIfAborted();
       steps.push("invite");
       onRead();
-      return inviteValue;
+      return retainedInviteSourceFixture(inviteValue);
     },
     async readProfileOwnershipSnapshot(query) {
       steps.push("ownership");

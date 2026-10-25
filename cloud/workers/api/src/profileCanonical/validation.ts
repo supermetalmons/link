@@ -1,5 +1,6 @@
 import { type AuthMethodKey, AUTH_METHODS } from "@mons/shared/auth";
-import { type JsonObject, CanonicalProfileCorruption } from "./types.ts";
+import { CanonicalProfileCorruption } from "./types.ts";
+type JsonObject = Record<string, unknown>;
 
 export function record(value: unknown): JsonObject | null {
   return value && typeof value === "object" && !Array.isArray(value)

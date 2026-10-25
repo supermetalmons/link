@@ -1,16 +1,22 @@
+import type { ApiSocketUrl, ApiResponse } from "@mons/shared/api-contracts";
 import { normalizeRecordKey } from "@mons/shared/ids";
 import { parseInviteMatchIndex } from "@mons/shared/rematches";
 import {
   MATCH_SYNC_MAX_MESSAGE_BYTES,
   MATCH_SYNC_SOCKET_PROTOCOL,
   isReadMatchSyncResponse,
-  type ReadMatchSyncResponse,
 } from "@mons/shared/match-sync";
 import {
   REACTION_AUTH_PROTOCOL_PREFIX,
   isReactionSocketToken,
 } from "@mons/shared/reactions";
-import { readSnapshotJson, type AuthTokenProvider } from "./apiTransport";
+import {
+  readSnapshotJson,
+  type AuthTokenProvider,
+  type EndpointSnapshotJsonRead,
+} from "./apiTransport";
+type ReadMatchSyncResponse =
+  ApiResponse<"GET /invites/:inviteId/matches/:matchId/snapshot">;
 
 const MATCH_SYNC_API_ROOT = "https://api.mons.link";
 export const MATCH_SYNC_REQUEST_TIMEOUT_MS = 10_000;
@@ -29,7 +35,10 @@ export class MatchSyncApiError extends Error {
   }
 }
 
-function matchSyncPath(inviteId: string, matchId: string): string {
+function matchSyncPath(
+  inviteId: string,
+  matchId: string,
+): `/invites/${string}/matches/${string}` {
   if (
     !inviteId ||
     normalizeRecordKey(inviteId) !== inviteId ||
@@ -44,7 +53,7 @@ function matchSyncPath(inviteId: string, matchId: string): string {
 export function getMatchSyncSocketUrl(
   inviteId: string,
   matchId: string,
-): string {
+): ApiSocketUrl<"GET /invites/:inviteId/matches/:matchId/socket"> {
   return `${MATCH_SYNC_API_ROOT.replace("https:", "wss:")}${matchSyncPath(inviteId, matchId)}/socket`;
 }
 
@@ -77,5 +86,5 @@ export async function readMatchSyncViaApi(
       payload.snapshot.matchId === matchId,
     createError: (code, status, retryAfterMs) =>
       new MatchSyncApiError(code, status, retryAfterMs),
-  });
+  } satisfies EndpointSnapshotJsonRead<"GET /invites/:inviteId/matches/:matchId/snapshot">);
 }

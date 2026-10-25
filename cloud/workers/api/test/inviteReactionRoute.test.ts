@@ -1,3 +1,4 @@
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import {
   REACTION_AUTH_PROTOCOL_PREFIX,
   REACTION_SOCKET_PROTOCOL,
@@ -117,7 +118,9 @@ function setup(
   };
   repository.readInviteMetadata = async (inviteId) => {
     calls.reads.push(`invites/${inviteId}`);
-    return invite as Record<string, unknown> | null;
+    return retainedInviteSourceFixture(
+      invite as Record<string, unknown> | null,
+    );
   };
   repository.readProfileOwnershipSnapshot = async (query) => ({
     canonicalProfileIdByProfileId: new Map(),
@@ -708,7 +711,10 @@ test("v2 sockets validate registered presentation and negotiate anonymous or par
     state.repository.readInviteMetadata = async (inviteId) => {
       state.calls.reads.push(`invites/${inviteId}`);
       assert.equal(inviteId, "invite-one");
-      return { hostId: "host-login", guestId: "guest-login" };
+      return retainedInviteSourceFixture({
+        hostId: "host-login",
+        guestId: "guest-login",
+      });
     };
     state.dependencies.room!.fetch = async (incoming) => {
       state.socketRequests.push(incoming);

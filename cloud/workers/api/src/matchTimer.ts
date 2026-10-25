@@ -1,4 +1,9 @@
 import {
+  readInviteDocument,
+  inviteMatchesParticipants,
+  type InviteDocument,
+} from "@mons/shared/invite-records";
+import {
   MATCH_TIMER_TERMINAL,
   type ClaimMatchVictoryByTimerRequest,
   type ClaimMatchVictoryByTimerResponse,
@@ -15,10 +20,7 @@ import {
   parseGameFromMatchData,
   selectLaterGame,
 } from "@mons/shared/match-protocol";
-import {
-  inviteMatchesPlayers,
-  parseInviteMatchIndex,
-} from "@mons/shared/rematches";
+import { parseInviteMatchIndex } from "@mons/shared/rematches";
 import { Game } from "mons-rules";
 import { AuthApiFailure } from "./authErrors.ts";
 import { enforceRateLimit } from "./rateLimit.ts";
@@ -55,7 +57,7 @@ export type ClaimMatchVictoryByTimerDependencies =
   MatchAdmissionDependencies & {
     claimCanonical: (
       request: ClaimMatchVictoryByTimerRequest,
-      inviteValue: unknown,
+      inviteValue: InviteDocument,
     ) => Promise<ClaimMatchVictoryByTimerResponse>;
   };
 
@@ -159,24 +161,27 @@ async function authorizeTimerMatch(
   request: StartMatchTimerRequest,
   repository: MatchTimerRepository,
   dependencies: MatchAdmissionDependencies,
-): Promise<unknown> {
+): Promise<InviteDocument> {
   const signal = createMatchAdmissionSignal(dependencies.signal);
   await authorizeMatchPlayer(identity, request.playerId, repository, {
     signal,
   });
-  const inviteValue = await repository.readInviteMetadata(
-    request.inviteId,
-    signal,
+  const inviteValue = readInviteDocument(
+    await repository.readInviteMetadata(request.inviteId, signal),
   );
   if (
-    !inviteMatchesPlayers(inviteValue, request.playerId, request.opponentId) ||
+    !inviteMatchesParticipants(
+      inviteValue,
+      request.playerId,
+      request.opponentId,
+    ) ||
     parseInviteMatchIndex(request.inviteId, request.matchId) === null
   ) {
     throw new AuthApiFailure(403, "permission-denied", "permission-denied");
   }
   signal.throwIfAborted();
   await dependencies.assertMutationAllowed?.();
-  return inviteValue;
+  return inviteValue!;
 }
 
 export async function enforceMatchTimerRateLimit(

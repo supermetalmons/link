@@ -8,8 +8,8 @@ export type EIP6963ProviderInfo = {
 export type EIP1193Provider = {
   request: (args: {
     method: string;
-    params?: any[] | Record<string, any>;
-  }) => Promise<any>;
+    params?: unknown[] | Record<string, unknown>;
+  }) => Promise<unknown>;
 };
 
 export type EIP6963ProviderDetail = {
@@ -19,7 +19,7 @@ export type EIP6963ProviderDetail = {
 
 declare global {
   interface Window {
-    ethereum?: any;
+    ethereum?: unknown;
   }
 }
 
@@ -44,20 +44,31 @@ const isDiscoverySupported = (): boolean => {
   );
 };
 
+const isEIP1193Provider = (value: unknown): value is EIP1193Provider => {
+  return (
+    !!value && typeof (value as { request?: unknown }).request === "function"
+  );
+};
+
 const readAnnouncedWallet = (event: Event): EIP6963ProviderDetail | null => {
-  const detail = (event as CustomEvent<unknown>).detail as
-    Partial<EIP6963ProviderDetail> | undefined;
+  const detail = (event as CustomEvent<unknown>).detail;
   if (!detail || typeof detail !== "object") {
     return null;
   }
-  const provider = detail.provider;
-  const info = detail.info;
-  if (!provider || typeof provider.request !== "function") {
+  const provider = (detail as { provider?: unknown }).provider;
+  const infoValue = (detail as { info?: unknown }).info;
+  if (!isEIP1193Provider(provider)) {
     return null;
   }
-  if (!info || typeof info !== "object") {
+  if (!infoValue || typeof infoValue !== "object") {
     return null;
   }
+  const info = infoValue as {
+    uuid?: unknown;
+    rdns?: unknown;
+    icon?: unknown;
+    name?: unknown;
+  };
   const uuid = typeof info.uuid === "string" ? info.uuid : "";
   const rdns = typeof info.rdns === "string" ? info.rdns : "";
   const icon = typeof info.icon === "string" ? info.icon : "";
@@ -102,10 +113,10 @@ export const getLegacyInjectedProvider = (): EIP1193Provider | null => {
     return null;
   }
   const injectedProvider = window.ethereum;
-  if (!injectedProvider || typeof injectedProvider.request !== "function") {
+  if (!isEIP1193Provider(injectedProvider)) {
     return null;
   }
-  return injectedProvider as EIP1193Provider;
+  return injectedProvider;
 };
 
 export const primeInjectedEthereumProviderDiscovery = (): void => {

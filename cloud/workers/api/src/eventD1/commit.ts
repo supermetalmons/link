@@ -6,7 +6,7 @@ import {
   type PublicEventMutationOptions,
   MAX_EVENT_TRANSACTION_ATTEMPTS,
 } from "./types.ts";
-import type { EventMutation } from "../../../../runtime/eventCommands.js";
+import type { EventPersistenceMutation as EventMutation } from "../eventPersistenceCommands.ts";
 import {
   eventWriteAdmissionGuard,
   eventLeaseGuard,

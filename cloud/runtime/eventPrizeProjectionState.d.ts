@@ -1,11 +1,5 @@
 // Generated from src/eventPrizeProjectionState.ts. Run npm run generate:runtime.
-export type PrizeWithdrawalProjectionRecord = {
-  eventId?: unknown;
-  prizeId?: unknown;
-  assetAddress?: unknown;
-  assetStandard?: unknown;
-  status?: unknown;
-};
+import { type WithdrawalDocument } from "./eventPrizes/records.js";
 declare const getEventPrizeAssetAddress: (
   eventId: unknown,
   prizeId: unknown,
@@ -15,18 +9,18 @@ declare const getEventPrizeAssetStandard: (
   prizeId: unknown,
 ) => "" | import("@mons/shared/event-prizes").EventPrizeStandard;
 declare const isMatchingProfileEventPrizeAssignment: (
-  value: PrizeWithdrawalProjectionRecord | null | undefined,
+  value: unknown,
   eventId: unknown,
   prizeId: unknown,
 ) => boolean;
 declare const isWithdrawalRecordForPrize: (
-  value: PrizeWithdrawalProjectionRecord | null | undefined,
+  value: WithdrawalDocument | null | undefined,
   eventId: unknown,
   prizeId: unknown,
   assetAddress: unknown,
 ) => boolean;
 declare const isCompletedEventPrizeWithdrawal: (
-  value: PrizeWithdrawalProjectionRecord | null | undefined,
+  value: WithdrawalDocument | null | undefined,
   eventId: unknown,
   prizeId: unknown,
 ) => boolean;
@@ -41,8 +35,7 @@ declare const filterProjectableEventPrizeAssignments: <
 }: {
   eventId: unknown;
   assignments: Record<string, T> | null | undefined;
-  withdrawals:
-    Record<string, PrizeWithdrawalProjectionRecord> | null | undefined;
+  withdrawals: Record<string, WithdrawalDocument> | null | undefined;
 }) => Record<string, T>;
 declare const getCompletedEventPrizeProjectionCleanupRequest: <
   T extends object,

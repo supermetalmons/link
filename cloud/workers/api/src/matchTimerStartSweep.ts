@@ -1,3 +1,7 @@
+import {
+  inviteOpponent,
+  type InviteDocument,
+} from "@mons/shared/invite-records";
 import { parseStrictMatchTimer } from "@mons/shared/timers";
 import {
   createInviteCandidatesFromMatchId,
@@ -69,16 +73,10 @@ function rawMatchProvesMarkerObsolete(
 function opponentFromInvite(
   marker: MatchTimerStartReconciliationItem,
   inviteId: string,
-  value: unknown,
+  value: InviteDocument | null,
 ): string | null {
   if (parseInviteMatchIndex(inviteId, marker.matchId) === null) return null;
-  const invite = toRecord(value);
-  const opponentId =
-    invite?.hostId === marker.playerId
-      ? invite.guestId
-      : invite?.guestId === marker.playerId
-        ? invite.hostId
-        : null;
+  const opponentId = inviteOpponent(value, marker.playerId);
   return typeof opponentId === "string" &&
     opponentId !== marker.playerId &&
     isSafeRecordKey(opponentId)

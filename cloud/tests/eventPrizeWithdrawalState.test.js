@@ -69,6 +69,7 @@ const {
   validatePrizeAssignment,
 } = require("../runtime/eventPrizes/withdrawalOrchestrator");
 const {
+  createWithdrawalRecordCommands,
   acquireWithdrawalClaim,
   discardDefinitiveSubmittedTransaction,
   persistSubmittedTransaction,
@@ -99,20 +100,22 @@ const removeMatchingProfileEventPrizeAssignment = async ({
   return result.committed === true && result.value === null;
 };
 
-const typedWithdrawalRecord = (reference) => ({
-  async transaction(update) {
-    let decision;
-    const result = await reference.transaction((current) => {
-      decision = update(current);
-      return decision.commit === false ? (current ?? null) : decision.value;
-    });
-    return {
-      ...result,
-      committed: result.committed && decision?.commit !== false,
-      decision: decision?.decision,
-    };
-  },
-});
+const typedWithdrawalRecord = (reference) =>
+  createWithdrawalRecordCommands({
+    read: async () => reference.read?.() ?? null,
+    async transaction(update) {
+      let decision;
+      const result = await reference.transaction((current) => {
+        decision = update(current);
+        return decision.commit === false ? (current ?? null) : decision.value;
+      });
+      return {
+        ...result,
+        committed: result.committed && decision?.commit !== false,
+        decision: decision?.decision,
+      };
+    },
+  });
 
 const createProjectionDependencies = ({
   assignments = new Map(),
@@ -492,11 +495,11 @@ test("withdrawal reads the entitlement through its typed profile prize reader", 
           record: (candidateEventId, candidatePrizeId) => {
             assert.equal(candidateEventId, eventId);
             assert.equal(candidatePrizeId, prizeId);
-            return {
+            return createWithdrawalRecordCommands({
               read: async () => null,
               transaction: () =>
                 assert.fail("unassigned prizes must not be claimed"),
-            };
+            });
           },
         },
         readProfileByLoginUid: async () => ({ id: profileId }),

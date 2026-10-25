@@ -1,3 +1,8 @@
+import { timerStartStoreFixture } from "../test/matchClaimFixture.ts";
+import {
+  matchDocumentFixture,
+  matchRecordFixture,
+} from "../test/matchRecordFixture.ts";
 import { env } from "cloudflare:workers";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
@@ -7,7 +12,6 @@ import {
   type MatchStateStoreOptions,
 } from "../src/matchStateStore.ts";
 import { parseNewMatchTimerStorage } from "../src/localMatchTimerStore.ts";
-import type { MatchStateRecord } from "../src/matchStateTypes.ts";
 import { seedRetainedMatchState } from "./retainedMatchStateFixture.ts";
 
 const now = 2_000_000_000_000;
@@ -31,19 +35,19 @@ function fixture() {
     matchId: inviteId,
     playerId,
     marker: `${playerId}-created`,
-    value: {
+    value: matchDocumentFixture({
       color: index === 0 ? "white" : "black",
       fen: "initial",
       flatMovesString: "",
       status: "",
       timer: "",
-    } as MatchStateRecord,
+    }),
   }));
   return { room: env.INVITE_REACTIONS.getByName(inviteId), input, records };
 }
 
 function options(extra: Partial<MatchStateStoreOptions> = {}) {
-  const timerStarts = {
+  const timerStarts = timerStartStoreFixture({
     getOrAdvance: vi.fn<MatchStateStoreOptions["timerStarts"]["getOrAdvance"]>(
       async () => {
         throw new Error("unexpected-d1-timer-write");
@@ -54,7 +58,7 @@ function options(extra: Partial<MatchStateStoreOptions> = {}) {
         throw new Error("unexpected-d1-timer-cleanup");
       },
     ),
-  };
+  });
   return {
     timerStarts,
     newMatchTimerStorage: "local" as const,
@@ -196,7 +200,10 @@ describe("local timer cohorts", () => {
           updatedAtMs,
         }));
         const settings = options({
-          timerStarts: { getOrAdvance, deletePair: vi.fn(async () => {}) },
+          timerStarts: timerStartStoreFixture({
+            getOrAdvance,
+            deletePair: vi.fn(async () => {}),
+          }),
         });
         const store = new MatchStateStore(ctx.storage, settings);
         seedRetainedMatchState(ctx.storage, {
@@ -363,7 +370,9 @@ describe("local timer cohorts", () => {
       const committed = store.readPair(input);
       const effects = store.effects.listDueEffects();
       const alarm = await ctx.storage.getAlarm();
-      expect(committed.playerMatch?.timer).toBe(MATCH_TIMER_TERMINAL);
+      expect(matchRecordFixture(committed.playerMatch)?.timer).toBe(
+        MATCH_TIMER_TERMINAL,
+      );
       expect(committed.claim).toMatchObject({
         status: "claimed",
         timer: started.timer,

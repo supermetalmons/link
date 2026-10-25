@@ -1,3 +1,7 @@
+import {
+  retainCanonicalRatingPayload,
+  type CanonicalRatingPayloadDocument,
+} from "./retainedRecords.ts";
 import { MATERIAL_KEYS, type MiningMaterialName } from "@mons/shared/mining";
 import { readD1FirstRow } from "../d1Reads.ts";
 import {
@@ -12,7 +16,6 @@ import {
   type CanonicalRatingProjectionKind,
   type CanonicalMutation,
   type D1Value,
-  type JsonObject,
 } from "./types.ts";
 import {
   record,
@@ -40,7 +43,7 @@ export function parseCanonicalRatingUpdateRow(
   }
   return {
     operationId: nonempty(row.operation_id),
-    payload: parseObjectJson(row.payload_json),
+    payload: retainCanonicalRatingPayload(parseObjectJson(row.payload_json)),
     status: row.status,
     inviteId: nonempty(row.invite_id),
     matchId: nonempty(row.match_id),
@@ -270,7 +273,22 @@ export function canonicalRatingProjectionFields(
   return RATING_PROJECTION_FIELDS[projection];
 }
 
-function isPlainPayload(value: JsonObject): boolean {
+function ratingPayloadFields(
+  value: CanonicalRatingPayloadDocument,
+): Record<string, unknown> {
+  const retained: unknown = value;
+  return retained as Record<string, unknown>;
+}
+
+export function ratingProjectionFieldJson(
+  value: CanonicalRatingUpdateValue,
+  field: ReturnType<typeof canonicalRatingProjectionFields>[
+    "state" | "updated" | "reason"],
+): string | undefined {
+  return JSON.stringify(ratingPayloadFields(value.payload)[field]);
+}
+
+function isPlainPayload(value: Record<string, unknown>): boolean {
   const prototype: unknown = Object.getPrototypeOf(value);
   return (
     (prototype === Object.prototype || prototype === null) &&
@@ -283,11 +301,13 @@ function isPlainPayload(value: JsonObject): boolean {
 }
 
 function canPatchRatingProjectionPayload(
-  current: JsonObject,
-  next: JsonObject,
+  currentDocument: CanonicalRatingPayloadDocument,
+  nextDocument: CanonicalRatingPayloadDocument,
   projection: CanonicalRatingProjectionKind,
   sourcePayloadJson: string,
 ): boolean {
+  const current = ratingPayloadFields(currentDocument);
+  const next = ratingPayloadFields(nextDocument);
   if (!isPlainPayload(current) || !isPlainPayload(next)) return false;
   const { state, updated, reason } =
     canonicalRatingProjectionFields(projection);

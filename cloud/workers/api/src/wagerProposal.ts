@@ -1,3 +1,7 @@
+import {
+  readInviteDocument,
+  inviteTrimmedParticipants,
+} from "@mons/shared/invite-records";
 import type {
   WagerKey,
   ModernProposalLineage,
@@ -87,16 +91,6 @@ type WagerParticipantFailure = {
 
 const WAGER_CRITICAL_PHASE_TIMEOUT_MS = 30_000;
 
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function normalizeString(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
-
 function validOperationId(value: unknown): value is string {
   return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 }
@@ -152,12 +146,13 @@ export async function resolveWagerParticipantUids(
   inviteId: string,
   repository: WagerParticipantReader,
 ): Promise<WagerParticipantUids | WagerParticipants | WagerParticipantFailure> {
-  const invite = toRecord(await repository.readInviteMetadata(inviteId));
+  const invite = readInviteDocument(
+    await repository.readInviteMetadata(inviteId),
+  );
   if (!invite) {
     return { ok: false, reason: "invite-not-found" };
   }
-  const hostId = normalizeString(invite.hostId);
-  const guestId = normalizeString(invite.guestId);
+  const { hostId, guestId } = inviteTrimmedParticipants(invite);
   if (!hostId || !guestId) {
     return { ok: false, reason: "missing-opponent" };
   }

@@ -13,6 +13,12 @@ import type {
   EVENT_LOCK_TTL_MS,
 } from "../../../runtime/events/lockManagerCore.js";
 import type { EventOwnershipSnapshot } from "../../../runtime/events/ownership.js";
+import {
+  createEventParticipantsDocument,
+  createEventRoundsDocument,
+  type EventParticipantsDocument,
+  type EventRoundsDocument,
+} from "../../../runtime/events/documents.js";
 import type {
   TelegramFailure,
   TelegramResult,
@@ -79,9 +85,9 @@ type ThirdPlaceInput = Parameters<
 >[0];
 type ThirdPlaceBase = {
   eventId: string;
-  rounds: {};
+  rounds: EventRoundsDocument;
   nowMs: number;
-  participantsById: {};
+  participantsById: EventParticipantsDocument;
   inviteUpdates: [];
   thirdPlaceMatch: null;
 };
@@ -108,15 +114,15 @@ export function supportedBracketCalls(ownership: EventOwnershipSnapshot) {
   const bracket = runtime.buildFixedBracketState({
     eventId: "event",
     participantIds: [],
-    participantsById: {},
+    participantsById: createEventParticipantsDocument(),
     nowMs: 1,
     ownershipSnapshot: ownership,
   });
   const reconciliation = runtime.reconcileThirdPlaceMatchReadiness({
     eventId: "event",
-    rounds: {},
+    rounds: createEventRoundsDocument(),
     nowMs: 1,
-    participantsById: {},
+    participantsById: createEventParticipantsDocument(),
     inviteUpdates: [],
     thirdPlaceMatch: null,
     allowInviteCreation: false,

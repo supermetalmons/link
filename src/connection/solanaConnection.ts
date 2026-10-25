@@ -1,13 +1,29 @@
-import { BaseMessageSignerWalletAdapter } from "@solana/wallet-adapter-base";
 import { connection } from "./connection";
+
+type InjectedSolanaProvider = {
+  connected?: boolean;
+  connect(): Promise<unknown>;
+  publicKey?: { toString(): string } | null;
+  signMessage(message: Uint8Array): Promise<unknown>;
+};
 
 declare global {
   interface Window {
-    solana?: BaseMessageSignerWalletAdapter;
+    solana?: InjectedSolanaProvider;
   }
 }
 
-let walletAdapter: BaseMessageSignerWalletAdapter | null = null;
+let walletAdapter: InjectedSolanaProvider | null = null;
+
+const coerceLegacySolanaSignature = (value: unknown): Uint8Array => {
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+  return new Uint8Array(
+    (value as { signature?: unknown }).signature as
+      ArrayBuffer | ArrayLike<number>,
+  );
+};
 
 export async function connectToSolana(): Promise<{
   publicKey: string;
@@ -41,10 +57,7 @@ export async function connectToSolana(): Promise<{
     const encodedMessage = new TextEncoder().encode(message);
     const signatureResponse = await walletAdapter.signMessage(encodedMessage);
 
-    const signature =
-      signatureResponse instanceof Uint8Array
-        ? signatureResponse
-        : new Uint8Array((signatureResponse as any).signature);
+    const signature = coerceLegacySolanaSignature(signatureResponse);
 
     return {
       publicKey: publicKey.toString(),

@@ -14,7 +14,6 @@ import {
   type EventMutationState,
   type ProfilePrizeMutationState,
   type EventMutationOptions,
-  type EventOutboxRecord,
   type ProgressOutboxSnapshot,
 } from "./types.ts";
 import {
@@ -25,7 +24,7 @@ import {
   readEventProgressOutboxSnapshot,
   readEventProfileGameProjectionOutbox,
 } from "./reads.ts";
-import type { EventMutation } from "../../../../runtime/eventCommands.js";
+import type { EventPersistenceMutation as EventMutation } from "../eventPersistenceCommands.ts";
 import {
   readEventMutationSnapshots,
   requiredMutationSnapshot,
@@ -358,13 +357,11 @@ export async function prepareEventMutations(
         const outboxId = exactKey(change.outboxId);
         const snapshot = await readEventProgressOutboxSnapshot(db, outboxId);
         const current =
-          snapshot.recordJson === null
-            ? null
-            : (decodeJson(snapshot.recordJson) as EventOutboxRecord);
+          snapshot.recordJson === null ? null : decodeJson(snapshot.recordJson);
         if (!current) throw new EventD1Failure("event-progress-not-found");
         progressDispatchSnapshots.set(outboxId, snapshot);
         progressUpdates.set(outboxId, {
-          ...cloneJson(current),
+          ...(cloneJson(current) as object),
           lastQueuedAtMs: value,
         });
         break;

@@ -1,3 +1,4 @@
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import {
   createMemoryWagerState,
   type WagerTestState,
@@ -152,6 +153,8 @@ export function attachMemoryWagerFrozenStore(
     automatchPersistence: createAutomatchPersistenceStub(),
     readAutomatchTelegramSource: unexpected,
     mergeAutomatchTelegramRatingResult: unexpected,
+    repairInvalidAutomatchTelegramOutbox: unexpected,
+    repairInvalidAutomatchProfileOutbox: unexpected,
     readAutomatchTelegramOutbox: unexpected,
     markAutomatchTelegramOutboxDead: unexpected,
     claimAutomatchTelegramOutbox: unexpected,
@@ -168,8 +171,8 @@ export function attachMemoryWagerFrozenStore(
       listDueAutomatchProfileOutboxesPage: unexpected,
       listMalformedAutomatchProfileOutboxes: unexpected,
       listMalformedAutomatchProfileOutboxesPage: unexpected,
-      transactRawAutomatchTelegramOutbox: unexpected,
-      transactRawAutomatchProfileOutbox: unexpected,
+      repairInvalidAutomatchTelegramOutbox: unexpected,
+      repairInvalidAutomatchProfileOutbox: unexpected,
     },
     readAutomatchEntry: unexpected,
     listAutomatchEntriesByLogin: unexpected,
@@ -192,11 +195,9 @@ export function attachMemoryWagerFrozenStore(
     readInviteMetadata:
       state.readInviteMetadata ??
       (async (inviteId, signal) =>
-        (await repository.readState(
-          `invites/${inviteId}`,
-          undefined,
-          signal,
-        )) as Record<string, unknown> | null),
+        retainedInviteSourceFixture(
+          await repository.readState(`invites/${inviteId}`, undefined, signal),
+        )),
     wagers: state.wagers ?? wagerState,
     wagerWriter: state.wagerWriter ?? wagerState,
     readInviteMetadataMany:

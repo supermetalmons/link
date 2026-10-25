@@ -60,8 +60,6 @@ test("event D1 preserves its exact public facade and implementation identities",
     transactEventLease: coordination.transactEventLease,
     transactEventPrizeSelection: transactions.transactEventPrizeSelection,
     transactEventPrizeSelections: transactions.transactEventPrizeSelections,
-    transactEventProfileGameProjectionOutbox:
-      transactions.transactEventProfileGameProjectionOutbox,
     transactEventProgressDeadOutbox:
       transactions.transactEventProgressDeadOutbox,
     transactEventProgressOutbox: transactions.transactEventProgressOutbox,
@@ -69,8 +67,6 @@ test("event D1 preserves its exact public facade and implementation identities",
     transactEventSyncThrottle: coordination.transactEventSyncThrottle,
     transactEventTelegramProjectionGeneration:
       transactions.transactEventTelegramProjectionGeneration,
-    transactEventTelegramProjectionOutbox:
-      transactions.transactEventTelegramProjectionOutbox,
     transactEventTelegramProjectionState:
       transactions.transactEventTelegramProjectionState,
     transactProfileEventPrize: transactions.transactProfileEventPrize,

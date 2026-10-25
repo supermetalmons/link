@@ -1,3 +1,4 @@
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -288,8 +289,10 @@ function repository(
     }),
     readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
     readInviteMetadata: async (inviteId, signal) =>
-      ((await getStatePath?.(`invites/${inviteId}`, undefined, signal)) ??
-        null) as Record<string, unknown> | null,
+      retainedInviteSourceFixture(
+        ((await getStatePath?.(`invites/${inviteId}`, undefined, signal)) ??
+          null) as Record<string, unknown> | null,
+      ),
     getStatePath: async (path, query, signal) => {
       assert.ok(!/^invites\/[^/]+$/.test(path), "use readInviteMetadata");
       return path.startsWith("gameplayMutationReceipts/")
@@ -1838,11 +1841,12 @@ test("cancellation rejects stale queue and invite snapshots", async (t) => {
       const dispatched: string[] = [];
       value.readAutomatchEntry = async () =>
         decodeAutomatchEntry({ ...queued.data, ...queue });
-      value.readInviteMetadata = async () => ({
-        hostId: identity.uid,
-        guestId: null,
-        ...invite,
-      });
+      value.readInviteMetadata = async () =>
+        retainedInviteSourceFixture({
+          hostId: identity.uid,
+          guestId: null,
+          ...invite,
+        });
       value.commitSessionChanges = async () => assert.fail("unexpected commit");
 
       const canceled = await cancelQueuedAutomatch(queued, value, {
@@ -1875,7 +1879,8 @@ test("non-v2 cancellations request only the profile projection", async (t) => {
         AutomatchRepository["commitSessionChanges"]
       >[0] = [];
       value.readAutomatchEntry = async () => decodeAutomatchEntry(queued.data);
-      value.readInviteMetadata = async () => ({ hostId: identity.uid });
+      value.readInviteMetadata = async () =>
+        retainedInviteSourceFixture({ hostId: identity.uid });
       value.commitSessionChanges = async (changes) => {
         events.push("commit");
         committed = changes;
@@ -1938,12 +1943,13 @@ test("cancellation requires the matching outbox request to prove an ambiguous co
   const patchError = new Error("cancel-response-lost");
   value.readAutomatchEntry = async () =>
     decodeAutomatchEntry(attempted ? null : queued.data);
-  value.readInviteMetadata = async () => ({
-    hostId: identity.uid,
-    guestId: null,
-    automatchStateHint: attempted ? "canceled" : "pending",
-    automatchCanceledAt: attempted ? 2 : null,
-  });
+  value.readInviteMetadata = async () =>
+    retainedInviteSourceFixture({
+      hostId: identity.uid,
+      guestId: null,
+      automatchStateHint: attempted ? "canceled" : "pending",
+      automatchCanceledAt: attempted ? 2 : null,
+    });
   value.readAutomatchProfileOutbox = async () => {
     proofReads += 1;
     return createAutomatchProfileOutboxSnapshot({
@@ -1990,7 +1996,7 @@ test("a committed cancellation dispatches in order despite a release-only failur
   };
   value.readInviteMetadata = async () => {
     assert.deepEqual(events, []);
-    return { hostId: identity.uid, guestId: null };
+    return retainedInviteSourceFixture({ hostId: identity.uid, guestId: null });
   };
   value.readAutomatchProfileOutbox = async () =>
     assert.fail("unexpected proof read");

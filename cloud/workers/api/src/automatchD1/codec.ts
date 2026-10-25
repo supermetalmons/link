@@ -11,6 +11,8 @@ import {
   type AutomatchRoot,
   type AutomatchRecordSnapshot,
   type RecordRow,
+  type AutomatchRecordValue,
+  type AutomatchRecordMutation,
 } from "./types.ts";
 
 export function timestamp(value: number): number {
@@ -46,10 +48,10 @@ export function encodeValue(value: unknown): string | null {
   return value === null ? null : JSON.stringify(value);
 }
 
-export function decodeSnapshot(
-  root: AutomatchRoot,
+export function decodeSnapshot<Root extends AutomatchRoot>(
+  root: Root,
   row: RecordRow,
-): AutomatchRecordSnapshot {
+): AutomatchRecordSnapshot<Root> {
   requireKey(row.record_key);
   if (!Number.isSafeInteger(row.revision) || row.revision < 0) {
     throw new AutomatchD1Failure("automatch-record-corrupt");
@@ -57,9 +59,26 @@ export function decodeSnapshot(
   return {
     root,
     key: row.record_key,
-    value: row.payload_json === null ? null : JSON.parse(row.payload_json),
+    value: retainAutomatchValue(
+      root,
+      row.payload_json === null ? null : JSON.parse(row.payload_json),
+    ),
     revision: row.revision,
-  };
+  } as AutomatchRecordSnapshot<Root>;
+}
+
+export function retainAutomatchValue<Root extends AutomatchRoot>(
+  _root: Root,
+  value: unknown,
+): AutomatchRecordValue<Root> {
+  return value as AutomatchRecordValue<Root>;
+}
+
+export function retainAutomatchMutation(
+  current: AutomatchRecordSnapshot,
+  value: unknown,
+): AutomatchRecordMutation {
+  return { current, value } as AutomatchRecordMutation;
 }
 
 export function isAutomatchRevisionConflict(error: unknown): boolean {

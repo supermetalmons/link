@@ -5,6 +5,7 @@ import {
   serializeEventTransitionReceipt,
   type EventTransitionReceipt,
   type EventTransitionReceiptRow,
+  type RetainedEventTransitionReceipt,
 } from "./eventTransitionReceipts.ts";
 
 export {
@@ -13,6 +14,7 @@ export {
   serializeEventTransitionReceipt,
   type EventTransitionReceipt,
   type EventTransitionReceiptRow,
+  type RetainedEventTransitionReceipt,
 } from "./eventTransitionReceipts.ts";
 
 export const EVENT_RECEIPT_ADMISSION_KIND = "event-effects-d1-receipts";
@@ -28,7 +30,7 @@ function safeKey(value: string): boolean {
 export async function readEventTransitionReceipt(
   db: D1Database,
   transitionId: string,
-): Promise<EventTransitionReceipt | null> {
+): Promise<RetainedEventTransitionReceipt | null> {
   if (!safeKey(transitionId)) return fail();
   const row = await db
     .withSession("first-primary")

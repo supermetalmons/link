@@ -1,4 +1,5 @@
 // Generated from src/telegram/queueBridge.ts. Run npm run generate:runtime.
+import type { ApiRequest } from "../shared/api-contracts.js";
 import type { TelegramFetch } from "./client.js";
 declare const TELEGRAM_COMMAND_BRIDGE_URL =
   "https://api.mons.link/internal/telegram/command";
@@ -13,7 +14,7 @@ declare const signTelegramBridgeRequest: ({
   timestamp: string;
 }) => string;
 declare const sendTelegramCommand: (
-  command: unknown,
+  command: ApiRequest<"POST /internal/telegram/command">,
   {
     bridgeUrl,
     fetchImpl,

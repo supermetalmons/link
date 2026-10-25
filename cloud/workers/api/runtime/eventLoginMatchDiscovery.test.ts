@@ -1,3 +1,5 @@
+import { retainedInviteSourceFixture } from "../test/inviteDocumentFixture.ts";
+import { commitEventCompatibilityFixture } from "../test/eventCompatibilityFixture.ts";
 import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
 import {
   eventMatchTestPort,
@@ -143,10 +145,12 @@ function stateFixture(initial: Record<string, unknown> = {}) {
     async readInviteMetadata(inviteId: string, signal?: AbortSignal) {
       signal?.throwIfAborted();
       metadataReads.push(inviteId);
-      return (values.get(`invites/${inviteId}`) ?? null) as Record<
-        string,
-        unknown
-      > | null;
+      return retainedInviteSourceFixture(
+        (values.get(`invites/${inviteId}`) ?? null) as Record<
+          string,
+          unknown
+        > | null,
+      );
     },
     async readInviteMetadataMany(
       inviteIds: readonly string[],
@@ -154,13 +158,15 @@ function stateFixture(initial: Record<string, unknown> = {}) {
     ) {
       signal?.throwIfAborted();
       metadataBatches.push([...inviteIds]);
-      return inviteIds.map(
-        (inviteId) =>
-          (values.get(`invites/${inviteId}`) ?? null) as Record<
-            string,
-            unknown
-          > | null,
-      );
+      return inviteIds
+        .map(
+          (inviteId) =>
+            (values.get(`invites/${inviteId}`) ?? null) as Record<
+              string,
+              unknown
+            > | null,
+        )
+        .map(retainedInviteSourceFixture);
     },
   };
   return {
@@ -513,13 +519,15 @@ describe("event login-match discovery", () => {
   it("keeps the event intent pending when indexing fails after match creation", async () => {
     const fixture = eventTransitionFixture(testEnv);
     const repository = fixture.client;
-    await repository.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      repository,
       decodeEventUpdates({ [`events/${eventId}`]: eventRecord() }),
     );
     await rejectIndexWrites();
     try {
       await expect(
-        repository.commitEventPlan(
+        commitEventCompatibilityFixture(
+          repository,
           decodeEventUpdates({
             [`events/${eventId}/status`]: "active",
             [`events/${eventId}/rounds`]: eventRounds(),
@@ -573,7 +581,8 @@ describe("event login-match discovery", () => {
         eventMatchTestPort(fixture.client),
       );
       const outboxPath = `profileGameProjectionOutbox/event/${eventId}`;
-      await repository.commitEventPlan(
+      await commitEventCompatibilityFixture(
+        repository,
         decodeEventUpdates({
           [`events/${eventId}`]: {
             ...eventRecord(),
@@ -760,7 +769,7 @@ describe("event login-match discovery", () => {
       expect(signal).toBe(controller.signal);
       const invites = await readInviteMetadataMany(inviteIds, signal);
       if (fixture.metadataBatches.length === 2) controller.abort(reason);
-      return invites;
+      return invites.map(retainedInviteSourceFixture);
     };
     await expect(
       captureEventMatchDiscovery(
@@ -846,7 +855,10 @@ describe("event login-match discovery", () => {
       { [`events/${eventId}`]: eventRecord(), ...matchEffects() },
     ]) {
       await expect(
-        repository.commitEventPlan(decodeEventUpdates(updates)),
+        commitEventCompatibilityFixture(
+          repository,
+          decodeEventUpdates(updates),
+        ),
       ).rejects.toThrow("event-match-creation-requires-transition");
     }
     expect("transactPath" in repository).toBe(false);

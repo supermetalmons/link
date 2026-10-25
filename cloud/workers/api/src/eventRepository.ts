@@ -1,3 +1,11 @@
+import type {
+  EventProgressDocument,
+  EventProgressRecordKind,
+} from "../../../runtime/eventProgressRecords.js";
+import type {
+  TransactionDecision,
+  TransactionResult,
+} from "../../../runtime/transactions.js";
 import * as eventD1 from "./eventD1.ts";
 import type { EventLeaseKey } from "../../../runtime/eventLeases.js";
 import type {
@@ -93,10 +101,21 @@ function leaseStorageKey(key: EventLeaseKey): string {
       return `transition:${key.id}`;
   }
 }
+type EventProgressTransaction<Kind extends EventProgressRecordKind> = (
+  id: string,
+  updater: (
+    current: EventProgressDocument<Kind> | null,
+  ) => TransactionDecision<EventProgressDocument<Kind>>,
+  signal?: AbortSignal,
+) => Promise<TransactionResult<EventProgressDocument<Kind>>>;
+type EventStoreImplementation = EventStore & {
+  transactEventProgressOutbox: EventProgressTransaction<"pending">;
+  transactEventProgressDeadOutbox: EventProgressTransaction<"dead">;
+};
 function createEventStore(
   db: D1Database,
   commit: EventStore["commitEventPlan"],
-): EventStore {
+): EventStoreImplementation {
   const admit = <T>(work: (admission: EventWriteAdmission) => Promise<T>) =>
     withEventWriteAdmission(
       db,
@@ -187,13 +206,6 @@ function createEventStore(
           signal,
         }),
       ),
-    transactEventProfileGameProjectionOutbox: (id, updater, signal) =>
-      admit((admission) =>
-        eventD1.transactEventProfileGameProjectionOutbox(db, id, updater, {
-          admission,
-          signal,
-        }),
-      ),
     claimEventProfileGameProjectionOutbox: (
       id,
       requestId,
@@ -238,13 +250,6 @@ function createEventStore(
     acknowledgeEventTelegramProjectionOutbox: (id, requestId, signal) =>
       admit((admission) =>
         eventD1.acknowledgeEventTelegramProjectionOutbox(db, id, requestId, {
-          admission,
-          signal,
-        }),
-      ),
-    transactEventTelegramProjectionOutbox: (id, updater, signal) =>
-      admit((admission) =>
-        eventD1.transactEventTelegramProjectionOutbox(db, id, updater, {
           admission,
           signal,
         }),

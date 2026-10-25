@@ -1,8 +1,12 @@
-import {
-  isReadHistoricalMatchRequest,
-  type ReadHistoricalMatchResponse,
-} from "@mons/shared/game-sessions";
+import type {
+  ApiQuery,
+  ApiJsonBody,
+  ApiJsonStatus,
+  ApiResponse,
+} from "@mons/shared/api-contracts";
+import { isReadHistoricalMatchRequest } from "@mons/shared/game-sessions";
 import { readHistoricalMatchSnapshot } from "./historicalMatchesD1.ts";
+type ReadHistoricalMatchResponse = ApiResponse<"GET /matches/history">;
 
 export const HISTORICAL_MATCH_PATH = "/matches/history";
 
@@ -21,7 +25,10 @@ function publicHeaders(): Record<string, string> {
   };
 }
 
-function json(body: unknown, status: number): Response {
+function json<Status extends ApiJsonStatus<"GET /matches/history">>(
+  body: ApiJsonBody<"GET /matches/history", NoInfer<Status>>,
+  status: Status,
+): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: publicHeaders(),
@@ -29,7 +36,7 @@ function json(body: unknown, status: number): Response {
 }
 
 function errorResponse(
-  status: number,
+  status: Exclude<ApiJsonStatus<"GET /matches/history">, 200>,
   error: string,
   message: string,
 ): Response {
@@ -65,7 +72,7 @@ export async function handleHistoricalMatchRoute(
     return response;
   }
   const url = new URL(request.url);
-  const input = {
+  const input: ApiQuery<"GET /matches/history"> = {
     inviteId: url.searchParams.get("inviteId") || "",
     matchId: url.searchParams.get("matchId") || "",
   };

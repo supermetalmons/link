@@ -369,3 +369,20 @@ test("new intent rejects invalid scope and cannot be accepted by another account
   assert.equal(h.delivery.pending, null);
   assert.equal(h.entries.size, 0);
 });
+
+test("confirmation removes only the matching stored operation even when its envelope is otherwise incomplete", () => {
+  for (const operationId of [record.operationId, nextRecord.operationId]) {
+    const h = harness({ online: false });
+    assert.equal(h.delivery.accept(record), true);
+    const stored = JSON.stringify({ record: { operationId } });
+    h.entries.set(key, stored);
+    h.delivery.confirm();
+    assert.equal(h.delivery.pending, null);
+    assert.deepEqual(h.confirmed, [record]);
+    assert.deepEqual(h.errors, []);
+    assert.equal(
+      h.entries.get(key),
+      operationId === record.operationId ? undefined : stored,
+    );
+  }
+});

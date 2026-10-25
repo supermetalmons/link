@@ -1,3 +1,5 @@
+import { retainEventProgressRecord } from "../../../runtime/eventProgressRecords.js";
+import { eventDocumentFixture } from "./eventCompatibilityFixture.ts";
 import type {
   WorkflowEvent,
   WorkflowInstanceStatus,
@@ -207,7 +209,7 @@ function sweepRepository(
       assert.equal(limit, 10);
       return Object.entries(outbox).map(([outboxId, record]) => ({
         outboxId,
-        record,
+        record: retainEventProgressRecord("pending", record),
       }));
     },
     getStatePath: async (path) => records.get(path) ?? null,
@@ -558,13 +560,20 @@ for (const kind of ["start", "reminder"] as const) {
       const repository: EventProgressSweepRepository = {
         readEvent: async () => null,
         listDueEventProgressOutboxes: async () => [
-          { outboxId: plan.outboxId, record: plan.outbox },
+          {
+            outboxId: plan.outboxId,
+            record: retainEventProgressRecord("pending", plan.outbox),
+          },
         ],
         readEventProgressOutbox: async (id) => {
-          if (id !== plan.outboxId) return otherOutboxes.get(id) ?? null;
+          if (id !== plan.outboxId)
+            return retainEventProgressRecord(
+              "pending",
+              otherOutboxes.get(id) ?? null,
+            );
           assert.equal(recreating, false);
           operations.push("read");
-          return current;
+          return retainEventProgressRecord("pending", current);
         },
         commitEventPlan: async (commands) => {
           for (const command of commands) {
@@ -658,10 +667,18 @@ test(
       readEvent: async () => null,
       listDueEventProgressOutboxes: async () => {
         await published.promise;
-        return [{ outboxId: plan.outboxId, record: malformed }];
+        return [
+          {
+            outboxId: plan.outboxId,
+            record: retainEventProgressRecord("pending", malformed),
+          },
+        ];
       },
       readEventProgressOutbox: async (id) =>
-        id === plan.outboxId ? current : (otherOutboxes.get(id) ?? null),
+        retainEventProgressRecord(
+          "pending",
+          id === plan.outboxId ? current : (otherOutboxes.get(id) ?? null),
+        ),
       commitEventPlan: async (commands) => {
         for (const command of commands) {
           assert.notEqual(command.kind, "progress-dead");
@@ -700,11 +717,14 @@ test("an outbox repaired after reread survives quarantine without a failure log"
   const repository: EventProgressSweepRepository = {
     readEvent: async () => null,
     listDueEventProgressOutboxes: async () => [
-      { outboxId: outbox.plan.outboxId, record: malformed },
+      {
+        outboxId: outbox.plan.outboxId,
+        record: retainEventProgressRecord("pending", malformed),
+      },
     ],
     readEventProgressOutbox: async () => {
       reads++;
-      return current;
+      return retainEventProgressRecord("pending", current);
     },
     commitEventPlan: async () => assert.fail("must not archive repaired work"),
   };
@@ -742,7 +762,8 @@ test("scheduled-event sweep discovers both announcements and retains their first
   const repository: EventProgressSweepRepository = attachEventTestPorts<
     EventProgressSweepRepository & EventTestSource
   >({
-    readEvent: async (id) => (id === eventId ? event : null),
+    readEvent: async (id) =>
+      id === eventId ? eventDocumentFixture(event) : null,
     listDueEventProgressOutboxes: async () => [],
     getStatePath: async (path) => records.get(path) ?? null,
     patchStateRoot: async (updates) => {
@@ -1280,7 +1301,8 @@ test("both announcements survive slow start dispatch and all three jobs can fail
     const repository: EventProgressSweepRepository = attachEventTestPorts<
       EventProgressSweepRepository & EventTestSource
     >({
-      readEvent: async (id) => (id === eventId ? event : null),
+      readEvent: async (id) =>
+        id === eventId ? eventDocumentFixture(event) : null,
       listDueEventProgressOutboxes: async () => [],
       getStatePath: async (path) => records.get(path) ?? null,
       patchStateRoot: async (updates) => {
@@ -1430,7 +1452,8 @@ test("dead-letters outbox records whose key mismatches their source", async () =
   const repository = sweepRepository({
     [mismatchedOutboxId]: outbox.plan.outbox,
   });
-  repository.value.readEventProgressOutbox = async () => outbox.plan.outbox;
+  repository.value.readEventProgressOutbox = async () =>
+    retainEventProgressRecord("pending", outbox.plan.outbox);
   let workflowCreates = 0;
   await sweepEventProgress(
     workflowEnvironment({ onCreate: () => workflowCreates++ }),

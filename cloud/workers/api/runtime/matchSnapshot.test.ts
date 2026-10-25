@@ -1,7 +1,8 @@
+import { unwrapMatchStateWireFixture } from "../test/matchRecordFixture.ts";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { env as runtimeEnv, exports } from "cloudflare:workers";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
-import { getMatchStateRpc, unwrapMatchStateRpc } from "../src/matchStateRpc.ts";
+import { getMatchStateRpc } from "../src/matchStateRpc.ts";
 
 const env = runtimeEnv;
 const testEnv = runtimeEnv as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
@@ -63,7 +64,7 @@ describe("public canonical match routing", () => {
     const external = vi
       .spyOn(globalThis, "fetch")
       .mockRejectedValue(new Error("unexpected-network"));
-    unwrapMatchStateRpc(
+    unwrapMatchStateWireFixture(
       await rpc.createCanonicalMatch({
         inviteId,
         epoch: 2,
@@ -133,7 +134,7 @@ describe("public canonical match routing", () => {
     const external = vi
       .spyOn(globalThis, "fetch")
       .mockRejectedValue(new Error("unexpected-network"));
-    unwrapMatchStateRpc(
+    unwrapMatchStateWireFixture(
       await getMatchStateRpc(env, inviteId).createCanonicalMatch({
         inviteId,
         epoch: 2,

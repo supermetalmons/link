@@ -2,8 +2,13 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.createTelegramCleanupDelivery = createTelegramCleanupDelivery;
-const deliveryPolicy_js_1 = require("./deliveryPolicy.js");
 const deliveryState_js_1 = require("./deliveryState.js");
+const retryRecords_js_1 = require("./retryRecords.js");
+const records_js_1 = require("./records.js");
+const deliveryCleanupRecords_js_1 = require("./deliveryCleanupRecords.js");
+const records_js_2 = require("./records.js");
+const deliveryPolicy_js_1 = require("./deliveryPolicy.js");
+const deliveryState_js_2 = require("./deliveryState.js");
 const desiredStateCore_js_1 = require("./desiredStateCore.js");
 const taskKinds_js_1 = require("./taskKinds.js");
 const values_js_1 = require("./values.js");
@@ -34,59 +39,19 @@ function createTelegramCleanupDelivery({
     ownerToken = "",
     apiGateSettleOwner = "",
   }) =>
-    (0, deliveryState_js_1.ensureCommitted)(
-      await transact(messageKey, (record) => {
-        const delivery = (0, deliveryState_js_1.readDelivery)(record.delivery);
-        const pendingDelete = (0, deliveryState_js_1.readPendingDelete)(
-          delivery.pendingDelete,
-        );
-        if (
-          (0, deliveryState_js_1.normalizeString)(
-            pendingDelete.pendingDeleteId,
-          ) !== pendingDeleteId ||
-          (ownerToken &&
-            (0, deliveryState_js_1.normalizeString)(
-              pendingDelete.leaseOwner,
-            ) !== ownerToken)
-        ) {
-          return { commit: false, decision: "pending-delete-lost" };
-        }
-        const orphanedDeletes = (0, deliveryState_js_1.asObject)(
-          delivery.orphanedDeletes,
-        );
-        const nextDelivery = (0, deliveryState_js_1.promotePendingDeleteQueue)({
-          ...(0, deliveryState_js_1.omitKeys)(delivery, ["pendingDelete"]),
-          orphanedDeletes: {
-            ...orphanedDeletes,
-            [pendingDeleteId]: {
-              ...(0, deliveryPolicy_js_1.omitRetryState)(
-                (0, deliveryState_js_1.omitKeys)(pendingDelete, [
-                  "leaseOwner",
-                  "leaseExpiresAtMs",
-                  "status",
-                ]),
-              ),
-              terminalAtMs: nowMs,
-              lastError: (0, deliveryPolicy_js_1.buildErrorState)(
-                result,
-                nowMs,
-              ),
-            },
+    (0, deliveryState_js_2.ensureCommitted)(
+      await transact(messageKey, (record) =>
+        (0, deliveryCleanupRecords_js_1.orphanPendingDeleteRecord)(
+          (0, records_js_2.messageDocument)(record),
+          {
+            apiGateSettleOwner,
+            nowMs,
+            ownerToken,
+            pendingDeleteId,
+            result,
           },
-        });
-        return {
-          value: {
-            ...record,
-            delivery: {
-              ...nextDelivery,
-              ...((0, deliveryState_js_1.normalizeString)(apiGateSettleOwner)
-                ? { pendingDeleteApiGateSettleOwner: apiGateSettleOwner }
-                : {}),
-            },
-          },
-          decision: "pending-delete-orphaned",
-        };
-      }),
+        ),
+      ),
       "pending-delete-orphan-finalization-failed",
     );
   const finishPendingDeleteRetryable = async ({
@@ -101,7 +66,7 @@ function createTelegramCleanupDelivery({
     persistBeforeSchedule = false,
   }) => {
     return retryCoordinator.finish({
-      current: (0, deliveryState_js_1.asObject)(pendingDelete),
+      current: (0, deliveryState_js_1.retryDocument)(pendingDelete),
       failure: result,
       target: {
         kind: taskKinds_js_1.TELEGRAM_PENDING_DELETE_TASK_KIND,
@@ -113,120 +78,55 @@ function createTelegramCleanupDelivery({
       apiGateOwner,
       persistBeforeSchedule,
       persistProof: async ({ retryState, barrierRetryNotBeforeMs }) => {
-        (0, deliveryState_js_1.ensureCommitted)(
-          await transact(messageKey, (record) => {
-            const delivery = (0, deliveryState_js_1.readDelivery)(
-              record.delivery,
-            );
-            const latestPendingDelete = (0,
-            deliveryState_js_1.readPendingDelete)(delivery.pendingDelete);
-            if (
-              (0, deliveryState_js_1.normalizeString)(
-                latestPendingDelete.pendingDeleteId,
-              ) !== pendingDeleteId ||
-              (0, deliveryState_js_1.normalizeString)(
-                latestPendingDelete.leaseOwner,
-              ) !== ownerToken
-            ) {
-              return { commit: false, decision: "pending-delete-lost" };
-            }
-            return {
-              value: {
-                ...record,
-                delivery: {
-                  ...delivery.source,
-                  pendingDelete: {
-                    ...latestPendingDelete.source,
-                    apiGateProofRequired: {
-                      owner: apiGateOwner,
-                      retryNotBeforeMs: barrierRetryNotBeforeMs,
-                      revision,
-                      proofTaskKind:
-                        taskKinds_js_1.TELEGRAM_PENDING_DELETE_TASK_KIND,
-                      pendingDeleteId,
-                      retryProofLeaseOwner: ownerToken,
-                      ...retryState,
-                    },
-                  },
-                },
+        (0, deliveryState_js_2.ensureCommitted)(
+          await transact(messageKey, (record) =>
+            (0, deliveryCleanupRecords_js_1.recordCleanupRetryProof)(
+              (0, records_js_2.messageDocument)(record),
+              {
+                apiGateOwner,
+                barrierRetryNotBeforeMs,
+                ownerToken,
+                pendingDeleteId,
+                retryState,
+                revision,
               },
-              decision: "pending-rate-limit-proof-required",
-            };
-          }),
+            ),
+          ),
           "pending-rate-limit-proof-marker-failed",
         );
       },
       persistState: async ({ finalizedAtMs, retryState, rateLimited }) => {
-        const finalization = await transact(messageKey, (record) => {
-          const delivery = (0, deliveryState_js_1.readDelivery)(
-            record.delivery,
-          );
-          const latestPendingDelete = (0, deliveryState_js_1.readPendingDelete)(
-            delivery.pendingDelete,
-          );
-          if (
-            (0, deliveryState_js_1.normalizeString)(
-              latestPendingDelete.pendingDeleteId,
-            ) !== pendingDeleteId ||
-            (0, deliveryState_js_1.normalizeString)(
-              latestPendingDelete.leaseOwner,
-            ) !== ownerToken
-          ) {
-            return { commit: false, decision: "pending-delete-lost" };
-          }
-          return {
-            value: {
-              ...record,
-              delivery: {
-                ...delivery.source,
-                pendingDelete: (0, deliveryState_js_1.writeCleanup)({
-                  ...(0, deliveryPolicy_js_1.omitRetryState)(
-                    (0, deliveryState_js_1.omitKeys)(latestPendingDelete, [
-                      "leaseOwner",
-                      "leaseExpiresAtMs",
-                      "lastError",
-                      ...(preserveApiGateIdentity
-                        ? []
-                        : [
-                            "apiGateOwner",
-                            "apiGateGeneration",
-                            "apiGateStartedAtMs",
-                            "apiGateProofRequired",
-                          ]),
-                    ]),
-                  ),
-                  status: "retryable",
-                  ...retryState,
-                  lastError: (0, deliveryPolicy_js_1.buildErrorState)(
-                    result,
-                    finalizedAtMs,
-                  ),
-                }),
-              },
+        const finalization = await transact(messageKey, (record) =>
+          (0, deliveryCleanupRecords_js_1.recordCleanupRetryState)(
+            (0, records_js_2.messageDocument)(record),
+            {
+              finalizedAtMs,
+              ownerToken,
+              pendingDeleteId,
+              preserveApiGateIdentity,
+              result,
+              retryState,
             },
-            decision: "pending-delete-retryable",
-          };
-        });
+          ),
+        );
         if (!finalization.committed) {
-          const current = (0, deliveryState_js_1.asObject)(
-            await repository.getMessage(messageKey),
-          );
-          const currentPendingDelete = (0, deliveryState_js_1.asObject)(
-            (0, values_js_1.readProperty)(current.delivery, "pendingDelete"),
+          const current = await repository.getMessage(messageKey);
+          const currentPendingDelete = (0,
+          deliveryState_js_2.readPendingDelete)(
+            (0, values_js_1.readProperty)(
+              (0, records_js_1.messageDeliveryDocument)(current),
+              "pendingDelete",
+            ),
           );
           const proofAlreadyApplied =
             rateLimited &&
             (0, deliveryPolicy_js_1.normalizeRetrySequence)(
               currentPendingDelete.retrySequence,
             ) >= retryState.retrySequence &&
-            (0, deliveryState_js_1.normalizeString)(
-              (0, values_js_1.readProperty)(
-                currentPendingDelete.apiGateProofRequired,
-                "owner",
-              ),
-            ) !== (0, deliveryState_js_1.normalizeString)(apiGateOwner);
+            currentPendingDelete.apiGateProofOwner !==
+              (0, deliveryState_js_2.normalizeString)(apiGateOwner);
           if (!proofAlreadyApplied) {
-            (0, deliveryState_js_1.ensureCommitted)(
+            (0, deliveryState_js_2.ensureCommitted)(
               finalization,
               "pending-delete-retryable-finalization-failed",
             );
@@ -261,201 +161,22 @@ function createTelegramCleanupDelivery({
     const nowMs = now();
     const ownerToken = createOwnerToken();
     let decision = "missing";
-    const acquired = await transact(normalizedMessageKey, (record) => {
-      const delivery = (0, deliveryState_js_1.readDelivery)(record.delivery);
-      const pendingDelete = (0, deliveryState_js_1.readPendingDelete)(
-        delivery.pendingDelete,
-      );
-      if (delivery.status === "uncertain" || delivery.sendInFlight) {
-        decision = "blocked-uncertain";
-        return { commit: false, decision };
-      }
-      const chatId = (0, deliveryState_js_1.normalizeString)(
-        pendingDelete.chatId,
-      );
-      const messageId = Number(pendingDelete.messageId);
-      if (!pendingDelete.present) {
-        decision = "missing";
-        return { commit: false, decision };
-      }
-      const pendingDeleteId = (0, deliveryState_js_1.resolvePendingDeleteId)(
-        pendingDelete,
-      );
-      if (
-        requestedPendingDeleteId &&
-        requestedPendingDeleteId !== pendingDeleteId
-      ) {
-        decision = "stale";
-        return { commit: false, decision };
-      }
-      const currentApiGateOwner = (0, deliveryState_js_1.normalizeString)(
-        pendingDelete.apiGateOwner,
-      );
-      const currentProofGateOwner = (0, deliveryState_js_1.normalizeString)(
-        (0, values_js_1.readProperty)(
-          pendingDelete.apiGateProofRequired,
-          "owner",
-        ),
-      );
-      if (
-        currentApiGateOwner &&
-        currentApiGateOwner === currentProofGateOwner
-      ) {
-        decision = "rate-limit-proof-pending";
-        return { commit: false, decision };
-      }
-      if (!chatId || !Number.isInteger(messageId) || messageId <= 0) {
-        decision = "invalid";
-        const apiGateOwner = (0, deliveryState_js_1.normalizeString)(
-          pendingDelete.apiGateOwner,
-        );
-        const proofGateOwner = (0, deliveryState_js_1.normalizeString)(
-          (0, values_js_1.readProperty)(
-            pendingDelete.apiGateProofRequired,
-            "owner",
-          ),
-        );
-        const shouldSettleApiGate =
-          apiGateOwner && apiGateOwner !== proofGateOwner;
-        const nextDelivery = (0, deliveryState_js_1.promotePendingDeleteQueue)({
-          ...(0, deliveryState_js_1.omitKeys)(delivery, ["pendingDelete"]),
-          orphanedDeletes: {
-            ...(0, deliveryState_js_1.asObject)(delivery.orphanedDeletes),
-            [pendingDeleteId]: {
-              ...pendingDelete.source,
-              pendingDeleteId,
-              terminalAtMs: nowMs,
-              lastError: {
-                code: "invalid-pending-delete",
-                atMs: nowMs,
-              },
-            },
-          },
-        });
-        return {
-          value: {
-            ...record,
-            delivery: {
-              ...nextDelivery,
-              ...(shouldSettleApiGate
-                ? { pendingDeleteApiGateSettleOwner: apiGateOwner }
-                : {}),
-            },
-          },
-          decision,
-        };
-      }
-      const retryDeadlineAtMs = (0,
-      deliveryPolicy_js_1.resolveRetryDeadlineAtMs)(pendingDelete);
-      const leaseExpiresAtMs = (0, deliveryPolicy_js_1.normalizeTimestamp)(
-        pendingDelete.leaseExpiresAtMs,
-      );
-      if (
-        pendingDelete.status === "processing" &&
-        (0, deliveryState_js_1.normalizeString)(pendingDelete.leaseOwner) !==
-          ownerToken &&
-        leaseExpiresAtMs > nowMs
-      ) {
-        decision = "locked";
-        return { commit: false, decision };
-      }
-      if (
-        ["pending", "processing", "retryable"].includes(pendingDelete.status) &&
-        retryDeadlineAtMs > 0 &&
-        retryDeadlineAtMs <= nowMs
-      ) {
-        decision = "exhausted";
-        const apiGateOwner = (0, deliveryState_js_1.normalizeString)(
-          pendingDelete.apiGateOwner,
-        );
-        const proofGateOwner = (0, deliveryState_js_1.normalizeString)(
-          (0, values_js_1.readProperty)(
-            pendingDelete.apiGateProofRequired,
-            "owner",
-          ),
-        );
-        const shouldSettleApiGate =
-          apiGateOwner && apiGateOwner !== proofGateOwner;
-        const nextDelivery = (0, deliveryState_js_1.promotePendingDeleteQueue)({
-          ...(0, deliveryState_js_1.omitKeys)(delivery, ["pendingDelete"]),
-          orphanedDeletes: {
-            ...(0, deliveryState_js_1.asObject)(delivery.orphanedDeletes),
-            [pendingDeleteId]: {
-              ...(0, deliveryPolicy_js_1.omitRetryState)(pendingDelete.source),
-              pendingDeleteId,
-              terminalAtMs: nowMs,
-              lastError: {
-                code: "safe-retry-window-exhausted",
-                atMs: nowMs,
-              },
-            },
-          },
-        });
-        return {
-          value: {
-            ...record,
-            delivery: {
-              ...nextDelivery,
-              ...(shouldSettleApiGate
-                ? { pendingDeleteApiGateSettleOwner: apiGateOwner }
-                : {}),
-            },
-          },
-          decision,
-        };
-      }
-      if (
-        pendingDelete.status === "retryable" &&
-        (0, deliveryPolicy_js_1.normalizeTimestamp)(pendingDelete.retryAtMs) >
-          nowMs
-      ) {
-        decision = "deferred";
-        return { commit: false, decision };
-      }
-      decision = "acquired";
-      const apiGateGeneration =
-        (0, deliveryState_js_1.normalizeString)(
-          pendingDelete.apiGateGeneration,
-        ) ||
-        (0, deliveryState_js_1.normalizeString)(requestedGeneration) ||
-        `direct:${pendingDeleteId}`;
-      return {
-        value: {
-          ...record,
-          delivery: {
-            ...delivery.source,
-            pendingDelete: (0, deliveryState_js_1.writeCleanup)({
-              ...pendingDelete.source,
-              pendingDeleteId,
-              status: "processing",
-              attempts:
-                (0, deliveryPolicy_js_1.normalizeAttempts)(
-                  pendingDelete.attempts,
-                ) + 1,
-              leaseOwner: ownerToken,
-              leaseExpiresAtMs: nowMs + leaseTtlMs,
-              startedAtMs: nowMs,
-              apiGateOwner:
-                (0, deliveryState_js_1.normalizeString)(
-                  pendingDelete.apiGateOwner,
-                ) ||
-                (0, deliveryState_js_1.buildApiGateOwner)(
-                  normalizedMessageKey,
-                  "pending-delete",
-                  pendingDeleteId,
-                  apiGateGeneration,
-                ),
-              apiGateGeneration,
-              apiGateStartedAtMs:
-                (0, deliveryPolicy_js_1.normalizeTimestamp)(
-                  pendingDelete.apiGateStartedAtMs,
-                ) || nowMs,
-            }),
+    const acquired = await transact(normalizedMessageKey, (record) =>
+      (0, deliveryCleanupRecords_js_1.acquirePendingDeleteRecord)(
+        (0, records_js_2.messageDocument)(record),
+        {
+          leaseTtlMs,
+          normalizedMessageKey,
+          nowMs,
+          ownerToken,
+          requestedGeneration,
+          requestedPendingDeleteId,
+          observeDecision: (value) => {
+            decision = value;
           },
         },
-        decision,
-      };
-    });
+      ),
+    );
     if (decision === "missing" || decision === "stale") {
       return { status: "settled", cleanup: decision };
     }
@@ -463,14 +184,9 @@ function createTelegramCleanupDelivery({
       return { status: "uncertain", cleanup: decision };
     }
     if (decision === "rate-limit-proof-pending") {
-      const proof = (0, deliveryState_js_1.asObject)(
-        (0, values_js_1.readProperty)(
-          (0, values_js_1.readProperty)(
-            acquired.value?.delivery,
-            "pendingDelete",
-          ),
-          "apiGateProofRequired",
-        ),
+      const proof = (0, retryRecords_js_1.messageRateLimitProof)(
+        (0, records_js_1.messageDeliveryDocument)(acquired.value),
+        true,
       );
       await resumeRateLimitProof({
         messageKey: normalizedMessageKey,
@@ -482,9 +198,7 @@ function createTelegramCleanupDelivery({
       return {
         status: "retryable",
         cleanup: decision,
-        retryAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
-          proof.retryNotBeforeMs,
-        ),
+        retryAtMs: (0, retryRecords_js_1.rateLimitProofRetryAt)(proof),
         scheduled: true,
       };
     }
@@ -492,33 +206,33 @@ function createTelegramCleanupDelivery({
       await settlePersistedApiGate({
         messageKey: normalizedMessageKey,
         field: "pendingDeleteApiGateSettleOwner",
-        owner: (0, values_js_1.readProperty)(
-          acquired.value?.delivery,
+        owner: (0, retryRecords_js_1.messageSettlementOwnerInput)(
+          acquired.value,
           "pendingDeleteApiGateSettleOwner",
         ),
       });
       return { status: "settled", cleanup: decision };
     }
     if (decision === "deferred" || decision === "locked") {
-      const pendingDelete = (0, deliveryState_js_1.readPendingDelete)(
+      const pendingDelete = (0, deliveryState_js_2.readPendingDelete)(
         (0, values_js_1.readProperty)(
-          acquired.value?.delivery,
+          (0, records_js_1.messageDeliveryDocument)(acquired.value),
           "pendingDelete",
         ),
       );
-      const lockedGateOwner = (0, deliveryState_js_1.normalizeString)(
+      const lockedGateOwner = (0, deliveryState_js_2.normalizeString)(
         pendingDelete.apiGateOwner,
       );
-      const lockedGateGeneration = (0, deliveryState_js_1.normalizeString)(
+      const lockedGateGeneration = (0, deliveryState_js_2.normalizeString)(
         pendingDelete.apiGateGeneration,
       );
       const mayReclaimLockedGate =
         lockedGateOwner &&
-        ((0, deliveryState_js_1.normalizeString)(apiGateReclaimOwner) ===
+        ((0, deliveryState_js_2.normalizeString)(apiGateReclaimOwner) ===
           lockedGateOwner ||
           (lockedGateGeneration &&
             lockedGateGeneration ===
-              (0, deliveryState_js_1.normalizeString)(requestedGeneration)));
+              (0, deliveryState_js_2.normalizeString)(requestedGeneration)));
       const retryAtMs =
         decision === "deferred"
           ? (0, deliveryPolicy_js_1.normalizeTimestamp)(pendingDelete.retryAtMs)
@@ -528,8 +242,11 @@ function createTelegramCleanupDelivery({
       await scheduleExactRetry({
         messageKey: normalizedMessageKey,
         revision:
-          (0, deliveryState_js_1.normalizeString)(
-            (0, values_js_1.readProperty)(acquired.value?.desired, "revision"),
+          (0, deliveryState_js_2.normalizeString)(
+            (0, values_js_1.readProperty)(
+              (0, records_js_1.messageDesiredDocument)(acquired.value),
+              "revision",
+            ),
           ) ||
           requestedRevision ||
           "latest",
@@ -546,7 +263,7 @@ function createTelegramCleanupDelivery({
           retryAtMs,
           retrySequence: pendingDelete.retrySequenceOr(retrySequence),
         },
-        pendingDeleteId: (0, deliveryState_js_1.resolvePendingDeleteId)(
+        pendingDeleteId: (0, deliveryState_js_2.resolvePendingDeleteId)(
           pendingDelete,
         ),
         sourceGeneration: requestedGeneration,
@@ -557,10 +274,13 @@ function createTelegramCleanupDelivery({
     if (decision !== "acquired") {
       return { status: "settled", cleanup: "missing" };
     }
-    const pendingDelete = (0, deliveryState_js_1.readPendingDelete)(
-      (0, values_js_1.readProperty)(acquired.value?.delivery, "pendingDelete"),
+    const pendingDelete = (0, deliveryState_js_2.readPendingDelete)(
+      (0, values_js_1.readProperty)(
+        (0, records_js_1.messageDeliveryDocument)(acquired.value),
+        "pendingDelete",
+      ),
     );
-    const pendingDeleteId = (0, deliveryState_js_1.normalizeString)(
+    const pendingDeleteId = (0, deliveryState_js_2.normalizeString)(
       pendingDelete.pendingDeleteId,
     );
     const callAtMs = now();
@@ -613,8 +333,11 @@ function createTelegramCleanupDelivery({
       const retryState = await finishPendingDeleteRetryable({
         messageKey: normalizedMessageKey,
         revision:
-          (0, deliveryState_js_1.normalizeString)(
-            (0, values_js_1.readProperty)(acquired.value?.desired, "revision"),
+          (0, deliveryState_js_2.normalizeString)(
+            (0, values_js_1.readProperty)(
+              (0, records_js_1.messageDesiredDocument)(acquired.value),
+              "revision",
+            ),
           ) ||
           requestedRevision ||
           "latest",
@@ -637,13 +360,13 @@ function createTelegramCleanupDelivery({
         scheduled: true,
       };
     }
-    const apiGateOwner = (0, deliveryState_js_1.normalizeString)(
+    const apiGateOwner = (0, deliveryState_js_2.normalizeString)(
       pendingDelete.apiGateOwner,
     );
-    const pendingGateGeneration = (0, deliveryState_js_1.normalizeString)(
+    const pendingGateGeneration = (0, deliveryState_js_2.normalizeString)(
       pendingDelete.apiGateGeneration,
     );
-    const proofRequiredOwner = (0, deliveryState_js_1.normalizeString)(
+    const proofRequiredOwner = (0, deliveryState_js_2.normalizeString)(
       (0, values_js_1.readProperty)(
         pendingDelete.apiGateProofRequired,
         "owner",
@@ -654,8 +377,11 @@ function createTelegramCleanupDelivery({
     const gateResult = await acquireApiGate({
       messageKey: normalizedMessageKey,
       revision:
-        (0, deliveryState_js_1.normalizeString)(
-          (0, values_js_1.readProperty)(acquired.value?.desired, "revision"),
+        (0, deliveryState_js_2.normalizeString)(
+          (0, values_js_1.readProperty)(
+            (0, records_js_1.messageDesiredDocument)(acquired.value),
+            "revision",
+          ),
         ) ||
         requestedRevision ||
         "latest",
@@ -670,8 +396,11 @@ function createTelegramCleanupDelivery({
       const retryState = await finishPendingDeleteRetryable({
         messageKey: normalizedMessageKey,
         revision:
-          (0, deliveryState_js_1.normalizeString)(
-            (0, values_js_1.readProperty)(acquired.value?.desired, "revision"),
+          (0, deliveryState_js_2.normalizeString)(
+            (0, values_js_1.readProperty)(
+              (0, records_js_1.messageDesiredDocument)(acquired.value),
+              "revision",
+            ),
           ) ||
           requestedRevision ||
           "latest",
@@ -709,40 +438,21 @@ function createTelegramCleanupDelivery({
       });
       return { status: "settled", cleanup: "exhausted" };
     }
-    const result = await client.deleteTelegramMessage({
-      chatId: pendingDelete.chatId,
-      messageId: pendingDelete.messageId,
-    });
+    const result = await client.deleteTelegramMessage(
+      pendingDelete.deleteInput(),
+    );
     if (result.ok) {
-      (0, deliveryState_js_1.ensureCommitted)(
-        await transact(normalizedMessageKey, (record) => {
-          const delivery = (0, deliveryState_js_1.readDelivery)(
-            record.delivery,
-          );
-          const latestPendingDelete = (0, deliveryState_js_1.readPendingDelete)(
-            delivery.pendingDelete,
-          );
-          if (
-            (0, deliveryState_js_1.normalizeString)(
-              latestPendingDelete.pendingDeleteId,
-            ) !== pendingDeleteId ||
-            (0, deliveryState_js_1.normalizeString)(
-              latestPendingDelete.leaseOwner,
-            ) !== ownerToken
-          ) {
-            return { commit: false, decision: "pending-delete-lost" };
-          }
-          return {
-            value: {
-              ...record,
-              delivery: {
-                ...(0, deliveryState_js_1.promotePendingDeleteQueue)(delivery),
-                pendingDeleteApiGateSettleOwner: apiGateOwner,
-              },
+      (0, deliveryState_js_2.ensureCommitted)(
+        await transact(normalizedMessageKey, (record) =>
+          (0, deliveryCleanupRecords_js_1.clearPendingDeleteRecord)(
+            (0, records_js_2.messageDocument)(record),
+            {
+              apiGateOwner,
+              ownerToken,
+              pendingDeleteId,
             },
-            decision: "pending-delete-cleared",
-          };
-        }),
+          ),
+        ),
         "pending-delete-finalization-failed",
       );
       await settlePersistedApiGate({
@@ -756,8 +466,11 @@ function createTelegramCleanupDelivery({
       const retryState = await finishPendingDeleteRetryable({
         messageKey: normalizedMessageKey,
         revision:
-          (0, deliveryState_js_1.normalizeString)(
-            (0, values_js_1.readProperty)(acquired.value?.desired, "revision"),
+          (0, deliveryState_js_2.normalizeString)(
+            (0, values_js_1.readProperty)(
+              (0, records_js_1.messageDesiredDocument)(acquired.value),
+              "revision",
+            ),
           ) ||
           requestedRevision ||
           "latest",

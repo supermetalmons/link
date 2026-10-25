@@ -1,6 +1,23 @@
 import { readProperty } from "./values.js";
 import { getTelegramEmojiTag } from "../telegramDisplay.js";
 import { customTelegramEmojis } from "../telegramEmojiData.js";
+import {
+  readEventParticipantDocument,
+  type EventParticipantDocument,
+} from "../events/documents.js";
+
+type ParticipantFields = {
+  joinedAtMs?: unknown;
+  emojiId?: unknown;
+  username?: unknown;
+  displayName?: unknown;
+};
+const participantFields = (
+  value: EventParticipantDocument,
+): ParticipantFields => {
+  const retained: unknown = value;
+  return retained as ParticipantFields;
+};
 
 const normalizeString = (value: unknown): string =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
@@ -46,13 +63,16 @@ const getParticipantRecords = (eventData: unknown) => {
         typeof participant === "object"
       );
     })
-    .map(([profileId, participant]) => ({ profileId, participant }))
+    .map(([profileId, participant]) => ({
+      profileId,
+      participant: readEventParticipantDocument(participant)!,
+    }))
     .sort((left, right) => {
       const leftJoined = normalizePositiveNumberOrNull(
-        left.participant.joinedAtMs,
+        participantFields(left.participant).joinedAtMs,
       );
       const rightJoined = normalizePositiveNumberOrNull(
-        right.participant.joinedAtMs,
+        participantFields(right.participant).joinedAtMs,
       );
       const leftJoinedValue = leftJoined === null ? 0 : leftJoined;
       const rightJoinedValue = rightJoined === null ? 0 : rightJoined;
@@ -66,10 +86,16 @@ const getParticipantRecords = (eventData: unknown) => {
 const buildParticipantRenderKey = (eventData: unknown) =>
   getParticipantRecords(eventData)
     .map(({ profileId, participant }) => {
-      const emojiId = normalizePositiveNumberOrNull(participant.emojiId);
-      const joinedAtMs = normalizePositiveNumberOrNull(participant.joinedAtMs);
-      const username = normalizeString(participant.username);
-      const displayName = normalizeString(participant.displayName);
+      const emojiId = normalizePositiveNumberOrNull(
+        participantFields(participant).emojiId,
+      );
+      const joinedAtMs = normalizePositiveNumberOrNull(
+        participantFields(participant).joinedAtMs,
+      );
+      const username = normalizeString(participantFields(participant).username);
+      const displayName = normalizeString(
+        participantFields(participant).displayName,
+      );
       return [
         profileId,
         username,

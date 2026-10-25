@@ -1,7 +1,7 @@
+import type { ApiResponse } from "@mons/shared/api-contracts";
 import {
   INVITE_METADATA_MAX_MESSAGE_BYTES,
   isReadInviteMetadataResponse,
-  type ReadInviteMetadataResponse,
 } from "@mons/shared/invite-metadata";
 import { GAME_SESSION_OPERATION_ID_PATTERN } from "@mons/shared/game-sessions";
 import { AuthApiFailure } from "./authErrors.ts";
@@ -14,6 +14,8 @@ import {
   resolveInviteReadRole,
   type InviteReadRouteDependencies,
 } from "./inviteReadRoute.ts";
+type ReadInviteMetadataResponse =
+  ApiResponse<"GET /invites/:inviteId/metadata">;
 
 export type InviteMetadataRouteDependencies = InviteReadRouteDependencies & {
   room?: Pick<InviteReactions, "readMetadata" | "fetch">;

@@ -1,3 +1,11 @@
+import type {
+  EventParticipantView,
+  EventMatchView,
+  EventRoundView,
+  EventPrizeAssignmentView,
+  EventPrizeAssignmentsView,
+  EventView,
+} from "@mons/shared/events";
 import {
   MINING_MATERIAL_NAMES as SHARED_MINING_MATERIAL_NAMES,
   type MiningMaterialName as SharedMiningMaterialName,
@@ -5,6 +13,7 @@ import {
 import type {
   AutomatchStateHint,
   NavigationStatus as SharedNavigationStatus,
+  RemoveNavigationGameResponse,
 } from "@mons/shared/navigation";
 import type {
   EventPrizeId as SharedEventPrizeId,
@@ -55,10 +64,6 @@ export type HistoricalMatchPair = SharedHistoricalMatchPair;
 export type NavigationItemStatus = SharedNavigationStatus;
 export type NavigationGameStatus = Exclude<SharedNavigationStatus, "dismissed">;
 type NavigationEventStatus = Exclude<SharedNavigationStatus, "pending">;
-type EventStatus = "scheduled" | "active" | "ended" | "dismissed";
-type EventParticipantState = "active" | "eliminated" | "winner";
-type EventMatchStatus = "upcoming" | "pending" | "host" | "guest" | "bye";
-type EventRoundStatus = "upcoming" | "active" | "completed";
 
 export interface NavigationGameItem {
   id: string;
@@ -103,93 +108,22 @@ export interface NavigationEventItem {
 
 export type NavigationItem = NavigationGameItem | NavigationEventItem;
 
-export interface EventParticipant {
-  profileId: string;
-  loginUid: string;
-  username: string;
-  displayName: string;
-  emojiId: number;
-  aura: string;
-  joinedAtMs: number;
-  state: EventParticipantState;
-  eliminatedRoundIndex: number | null;
-  eliminatedByProfileId: string | null;
-}
+export type RemoveWaitingNavigationGameResult =
+  | RemoveNavigationGameResponse
+  | { ok: false; skipped: true; reason: "invalid-invite-id" };
 
-export interface EventMatch {
-  matchKey: string;
-  inviteId: string | null;
-  status: EventMatchStatus;
-  resolvedAtMs: number | null;
-  winnerDisqualified: boolean;
-  winnerProfileId: string | null;
-  loserProfileId: string | null;
-  hostSlotBlocked: boolean;
-  hostProfileId: string | null;
-  hostLoginUid: string | null;
-  hostDisplayName: string | null;
-  hostEmojiId: number | null;
-  hostAura: string | null;
-  guestSlotBlocked: boolean;
-  guestProfileId: string | null;
-  guestLoginUid: string | null;
-  guestDisplayName: string | null;
-  guestEmojiId: number | null;
-  guestAura: string | null;
-}
-
-export interface EventRound {
-  roundIndex: number;
-  status: EventRoundStatus;
-  createdAtMs: number;
-  completedAtMs: number | null;
-  matches: Record<string, EventMatch>;
-}
+export type EventParticipant = EventParticipantView;
+export type EventMatch = EventMatchView;
+export type EventRound = EventRoundView;
+export type EventPrizeAssignment = EventPrizeAssignmentView;
+export type EventPrizeAssignments = EventPrizeAssignmentsView;
+export type EventRecord = EventView;
 
 export type EventPrizeId = SharedEventPrizeId;
 export type EventPrizePlace = 1 | 2 | 3;
-
-export interface EventPrizeAssignment {
-  eventId: string;
-  profileId: string;
-  place: EventPrizePlace;
-  prizeId: EventPrizeId;
-  assignedAtMs: number;
-}
-
-export type EventPrizeAssignments = Partial<
-  Record<`${EventPrizePlace}`, EventPrizeAssignment>
->;
-
 export type ProfileEventPrizes = Record<string, EventPrizeAssignment>;
-
 export type EventPrizeWithdrawalResponse =
   EventPrizeWithdrawalCompletedResponse;
-
-export interface EventRecord {
-  schemaVersion: number;
-  eventId: string;
-  isSundayMons: boolean;
-  status: EventStatus;
-  createdAtMs: number;
-  updatedAtMs: number;
-  startAtMs: number;
-  startedAtMs: number | null;
-  endedAtMs: number | null;
-  createdByProfileId: string;
-  createdByLoginUid: string;
-  createdByUsername: string;
-  winnerProfileId: string | null;
-  winnerDisplayName: string | null;
-  currentRoundIndex: number | null;
-  bracketSize: number;
-  roundCount: number;
-  thirdPlaceMatch?: EventMatch | null;
-  prizeSelectionsLockedAtMs?: number | null;
-  prizeAssignments?: EventPrizeAssignments;
-  participants: Record<string, EventParticipant>;
-  rounds: Record<string, EventRound>;
-}
 
 export type EventPrizeSelections = Record<string, EventPrizeId>;
 

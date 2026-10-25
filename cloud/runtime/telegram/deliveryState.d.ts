@@ -1,4 +1,10 @@
 // Generated from src/telegram/deliveryState.ts. Run npm run generate:runtime.
+import type { TelegramExactRetryInput } from "./deliveryRetryTypes.js";
+import type {
+  TelegramProofInput,
+  RetainedTelegramExactRetryInput,
+  RetainedTelegramOwner,
+} from "./retryRecords.js";
 import type {
   TransactionDecision,
   TransactionResult,
@@ -8,21 +14,35 @@ import type {
   TelegramRetryResult,
   TelegramRetryState,
 } from "./deliveryRetryTypes.js";
-import type { TelegramReconcileInput } from "./deliveryTypes.js";
 import type { TelegramDesired } from "./desiredStateCore.js";
-import type { TelegramTaskKind } from "./taskIdentity.js";
-export type RawRecord = Record<string, unknown>;
+import type { RetainedDesiredView } from "./desiredRecords.js";
+import type {
+  TelegramMessageDocument,
+  TelegramDesiredDocument,
+  TelegramDeliveryDocument,
+  TelegramCleanupDocument,
+  TelegramAppliedDocument,
+  TelegramAppliedReceiptWrite,
+  TelegramDeliveryMetadata,
+  TelegramCleanupFields,
+  TelegramRetryProofDocument,
+  TelegramSendEvidence,
+  TelegramOrphanedDeletesDocument,
+  TelegramRetryDocument,
+} from "./records.js";
+import { type RetainedTelegramDeleteInput } from "./client.js";
+type RawRecord = Record<string, unknown>;
 export type MessageMutation = (
-  record: RawRecord,
-) => TransactionDecision<RawRecord>;
+  record: TelegramMessageDocument,
+) => TransactionDecision<TelegramMessageDocument>;
 export type OwnedMutation = (
-  record: RawRecord,
+  record: TelegramMessageDocument,
   delivery: DeliverySnapshot,
-) => RawRecord;
+) => TelegramMessageDocument;
 export type DesiredContext = {
   messageKey: string;
   ownerToken: string;
-  desired: TelegramDesired;
+  desired: RetainedDesiredView;
 };
 export type AppliedReceiptAction =
   | {
@@ -31,7 +51,7 @@ export type AppliedReceiptAction =
     }
   | {
       kind: "set";
-      value: RawRecord;
+      value: TelegramAppliedReceiptWrite | TelegramAppliedDocument;
     }
   | {
       kind: "clear";
@@ -43,7 +63,7 @@ export type DeliveredOptions = {
 };
 export type FinishStatusInput = DesiredContext & {
   nowMs: number;
-  apiGateSettleOwner?: unknown;
+  apiGateSettleOwner?: string | RetainedTelegramOwner;
 } & (
     | ({
         status: "delivered";
@@ -157,38 +177,33 @@ export declare function preserveSendEvidence(
   present?: boolean,
 ): PreservedSendEvidence;
 export declare function writeDelivery(
-  transition: DeliveryTransition & RawRecord,
-): RawRecord;
+  transition: DeliveryTransition & TelegramDeliveryMetadata,
+): TelegramDeliveryDocument;
 export declare function writeCleanup(
-  transition: CleanupTransition & RawRecord,
-): RawRecord;
-export type ProofInput = Partial<
-  Record<keyof TelegramReconcileInput | "requestedPendingDeleteId", unknown>
->;
-export type ExactRetryInput = {
-  messageKey: string;
-  revision: string;
-  taskKind: TelegramTaskKind;
-  retryState: Partial<Record<keyof TelegramRetryState, unknown>>;
-  safeRejectedAttemptId?: unknown;
-  pendingDeleteId?: unknown;
-  retryProofLeaseOwner?: unknown;
-  sourceGeneration?: unknown;
-  proofTaskKind?: unknown;
-  barrierProofOwner?: unknown;
-  barrierRetryNotBeforeMs?: unknown;
-  scheduleTimeMs?: unknown;
-  apiGateReclaimOwner?: unknown;
-  apiGateSettleOwner?: unknown;
-};
+  transition: CleanupTransition & TelegramCleanupFields,
+): TelegramCleanupDocument;
+export type ProofInput = TelegramProofInput;
+export type ExactRetryInput =
+  TelegramExactRetryInput | RetainedTelegramExactRetryInput;
 export declare const normalizeString: (value: unknown) => string;
 export declare const hashValue: (value: unknown) => string;
-export declare const asObject: (value: unknown) => Record<string, unknown>;
 declare class StoredSnapshot {
-  readonly source: RawRecord;
   constructor(value: unknown);
   get present(): boolean;
 }
+export declare function deliveryDocument(
+  value: DeliverySnapshot,
+): TelegramDeliveryDocument;
+export declare function pendingDeleteDocument(
+  value: PendingDeleteSnapshot,
+): TelegramCleanupDocument;
+export declare function retryDocument(
+  value:
+    | TelegramDeliveryDocument
+    | TelegramCleanupDocument
+    | DeliverySnapshot
+    | PendingDeleteSnapshot,
+): TelegramRetryDocument;
 declare class RetrySnapshot extends StoredSnapshot {
   get attempts(): number;
   get leaseOwner(): string;
@@ -199,13 +214,14 @@ declare class RetrySnapshot extends StoredSnapshot {
   get retrySequence(): number;
   retryTimestampOr(
     field: "retryStartedAtMs" | "retryDeadlineAtMs",
-    fallback: unknown,
+    fallback: number | undefined,
   ): number;
-  retrySequenceOr(fallback: unknown): number;
+  retrySequenceOr(fallback: number | undefined): number;
   get apiGateOwner(): string;
   get apiGateGeneration(): string;
   get apiGateStartedAtMs(): number;
-  get apiGateProofRequired(): unknown;
+  get apiGateProofRequired(): TelegramRetryProofDocument;
+  get apiGateProofOwner(): string;
 }
 export declare class DeliverySnapshot extends RetrySnapshot {
   get status(): DeliveryStatus | undefined;
@@ -214,9 +230,14 @@ export declare class DeliverySnapshot extends RetrySnapshot {
   matchesRevision(revision: string): this is this & {
     revision: string;
   };
-  get sendInFlight(): unknown;
+  get sendInFlight(): TelegramSendEvidence;
+  get hasSendInFlight(): boolean;
+  get hasAppliedStateUnknown(): boolean;
+  get hasRawApiGateOwner(): boolean;
+  sendInFlightMatchesRevision(revision: string): boolean;
+  preservedSendInFlight(): PreservedSendEvidence;
   get pendingDelete(): PendingDeleteSnapshot;
-  get orphanedDeletes(): RawRecord;
+  get orphanedDeletes(): TelegramOrphanedDeletesDocument;
   get apiGateSettleOwner(): string;
   get pendingDeleteApiGateSettleOwner(): string;
   get apiGateReleaseOwner(): string;
@@ -229,8 +250,9 @@ export declare class PendingDeleteSnapshot extends RetrySnapshot {
   get status(): CleanupStatus | undefined;
   get kind(): CleanupStatus | "legacy" | "missing";
   get pendingDeleteId(): string;
-  get chatId(): unknown;
-  get messageId(): unknown;
+  get chatIdText(): string;
+  get numericMessageId(): number;
+  deleteInput(): RetainedTelegramDeleteInput;
 }
 export declare function readDelivery(value: unknown): DeliverySnapshot;
 export declare function readPendingDelete(
@@ -244,8 +266,8 @@ export declare const buildPendingDeleteId: ({
   chatId,
   messageId,
 }: {
-  chatId: unknown;
-  messageId: unknown;
+  chatId: string;
+  messageId: number;
 }) => string;
 export declare const buildApiGateOwner: (...parts: unknown[]) => string;
 export declare const resolvePendingDeleteId: (pendingDelete: unknown) => string;
@@ -266,11 +288,13 @@ export declare const ensureCommitted: <
 ) => T;
 export declare const validateDesiredForDelivery: (
   desired: unknown,
-) => desired is TelegramDesired;
+) => desired is TelegramDesiredDocument & {
+  revision: string;
+};
 export type DesiredRetryInput = DesiredContext & {
   result: TelegramRetryFailure;
   safeRejectedAttemptId?: string;
-  currentDelivery: unknown;
+  currentDelivery: TelegramDeliveryDocument | DeliverySnapshot;
   apiGateOwner?: string;
   proofTaskKind?: "desired" | "pending-delete";
   pendingDeleteId?: string;
@@ -280,7 +304,7 @@ export type DesiredRetryInput = DesiredContext & {
 export type DesiredSendOperations = {
   finishExpiredOwnedRetryWindow(
     input: DesiredContext & {
-      currentDelivery: unknown;
+      currentDelivery: TelegramDeliveryDocument | DeliverySnapshot;
     },
   ): Promise<{
     status: string;
@@ -289,6 +313,6 @@ export type DesiredSendOperations = {
   finishRetryable(input: DesiredRetryInput): Promise<TelegramRetryResult>;
   finishStatusAndSettleApiGate(
     input: FinishStatusInput,
-  ): Promise<TransactionResult<RawRecord>>;
+  ): Promise<TransactionResult<TelegramMessageDocument>>;
 };
 export {};

@@ -1,4 +1,10 @@
+import {
+  messageDocument,
+  messageDeliveryDocument,
+  messageDesiredRevision,
+} from "./records.js";
 import * as crypto from "node:crypto";
+import { telegramApiGateOwner } from "./records.js";
 import { createTelegramCleanupDelivery } from "./deliveryCleanup.js";
 import { createTelegramDeliveryControl } from "./deliveryControl.js";
 import { createTelegramDesiredDelivery } from "./deliveryDesired.js";
@@ -10,7 +16,6 @@ import {
 } from "./deliveryPolicy.js";
 import { createTelegramDeliveryRecovery } from "./deliveryRecovery.js";
 import {
-  asObject,
   normalizeString,
   readPendingDelete,
   resolvePendingDeleteId,
@@ -148,7 +153,7 @@ const createTelegramDeliveryEngine: (input: TelegramEngineOptions) => {
         barrierRetryNotBeforeMs: input.barrierRetryNotBeforeMs,
       });
       if (!barrierProof.applied) {
-        if (normalizeString(barrierProof.gate?.owner)) {
+        if (telegramApiGateOwner(barrierProof.gate)) {
           return { status: "settled", reason: "stale-rate-limit-proof" };
         }
         const error = Object.assign(new Error("rate-limit-proof-not-applied"), {
@@ -171,11 +176,11 @@ const createTelegramDeliveryEngine: (input: TelegramEngineOptions) => {
     ) {
       return desiredResult;
     }
-    const record = asObject(
+    const record = messageDocument(
       await repository.getMessage(effectiveInput.messageKey),
     );
     const pendingDelete = readPendingDelete(
-      readProperty(record.delivery, "pendingDelete"),
+      readProperty(messageDeliveryDocument(record), "pendingDelete"),
     );
     if (!pendingDelete.present) {
       return desiredResult;
@@ -185,7 +190,7 @@ const createTelegramDeliveryEngine: (input: TelegramEngineOptions) => {
       await scheduleExactRetry({
         messageKey: effectiveInput.messageKey,
         revision:
-          normalizeString(readProperty(record.desired, "revision")) ||
+          messageDesiredRevision(record) ||
           normalizeString(effectiveInput.requestedRevision) ||
           "latest",
         taskKind: TELEGRAM_PENDING_DELETE_TASK_KIND,
@@ -212,18 +217,18 @@ const createTelegramDeliveryEngine: (input: TelegramEngineOptions) => {
     });
     let cleanupScheduled = false;
     if (cleanupResult.status === "settled") {
-      const refreshed = asObject(
+      const refreshed = messageDocument(
         await repository.getMessage(effectiveInput.messageKey),
       );
       const nextPendingDelete = readPendingDelete(
-        readProperty(refreshed.delivery, "pendingDelete"),
+        readProperty(messageDeliveryDocument(refreshed), "pendingDelete"),
       );
       if (nextPendingDelete.present) {
         const nextPendingDeleteId = resolvePendingDeleteId(nextPendingDelete);
         await scheduleExactRetry({
           messageKey: effectiveInput.messageKey,
           revision:
-            normalizeString(readProperty(refreshed.desired, "revision")) ||
+            messageDesiredRevision(refreshed) ||
             normalizeString(effectiveInput.requestedRevision) ||
             "latest",
           taskKind: TELEGRAM_PENDING_DELETE_TASK_KIND,

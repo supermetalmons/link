@@ -1,3 +1,8 @@
+import {
+  matchRecordFixture,
+  matchDocumentFixture,
+} from "../test/matchRecordFixture.ts";
+import { unwrapMatchStateWireFixture } from "../test/matchRecordFixture.ts";
 import { env } from "cloudflare:workers";
 import {
   evictDurableObject,
@@ -18,7 +23,7 @@ import type {
   MatchStateSyncReadRequest,
   MatchStateSyncReadResult,
 } from "../src/matchStateTypes.ts";
-import { getMatchStateRpc, unwrapMatchStateRpc } from "../src/matchStateRpc.ts";
+import { getMatchStateRpc } from "../src/matchStateRpc.ts";
 import { resolveMatchTimerGame } from "../src/matchTimer.ts";
 import { socketTestSessionHeaders } from "../test/socketTestSession.ts";
 import { AuthApiFailure } from "../src/authErrors.ts";
@@ -29,7 +34,7 @@ import type { InviteChannelsRoom } from "../src/inviteChannelsRoom.ts";
 type Room = DurableObjectStub<InviteReactions>;
 const rooms: Room[] = [];
 const sockets: WebSocket[] = [];
-const match = {
+const match = matchDocumentFixture({
   version: 2,
   color: "white",
   emojiId: 1,
@@ -39,7 +44,7 @@ const match = {
   status: "",
   flatMovesString: "",
   timer: "",
-};
+});
 
 async function installMetadata(room: Room) {
   await runInDurableObject(room, (instance) => {
@@ -84,7 +89,7 @@ async function createMatches(
   input: Awaited<ReturnType<typeof fixture>>["input"],
 ) {
   const rpc = getMatchStateRpc(env, input.inviteId);
-  return unwrapMatchStateRpc(await rpc.createCanonicalMatch(input));
+  return unwrapMatchStateWireFixture(await rpc.createCanonicalMatch(input));
 }
 
 async function close(socket: WebSocket) {
@@ -307,10 +312,12 @@ describe("canonical match room integration", () => {
         new Error("notification-failed"),
       );
     });
-    const result = unwrapMatchStateRpc(await rpc.createCanonicalMatch(input));
+    const result = unwrapMatchStateWireFixture(
+      await rpc.createCanonicalMatch(input),
+    );
     expect(result.changedMatchIds).toEqual([inviteId]);
     expect(
-      unwrapMatchStateRpc(
+      unwrapMatchStateWireFixture(
         await rpc.readCanonicalMatchRecord({
           inviteId,
           epoch: 2,
@@ -344,7 +351,7 @@ describe("canonical match room integration", () => {
         operationId: "compatible-event-effect",
         terminalTimers: [{ matchId: inviteId, playerId: "host-login" }],
       };
-      const applied = unwrapMatchStateRpc(
+      const applied = unwrapMatchStateWireFixture(
         await (deferNotifications
           ? rpc.applyCanonicalMatchEventEffects(effect, {
               deferNotifications: true,
@@ -365,7 +372,7 @@ describe("canonical match room integration", () => {
       );
       expect(JSON.parse(receipt)).toEqual(effect);
       expect(
-        unwrapMatchStateRpc(
+        unwrapMatchStateWireFixture(
           await rpc.applyCanonicalMatchEventEffects(effect, {
             deferNotifications: !deferNotifications,
           }),
@@ -384,15 +391,17 @@ describe("canonical match room integration", () => {
         ),
       ).toBe(receipt);
       expect(
-        unwrapMatchStateRpc(
-          await rpc.readCanonicalMatchPair({
-            inviteId,
-            epoch: 2,
-            matchId: inviteId,
-            playerId: "host-login",
-            opponentId: "guest-login",
-          }),
-        ).playerMatch?.timer,
+        matchRecordFixture(
+          unwrapMatchStateWireFixture(
+            await rpc.readCanonicalMatchPair({
+              inviteId,
+              epoch: 2,
+              matchId: inviteId,
+              playerId: "host-login",
+              opponentId: "guest-login",
+            }),
+          ).playerMatch,
+        )?.timer,
       ).toBe(MATCH_TIMER_TERMINAL);
     },
   );
@@ -420,7 +429,7 @@ describe("canonical match room integration", () => {
       playerId: "host-login",
       opponentId: "guest-login",
     };
-    const before = unwrapMatchStateRpc(
+    const before = unwrapMatchStateWireFixture(
       await rpc.readCanonicalMatchPair(pairRequest),
     );
     await evictDurableObject(room);
@@ -431,7 +440,9 @@ describe("canonical match room integration", () => {
       epoch: 2,
     };
     expect(
-      unwrapMatchStateRpc(await rpc.applyCanonicalMatchEventEffects(effect)),
+      unwrapMatchStateWireFixture(
+        await rpc.applyCanonicalMatchEventEffects(effect),
+      ),
     ).toEqual({ records: [], changedMatchIds: [] });
     expect(
       await rpc.applyCanonicalMatchEventEffects({
@@ -445,7 +456,9 @@ describe("canonical match room integration", () => {
       message: "match-state-event-effect-conflict",
     });
     expect(
-      unwrapMatchStateRpc(await rpc.readCanonicalMatchPair(pairRequest)),
+      unwrapMatchStateWireFixture(
+        await rpc.readCanonicalMatchPair(pairRequest),
+      ),
     ).toEqual(before);
     expect(
       await runInDurableObject(
@@ -506,7 +519,7 @@ describe("canonical match room integration", () => {
     const repaired = new Promise((resolve) => {
       received = resolve;
     });
-    unwrapMatchStateRpc(
+    unwrapMatchStateWireFixture(
       await rpc.applyCanonicalMatchEventEffects(
         {
           inviteId,
@@ -575,7 +588,7 @@ describe("canonical match room integration", () => {
     });
     await createMatches(input);
     expect(
-      unwrapMatchStateRpc(
+      unwrapMatchStateWireFixture(
         await rpc.readCanonicalMatchPair({
           inviteId,
           epoch: 2,
@@ -657,7 +670,7 @@ describe("canonical match room integration", () => {
         target.matchSync.dependencies.readSyncState;
     });
     expect(await room.readMatches(inviteId, inviteId)).toEqual(initial);
-    unwrapMatchStateRpc(
+    unwrapMatchStateWireFixture(
       await rpc.surrenderCanonicalMatch({
         inviteId,
         matchId: inviteId,
@@ -707,7 +720,7 @@ describe("canonical match room integration", () => {
       target.matchEffects.dependencies.deliver = failDelivery;
     });
     expect(
-      unwrapMatchStateRpc(
+      unwrapMatchStateWireFixture(
         await rpc.claimCanonicalMatchTimer({
           inviteId,
           epoch: 2,
@@ -756,7 +769,7 @@ describe("canonical match room integration", () => {
     expect(saved.sockets).toBe(0);
     expect(saved.effect).toMatchObject({ attempts: 1, completed_at_ms: null });
     expect(
-      unwrapMatchStateRpc(
+      unwrapMatchStateWireFixture(
         await rpc.readCanonicalMatchRecord({
           inviteId,
           epoch: 2,

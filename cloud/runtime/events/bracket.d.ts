@@ -1,10 +1,12 @@
 // Generated from src/events/bracket.ts. Run npm run generate:runtime.
+import { type EventMatchesDocument } from "./documents.js";
 import type { EventRuntimeStore, EventCommitPlan } from "../eventCommands.js";
+import type { WithdrawalDocument } from "../eventPrizes/records.js";
 import type { EventPrizeAssignmentRecord } from "../eventReads.js";
 import type { EventOwnershipSnapshot } from "./ownership.js";
 import type {
   EventData,
-  EventParticipant,
+  EventParticipants,
   EventMatch,
   EventRounds,
   EventPlacement,
@@ -54,12 +56,12 @@ export type EventBracketDependencies = {
   }>;
   readEventPrizeWithdrawals?(
     eventId: string,
-  ): Promise<Record<string, Record<string, unknown>>>;
+  ): Promise<Record<string, WithdrawalDocument>>;
 };
 export type EventPrizePlacementsInput = {
   event: EventData | null;
   rounds: EventRounds;
-  participantsById: Record<string, EventParticipant>;
+  participantsById: EventParticipants;
   thirdPlaceMatch?: EventMatch | null;
 };
 type PrizeProjectionInput = {
@@ -99,7 +101,7 @@ declare const createEventBracketRuntime: (
     roundIndex: number;
     matchIndex: number;
     winnerProfileId: unknown;
-    participantsById: Record<string, EventParticipant>;
+    participantsById: EventParticipants;
     winnerDisqualified?: boolean;
   }) => boolean;
   buildFixedBracketState: (
@@ -150,13 +152,13 @@ declare const createEventBracketRuntime: (
     winnerProfileId,
     eventEnded,
   }: {
-    participantsById: Record<string, EventParticipant>;
+    participantsById: EventParticipants;
     rounds: EventRounds;
     winnerProfileId: unknown;
     eventEnded: boolean;
   }) => {
     didChange: boolean;
-    participantsById: Record<string, EventParticipant>;
+    participantsById: EventParticipants;
   };
   recomputeRoundStatuses: ({
     rounds,
@@ -226,7 +228,7 @@ declare const createEventBracketRuntime: (
     matchPair?: [unknown, unknown],
   ) => Promise<MatchResolution | null>;
   resolveRoundMatchesWithConcurrency: (
-    matchesByKey: Record<string, EventMatch | null>,
+    matchesByKey: EventMatchesDocument,
   ) => Promise<
     {
       matchKey: string;
@@ -234,16 +236,8 @@ declare const createEventBracketRuntime: (
       resolved: MatchResolution | null;
     }[]
   >;
-  setMatchSlotBlocked: (
-    match: EventMatch,
-    slot: "host" | "guest",
-    blocked: boolean,
-  ) => boolean;
-  setMatchSlotParticipant: (
-    match: EventMatch,
-    slot: "host" | "guest",
-    participant: EventParticipant | null,
-  ) => boolean;
+  setMatchSlotBlocked: typeof import("./documents.js").setEventMatchSlotBlocked;
+  setMatchSlotParticipant: typeof import("./documents.js").copyEventParticipantToMatchSlot;
 };
 export type EventBracketRuntime = ReturnType<typeof createEventBracketRuntime>;
 export declare const addEventPrizeAssignmentUpdates: ({
@@ -288,13 +282,13 @@ export declare const addEventPrizeAssignmentUpdates: ({
     winnerProfileId,
     eventEnded,
   }: {
-    participantsById: Record<string, EventParticipant>;
+    participantsById: EventParticipants;
     rounds: EventRounds;
     winnerProfileId: unknown;
     eventEnded: boolean;
   }) => {
     didChange: boolean;
-    participantsById: Record<string, EventParticipant>;
+    participantsById: EventParticipants;
   },
   reconcileBracketMatchReadiness: (
     input: Omit<MatchReadinessInput, "buildRandomGameSeed">,
@@ -352,7 +346,7 @@ export declare const addEventPrizeAssignmentUpdates: ({
     matchPair?: [unknown, unknown],
   ) => Promise<MatchResolution | null>,
   resolveRoundMatchesWithConcurrency: (
-    matchesByKey: Record<string, EventMatch | null>,
+    matchesByKey: EventMatchesDocument,
   ) => Promise<
     {
       matchKey: string;

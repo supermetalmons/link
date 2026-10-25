@@ -1,3 +1,8 @@
+import type {
+  ApiPath,
+  ApiPathRequest,
+  ApiPathResponse,
+} from "@mons/shared/api-contracts";
 import {
   isAuthVerificationResponse,
   isLinkedAuthMethodsResponse,
@@ -21,13 +26,11 @@ import {
   isProfileLookupResponse,
   type ProfileLookupResponse,
 } from "@mons/shared/profiles";
-
 import {
   authenticatedJsonRequest,
   type ApiErrorPolicy,
   type AuthTokenProvider,
 } from "./apiTransport";
-
 export type { AuthTokenProvider } from "./apiTransport";
 
 const AUTH_API_ROOT = "https://api.mons.link";
@@ -45,12 +48,11 @@ type AuthTokenUser = {
   getIdToken(forceRefresh?: boolean): Promise<string>;
 };
 
-type AuthMutationRequest =
-  | AppleAuthVerificationRequest
-  | AuthMethodUnlinkRequest
-  | EthereumAuthVerificationRequest
-  | SolanaAuthVerificationRequest
-  | XAuthCompletionRequest;
+type AuthGetPath = "/auth/identity" | "/auth/methods";
+type AuthPostPath = Exclude<
+  Extract<ApiPath<"POST">, `/auth/${string}`>,
+  `/auth/session/${string}`
+>;
 
 export class AuthApiError extends Error {
   readonly code: string;
@@ -107,6 +109,26 @@ const authErrorPolicy: ApiErrorPolicy = {
   timeoutMessage: "Auth request timed out.",
 };
 
+async function authRequest<const Path extends AuthGetPath>(
+  path: Path,
+  init: Omit<RequestInit, "cache" | "headers" | "signal" | "method"> & {
+    method: "GET";
+  },
+  tokenProvider: AuthTokenProvider,
+  validate: (value: unknown) => value is ApiPathResponse<"GET", NoInfer<Path>>,
+  timeoutMs?: number,
+  maxResponseBytes?: number,
+): Promise<ApiPathResponse<"GET", Path>>;
+async function authRequest<const Path extends AuthPostPath>(
+  path: Path,
+  init: Omit<RequestInit, "cache" | "headers" | "signal" | "method"> & {
+    method: "POST";
+  },
+  tokenProvider: AuthTokenProvider,
+  validate: (value: unknown) => value is ApiPathResponse<"POST", NoInfer<Path>>,
+  timeoutMs?: number,
+  maxResponseBytes?: number,
+): Promise<ApiPathResponse<"POST", Path>>;
 async function authRequest<T>(
   path: string,
   init: Omit<RequestInit, "cache" | "headers" | "signal">,
@@ -127,18 +149,19 @@ async function authRequest<T>(
   });
 }
 
-function authMutationRequest<T>(
-  path: string,
-  request: AuthMutationRequest,
+function authMutationRequest<const Path extends AuthPostPath>(
+  path: Path,
+  request: ApiPathRequest<"POST", NoInfer<Path>>,
   tokenProvider: AuthTokenProvider,
-  validate: (value: unknown) => value is T,
-): Promise<T> {
+  validate: (value: unknown) => value is ApiPathResponse<"POST", NoInfer<Path>>,
+  timeoutMs = AUTH_MUTATION_TIMEOUT_MS,
+): Promise<ApiPathResponse<"POST", Path>> {
   return authRequest(
     path,
     { method: "POST", body: JSON.stringify(request) },
     tokenProvider,
     validate,
-    AUTH_MUTATION_TIMEOUT_MS,
+    timeoutMs,
   );
 }
 
@@ -146,11 +169,12 @@ export function beginAuthIntentViaApi(
   method: AuthMethodKey,
   tokenProvider: AuthTokenProvider,
 ): Promise<AuthIntentResponse> {
-  return authRequest(
+  return authMutationRequest(
     "/auth/intents",
-    { method: "POST", body: JSON.stringify({ method }) },
+    { method },
     tokenProvider,
     isAuthIntentResponse,
+    AUTH_API_TIMEOUT_MS,
   );
 }
 
@@ -168,9 +192,9 @@ export function getLinkedAuthMethodsViaApi(
 export function syncProfileViaApi(
   tokenProvider: AuthTokenProvider,
 ): Promise<LinkedAuthMethodsResponse> {
-  return authRequest(
+  return authMutationRequest(
     "/auth/profile/sync",
-    { method: "POST", body: JSON.stringify({}) },
+    {},
     tokenProvider,
     isLinkedAuthMethodsResponse,
     PROFILE_SYNC_TIMEOUT_MS,
@@ -194,11 +218,12 @@ export function beginXRedirectAuthViaApi(
   request: XRedirectStartRequest,
   tokenProvider: AuthTokenProvider,
 ): Promise<XRedirectStartResponse> {
-  return authRequest(
+  return authMutationRequest(
     "/auth/x/flows",
-    { method: "POST", body: JSON.stringify(request) },
+    request,
     tokenProvider,
     isXRedirectStartResponse,
+    AUTH_API_TIMEOUT_MS,
   );
 }
 

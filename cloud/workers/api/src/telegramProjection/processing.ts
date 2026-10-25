@@ -1,12 +1,11 @@
+import { projectAutomatchMessage } from "../../../../runtime/telegram/messageProjectionRecords.js";
+import type { InviteDocument } from "@mons/shared/invite-records";
 import {} from "../../../../runtime/telegram/automatchSource.js";
 import {
   buildTelegramEditDesired,
   buildTelegramSendDesired,
 } from "../../../../runtime/telegram/desiredStateCore.js";
 import {
-  asObject,
-  buildAutomatchProjectionGuard,
-  evaluateAutomatchProjectionUpdate,
   shouldProjectRatingTelegramUpdate,
   type AutomatchTelegramProjection,
 } from "../../../../runtime/telegram/projectionCore.js";
@@ -27,17 +26,11 @@ type AutomatchProjectionResult = {
   status: "projected" | "stale" | "invalid";
 };
 
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
 function inputFingerprint(input: {
-  inviteData: unknown;
+  inviteData: InviteDocument | null;
   source: AutomatchTelegramSourceSnapshot;
 }): string {
-  return input.source.fingerprint(toRecord(input.inviteData)?.guestId);
+  return input.source.fingerprint(input.inviteData);
 }
 
 function projectionDesired(projection: AutomatchTelegramProjection) {
@@ -50,7 +43,7 @@ async function readAutomatchInputs(
   inviteId: string,
   state: GameSessionPort,
 ): Promise<{
-  inviteData: unknown;
+  inviteData: InviteDocument | null;
   source: AutomatchTelegramSourceSnapshot;
 }> {
   const [source, inviteData] = await Promise.all([
@@ -67,29 +60,14 @@ export async function projectAutomatchSource(
 ): Promise<AutomatchProjectionResult> {
   let input = await readAutomatchInputs(inviteId, state);
   for (let attempt = 0; attempt < PROJECTION_INPUT_RETRIES; attempt += 1) {
-    const projection = input.source.project(
-      toRecord(input.inviteData)?.guestId,
-    );
+    const projection = input.source.project(input.inviteData);
     if (!projection) {
       return { status: "invalid" };
     }
     const desired = projectionDesired(projection);
     const transaction = await telegram.transactMessage(
       projection.messageKey,
-      (current) => {
-        const decision = evaluateAutomatchProjectionUpdate(current, projection);
-        if (!decision.allowed) {
-          return { commit: false, decision: decision.reason };
-        }
-        return {
-          value: {
-            ...asObject(current),
-            desired,
-            automatchProjection: buildAutomatchProjectionGuard(projection),
-          },
-          decision: decision.reason,
-        };
-      },
+      (current) => projectAutomatchMessage(current, projection, desired),
     );
     const latest = await readAutomatchInputs(inviteId, state);
     if (inputFingerprint(input) === inputFingerprint(latest)) {

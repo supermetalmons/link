@@ -80,9 +80,7 @@ export async function createEventTransitionIntent(
 function parseTransitionRow(row: {
   intent_json: string;
 }): EventTransitionIntent {
-  return validateTransitionIntent(
-    decodeJson(row.intent_json) as EventTransitionIntent,
-  );
+  return validateTransitionIntent(decodeJson(row.intent_json));
 }
 
 export async function readEventTransitionIntent(

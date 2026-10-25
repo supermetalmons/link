@@ -8,7 +8,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { EventLockManager } from "../../../runtime/events/lockManagerCore.js";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
+import {
+  decodeEventCompatibilityPlanFixture,
+  eventDocumentFixture,
+} from "./eventCompatibilityFixture.ts";
 import { EVENT_CONTROL_TIMEOUT_MS } from "../src/eventOperations.ts";
 import { EVENT_OPERATION_TIMEOUT_MS } from "../src/eventParticipation.ts";
 import type { EventGameplayRepository } from "../src/eventRepository.ts";
@@ -553,7 +556,7 @@ test("returns strict join, leave, and removal responses without snapshot enrichm
       now: () => 100,
       buildDueUpdates: async () => ({
         didChange: false,
-        updates: decodeEventUpdates({}),
+        updates: decodeEventCompatibilityPlanFixture({}),
       }),
     },
     readEventSnapshotSeed: async () => {
@@ -601,21 +604,22 @@ test("returns strict join, leave, and removal responses without snapshot enrichm
       ...dependencies,
       repository: {
         ...createRepository(),
-        readEvent: async () => ({
-          eventId: "event-1",
-          status: "scheduled",
-          startAtMs: 10_000,
-          createdByLoginUid: identity.uid,
-          createdByProfileId: profileId,
-          participants: {
-            [profileId]: participant,
-            "target-profile": {
-              ...participant,
-              profileId: "target-profile",
-              loginUid: "target-login",
+        readEvent: async () =>
+          eventDocumentFixture({
+            eventId: "event-1",
+            status: "scheduled",
+            startAtMs: 10_000,
+            createdByLoginUid: identity.uid,
+            createdByProfileId: profileId,
+            participants: {
+              [profileId]: participant,
+              "target-profile": {
+                ...participant,
+                profileId: "target-profile",
+                loginUid: "target-login",
+              },
             },
-          },
-        }),
+          }),
       },
     },
   );
@@ -642,21 +646,22 @@ test("returns strict join, leave, and removal responses without snapshot enrichm
       verifyIdentity: async () => ({ uid: "target-login" }),
       repository: {
         ...createRepository(),
-        readEvent: async () => ({
-          eventId: "event-1",
-          status: "scheduled",
-          startAtMs: 10_000,
-          createdByLoginUid: identity.uid,
-          createdByProfileId: profileId,
-          participants: {
-            [profileId]: participant,
-            "target-profile": {
-              ...participant,
-              profileId: "target-profile",
-              loginUid: "target-login",
+        readEvent: async () =>
+          eventDocumentFixture({
+            eventId: "event-1",
+            status: "scheduled",
+            startAtMs: 10_000,
+            createdByLoginUid: identity.uid,
+            createdByProfileId: profileId,
+            participants: {
+              [profileId]: participant,
+              "target-profile": {
+                ...participant,
+                profileId: "target-profile",
+                loginUid: "target-login",
+              },
             },
-          },
-        }),
+          }),
       },
     },
   );
@@ -676,11 +681,11 @@ test("returns a strict event prize selection response without snapshot enrichmen
   const repository = createRepository();
   repository.readEvent = async (id) =>
     id === eventId
-      ? {
+      ? eventDocumentFixture({
           eventId,
           status: "active",
           participants: { [profileId]: participant },
-        }
+        })
       : null;
   repository.transactStatePath = async (_path, updater) => {
     const decision = updater(null);
@@ -880,10 +885,11 @@ test("event sync enrichment failures and combined overflow preserve successful r
     const h = syncRouteFixture();
     const originalRead = h.repository.readEvent;
     if (overflow)
-      h.repository.readEvent = async (eventId, signal) => ({
-        ...(await originalRead(eventId, signal)),
-        padding: "x".repeat(350 * 1024),
-      });
+      h.repository.readEvent = async (eventId, signal) =>
+        eventDocumentFixture({
+          ...(await originalRead(eventId, signal)),
+          padding: "x".repeat(350 * 1024),
+        });
     const response = await handleEventRoute(
       h.request(),
       TELEGRAM_TEST_ENV,
@@ -893,10 +899,9 @@ test("event sync enrichment failures and combined overflow preserve successful r
         readEventSnapshotSeed: async () => {
           if (!overflow) throw new Error("read-after-success-failed");
           const seed = snapshotSeed();
-          seed.snapshot.event = {
-            ...seed.snapshot.event!,
+          seed.snapshot.event = Object.assign({}, seed.snapshot.event!, {
             padding: "x".repeat(350 * 1024),
-          };
+          });
           return seed;
         },
       },

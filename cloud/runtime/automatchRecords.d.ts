@@ -7,6 +7,17 @@ import type {
   ProposeRematchResponse,
 } from "./shared/game-sessions.js";
 import type { StartAutomatchResponse } from "./shared/navigation.js";
+export type AutomatchRecordRoot =
+  | "automatch"
+  | "telegramAutomatches"
+  | "telegramProjectionOutbox/automatch"
+  | "profileGameProjectionOutbox/automatch"
+  | "gameplayMutationReceipts"
+  | "gameplayMutationReceiptExpirations";
+declare const retainedAutomatchRecord: unique symbol;
+export type RetainedAutomatchValue<Root extends AutomatchRecordRoot> = {
+  readonly [retainedAutomatchRecord]: Root;
+};
 export type JsonValue =
   | null
   | boolean
@@ -122,17 +133,36 @@ export type GameSessionMutationReceiptView = {
   response: GameSessionResponse;
   schemaVersion: 1;
 };
-export type GameSessionMutationReceiptWrite = Omit<
-  GameSessionMutationReceiptView,
-  "completedAtMs" | "kind"
-> & {
-  completedAtMs: SessionTimestamp;
-  kind: GameSessionMutationKind;
+type ResponseKeys<Response> = Response extends unknown ? keyof Response : never;
+type ReceiptResponse<Response> = Response & {
+  [Key in Exclude<ResponseKeys<GameSessionResponse>, keyof Response>]?: never;
 };
+export type GameSessionMutationResponseMap = {
+  "invite-create": ReceiptResponse<CreateInviteResponse>;
+  "invite-join": ReceiptResponse<JoinInviteResponse>;
+  "match-ensure": ReceiptResponse<EnsureMatchResponse>;
+  "rematch-end": ReceiptResponse<EndRematchResponse>;
+  "rematch-propose": ReceiptResponse<ProposeRematchResponse>;
+};
+export type GameSessionMutationReceiptWrite<
+  Kind extends GameSessionMutationKind = GameSessionMutationKind,
+> = {
+  [Key in Kind]: Omit<
+    GameSessionMutationReceiptView,
+    "completedAtMs" | "kind" | "response"
+  > & {
+    completedAtMs: SessionTimestamp;
+    kind: Key;
+    response: GameSessionMutationResponseMap[Key];
+  };
+}[Kind];
 export type MutationReceiptWrite =
   AutomatchReceiptWrite | GameSessionMutationReceiptWrite;
 export type MutationReceiptExpirationWrite = {
   completedAtMs: SessionTimestamp;
+  schemaVersion?: never;
+  kind?: never;
+  response?: never;
 };
 export type HistoricalMatchDescriptorWrite = {
   finalizedAtMs: number;
@@ -148,3 +178,4 @@ export declare function decodeAutomatchEntry(
 export declare function decodeAutomatchEntries(
   value: unknown,
 ): Record<string, AutomatchEntryRead> | null;
+export {};

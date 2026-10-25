@@ -1,3 +1,4 @@
+import { timerStartStoreFixture } from "./matchClaimFixture.ts";
 import {
   GAME_SESSION_MUTATION_LOCK_MS,
   GameSessionMutationLockFailure,
@@ -69,7 +70,9 @@ export function createMemoryGameplayCoordinationStores(): MemoryGameplayCoordina
         return deleted;
       },
     },
-    timerStarts: {
+    timerStarts: timerStartStoreFixture<
+      Omit<GameplayCoordinationStores["timerStarts"], "deleteRetainedPair">
+    >({
       async getOrAdvance(
         playerId,
         opponentId,
@@ -177,6 +180,6 @@ export function createMemoryGameplayCoordinationStores(): MemoryGameplayCoordina
         timerRows.set(key, { ...current, updatedAtMs });
         return true;
       },
-    },
+    }),
   };
 }

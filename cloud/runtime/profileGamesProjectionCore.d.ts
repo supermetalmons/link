@@ -1,19 +1,37 @@
 // Generated from src/profileGamesProjectionCore.ts. Run npm run generate:runtime.
+import {
+  type ProfileGameProjectionDocument,
+  type ProjectionProfileDocument,
+} from "./profileGameProjectionRecords.js";
+import { type InviteDocument } from "@mons/shared/invite-records";
 import type { MatchPresentationSnapshot } from "@mons/shared/match-presentation";
 import type { AutomatchEntryRead } from "./automatchRecords.js";
 export type ProjectionRecord = {
-  data: Record<string, unknown>;
+  data: ProfileGameProjectionDocument;
   version: number;
 };
 export type ProjectionWrite = {
-  type: "create" | "delete" | "merge" | "update";
   profileId: string;
   inviteId: string;
-  data?: Record<string, unknown>;
-  expectedVersion?: number;
-};
+} & (
+  | {
+      type: "delete";
+      data?: never;
+      expectedVersion?: number;
+    }
+  | {
+      type: "create" | "merge";
+      data: ProfileGameProjectionDocument;
+      expectedVersion?: never;
+    }
+  | {
+      type: "update";
+      data: ProfileGameProjectionDocument;
+      expectedVersion?: number;
+    }
+);
 export type ProjectionOwnershipSnapshot = {
-  profileDataById: ReadonlyMap<string, Record<string, unknown>>;
+  profileDataById: ReadonlyMap<string, ProjectionProfileDocument>;
   profileIdByLoginUid: ReadonlyMap<string, string | null>;
 };
 export type ProfileGamesProjectionRepository = {
@@ -23,7 +41,7 @@ export type ProfileGamesProjectionRepository = {
     inviteId: string,
   ): Promise<Map<string, ProjectionRecord>>;
   readAutomatchEntry(inviteId: string): Promise<AutomatchEntryRead>;
-  readInviteMetadata(inviteId: string): Promise<Record<string, unknown> | null>;
+  readInviteMetadata(inviteId: string): Promise<InviteDocument | null>;
   readMatchPresentation?(
     inviteId: string,
     matchId: string,
@@ -92,7 +110,7 @@ type Signature_readExistingProjectionRecords = (input: {
 }) => Promise<
   Array<{
     profileId: string;
-    data: Record<string, unknown>;
+    data: ProfileGameProjectionDocument;
     version: number;
   }>
 >;

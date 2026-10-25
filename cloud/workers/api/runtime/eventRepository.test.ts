@@ -1,3 +1,6 @@
+import { eventIntentFixture } from "../test/transitionIntentFixture.ts";
+import { matchDocumentFixture } from "../test/matchRecordFixture.ts";
+import { commitEventCompatibilityFixture } from "../test/eventCompatibilityFixture.ts";
 import { captureLoginMatchDiscovery } from "../src/loginMatchDiscoveryD1.ts";
 import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
 import {
@@ -243,7 +246,7 @@ describe("typed event repository", () => {
 
   it("retains malformed canonical intents without applying their effect entries", async () => {
     const fixture = eventTransitionFixture(testEnv);
-    await fixture.client.commitEventPlan([
+    await commitEventCompatibilityFixture(fixture.client, [
       { kind: "event", eventId, value: eventRecord() },
     ]);
     const before = await readEventSnapshot(testEnv.EVENT_DB, eventId);
@@ -251,16 +254,18 @@ describe("typed event repository", () => {
       [`events/${eventId}/status`]: "active",
       "players/host/matches/poison/timer": "gg",
     };
-    const intent = await createPendingIntent({
-      schemaVersion: 1,
-      transitionId: "malformed-canonical-effect",
-      eventId,
-      expectedRevision: before.revision,
-      canonicalUpdates,
-      rtdbEffects: {},
-      createdAtMs: 200,
-      updatedAtMs: 200,
-    });
+    const intent = await createPendingIntent(
+      eventIntentFixture({
+        schemaVersion: 1,
+        transitionId: "malformed-canonical-effect",
+        eventId,
+        expectedRevision: before.revision,
+        canonicalUpdates,
+        rtdbEffects: {},
+        createdAtMs: 200,
+        updatedAtMs: 200,
+      }),
+    );
     await expect(fixture.recover()).rejects.toThrow(
       "event-transition-recovery-failed",
     );
@@ -308,7 +313,7 @@ describe("typed event repository", () => {
       );
       const update = { [`events/${eventId}`]: eventRecord() };
       await expect(
-        client.commitEventPlan(decodeEventUpdates(update)),
+        commitEventCompatibilityFixture(client, decodeEventUpdates(update)),
       ).resolves.toBeUndefined();
       expect(effects).toEqual([]);
       const failedClient = createEventStateRepository(
@@ -322,7 +327,8 @@ describe("typed event repository", () => {
         }),
       );
       await expect(
-        failedClient.commitEventPlan(
+        commitEventCompatibilityFixture(
+          failedClient,
           decodeEventUpdates({
             [`events/${eventId}`]: { ...eventRecord(), status: "invalid" },
           }),
@@ -376,7 +382,8 @@ describe("typed event repository", () => {
         transactPath: async () => ({ committed: false, value: null }),
       }),
     );
-    await client.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      client,
       decodeEventUpdates({
         [`events/${eventId}`]: eventRecord(),
         ...buildEventProfileGameProjectionOutboxUpdates({
@@ -482,7 +489,8 @@ describe("typed event repository", () => {
                   updatedAtMs: timestamp,
                 },
       }));
-      await client.commitEventPlan(
+      await commitEventCompatibilityFixture(
+        client,
         decodeEventUpdates(
           Object.fromEntries(
             rows.flatMap(({ id, record }) => [
@@ -569,7 +577,8 @@ describe("typed event repository", () => {
         transactPath: async () => ({ committed: false, value: null }),
       }),
     );
-    await client.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      client,
       decodeEventUpdates({
         [`events/${eventId}`]: eventRecord(),
         [`telegramProjectionOutbox/event/${eventId}`]: {
@@ -647,7 +656,8 @@ describe("typed event repository", () => {
       ["oXAceF6anag", "281"],
       ["RpPjMNyrJJa", "217"],
     ] as const;
-    await client.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      client,
       decodeEventUpdates(
         Object.fromEntries(
           assignments.flatMap(([assignmentEventId, prizeId]) => [
@@ -719,7 +729,8 @@ describe("typed event repository", () => {
       prizeId: "1092",
       assignedAtMs: 100,
     };
-    await client.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      client,
       decodeEventUpdates({
         [`events/${eventId}`]: eventRecord(),
         [`eventPrizeSelections/${eventId}/${profileId}`]: "1092",
@@ -763,7 +774,8 @@ describe("typed event repository", () => {
     async (selectionChanges) => {
       const f = eventTransitionFixture(testEnv);
       const selectionPath = `eventPrizeSelections/${eventId}/profile-one`;
-      await f.client.commitEventPlan(
+      await commitEventCompatibilityFixture(
+        f.client,
         decodeEventUpdates({
           [`events/${eventId}`]: eventRecord(),
           [selectionPath]: "1092",
@@ -787,7 +799,8 @@ describe("typed event repository", () => {
       };
       const before = await readStoredState();
       await expect(
-        f.client.commitEventPlan(
+        commitEventCompatibilityFixture(
+          f.client,
           decodeEventUpdates({
             [`events/${eventId}/status`]: "active",
             [`events/${eventId}/updatedAtMs`]: 200,
@@ -825,10 +838,11 @@ describe("typed event repository", () => {
 
   it("rejects upcoming-event plans with effects before journaling or applying them", async () => {
     const f = eventTransitionFixture(testEnv);
-    await f.client.commitEventPlan([
+    await commitEventCompatibilityFixture(f.client, [
       { kind: "event", eventId, value: eventRecord() },
     ]);
-    const commit = f.client.commitEventPlan(
+    const commit = commitEventCompatibilityFixture(
+      f.client,
       decodeEventUpdates({
         [`events/${eventId}/status`]: "active",
         "players/login-one/matches/event-match/timer": "gg",
@@ -853,22 +867,25 @@ describe("typed event repository", () => {
   it("replays a stored v2 intent with unchanged serialized effect keys and digest", async () => {
     const f = eventTransitionFixture(testEnv);
     const timerPath = "players/login-one/matches/event-match/timer";
-    await f.client.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      f.client,
       decodeEventUpdates({ [`events/${eventId}`]: eventRecord() }),
     );
-    const pending = await createPendingIntent({
-      schemaVersion: 1,
-      transitionId: "compatibility-transition",
-      eventId,
-      expectedRevision: 1,
-      canonicalUpdates: {
-        [`events/${eventId}/status`]: "active",
-        [`events/${eventId}/updatedAtMs`]: 200,
-      },
-      rtdbEffects: { [timerPath]: "gg" },
-      createdAtMs: 200,
-      updatedAtMs: 200,
-    });
+    const pending = await createPendingIntent(
+      eventIntentFixture({
+        schemaVersion: 1,
+        transitionId: "compatibility-transition",
+        eventId,
+        expectedRevision: 1,
+        canonicalUpdates: {
+          [`events/${eventId}/status`]: "active",
+          [`events/${eventId}/updatedAtMs`]: 200,
+        },
+        rtdbEffects: { [timerPath]: "gg" },
+        createdAtMs: 200,
+        updatedAtMs: 200,
+      }),
+    );
     expect(pending.payloadDigest).toBe(
       "6d1ec90c315e871b8614f55297b3bfd28f27d2fd947db2e390f9e8e532f0f1ba",
     );
@@ -928,7 +945,8 @@ describe("typed event repository", () => {
         [{ loginUid: "login-two", matchId, inviteId: matchId }],
         100,
       );
-      await f.client.commitEventPlan(
+      await commitEventCompatibilityFixture(
+        f.client,
         decodeEventUpdates({ [`events/${eventId}`]: eventRecord() }),
       );
       f.hooks.beforePatch = async () => {
@@ -939,7 +957,8 @@ describe("typed event repository", () => {
         [`players/login-two/matches/${matchId}/timer`, "gg"],
       ];
       await expect(
-        f.client.commitEventPlan(
+        commitEventCompatibilityFixture(
+          f.client,
           decodeEventUpdates({
             [`events/${eventId}/status`]: "active",
             ...Object.fromEntries(reverse ? effects.reverse() : effects),
@@ -961,7 +980,8 @@ describe("typed event repository", () => {
       f.hooks.beforePatch = undefined;
       throw new Error("state-offline");
     };
-    await f.client.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      f.client,
       decodeEventUpdates({ [`events/${eventId}`]: eventRecord() }),
     );
     const update = {
@@ -970,7 +990,7 @@ describe("typed event repository", () => {
       [timerPath]: "gg",
     };
     await expect(
-      f.client.commitEventPlan(decodeEventUpdates(update)),
+      commitEventCompatibilityFixture(f.client, decodeEventUpdates(update)),
     ).rejects.toThrow("state-offline");
     expect(
       await testEnv.EVENT_DB.prepare(
@@ -984,11 +1004,12 @@ describe("typed event repository", () => {
     const [pending] = await listPendingEventTransitionIntents(testEnv.EVENT_DB);
     expect(pending.schemaVersion).toBe(2);
     await expect(
-      f.client.commitEventPlan(
+      commitEventCompatibilityFixture(
+        f.client,
         decodeEventUpdates({ [`events/${eventId}/updatedAtMs`]: 150 }),
       ),
     ).rejects.toThrow("event-transition-pending");
-    await f.client.commitEventPlan(decodeEventUpdates(update));
+    await commitEventCompatibilityFixture(f.client, decodeEventUpdates(update));
     expect(f.patches).toEqual([{ [timerPath]: "gg" }, { [timerPath]: "gg" }]);
     expect(
       await readEventTransitionReceipt(
@@ -1026,7 +1047,7 @@ describe("typed event repository", () => {
           ? { schedule: (work) => scheduled.push(work) }
           : {},
       );
-      await client.commitEventPlan([
+      await commitEventCompatibilityFixture(client, [
         { kind: "event", eventId, value: eventRecord() },
       ]);
       const updates = {
@@ -1034,22 +1055,26 @@ describe("typed event repository", () => {
         "players/login-one/matches/event-match/timer": "gg",
       };
       if (mode === "recovery") {
-        await createPendingIntent({
-          schemaVersion: 1,
-          transitionId: "post-commit-recovery",
-          eventId,
-          expectedRevision: 1,
-          canonicalUpdates: { [`events/${eventId}/status`]: "active" },
-          rtdbEffects: { "players/login-one/matches/event-match/timer": "gg" },
-          createdAtMs: 200,
-          updatedAtMs: 200,
-        });
+        await createPendingIntent(
+          eventIntentFixture({
+            schemaVersion: 1,
+            transitionId: "post-commit-recovery",
+            eventId,
+            expectedRevision: 1,
+            canonicalUpdates: { [`events/${eventId}/status`]: "active" },
+            rtdbEffects: {
+              "players/login-one/matches/event-match/timer": "gg",
+            },
+            createdAtMs: 200,
+            updatedAtMs: 200,
+          }),
+        );
       }
       let completed = false;
       const work = (
         mode === "recovery"
           ? recoverEventTransitionIntents(scopedEnv, 100, f.raw)
-          : client.commitEventPlan(decodeEventUpdates(updates))
+          : commitEventCompatibilityFixture(client, decodeEventUpdates(updates))
       ).then(() => {
         completed = true;
       });
@@ -1101,7 +1126,7 @@ describe("typed event repository", () => {
       const notify = vi.fn(async () => {});
       const scopedEnv = notificationEnv(notify);
       const f = eventTransitionFixture(scopedEnv);
-      await f.client.commitEventPlan([
+      await commitEventCompatibilityFixture(f.client, [
         { kind: "event", eventId, value: eventRecord() },
       ]);
       if (failure === "effects") {
@@ -1117,7 +1142,8 @@ describe("typed event repository", () => {
       }
       try {
         await expect(
-          f.client.commitEventPlan(
+          commitEventCompatibilityFixture(
+            f.client,
             decodeEventUpdates({
               [`events/${eventId}/status`]: "active",
               "players/login-one/matches/event-match/timer": "gg",
@@ -1180,11 +1206,12 @@ describe("typed event repository", () => {
         },
       );
       try {
-        await client.commitEventPlan([
+        await commitEventCompatibilityFixture(client, [
           { kind: "event", eventId, value: eventRecord() },
         ]);
         await expect(
-          client.commitEventPlan(
+          commitEventCompatibilityFixture(
+            client,
             decodeEventUpdates({
               [`events/${eventId}/status`]: "active",
               "players/login-one/matches/event-match/timer": "gg",
@@ -1219,7 +1246,7 @@ describe("typed event repository", () => {
       const scopedEnv = methodNotificationEnv(notify);
       const f = eventTransitionFixture(scopedEnv);
       const client = createEventStateRepository(scopedEnv, f.raw, f.raw);
-      await client.commitEventPlan([
+      await commitEventCompatibilityFixture(client, [
         { kind: "event", eventId, value: eventRecord() },
       ]);
       await captureLoginMatchDiscovery(
@@ -1248,21 +1275,24 @@ describe("typed event repository", () => {
       };
       const canonicalUpdates = { [`events/${eventId}/status`]: "active" };
       if (mode === "recovery") {
-        await createPendingIntent({
-          schemaVersion: 1,
-          transitionId: "deduplicated-notifications",
-          eventId,
-          expectedRevision: 1,
-          canonicalUpdates,
-          rtdbEffects: effects,
-          createdAtMs: 200,
-          updatedAtMs: 200,
-        });
+        await createPendingIntent(
+          eventIntentFixture({
+            schemaVersion: 1,
+            transitionId: "deduplicated-notifications",
+            eventId,
+            expectedRevision: 1,
+            canonicalUpdates,
+            rtdbEffects: effects,
+            createdAtMs: 200,
+            updatedAtMs: 200,
+          }),
+        );
         await expect(
           recoverEventTransitionIntents(scopedEnv, 100, f.raw),
         ).resolves.toBe(1);
       } else {
-        await client.commitEventPlan(
+        await commitEventCompatibilityFixture(
+          client,
           decodeEventUpdates({ ...canonicalUpdates, ...effects }),
         );
       }
@@ -1362,10 +1392,11 @@ describe("typed event repository", () => {
         { schedule: (work) => scheduled.push(work) },
       );
       try {
-        await client.commitEventPlan([
+        await commitEventCompatibilityFixture(client, [
           { kind: "event", eventId, value: eventRecord() },
         ]);
-        await client.commitEventPlan(
+        await commitEventCompatibilityFixture(
+          client,
           decodeEventUpdates({
             [`events/${eventId}/status`]: "active",
             ...notificationCreationEffects(),
@@ -1395,7 +1426,7 @@ describe("typed event repository", () => {
     const notify = vi.fn(async (_inviteId: string, _matchIds?: string[]) => {});
     const scopedEnv = notificationEnv(notify);
     const f = eventTransitionFixture(scopedEnv);
-    await f.client.commitEventPlan([
+    await commitEventCompatibilityFixture(f.client, [
       { kind: "event", eventId, value: eventRecord() },
     ]);
     const claim = {
@@ -1405,16 +1436,18 @@ describe("typed event repository", () => {
       status: "claimed",
       claimedAtMs: 200,
     };
-    await createPendingIntent({
-      schemaVersion: 1,
-      transitionId: "claim-notification",
-      eventId,
-      expectedRevision: 1,
-      canonicalUpdates: { [`events/${eventId}/status`]: "active" },
-      rtdbEffects: { "matchTimerClaims/claim-match": claim },
-      createdAtMs: 200,
-      updatedAtMs: 200,
-    });
+    await createPendingIntent(
+      eventIntentFixture({
+        schemaVersion: 1,
+        transitionId: "claim-notification",
+        eventId,
+        expectedRevision: 1,
+        canonicalUpdates: { [`events/${eventId}/status`]: "active" },
+        rtdbEffects: { "matchTimerClaims/claim-match": claim },
+        createdAtMs: 200,
+        updatedAtMs: 200,
+      }),
+    );
     await expect(
       recoverEventTransitionIntents(scopedEnv, 100, f.raw),
     ).resolves.toBe(1);
@@ -1430,11 +1463,13 @@ describe("typed event repository", () => {
       f.hooks.afterTransaction = undefined;
       throw new Error("ambiguous-state-commit");
     };
-    await f.client.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      f.client,
       decodeEventUpdates({ [`events/${eventId}`]: eventRecord() }),
     );
     await expect(
-      f.client.commitEventPlan(
+      commitEventCompatibilityFixture(
+        f.client,
         decodeEventUpdates({
           [`events/${eventId}/status`]: "active",
           [`events/${eventId}/updatedAtMs`]: 200,
@@ -1483,16 +1518,23 @@ describe("typed event repository", () => {
       markEffectsStarted();
       await gate;
     };
-    await f.client.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      f.client,
       decodeEventUpdates({ [`events/${eventId}`]: eventRecord() }),
     );
     const update = {
       [`events/${eventId}/status`]: "active",
       "players/login-one/matches/serialized-transition/timer": "gg",
     };
-    const first = f.client.commitEventPlan(decodeEventUpdates(update));
+    const first = commitEventCompatibilityFixture(
+      f.client,
+      decodeEventUpdates(update),
+    );
     await started;
-    const duplicate = f.client.commitEventPlan(decodeEventUpdates(update));
+    const duplicate = commitEventCompatibilityFixture(
+      f.client,
+      decodeEventUpdates(update),
+    );
     await expect(duplicate).rejects.toBeInstanceOf(EventD1Conflict);
     await expect(duplicate).rejects.toThrow(
       "event-transition-application-busy",
@@ -1509,23 +1551,26 @@ describe("typed event repository", () => {
       ["a-stale-transition", eventId],
       ["b-stale-transition", otherEventId],
     ] as const) {
-      await f.client.commitEventPlan(
+      await commitEventCompatibilityFixture(
+        f.client,
         decodeEventUpdates({
           [`events/${targetEventId}`]: eventRecord("scheduled", targetEventId),
         }),
       );
-      await createPendingIntent({
-        schemaVersion: 1,
-        transitionId,
-        eventId: targetEventId,
-        expectedRevision: 1,
-        rtdbEffects: {
-          [`players/login-one/matches/${transitionId}/timer`]: "gg",
-        },
-        canonicalUpdates: { [`events/${targetEventId}/status`]: "active" },
-        createdAtMs: 200,
-        updatedAtMs: 200,
-      });
+      await createPendingIntent(
+        eventIntentFixture({
+          schemaVersion: 1,
+          transitionId,
+          eventId: targetEventId,
+          expectedRevision: 1,
+          rtdbEffects: {
+            [`players/login-one/matches/${transitionId}/timer`]: "gg",
+          },
+          canonicalUpdates: { [`events/${targetEventId}/status`]: "active" },
+          createdAtMs: 200,
+          updatedAtMs: 200,
+        }),
+      );
     }
     let nestedRecoveryStarted = false;
     f.hooks.beforePatch = async () => {
@@ -1560,21 +1605,24 @@ describe("typed event repository", () => {
 
   it("fails closed on a conflicting D1 transition receipt", async () => {
     const f = eventTransitionFixture(testEnv);
-    await f.client.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      f.client,
       decodeEventUpdates({ [`events/${eventId}`]: eventRecord() }),
     );
-    const intent = await createPendingIntent({
-      schemaVersion: 1,
-      transitionId: "conflicting-receipt",
-      eventId,
-      expectedRevision: 1,
-      rtdbEffects: {
-        "players/login-one/matches/conflicting-receipt/timer": "gg",
-      },
-      canonicalUpdates: { [`events/${eventId}/status`]: "active" },
-      createdAtMs: 200,
-      updatedAtMs: 200,
-    });
+    const intent = await createPendingIntent(
+      eventIntentFixture({
+        schemaVersion: 1,
+        transitionId: "conflicting-receipt",
+        eventId,
+        expectedRevision: 1,
+        rtdbEffects: {
+          "players/login-one/matches/conflicting-receipt/timer": "gg",
+        },
+        canonicalUpdates: { [`events/${eventId}/status`]: "active" },
+        createdAtMs: 200,
+        updatedAtMs: 200,
+      }),
+    );
     await ensureEventTransitionReceipt(
       testEnv.PROFILE_GAMES_DB,
       {
@@ -1605,23 +1653,26 @@ describe("typed event repository", () => {
       ["a-failing-transition", eventId],
       ["b-working-transition", otherEventId],
     ] as const) {
-      await f.client.commitEventPlan(
+      await commitEventCompatibilityFixture(
+        f.client,
         decodeEventUpdates({
           [`events/${targetEventId}`]: eventRecord("scheduled", targetEventId),
         }),
       );
-      await createPendingIntent({
-        schemaVersion: 1,
-        transitionId,
-        eventId: targetEventId,
-        expectedRevision: 1,
-        rtdbEffects: {
-          [`players/login-one/matches/${transitionId}/timer`]: "gg",
-        },
-        canonicalUpdates: { [`events/${targetEventId}/status`]: "active" },
-        createdAtMs: 200,
-        updatedAtMs: 200,
-      });
+      await createPendingIntent(
+        eventIntentFixture({
+          schemaVersion: 1,
+          transitionId,
+          eventId: targetEventId,
+          expectedRevision: 1,
+          rtdbEffects: {
+            [`players/login-one/matches/${transitionId}/timer`]: "gg",
+          },
+          canonicalUpdates: { [`events/${targetEventId}/status`]: "active" },
+          createdAtMs: 200,
+          updatedAtMs: 200,
+        }),
+      );
     }
     f.hooks.beforePatch = async (updates) => {
       if (
@@ -1658,7 +1709,8 @@ describe("typed event repository", () => {
       }),
     ]);
     await expect(
-      f.client.commitEventPlan(
+      commitEventCompatibilityFixture(
+        f.client,
         decodeEventUpdates({ [`events/${eventId}/updatedAtMs`]: 300 }),
       ),
     ).rejects.toThrow("event-transition-pending");
@@ -1670,21 +1722,24 @@ describe("typed event repository", () => {
 
   it("holds a durable admission while replaying match effects", async () => {
     const f = eventTransitionFixture(testEnv);
-    await f.client.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      f.client,
       decodeEventUpdates({ [`events/${eventId}`]: eventRecord() }),
     );
-    await createPendingIntent({
-      schemaVersion: 1,
-      transitionId: "admitted-recovery",
-      eventId,
-      expectedRevision: 1,
-      rtdbEffects: {
-        "players/login-one/matches/admitted-recovery/timer": "gg",
-      },
-      canonicalUpdates: { [`events/${eventId}/status`]: "active" },
-      createdAtMs: 200,
-      updatedAtMs: 200,
-    });
+    await createPendingIntent(
+      eventIntentFixture({
+        schemaVersion: 1,
+        transitionId: "admitted-recovery",
+        eventId,
+        expectedRevision: 1,
+        rtdbEffects: {
+          "players/login-one/matches/admitted-recovery/timer": "gg",
+        },
+        canonicalUpdates: { [`events/${eventId}/status`]: "active" },
+        createdAtMs: 200,
+        updatedAtMs: 200,
+      }),
+    );
     let finishReplay!: () => void;
     let markStarted!: () => void;
     const started = new Promise<void>((resolve) => {
@@ -1725,7 +1780,8 @@ describe("typed event repository", () => {
     await testEnv.PROFILE_GAMES_DB.prepare(
       "INSERT INTO match_timer_starts(player_id,match_id,timer,turn_number,updated_at_ms) VALUES ('match-one','login-one','timer',0,100)",
     ).run();
-    await f.client.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      f.client,
       decodeEventUpdates({ [`events/${eventId}`]: eventRecord() }),
     );
     const outbox = {
@@ -1737,7 +1793,8 @@ describe("typed event repository", () => {
       firstQueuedAtMs: 100,
       lastQueuedAtMs: 100,
     };
-    await f.client.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      f.client,
       decodeEventUpdates({
         "eventProgressOutbox/progress-mixed": outbox,
         "matchTimerStarts/login-one/match-one": null,
@@ -1806,7 +1863,8 @@ describe("typed event repository", () => {
         transactPath: async () => ({ committed: false, value: null }),
       }),
     );
-    await client.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      client,
       decodeEventUpdates({
         [`events/${eventId}`]: eventRecord(),
         [`profileGameProjectionOutbox/event/${eventId}`]: {
@@ -1842,8 +1900,6 @@ describe("typed event repository", () => {
         {
           readEventProfileGameProjectionOutbox:
             client.readEventProfileGameProjectionOutbox,
-          transactEventProfileGameProjectionOutbox:
-            client.transactEventProfileGameProjectionOutbox,
           claimEventProfileGameProjectionOutbox:
             client.claimEventProfileGameProjectionOutbox,
           acknowledgeEventProfileGameProjectionOutbox:
@@ -1952,7 +2008,8 @@ describe("typed event repository", () => {
         transactPath: async () => ({ committed: false, value: null }),
       }),
     );
-    await client.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      client,
       decodeEventUpdates({ [`events/${eventId}`]: eventRecord() }),
     );
     const sourceAssignment = {
@@ -2000,7 +2057,8 @@ describe("typed event repository", () => {
       }),
     );
     await expect(
-      client.commitEventPlan(
+      commitEventCompatibilityFixture(
+        client,
         decodeEventUpdates({ [targetPath]: targetAssignment }),
       ),
     ).rejects.toThrow("invalid-event-prize-assignment");
@@ -2037,7 +2095,8 @@ describe("typed event repository", () => {
         transactPath: async () => ({ committed: false, value: null }),
       }),
     );
-    await client.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      client,
       decodeEventUpdates({ [`events/${eventId}`]: eventRecord() }),
     );
     const lockPath = `eventLocks/${eventId}`;
@@ -2093,7 +2152,9 @@ describe("typed event repository", () => {
   });
 
   it("keeps explicit match reads independent while event writes are frozen", async () => {
-    const readMatchRecord = vi.fn(async () => ({ fen: "initial" }));
+    const readMatchRecord = vi.fn(async () =>
+      matchDocumentFixture({ fen: "initial" }),
+    );
     const port = eventMatchTestPort({
       getPath: async () => null,
       patchRoot: async () => undefined,
@@ -2111,7 +2172,7 @@ describe("typed event repository", () => {
     try {
       expect(await client.readEvent(eventId)).toBeNull();
       await expect(
-        client.commitEventPlan([
+        commitEventCompatibilityFixture(client, [
           { kind: "event", eventId, value: eventRecord() },
         ]),
       ).rejects.toThrow("event-writes-disabled");

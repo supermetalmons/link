@@ -2,8 +2,12 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.createTelegramSendDelivery = createTelegramSendDelivery;
-const deliveryPolicy_js_1 = require("./deliveryPolicy.js");
 const deliveryState_js_1 = require("./deliveryState.js");
+const records_js_1 = require("./records.js");
+const deliverySendRecords_js_1 = require("./deliverySendRecords.js");
+const records_js_2 = require("./records.js");
+const deliveryPolicy_js_1 = require("./deliveryPolicy.js");
+const deliveryState_js_2 = require("./deliveryState.js");
 const values_js_1 = require("./values.js");
 function createTelegramSendDelivery({
   client,
@@ -33,54 +37,25 @@ function createTelegramSendDelivery({
     nowMs,
   }) => {
     const attemptId = createAttemptId();
-    const marker = {
-      attemptId,
-      revision: desired.revision,
-      destination: desired.destination,
-      chatId,
-      instanceKey: desired.instanceKey,
-      contentHash: desired.contentHash,
-      startedAtMs: nowMs,
-      apiGateOwner: `send:${attemptId}`,
-    };
+    const marker = desired.createSendMarker(attemptId, chatId, nowMs);
     const marked = await updateOwned(
       messageKey,
       ownerToken,
-      (record, delivery) => {
-        if (
-          (0, deliveryState_js_1.normalizeString)(
-            (0, values_js_1.readProperty)(record.desired, "revision"),
-          ) !== desired.revision
-        ) {
-          return {
-            ...record,
-            delivery: (0, deliveryState_js_1.writeDelivery)({
-              ...(0, deliveryState_js_1.omitKeys)(delivery, [
-                "leaseOwner",
-                "leaseExpiresAtMs",
-              ]),
-              status: "pending",
-              revision: (0, deliveryState_js_1.normalizeString)(
-                (0, values_js_1.readProperty)(record.desired, "revision"),
-              ),
-            }),
-          };
-        }
-        return {
-          ...record,
-          delivery: {
-            ...delivery.source,
-            sendInFlight: marker,
+      (record, delivery) =>
+        (0, deliverySendRecords_js_1.markSendInFlightRecord)(
+          (0, records_js_2.messageDocument)(record),
+          delivery,
+          {
+            desired,
+            marker,
           },
-        };
-      },
+        ),
     );
     if (
       !marked.committed ||
-      (0, values_js_1.readProperty)(
-        (0, values_js_1.readProperty)(marked.value?.delivery, "sendInFlight"),
-        "revision",
-      ) !== desired.revision
+      !(0, deliveryState_js_1.readDelivery)(
+        (0, records_js_1.messageDeliveryDocument)(marked.value),
+      ).sendInFlightMatchesRevision(desired.revision)
     ) {
       return { status: "stale" };
     }
@@ -88,7 +63,7 @@ function createTelegramSendDelivery({
       messageKey,
       ownerToken,
       desired,
-      currentDelivery: marked.value?.delivery,
+      currentDelivery: (0, records_js_1.messageDeliveryDocument)(marked.value),
     });
     if (expired) {
       return expired;
@@ -107,7 +82,9 @@ function createTelegramSendDelivery({
         ownerToken,
         desired,
         result: buildGateBlockedFailure(gateResult, checkedAtMs),
-        currentDelivery: marked.value?.delivery,
+        currentDelivery: (0, records_js_1.messageDeliveryDocument)(
+          marked.value,
+        ),
         persistBeforeSchedule: true,
       });
       return {
@@ -120,13 +97,13 @@ function createTelegramSendDelivery({
     if (
       (0, deliveryPolicy_js_1.normalizeTimestamp)(
         (0, values_js_1.readProperty)(
-          marked.value?.delivery,
+          (0, records_js_1.messageDeliveryDocument)(marked.value),
           "retryDeadlineAtMs",
         ),
       ) > 0 &&
       (0, deliveryPolicy_js_1.normalizeTimestamp)(
         (0, values_js_1.readProperty)(
-          marked.value?.delivery,
+          (0, records_js_1.messageDeliveryDocument)(marked.value),
           "retryDeadlineAtMs",
         ),
       ) <= callAtMs
@@ -143,104 +120,32 @@ function createTelegramSendDelivery({
       });
       return { status: "terminal", reason: expiredResult.code };
     }
-    const result = await client.sendTelegramMessage({
-      chatId,
-      text: desired.text,
-      parseMode: desired.parseMode || null,
-      silent: desired.silent === true,
-      disableWebPagePreview: desired.disableWebPagePreview !== false,
-    });
+    const result = await client.sendTelegramMessage(desired.sendInput(chatId));
     if (result.ok) {
-      const applied = {
-        destination: desired.destination,
+      const applied = desired.createAppliedReceipt(
         chatId,
-        messageId: result.messageId,
-        instanceKey: desired.instanceKey,
-        revision: desired.revision,
-        contentHash: desired.contentHash,
-        appliedAtMs: nowMs,
-      };
+        result.messageId,
+        nowMs,
+      );
       const receiptWrite = await updateOwned(
         messageKey,
         ownerToken,
-        (record, delivery) => {
-          const latestRevision = (0, deliveryState_js_1.normalizeString)(
-            (0, values_js_1.readProperty)(record.desired, "revision"),
-          );
-          const nextDelivery = (0, deliveryState_js_1.writeDelivery)({
-            ...(0, deliveryPolicy_js_1.omitRetryState)(
-              (0, deliveryState_js_1.omitKeys)(delivery, [
-                "leaseOwner",
-                "leaseExpiresAtMs",
-                "sendInFlight",
-                "lastError",
-                "deadLetterAtMs",
-                "apiGateOwner",
-                "apiGateGeneration",
-                "apiGateStartedAtMs",
-                "appliedStateUnknown",
-              ]),
-            ),
-            ...(latestRevision === desired.revision
-              ? {
-                  status: "delivered",
-                  revision: latestRevision || desired.revision,
-                  deliveredAtMs: nowMs,
-                }
-              : {
-                  status: "pending",
-                  revision: latestRevision || desired.revision,
-                }),
-            apiGateSettleOwner: marker.apiGateOwner,
-          });
-          if (latestRevision !== desired.revision) {
-            nextDelivery.attempts = 0;
-          }
-          if (
-            previousApplied &&
-            typeof previousApplied.messageId === "number" &&
-            Number.isInteger(previousApplied.messageId) &&
-            previousApplied.messageId > 0 &&
-            (previousApplied.messageId !== result.messageId ||
-              (0, deliveryState_js_1.normalizeString)(
-                previousApplied.chatId,
-              ) !== chatId)
-          ) {
-            const pendingDelete = (0, deliveryState_js_1.writeCleanup)({
-              chatId:
-                (0, deliveryState_js_1.normalizeString)(
-                  previousApplied.chatId,
-                ) || chatId,
-              messageId: previousApplied.messageId,
-              instanceKey: (0, deliveryState_js_1.normalizeString)(
-                previousApplied.instanceKey,
-              ),
-              pendingDeleteId: (0, deliveryState_js_1.buildPendingDeleteId)({
-                chatId:
-                  (0, deliveryState_js_1.normalizeString)(
-                    previousApplied.chatId,
-                  ) || chatId,
-                messageId: previousApplied.messageId,
-              }),
-              status: "pending",
-              attempts: 0,
-            });
-            Object.assign(
-              nextDelivery,
-              (0, deliveryState_js_1.appendPendingDelete)(
-                nextDelivery,
-                pendingDelete,
-              ),
-            );
-          }
-          return {
-            ...record,
-            applied,
-            delivery: nextDelivery,
-          };
-        },
+        (record, delivery) =>
+          (0, deliverySendRecords_js_1.acknowledgeSendRecord)(
+            (0, records_js_2.messageDocument)(record),
+            delivery,
+            {
+              applied,
+              chatId,
+              desired,
+              marker,
+              nowMs,
+              previousApplied,
+              result,
+            },
+          ),
       );
-      (0, deliveryState_js_1.ensureCommitted)(
+      (0, deliveryState_js_2.ensureCommitted)(
         receiptWrite,
         "send-receipt-not-persisted",
       );
@@ -258,7 +163,9 @@ function createTelegramSendDelivery({
         desired,
         result,
         safeRejectedAttemptId: marker.attemptId,
-        currentDelivery: marked.value?.delivery,
+        currentDelivery: (0, records_js_1.messageDeliveryDocument)(
+          marked.value,
+        ),
         apiGateOwner: marker.apiGateOwner,
       });
       return {

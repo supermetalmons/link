@@ -429,7 +429,10 @@ describe("D1 event transition receipts", () => {
     });
     await expect(
       db.batch(
-        eventTransitionReceiptGuardStatements(db, { ...receipt, extra: true }),
+        eventTransitionReceiptGuardStatements(
+          db,
+          parseEventTransitionReceipt({ ...receipt, extra: true }),
+        ),
       ),
     ).rejects.toThrow();
     await expect(publish()).resolves.toBeDefined();

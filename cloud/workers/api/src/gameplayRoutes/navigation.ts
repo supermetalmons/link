@@ -1,4 +1,9 @@
 import {
+  readInviteDocument,
+  inviteTrimmedParticipants,
+  inviteProjectionState,
+} from "@mons/shared/invite-records";
+import {
   inferAutomatchStateHint,
   isReadNavigationGamesRequest,
   isRemoveNavigationGameRequest,
@@ -13,12 +18,7 @@ import {
   requireProfileOwnershipSnapshot,
 } from "../profileOwnership.ts";
 import { readProfileGamesPage } from "../profileGamesD1.ts";
-import {
-  defineGameplayRoute,
-  normalizeString,
-  toRecord,
-  validateBody,
-} from "./definition.ts";
+import { defineGameplayRoute, validateBody } from "./definition.ts";
 
 export async function resolveProfileId(
   identity: RequestIdentity,
@@ -51,11 +51,11 @@ export async function removeNavigationGame(
     repository.readInviteMetadata(inviteId),
     repository.readAutomatchEntry(inviteId),
   ]);
-  const invite = toRecord(inviteValue);
+  const invite = readInviteDocument(inviteValue);
   if (!invite) {
     return skippedNavigationResponse(inviteId, "invite-missing");
   }
-  const guestId = normalizeString(invite.guestId);
+  const { guestId } = inviteTrimmedParticipants(invite);
   if (guestId) {
     return skippedNavigationResponse(inviteId, "invite-active");
   }
@@ -64,7 +64,7 @@ export async function removeNavigationGame(
       inviteId,
       queueValue: automatchValue.isTruthy,
       hasGuest: false,
-      storedStateHint: invite.automatchStateHint,
+      storedStateHint: inviteProjectionState(invite).automatchStateHint,
     }) === "pending"
   ) {
     return skippedNavigationResponse(inviteId, "pending-automatch");

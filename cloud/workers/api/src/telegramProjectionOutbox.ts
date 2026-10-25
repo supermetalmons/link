@@ -2,6 +2,7 @@ import { isSafeRecordKey } from "./recordKeys.ts";
 import { TELEGRAM_PROJECTION_SCHEMA_VERSION } from "./telegramProjectionTasks.ts";
 
 export const EVENT_TELEGRAM_PROJECTION_SCHEMA_VERSION = 1;
+export type { EventTelegramProjectionRequest } from "../../../runtime/eventProjectionOutboxRecords.js";
 
 type AutomatchProjectionOutbox = {
   requestId: string;

@@ -20,6 +20,7 @@ exports.setMatchSlotParticipant =
   exports.assignWinnerToNextRound =
   exports.applyMatchResolution =
     void 0;
+const documents_js_1 = require("./documents.js");
 const eventCommands_js_1 = require("../eventCommands.js");
 const ids_1 = require("@mons/shared/ids");
 const match_protocol_1 = require("@mons/shared/match-protocol");
@@ -57,19 +58,26 @@ exports.getSortedRoundIndexes = getSortedRoundIndexes;
 const isResolvedMatchStatus = (status) =>
   status === "host" || status === "guest" || status === "bye";
 const isMatchWinnerDisqualified = (match) =>
-  !!(match && match.winnerDisqualified === true);
+  !!(
+    match &&
+    (0, documents_js_1.eventMatchState)(match).winnerDisqualified === true
+  );
 exports.isMatchWinnerDisqualified = isMatchWinnerDisqualified;
 const isMatchResolved = (match) => {
   if (isMatchWinnerDisqualified(match)) {
     return true;
   }
-  const status = normalizeString(match && match.status);
+  const status = normalizeString(
+    match && (0, documents_js_1.eventMatchState)(match).status,
+  );
   if (status === "bye") {
     return true;
   }
   return (
     (status === "host" || status === "guest") &&
-    normalizeString(match && match.winnerProfileId) !== ""
+    normalizeString(
+      match && (0, documents_js_1.eventMatchState)(match).winnerProfileId,
+    ) !== ""
   );
 };
 exports.isMatchResolved = isMatchResolved;
@@ -78,8 +86,8 @@ const isMatchSlotBlocked = (match, slot) => {
     return false;
   }
   return slot === "guest"
-    ? match.guestSlotBlocked === true
-    : match.hostSlotBlocked === true;
+    ? (0, documents_js_1.eventMatchState)(match).guestSlotBlocked === true
+    : (0, documents_js_1.eventMatchState)(match).hostSlotBlocked === true;
 };
 exports.isMatchSlotBlocked = isMatchSlotBlocked;
 const buildSeedToProfileId = ({ participantIds, random }) => {
@@ -95,90 +103,71 @@ const buildSeedToProfileId = ({ participantIds, random }) => {
   return seedToProfileId;
 };
 exports.buildSeedToProfileId = buildSeedToProfileId;
-const createEmptyEventMatch = (matchKey) => ({
-  matchKey,
-  inviteId: null,
-  status: "upcoming",
-  resolvedAtMs: null,
-  winnerDisqualified: false,
-  winnerProfileId: null,
-  loserProfileId: null,
-  hostSlotBlocked: false,
-  hostProfileId: null,
-  hostLoginUid: null,
-  hostDisplayName: null,
-  hostEmojiId: null,
-  hostAura: null,
-  guestSlotBlocked: false,
-  guestProfileId: null,
-  guestLoginUid: null,
-  guestDisplayName: null,
-  guestEmojiId: null,
-  guestAura: null,
-});
+const createEmptyEventMatch = (matchKey) =>
+  (0, documents_js_1.createEventMatchDocument)({
+    matchKey,
+    inviteId: null,
+    status: "upcoming",
+    resolvedAtMs: null,
+    winnerDisqualified: false,
+    winnerProfileId: null,
+    loserProfileId: null,
+    hostSlotBlocked: false,
+    hostProfileId: null,
+    hostLoginUid: null,
+    hostDisplayName: null,
+    hostEmojiId: null,
+    hostAura: null,
+    guestSlotBlocked: false,
+    guestProfileId: null,
+    guestLoginUid: null,
+    guestDisplayName: null,
+    guestEmojiId: null,
+    guestAura: null,
+  });
 exports.createEmptyEventMatch = createEmptyEventMatch;
 const hasThirdPlaceMatchField = (event) =>
-  !!(
-    event &&
-    typeof event === "object" &&
-    (event.supportsThirdPlaceMatch === true ||
-      (event.thirdPlaceMatch && typeof event.thirdPlaceMatch === "object"))
-  );
+  !!event &&
+  ((0, documents_js_1.eventState)(event).supportsThirdPlaceMatch ||
+    (0, documents_js_1.eventThirdPlaceMatch)(event) !== null);
 exports.hasThirdPlaceMatchField = hasThirdPlaceMatchField;
-const setMatchSlotBlocked = (match, slot, blocked) => {
-  const field = slot === "guest" ? "guestSlotBlocked" : "hostSlotBlocked";
-  const nextValue = blocked === true;
-  if (match[field] === nextValue) {
-    return false;
-  }
-  match[field] = nextValue;
-  return true;
-};
+const setMatchSlotBlocked = documents_js_1.setEventMatchSlotBlocked;
 exports.setMatchSlotBlocked = setMatchSlotBlocked;
-const setMatchSlotParticipant = (match, slot, participant) => {
-  const prefix = slot === "guest" ? "guest" : "host";
-  const values = {
-    ProfileId: participant ? participant.profileId : null,
-    LoginUid: participant ? participant.loginUid : null,
-    DisplayName: participant ? participant.displayName : null,
-    EmojiId: participant ? participant.emojiId : null,
-    Aura: participant ? participant.aura || null : null,
-  };
-  let didChange = false;
-  for (const [suffix, value] of Object.entries(values)) {
-    const field = `${prefix}${suffix}`;
-    if (match[field] !== value) {
-      match[field] = value;
-      didChange = true;
-    }
-  }
-  if (participant && setMatchSlotBlocked(match, slot, false)) {
-    didChange = true;
-  }
-  return didChange;
-};
+const setMatchSlotParticipant = documents_js_1.copyEventParticipantToMatchSlot;
 exports.setMatchSlotParticipant = setMatchSlotParticipant;
 const applyMatchResolution = (match, resolved, nowMs) => {
   if (!match || !resolved) {
     return false;
   }
   let didChange = false;
-  if (match.status !== resolved.status) {
-    match.status = resolved.status;
+  if ((0, documents_js_1.eventMatchState)(match).status !== resolved.status) {
+    (0, documents_js_1.patchEventMatch)(match, { status: resolved.status });
     didChange = true;
   }
   if (
-    normalizeStringOrNull(match.winnerProfileId) !== resolved.winnerProfileId
+    normalizeStringOrNull(
+      (0, documents_js_1.eventMatchState)(match).winnerProfileId,
+    ) !== resolved.winnerProfileId
   ) {
-    match.winnerProfileId = resolved.winnerProfileId;
+    (0, documents_js_1.patchEventMatch)(match, {
+      winnerProfileId: resolved.winnerProfileId,
+    });
     didChange = true;
   }
-  if (normalizeStringOrNull(match.loserProfileId) !== resolved.loserProfileId) {
-    match.loserProfileId = resolved.loserProfileId;
+  if (
+    normalizeStringOrNull(
+      (0, documents_js_1.eventMatchState)(match).loserProfileId,
+    ) !== resolved.loserProfileId
+  ) {
+    (0, documents_js_1.patchEventMatch)(match, {
+      loserProfileId: resolved.loserProfileId,
+    });
     didChange = true;
   }
-  if (typeof match.resolvedAtMs !== "number") {
-    match.resolvedAtMs = nowMs;
+  if (
+    typeof (0, documents_js_1.eventMatchState)(match).resolvedAtMs !== "number"
+  ) {
+    (0, documents_js_1.patchEventMatch)(match, { resolvedAtMs: nowMs });
     didChange = true;
   }
   return didChange;
@@ -192,22 +181,31 @@ const assignWinnerToNextRound = ({
   participantsById,
   winnerDisqualified = false,
 }) => {
-  const nextRound = rounds[String(roundIndex + 1)];
+  const nextRound = (0, documents_js_1.eventRoundAt)(
+    rounds,
+    String(roundIndex + 1),
+  );
   if (
     !nextRound ||
-    !nextRound.matches ||
-    typeof nextRound.matches !== "object"
+    !(0, documents_js_1.eventRoundMatches)(nextRound) ||
+    typeof (0, documents_js_1.eventRoundMatches)(nextRound) !== "object"
   ) {
     return false;
   }
   const nextMatchIndex = Math.floor(matchIndex / 2);
-  const nextMatch =
-    nextRound.matches[
-      (0, events_1.buildEventMatchKey)(roundIndex + 1, nextMatchIndex)
-    ];
-  if (!nextMatch) {
-    return false;
-  }
+  const nextMatches = (0, documents_js_1.eventRoundMatches)(nextRound);
+  const nextMatchKey = (0, events_1.buildEventMatchKey)(
+    roundIndex + 1,
+    nextMatchIndex,
+  );
+  const targetKind = (0, documents_js_1.eventMatchEntryKind)(
+    nextMatches,
+    nextMatchKey,
+  );
+  if (targetKind === "missing") return false;
+  if (targetKind === "invalid")
+    throw new TypeError("Cannot assign an event match slot to a scalar.");
+  const nextMatch = (0, documents_js_1.eventMatchAt)(nextMatches, nextMatchKey);
   const slot = matchIndex % 2 === 0 ? "host" : "guest";
   if (winnerDisqualified) {
     const didClearParticipant = setMatchSlotParticipant(nextMatch, slot, null);
@@ -223,7 +221,10 @@ const assignWinnerToNextRound = ({
   const didSetParticipant = setMatchSlotParticipant(
     nextMatch,
     slot,
-    participantsById[normalizedWinnerProfileId] || null,
+    (0, documents_js_1.eventParticipantAt)(
+      participantsById,
+      normalizedWinnerProfileId,
+    ) || null,
   );
   const didClearBlocked = setMatchSlotBlocked(nextMatch, slot, false);
   return didSetParticipant || didClearBlocked;
@@ -238,13 +239,22 @@ const createInviteForMatch = async ({
   random,
   buildRandomGameSeed,
   ownershipSnapshot,
+  useStoredMatchKey = false,
 }) => {
   if (isMatchSlotBlocked(match, "host") || isMatchSlotBlocked(match, "guest")) {
     return false;
   }
-  const hostLoginUid = normalizeString(match.hostLoginUid);
-  const guestLoginUid = normalizeString(match.guestLoginUid);
-  if (!hostLoginUid || !guestLoginUid || normalizeString(match.inviteId)) {
+  const hostLoginUid = normalizeString(
+    (0, documents_js_1.eventMatchState)(match).hostLoginUid,
+  );
+  const guestLoginUid = normalizeString(
+    (0, documents_js_1.eventMatchState)(match).guestLoginUid,
+  );
+  if (
+    !hostLoginUid ||
+    !guestLoginUid ||
+    normalizeString((0, documents_js_1.eventMatchState)(match).inviteId)
+  ) {
     return false;
   }
   if (!ownershipSnapshot)
@@ -252,32 +262,39 @@ const createInviteForMatch = async ({
   (0, ownership_js_1.resolveOwnedProfileReferences)(ownershipSnapshot, [
     {
       loginUid: hostLoginUid,
-      profileId: normalizeString(match.hostProfileId),
+      profileId: normalizeString(
+        (0, documents_js_1.eventMatchState)(match).hostProfileId,
+      ),
     },
     {
       loginUid: guestLoginUid,
-      profileId: normalizeString(match.guestProfileId),
+      profileId: normalizeString(
+        (0, documents_js_1.eventMatchState)(match).guestProfileId,
+      ),
     },
   ]);
   const inviteId = (0, ids_1.buildAutoInviteId)(random);
   const hostColor = (0, ids_1.pickHostColor)(random);
   const guestColor = hostColor === "white" ? "black" : "white";
   const gameSeed = await buildRandomGameSeed(random);
-  match.inviteId = inviteId;
-  match.status = "pending";
+  (0, documents_js_1.patchEventMatch)(match, { inviteId: inviteId });
+  (0, documents_js_1.patchEventMatch)(match, { status: "pending" });
   inviteUpdates.push({
     kind: "invite",
     inviteId: inviteId,
-    value: {
-      version: match_protocol_1.CONTROLLER_VERSION,
-      hostId: hostLoginUid,
-      hostColor,
-      guestId: guestLoginUid,
-      eventId,
-      eventRoundIndex: roundIndex,
-      eventMatchKey: matchKey,
-      eventOwned: true,
-    },
+    value: (0, documents_js_1.createEventMatchInvite)(
+      match,
+      {
+        version: match_protocol_1.CONTROLLER_VERSION,
+        hostId: hostLoginUid,
+        hostColor,
+        guestId: guestLoginUid,
+        eventId,
+        eventRoundIndex: roundIndex,
+      },
+      matchKey,
+      useStoredMatchKey,
+    ),
   });
   const createMatchRecord = (color, emojiId, aura) =>
     (0, match_protocol_1.buildFreshMatchRecord)({
@@ -290,13 +307,21 @@ const createInviteForMatch = async ({
     kind: "match-creation",
     playerId: hostLoginUid,
     matchId: inviteId,
-    value: createMatchRecord(hostColor, match.hostEmojiId, match.hostAura),
+    value: createMatchRecord(
+      hostColor,
+      (0, documents_js_1.eventMatchState)(match).hostEmojiId,
+      (0, documents_js_1.eventMatchState)(match).hostAura,
+    ),
   });
   inviteUpdates.push({
     kind: "match-creation",
     playerId: guestLoginUid,
     matchId: inviteId,
-    value: createMatchRecord(guestColor, match.guestEmojiId, match.guestAura),
+    value: createMatchRecord(
+      guestColor,
+      (0, documents_js_1.eventMatchState)(match).guestEmojiId,
+      (0, documents_js_1.eventMatchState)(match).guestAura,
+    ),
   });
   return true;
 };
@@ -320,15 +345,28 @@ const reconcileThirdPlaceMatchReadiness = async ({
   if (sortedRoundIndexes.length < 2) {
     return { didChange: false, thirdPlaceMatch };
   }
-  const semifinalRound =
-    rounds[String(sortedRoundIndexes[sortedRoundIndexes.length - 2])];
-  if (!semifinalRound?.matches || typeof semifinalRound.matches !== "object") {
+  const semifinalRound = (0, documents_js_1.eventRoundAt)(
+    rounds,
+    String(sortedRoundIndexes[sortedRoundIndexes.length - 2]),
+  );
+  if (
+    !(0, documents_js_1.eventRoundMatches)(semifinalRound) ||
+    typeof (0, documents_js_1.eventRoundMatches)(semifinalRound) !== "object"
+  ) {
     return { didChange: false, thirdPlaceMatch };
   }
-  const semifinalMatchKeys = getSortedMatchKeys(semifinalRound.matches);
+  const semifinalMatchKeys = getSortedMatchKeys(
+    (0, documents_js_1.eventRoundMatches)(semifinalRound),
+  );
   const semifinalMatches = [
-    semifinalRound.matches[semifinalMatchKeys[0]],
-    semifinalRound.matches[semifinalMatchKeys[1]],
+    (0, documents_js_1.eventMatchAt)(
+      (0, documents_js_1.eventRoundMatches)(semifinalRound),
+      semifinalMatchKeys[0],
+    ),
+    (0, documents_js_1.eventMatchAt)(
+      (0, documents_js_1.eventRoundMatches)(semifinalRound),
+      semifinalMatchKeys[1],
+    ),
   ];
   let didChange = false;
   for (const [index, semifinalMatch] of semifinalMatches.entries()) {
@@ -338,8 +376,14 @@ const reconcileThirdPlaceMatchReadiness = async ({
       if (isMatchWinnerDisqualified(semifinalMatch)) {
         blocked = true;
       } else if (isMatchResolved(semifinalMatch)) {
-        const loserProfileId = normalizeString(semifinalMatch.loserProfileId);
-        participant = participantsById[loserProfileId] || null;
+        const loserProfileId = normalizeString(
+          (0, documents_js_1.eventMatchState)(semifinalMatch).loserProfileId,
+        );
+        participant =
+          (0, documents_js_1.eventParticipantAt)(
+            participantsById,
+            loserProfileId,
+          ) || null;
         blocked = !loserProfileId;
       }
     }
@@ -351,9 +395,15 @@ const reconcileThirdPlaceMatchReadiness = async ({
       didChange = true;
     }
   }
-  const status = normalizeString(thirdPlaceMatch.status);
-  const hostProfileId = normalizeString(thirdPlaceMatch.hostProfileId);
-  const guestProfileId = normalizeString(thirdPlaceMatch.guestProfileId);
+  const status = normalizeString(
+    (0, documents_js_1.eventMatchState)(thirdPlaceMatch).status,
+  );
+  const hostProfileId = normalizeString(
+    (0, documents_js_1.eventMatchState)(thirdPlaceMatch).hostProfileId,
+  );
+  const guestProfileId = normalizeString(
+    (0, documents_js_1.eventMatchState)(thirdPlaceMatch).guestProfileId,
+  );
   const hostSlotBlocked = isMatchSlotBlocked(thirdPlaceMatch, "host");
   const guestSlotBlocked = isMatchSlotBlocked(thirdPlaceMatch, "guest");
   if (
@@ -379,7 +429,8 @@ const reconcileThirdPlaceMatchReadiness = async ({
       (await createInviteForMatch({
         eventId,
         roundIndex: null,
-        matchKey: thirdPlaceMatch.matchKey || events_1.THIRD_PLACE_MATCH_KEY,
+        matchKey: events_1.THIRD_PLACE_MATCH_KEY,
+        useStoredMatchKey: true,
         match: thirdPlaceMatch,
         inviteUpdates,
         random,
@@ -417,7 +468,9 @@ const reconcileThirdPlaceMatchReadiness = async ({
     return { didChange, thirdPlaceMatch };
   }
   if (status !== "upcoming") {
-    thirdPlaceMatch.status = "upcoming";
+    (0, documents_js_1.patchEventMatch)(thirdPlaceMatch, {
+      status: "upcoming",
+    });
     didChange = true;
   }
   return { didChange, thirdPlaceMatch };
@@ -441,18 +494,32 @@ const reconcileBracketMatchReadiness = async ({
     passChanged = false;
     passCount += 1;
     for (const roundIndex of sortedRoundIndexes) {
-      const round = rounds[String(roundIndex)];
-      if (!round?.matches || typeof round.matches !== "object") {
+      const round = (0, documents_js_1.eventRoundAt)(
+        rounds,
+        String(roundIndex),
+      );
+      if (!round || !(0, documents_js_1.eventRoundMatches)(round)) {
         continue;
       }
-      for (const matchKey of getSortedMatchKeys(round.matches)) {
-        const match = round.matches[matchKey];
+      for (const matchKey of getSortedMatchKeys(
+        (0, documents_js_1.eventRoundMatches)(round),
+      )) {
+        const match = (0, documents_js_1.eventMatchAt)(
+          (0, documents_js_1.eventRoundMatches)(round),
+          matchKey,
+        );
         if (!match || typeof match !== "object") {
           continue;
         }
-        const status = normalizeString(match.status);
-        const hostProfileId = normalizeString(match.hostProfileId);
-        const guestProfileId = normalizeString(match.guestProfileId);
+        const status = normalizeString(
+          (0, documents_js_1.eventMatchState)(match).status,
+        );
+        const hostProfileId = normalizeString(
+          (0, documents_js_1.eventMatchState)(match).hostProfileId,
+        );
+        const guestProfileId = normalizeString(
+          (0, documents_js_1.eventMatchState)(match).guestProfileId,
+        );
         const winnerDisqualified = isMatchWinnerDisqualified(match);
         const hostSlotBlocked = isMatchSlotBlocked(match, "host");
         const guestSlotBlocked = isMatchSlotBlocked(match, "guest");
@@ -474,7 +541,9 @@ const reconcileBracketMatchReadiness = async ({
           continue;
         }
         if (isResolvedMatchStatus(status)) {
-          const winnerProfileId = normalizeString(match.winnerProfileId);
+          const winnerProfileId = normalizeString(
+            (0, documents_js_1.eventMatchState)(match).winnerProfileId,
+          );
           if (
             assignWinnerToNextRound({
               rounds,
@@ -571,7 +640,7 @@ const reconcileBracketMatchReadiness = async ({
           continue;
         }
         if (status !== "upcoming") {
-          match.status = "upcoming";
+          (0, documents_js_1.patchEventMatch)(match, { status: "upcoming" });
           didChange = true;
           passChanged = true;
         }
@@ -588,24 +657,34 @@ const recomputeRoundStatuses = ({ rounds, nowMs }) => {
   let finalRoundWinnerProfileId = null;
   let didChange = false;
   for (const roundIndex of sortedRoundIndexes) {
-    const round = rounds[String(roundIndex)];
-    if (!round?.matches || typeof round.matches !== "object") {
+    const round = (0, documents_js_1.eventRoundAt)(rounds, String(roundIndex));
+    if (!round || !(0, documents_js_1.eventRoundMatches)(round)) {
       continue;
     }
-    const matchKeys = getSortedMatchKeys(round.matches);
+    const matchKeys = getSortedMatchKeys(
+      (0, documents_js_1.eventRoundMatches)(round),
+    );
     const winnerProfileIds = new Set();
     let allResolved = matchKeys.length > 0;
     let hasStarted = false;
     for (const matchKey of matchKeys) {
-      const match = round.matches[matchKey];
+      const match = (0, documents_js_1.eventMatchAt)(
+        (0, documents_js_1.eventRoundMatches)(round),
+        matchKey,
+      );
       if (!match || typeof match !== "object") {
         allResolved = false;
         continue;
       }
       if (
-        normalizeString(match.status) !== "upcoming" ||
-        normalizeString(match.hostProfileId) ||
-        normalizeString(match.guestProfileId) ||
+        normalizeString((0, documents_js_1.eventMatchState)(match).status) !==
+          "upcoming" ||
+        normalizeString(
+          (0, documents_js_1.eventMatchState)(match).hostProfileId,
+        ) ||
+        normalizeString(
+          (0, documents_js_1.eventMatchState)(match).guestProfileId,
+        ) ||
         isMatchSlotBlocked(match, "host") ||
         isMatchSlotBlocked(match, "guest")
       ) {
@@ -615,7 +694,9 @@ const recomputeRoundStatuses = ({ rounds, nowMs }) => {
         allResolved = false;
         continue;
       }
-      const winnerProfileId = normalizeString(match.winnerProfileId);
+      const winnerProfileId = normalizeString(
+        (0, documents_js_1.eventMatchState)(match).winnerProfileId,
+      );
       if (winnerProfileId && !isMatchWinnerDisqualified(match)) {
         winnerProfileIds.add(winnerProfileId);
       }
@@ -625,17 +706,20 @@ const recomputeRoundStatuses = ({ rounds, nowMs }) => {
       : hasStarted
         ? "active"
         : "upcoming";
-    if (round.status !== nextStatus) {
-      round.status = nextStatus;
+    if ((0, documents_js_1.eventRoundState)(round).status !== nextStatus) {
+      (0, documents_js_1.patchEventRound)(round, { status: nextStatus });
       didChange = true;
     }
     if (nextStatus === "completed") {
-      if (typeof round.completedAtMs !== "number") {
-        round.completedAtMs = nowMs;
+      if (
+        typeof (0, documents_js_1.eventRoundState)(round).completedAtMs !==
+        "number"
+      ) {
+        (0, documents_js_1.patchEventRound)(round, { completedAtMs: nowMs });
         didChange = true;
       }
-    } else if (round.completedAtMs !== null) {
-      round.completedAtMs = null;
+    } else if (!(0, documents_js_1.eventRoundState)(round).completedAtIsNull) {
+      (0, documents_js_1.patchEventRound)(round, { completedAtMs: null });
       didChange = true;
     }
     if (!allResolved && earliestUnresolvedRoundIndex === null) {
@@ -670,17 +754,18 @@ const buildFixedBracketState = async ({
   const roundCount = Math.max(1, Math.round(Math.log2(bracketSize)));
   const seedOrder = (0, events_1.buildEventSeedOrder)(bracketSize);
   const inviteUpdates = [];
-  const rounds = {};
+  const rounds = (0, documents_js_1.createEventRoundsDocument)();
   let thirdPlaceMatch = null;
   const seedToProfileId = buildSeedToProfileId({ participantIds, random });
   for (let roundIndex = 0; roundIndex < roundCount; roundIndex += 1) {
-    const round = {
+    const matches = (0, documents_js_1.createEventMatchesDocument)();
+    const round = (0, documents_js_1.createEventRoundDocument)({
       roundIndex,
       status: roundIndex === 0 ? "active" : "upcoming",
       createdAtMs: nowMs,
       completedAtMs: null,
-      matches: {},
-    };
+      matches,
+    });
     const matchCount = bracketSize / Math.pow(2, roundIndex + 1);
     for (let matchIndex = 0; matchIndex < matchCount; matchIndex += 1) {
       const matchKey = (0, events_1.buildEventMatchKey)(roundIndex, matchIndex);
@@ -693,12 +778,18 @@ const buildFixedBracketState = async ({
         setMatchSlotParticipant(
           match,
           "host",
-          participantsById[String(hostProfileId)] || null,
+          (0, documents_js_1.eventParticipantAt)(
+            participantsById,
+            String(hostProfileId),
+          ) || null,
         );
         setMatchSlotParticipant(
           match,
           "guest",
-          participantsById[String(guestProfileId)] || null,
+          (0, documents_js_1.eventParticipantAt)(
+            participantsById,
+            String(guestProfileId),
+          ) || null,
         );
         if (hostProfileId && guestProfileId) {
           await createInviteForMatch({
@@ -723,9 +814,9 @@ const buildFixedBracketState = async ({
           );
         }
       }
-      round.matches[matchKey] = match;
+      (0, documents_js_1.setEventMatch)(matches, matchKey, match);
     }
-    rounds[String(roundIndex)] = round;
+    (0, documents_js_1.setEventRound)(rounds, String(roundIndex), round);
   }
   await reconcileBracketMatchReadiness({
     eventId,
@@ -778,10 +869,11 @@ const buildScheduledEventDueUpdatesCore = async ({
   if (typeof buildRandomGameSeed !== "function") {
     throw new TypeError("buildRandomGameSeed is required");
   }
-  if (!event || event.status !== "scheduled") {
+  if (!event || (0, documents_js_1.eventState)(event).status !== "scheduled") {
     return { didChange: false, updates: [] };
   }
-  if (typeof event.startAtMs !== "number" || nowMs < event.startAtMs) {
+  const startAtMs = (0, documents_js_1.eventState)(event).startAtMs;
+  if (typeof startAtMs !== "number" || nowMs < startAtMs) {
     return { didChange: false, updates: [] };
   }
   const storedParticipantIds = (0, participants_js_1.getEventParticipantIds)(
@@ -796,7 +888,7 @@ const buildScheduledEventDueUpdatesCore = async ({
         typeof prizeSelections !== "object" ||
         Array.isArray(prizeSelections) ||
         Object.keys(prizeSelections).length > 0);
-    Object.assign(event, {
+    (0, documents_js_1.patchEventDocument)(event, {
       status: "dismissed",
       endedAtMs: nowMs,
       updatedAtMs: nowMs,
@@ -815,16 +907,16 @@ const buildScheduledEventDueUpdatesCore = async ({
               },
             ]
           : []),
-        (0, eventCommands_js_1.eventField)(eventId, "status", event.status),
+        (0, eventCommands_js_1.eventField)(eventId, "status", "dismissed"),
         (0, eventCommands_js_1.eventField)(
           eventId,
           "endedAtMs",
-          event.endedAtMs,
+          (0, documents_js_1.eventState)(event).endedAtMs,
         ),
         (0, eventCommands_js_1.eventField)(
           eventId,
           "updatedAtMs",
-          event.updatedAtMs,
+          (0, documents_js_1.eventState)(event).updatedAtMs,
         ),
         (0, eventCommands_js_1.eventField)(eventId, "winnerProfileId", null),
         (0, eventCommands_js_1.eventField)(eventId, "winnerDisplayName", null),
@@ -860,10 +952,14 @@ const buildScheduledEventDueUpdatesCore = async ({
   const canonicalParticipants = (0,
   ownership_js_1.canonicalizeEventParticipants)(event, ownershipSnapshot);
   const participantsById = canonicalParticipants.participantsById;
-  const participantIds = (0, participants_js_1.getEventParticipantIds)({
+  const participantIds = (0, participants_js_1.getEventParticipantIds)(
+    (0, documents_js_1.readEventDocument)({
+      participants: participantsById,
+    }),
+  );
+  (0, documents_js_1.patchEventDocument)(event, {
     participants: participantsById,
   });
-  event.participants = participantsById;
   if (participantIds.length >= 2) {
     const supportsThirdPlaceMatch = hasThirdPlaceMatchField(event);
     const bracket = await buildFixedBracketState({
@@ -876,7 +972,7 @@ const buildScheduledEventDueUpdatesCore = async ({
       buildRandomGameSeed,
       ownershipSnapshot,
     });
-    Object.assign(event, {
+    (0, documents_js_1.patchEventDocument)(event, {
       status: "active",
       startedAtMs: nowMs,
       updatedAtMs: nowMs,
@@ -885,38 +981,40 @@ const buildScheduledEventDueUpdatesCore = async ({
       roundCount: bracket.roundCount,
     });
     if (supportsThirdPlaceMatch) {
-      event.thirdPlaceMatch = bracket.thirdPlaceMatch;
+      (0, documents_js_1.patchEventDocument)(event, {
+        thirdPlaceMatch: bracket.thirdPlaceMatch,
+      });
     }
     return {
       didChange: true,
       updates: [
         ...bracket.inviteUpdates,
         ...prizeSelectionUpdates,
-        (0, eventCommands_js_1.eventField)(eventId, "status", event.status),
+        (0, eventCommands_js_1.eventField)(eventId, "status", "active"),
         (0, eventCommands_js_1.eventField)(
           eventId,
           "startedAtMs",
-          event.startedAtMs,
+          (0, documents_js_1.eventState)(event).startedAtMs,
         ),
         (0, eventCommands_js_1.eventField)(
           eventId,
           "updatedAtMs",
-          event.updatedAtMs,
+          (0, documents_js_1.eventState)(event).updatedAtMs,
         ),
         (0, eventCommands_js_1.eventField)(
           eventId,
           "currentRoundIndex",
-          event.currentRoundIndex,
+          (0, documents_js_1.eventState)(event).currentRoundIndex,
         ),
         (0, eventCommands_js_1.eventField)(
           eventId,
           "bracketSize",
-          event.bracketSize,
+          (0, documents_js_1.eventState)(event).bracketSize,
         ),
         (0, eventCommands_js_1.eventField)(
           eventId,
           "roundCount",
-          event.roundCount,
+          (0, documents_js_1.eventState)(event).roundCount,
         ),
         (0, eventCommands_js_1.eventField)(eventId, "rounds", bracket.rounds),
         ...(canonicalParticipants.didChange

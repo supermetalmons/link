@@ -1,3 +1,8 @@
+import type {
+  ApiTransport,
+  ApiRequestValidator,
+  ApiParameters,
+} from "@mons/shared/api-contracts";
 import {
   PRESENTATION_MAX_REQUEST_BYTES,
   isUpdateMatchPresentationRequest,
@@ -29,6 +34,10 @@ import {
   requirePresentationPair,
   type MatchPresentationReadDependencies,
 } from "./matchPresentationAccess.ts";
+type MatchPresentationConflictResponse = Extract<
+  ApiTransport<"POST /invites/:inviteId/matches/:matchId/presentation">,
+  { kind: "json"; status: 409; body: { error: "presentation-conflict" } }
+>["body"];
 
 const PRESENTATION_ROUTE_PATTERN =
   /^\/invites\/([^/]+)\/matches\/([^/]+)\/presentation$/;
@@ -49,7 +58,9 @@ export function isMatchPresentationPath(pathname: string): boolean {
   return PRESENTATION_ROUTE_PATTERN.test(pathname);
 }
 
-function readRoute(request: Request): { inviteId: string; matchId: string } {
+function readRoute(
+  request: Request,
+): ApiParameters<"GET /invites/:inviteId/matches/:matchId/presentation"> {
   const url = new URL(request.url);
   const parts = url.pathname.match(PRESENTATION_ROUTE_PATTERN);
   try {
@@ -143,7 +154,11 @@ export async function handleMatchPresentationRoute(
           "invalid-presentation",
         );
       }
-      if (!isUpdateMatchPresentationRequest(update))
+      if (
+        !(
+          isUpdateMatchPresentationRequest satisfies ApiRequestValidator<"POST /invites/:inviteId/matches/:matchId/presentation">
+        )(update)
+      )
         throw new AuthApiFailure(
           400,
           "invalid-argument",
@@ -164,29 +179,35 @@ export async function handleMatchPresentationRoute(
       },
     );
     if (request.method === "GET")
-      return authJsonResponse(
-        { ok: true, presentation: snapshot },
-        200,
-        corsHeaders,
-      );
-    if (!actorUid || !isUpdateMatchPresentationRequest(update))
+      return authJsonResponse<
+        "GET /invites/:inviteId/matches/:matchId/presentation",
+        200
+      >({ ok: true, presentation: snapshot }, 200, corsHeaders);
+    if (
+      !actorUid ||
+      !(
+        isUpdateMatchPresentationRequest satisfies ApiRequestValidator<"POST /invites/:inviteId/matches/:matchId/presentation">
+      )(update)
+    )
       throw new TypeError("invalid-presentation-update");
     const result = await room.updatePresentation(actorUid, matchId, update);
     return result.status === "conflict"
-      ? authJsonResponse(
+      ? authJsonResponse<
+          "POST /invites/:inviteId/matches/:matchId/presentation",
+          409
+        >(
           {
             ok: false,
             error: "presentation-conflict",
             presentation: result.presentation,
-          },
+          } satisfies MatchPresentationConflictResponse,
           409,
           corsHeaders,
         )
-      : authJsonResponse(
-          { ok: true, presentation: result.presentation },
-          200,
-          corsHeaders,
-        );
+      : authJsonResponse<
+          "POST /invites/:inviteId/matches/:matchId/presentation",
+          200
+        >({ ok: true, presentation: result.presentation }, 200, corsHeaders);
   } catch (error) {
     if (error instanceof AuthApiFailure)
       return authErrorResponse(error, corsHeaders);

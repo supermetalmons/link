@@ -1,6 +1,21 @@
+type AppleAuthOptions = {
+  clientId: string;
+  redirectURI: string;
+  state: string;
+  nonce: string;
+  usePopup: boolean;
+  responseType: "id_token";
+  responseMode: "fragment";
+};
+
+type AppleAuthSdk = {
+  init(options: AppleAuthOptions): unknown;
+  signIn(): unknown;
+};
+
 declare global {
   interface Window {
-    AppleID?: any;
+    AppleID?: { auth: AppleAuthSdk };
   }
 }
 
@@ -169,7 +184,9 @@ const loadAppleScript = async (): Promise<void> => {
         const didLoad = existingScript.getAttribute("data-loaded") === "true";
         const didFail =
           existingScript.getAttribute("data-load-failed") === "true";
-        const readyState = (existingScript as any).readyState;
+        const readyState = (
+          existingScript as HTMLScriptElement & { readyState?: unknown }
+        ).readyState;
         if (didLoad && (!window.AppleID || !window.AppleID.auth)) {
           existingScript.remove();
         } else if (didLoad || (window.AppleID && window.AppleID.auth)) {
@@ -268,13 +285,23 @@ const parsePendingAppleIntentRecordsFromStorage = (
     if (!raw) {
       return [];
     }
-    const parsed = JSON.parse(raw);
+    const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) {
       return [];
     }
     const nowMs = Date.now();
     return parsed
-      .map((item) => {
+      .map((value: unknown) => {
+        const item = value as
+          | {
+              state?: unknown;
+              intentId?: unknown;
+              consentSource?: unknown;
+              createdAtMs?: unknown;
+              expiresAtMs?: unknown;
+            }
+          | null
+          | undefined;
         const state = typeof item?.state === "string" ? item.state : "";
         const intentId =
           typeof item?.intentId === "string" ? item.intentId : "";
@@ -606,34 +633,32 @@ export const clearAppleSignInTransientState = (): void => {
 };
 
 const extractApplePopupSignals = (
-  value: any,
+  value: unknown,
 ): {
   idToken: string;
   stateCandidates: string[];
 } => {
+  type SignalFields = { id_token?: unknown; state?: unknown };
+  const root =
+    value && typeof value === "object"
+      ? (value as SignalFields & { authorization?: unknown })
+      : null;
   const authorization =
-    value &&
-    typeof value === "object" &&
-    value.authorization &&
-    typeof value.authorization === "object"
-      ? value.authorization
+    root && root.authorization && typeof root.authorization === "object"
+      ? (root.authorization as SignalFields)
       : null;
   const idTokenFromAuthorization =
     authorization && typeof authorization.id_token === "string"
       ? authorization.id_token
       : "";
   const idTokenFromRoot =
-    value && typeof value === "object" && typeof value.id_token === "string"
-      ? value.id_token
-      : "";
+    root && typeof root.id_token === "string" ? root.id_token : "";
   const stateFromAuthorization =
     authorization && typeof authorization.state === "string"
       ? authorization.state
       : "";
   const stateFromRoot =
-    value && typeof value === "object" && typeof value.state === "string"
-      ? value.state
-      : "";
+    root && typeof root.state === "string" ? root.state : "";
   const stateCandidates = [stateFromAuthorization, stateFromRoot].filter(
     (candidate) => candidate !== "",
   );
@@ -654,7 +679,7 @@ const hasMatchingApplePopupState = (
 };
 
 const getApplePopupSignalScore = (
-  value: any,
+  value: unknown,
   expectedStates: ReadonlySet<string>,
 ): number => {
   const { idToken, stateCandidates } = extractApplePopupSignals(value);
@@ -665,13 +690,15 @@ const getApplePopupSignalScore = (
 };
 
 const isCompleteApplePopupResult = (
-  value: any,
+  value: unknown,
   expectedStates: ReadonlySet<string>,
 ): boolean => {
   return getApplePopupSignalScore(value, expectedStates) === 3;
 };
 
-const waitForApplePopupResult = (expectedStates: string[]): Promise<any> => {
+const waitForApplePopupResult = (
+  expectedStates: string[],
+): Promise<unknown> => {
   const INCOMPLETE_RESULT_GRACE_MS = 1500;
   type PopupResultSource = "event" | "promise";
   const expectedStateSet = new Set(
@@ -683,7 +710,7 @@ const waitForApplePopupResult = (expectedStates: string[]): Promise<any> => {
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
     let fallbackResolveId: ReturnType<typeof setTimeout> | null = null;
     let pendingIncompleteResult: {
-      value: any;
+      value: unknown;
       score: number;
       source: PopupResultSource;
     } | null = null;
@@ -703,7 +730,7 @@ const waitForApplePopupResult = (expectedStates: string[]): Promise<any> => {
         onFailure as EventListener,
       );
     };
-    const finishResolve = (value: any) => {
+    const finishResolve = (value: unknown) => {
       if (settled) {
         return;
       }
@@ -721,7 +748,7 @@ const waitForApplePopupResult = (expectedStates: string[]): Promise<any> => {
     };
 
     const rememberIncompleteResult = (
-      value: any,
+      value: unknown,
       source: PopupResultSource,
     ) => {
       const nextScore = getApplePopupSignalScore(value, expectedStateSet);
@@ -739,7 +766,7 @@ const waitForApplePopupResult = (expectedStates: string[]): Promise<any> => {
       }
     };
 
-    const maybeResolve = (value: any, source: PopupResultSource) => {
+    const maybeResolve = (value: unknown, source: PopupResultSource) => {
       if (isCompleteApplePopupResult(value, expectedStateSet)) {
         if (fallbackResolveId) {
           clearTimeout(fallbackResolveId);
@@ -763,7 +790,7 @@ const waitForApplePopupResult = (expectedStates: string[]): Promise<any> => {
       }, INCOMPLETE_RESULT_GRACE_MS);
     };
     const onSuccess = (event: Event) => {
-      const detail = (event as CustomEvent<any>).detail;
+      const detail = (event as CustomEvent<unknown>).detail;
       const data =
         detail && typeof detail === "object" && "data" in detail
           ? detail.data
@@ -771,7 +798,7 @@ const waitForApplePopupResult = (expectedStates: string[]): Promise<any> => {
       maybeResolve(data, "event");
     };
     const onFailure = (event: Event) => {
-      const detail = (event as CustomEvent<any>).detail;
+      const detail = (event as CustomEvent<unknown>).detail;
       const err =
         detail && typeof detail === "object" && "error" in detail
           ? detail.error
@@ -799,7 +826,7 @@ const waitForApplePopupResult = (expectedStates: string[]): Promise<any> => {
     timeoutId = setTimeout(() => {
       finishReject(new Error("Apple sign in popup timed out"));
     }, 60000);
-    Promise.resolve(window.AppleID.auth.signIn())
+    Promise.resolve(window.AppleID!.auth.signIn())
       .then((value) => maybeResolve(value, "promise"))
       .catch(finishReject);
   });
@@ -853,7 +880,7 @@ export async function signInWithApplePopup({
     });
   }
 
-  window.AppleID.auth.init({
+  window.AppleID!.auth.init({
     clientId,
     redirectURI,
     state: resolvedState,
@@ -864,7 +891,7 @@ export async function signInWithApplePopup({
   });
 
   if (useRedirect) {
-    await window.AppleID.auth.signIn();
+    await window.AppleID!.auth.signIn();
     return null;
   }
 

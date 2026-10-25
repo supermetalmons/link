@@ -1,12 +1,12 @@
 // Generated from src/eventPrizes/projectionReconciliation.ts. Run npm run generate:runtime.
+import type { WithdrawalDocument } from "./records.js";
 import type {
-  WithdrawalData,
   WithdrawalCompletionInput,
   WithdrawalProjectionDependencies,
   WithdrawalCompletionDependencies,
 } from "./types.js";
 type ProjectionReconciliationInput = {
-  withdrawal: WithdrawalData;
+  withdrawal: WithdrawalDocument;
   profileIds?: readonly string[];
   eventId: string;
   prizeId: string;
@@ -30,23 +30,7 @@ declare const finalizeWithdrawal: (
     transactionSignature,
   }: WithdrawalCompletionInput,
   dependencies: WithdrawalCompletionDependencies,
-) => Promise<{
-  eventId: string;
-  prizeId: string;
-  assetAddress: string;
-  assetStandard: string;
-  profileId: string;
-  entitledProfileId: string;
-  place: number;
-  recipientAddress: string;
-  requesterUid: string;
-  status: "completed";
-  transactionSignature: string;
-  startedAtMs: number;
-  submittedAtMs: number;
-  completedAtMs: number;
-  updatedAtMs: number;
-}>;
+) => Promise<import("./records.js").CompletedWithdrawalDocument>;
 export {
   attemptCompletedWithdrawalProjectionReconciliation,
   finalizeWithdrawal,

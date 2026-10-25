@@ -12,6 +12,8 @@ import {
 } from "../src/eventPrizeWithdrawal.ts";
 import { createEventPrizeContext } from "../src/eventPrizeWithdrawal/context.ts";
 import type { EventPrizeWithdrawalStore } from "../src/eventPrizeWithdrawalD1.ts";
+import { createWithdrawalRecordCommands } from "../../../runtime/eventPrizes/withdrawalRepository.js";
+import { withdrawalFixture } from "./withdrawalStorageFixture.ts";
 import type { EventPrizeRepository } from "../src/eventPrizeRepository.ts";
 import { isMatchingProfileEventPrizeAssignment } from "../../../runtime/eventPrizeWithdrawalState.js";
 import type { EventPrizeAssignmentRecord } from "../../../runtime/eventReads.js";
@@ -233,17 +235,22 @@ function repository() {
   };
   const withdrawalStore: EventPrizeWithdrawalStore = {
     async get(candidateEventId, candidatePrizeId) {
-      return (
-        (values.get(
-          `eventPrizeWithdrawals/${candidateEventId}/${candidatePrizeId}`,
-        ) as Record<string, unknown> | undefined) ?? null
+      const current = values.get(
+        `eventPrizeWithdrawals/${candidateEventId}/${candidatePrizeId}`,
       );
+      return current == null
+        ? null
+        : withdrawalFixture(current as Record<string, unknown>);
     },
     record(candidateEventId, candidatePrizeId) {
       const path = `eventPrizeWithdrawals/${candidateEventId}/${candidatePrizeId}`;
-      const read = () =>
-        (values.get(path) as Record<string, unknown> | undefined) ?? null;
-      return {
+      const read = () => {
+        const current = values.get(path);
+        return current == null
+          ? null
+          : withdrawalFixture(current as Record<string, unknown>);
+      };
+      return createWithdrawalRecordCommands({
         async read() {
           return read();
         },
@@ -266,9 +273,9 @@ function repository() {
             value: next,
           };
         },
-      };
+      });
     },
-    async replaceRecords(records) {
+    async replaceCompleted(records) {
       for (const { eventId, prizeId, value: next } of records) {
         const path = `eventPrizeWithdrawals/${eventId}/${prizeId}`;
         if (next === null) values.delete(path);
@@ -903,10 +910,10 @@ test("completion observed during claim acquisition returns without projection cl
     const withdrawalRecord = record(...args);
     return {
       ...withdrawalRecord,
-      async transaction(updater) {
+      async claim(input) {
         claimAttempts++;
         state.values.set(withdrawalPath, completed);
-        return withdrawalRecord.transaction(updater);
+        return withdrawalRecord.claim(input);
       },
     };
   };
@@ -1062,10 +1069,7 @@ test("rejects a contradictory durable processing admission", async () => {
       {
         readProfileOwnershipSnapshot:
           ownershipReader().readProfileOwnershipSnapshot,
-        readWithdrawal: async (candidateEventId, candidatePrizeId) =>
-          (state.values.get(
-            `eventPrizeWithdrawals/${candidateEventId}/${candidatePrizeId}`,
-          ) as Record<string, unknown> | undefined) ?? null,
+        readWithdrawal: state.withdrawalStore.get,
       },
     ),
     (error) =>
@@ -1094,16 +1098,17 @@ test("validates processing ownership through a canonical merge", async () => {
     readProfileOwnershipSnapshot: ownershipReader({
       canonicalProfileIds: new Map([["retired-profile", "canonical-profile"]]),
     }).readProfileOwnershipSnapshot,
-    readWithdrawal: async () => ({
-      assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
-      eventId,
-      place: 1,
-      prizeId,
-      profileId: "retired-profile",
-      recipientAddress,
-      requesterUid: uid,
-      status: "processing",
-    }),
+    readWithdrawal: async () =>
+      withdrawalFixture({
+        assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
+        eventId,
+        place: 1,
+        prizeId,
+        profileId: "retired-profile",
+        recipientAddress,
+        requesterUid: uid,
+        status: "processing",
+      }),
   });
   assert.equal(resolved.profileId, "canonical-profile");
 });
@@ -1127,16 +1132,17 @@ test("lets an alternate canonical login execute an existing processing intent", 
     {
       readProfileOwnershipSnapshot:
         ownershipReader().readProfileOwnershipSnapshot,
-      readWithdrawal: async () => ({
-        assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
-        eventId,
-        place: 1,
-        prizeId,
-        profileId,
-        recipientAddress,
-        requesterUid: "original-login",
-        status: "processing",
-      }),
+      readWithdrawal: async () =>
+        withdrawalFixture({
+          assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
+          eventId,
+          place: 1,
+          prizeId,
+          profileId,
+          recipientAddress,
+          requesterUid: "original-login",
+          status: "processing",
+        }),
     },
   );
   assert.equal(resolved.requesterUid, "alternate-login");
@@ -1161,16 +1167,17 @@ test("executes a processing capability without rereading the live owner", async 
   const resolved = await resolveEventPrizeWithdrawalExecutionParams(params, {
     readProfileOwnershipSnapshot:
       ownershipReader().readProfileOwnershipSnapshot,
-    readWithdrawal: async () => ({
-      assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
-      eventId,
-      place: 1,
-      prizeId,
-      profileId,
-      recipientAddress,
-      requesterUid: uid,
-      status: "processing",
-    }),
+    readWithdrawal: async () =>
+      withdrawalFixture({
+        assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
+        eventId,
+        place: 1,
+        prizeId,
+        profileId,
+        recipientAddress,
+        requesterUid: uid,
+        status: "processing",
+      }),
   });
   assert.deepEqual(resolved, params);
 });
@@ -1196,16 +1203,17 @@ test("fails closed when the admitted profile no longer exists", async () => {
         readProfileOwnershipSnapshot: ownershipReader({
           canonicalProfileIds: new Map([[profileId, null]]),
         }).readProfileOwnershipSnapshot,
-        readWithdrawal: async () => ({
-          assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
-          eventId,
-          place: 1,
-          prizeId,
-          profileId,
-          recipientAddress,
-          requesterUid: uid,
-          status: "processing",
-        }),
+        readWithdrawal: async () =>
+          withdrawalFixture({
+            assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
+            eventId,
+            place: 1,
+            prizeId,
+            profileId,
+            recipientAddress,
+            requesterUid: uid,
+            status: "processing",
+          }),
       },
     ),
     (error) =>
@@ -1233,16 +1241,17 @@ test("preserves submitted reconciliation after the login is unlinked", async () 
   const resolved = await resolveEventPrizeWithdrawalExecutionParams(params, {
     readProfileOwnershipSnapshot:
       ownershipReader().readProfileOwnershipSnapshot,
-    readWithdrawal: async () => ({
-      assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
-      eventId,
-      place: 1,
-      prizeId,
-      profileId,
-      recipientAddress,
-      requesterUid: uid,
-      status: "submitted",
-    }),
+    readWithdrawal: async () =>
+      withdrawalFixture({
+        assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
+        eventId,
+        place: 1,
+        prizeId,
+        profileId,
+        recipientAddress,
+        requesterUid: uid,
+        status: "submitted",
+      }),
   });
   assert.deepEqual(resolved, params);
 });

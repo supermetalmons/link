@@ -1,3 +1,10 @@
+import type { EventProjectionOutboxDocument } from "../../../runtime/eventProjectionOutboxRecords.js";
+import type { TransactionResult } from "../../../runtime/transactions.js";
+import {
+  repairEventProfileProjectionRecord,
+  markInvalidEventTelegramProjectionRecord,
+  type EventProfileProjectionRepair,
+} from "./eventProjectionRecoveryRecords.ts";
 import {
   listDueProjectionOutboxSnapshots,
   listDueProjectionOutboxSnapshotsPage,
@@ -10,47 +17,65 @@ import {
   transactEventTelegramProjectionOutbox,
 } from "./eventD1/transactions.ts";
 import { EventD1Failure, type EventD1Connection } from "./eventD1/types.ts";
-import type { EventRecordTransaction } from "./eventStoreContracts.ts";
 import { withEventWriteAdmission } from "./eventWriteAdmission.ts";
 import type { RecoveryScanPage } from "./recoveryScanPage.ts";
 
 export type EventProjectionRecoveryKind = ProjectionOutboxKind;
-export type EventProjectionRecoverySnapshot = ProjectionOutboxSnapshot;
+export type EventProjectionRecoverySnapshot<
+  Kind extends EventProjectionRecoveryKind = EventProjectionRecoveryKind,
+> = ProjectionOutboxSnapshot<Kind>;
 
-export type EventProjectionRecoveryWriter = {
+type EventProjectionRecoveryClaim<Kind extends EventProjectionRecoveryKind> = {
   claim(
-    snapshot: EventProjectionRecoverySnapshot,
+    snapshot: EventProjectionRecoverySnapshot<Kind>,
     requestId: string,
     expectedTimestamp: number,
     nowMs: number,
     signal?: AbortSignal,
   ): Promise<boolean>;
-  transact: EventRecordTransaction;
 };
+type EventProjectionRecoveryWriters = {
+  "profile-game": EventProjectionRecoveryClaim<"profile-game"> & {
+    repairInvalid(
+      eventId: string,
+      input: EventProfileProjectionRepair,
+      signal?: AbortSignal,
+    ): Promise<
+      TransactionResult<EventProjectionOutboxDocument<"profile-game">>
+    >;
+  };
+  telegram: EventProjectionRecoveryClaim<"telegram"> & {
+    markInvalid(
+      eventId: string,
+      nowMs: number,
+      signal?: AbortSignal,
+    ): Promise<TransactionResult<EventProjectionOutboxDocument<"telegram">>>;
+  };
+};
+export type EventProjectionRecoveryWriter<
+  Kind extends EventProjectionRecoveryKind = EventProjectionRecoveryKind,
+> = EventProjectionRecoveryWriters[Kind];
 
-export type EventProjectionRecoveryStore = {
+export type EventProjectionRecoveryStore<
+  Kind extends EventProjectionRecoveryKind = EventProjectionRecoveryKind,
+> = {
   listDue(
     beforeMs: number,
     limit: number,
-  ): Promise<EventProjectionRecoverySnapshot[]>;
+  ): Promise<EventProjectionRecoverySnapshot<Kind>[]>;
   listDuePage(
     beforeMs: number,
     limit: number,
     excludedIdentities?: readonly string[],
-  ): Promise<RecoveryScanPage<EventProjectionRecoverySnapshot[]>>;
+  ): Promise<RecoveryScanPage<EventProjectionRecoverySnapshot<Kind>[]>>;
   withAdmission<T>(
-    work: (writer: EventProjectionRecoveryWriter) => Promise<T>,
+    work: (writer: EventProjectionRecoveryWriter<Kind>) => Promise<T>,
   ): Promise<T>;
 };
 
-export function createEventProjectionRecoveryStore(
-  db: EventD1Connection,
-  kind: EventProjectionRecoveryKind,
-): EventProjectionRecoveryStore {
-  const transact =
-    kind === "profile-game"
-      ? transactEventProfileGameProjectionOutbox
-      : transactEventTelegramProjectionOutbox;
+export function createEventProjectionRecoveryStore<
+  Kind extends EventProjectionRecoveryKind,
+>(db: EventD1Connection, kind: Kind): EventProjectionRecoveryStore<Kind> {
   return {
     listDue: (beforeMs, limit) =>
       listDueProjectionOutboxSnapshots(db, kind, beforeMs, limit),
@@ -66,9 +91,9 @@ export function createEventProjectionRecoveryStore(
       withEventWriteAdmission(
         db,
         { kind: "mutation", context: "event-path-transaction" },
-        (admission) =>
-          work({
-            claim(snapshot, requestId, expectedTimestamp, nowMs, signal) {
+        (admission) => {
+          const claim: EventProjectionRecoveryClaim<EventProjectionRecoveryKind>["claim"] =
+            (snapshot, requestId, expectedTimestamp, nowMs, signal) => {
               if (snapshot.kind !== kind) {
                 return Promise.reject(
                   new EventD1Failure("event-projection-recovery-kind-mismatch"),
@@ -82,10 +107,37 @@ export function createEventProjectionRecoveryStore(
                 nowMs,
                 { admission, signal },
               );
+            };
+          const writers: EventProjectionRecoveryWriters = {
+            "profile-game": {
+              claim,
+              repairInvalid: (eventId, input, signal) =>
+                transactEventProfileGameProjectionOutbox(
+                  db,
+                  eventId,
+                  (current) =>
+                    repairEventProfileProjectionRecord(current, input),
+                  { admission, signal },
+                ),
             },
-            transact: (eventId, updater, signal) =>
-              transact(db, eventId, updater, { admission, signal }),
-          }),
+            telegram: {
+              claim,
+              markInvalid: (eventId, nowMs, signal) =>
+                transactEventTelegramProjectionOutbox(
+                  db,
+                  eventId,
+                  (current) =>
+                    markInvalidEventTelegramProjectionRecord(
+                      current,
+                      eventId,
+                      nowMs,
+                    ),
+                  { admission, signal },
+                ),
+            },
+          };
+          return work(writers[kind]);
+        },
       ),
   };
 }

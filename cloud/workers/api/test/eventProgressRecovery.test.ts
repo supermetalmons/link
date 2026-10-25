@@ -1,3 +1,4 @@
+import { retainEventProgressRecord } from "../../../runtime/eventProgressRecords.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { WorkflowInstanceStatus } from "cloudflare:workers";
@@ -23,9 +24,17 @@ async function fixture(runAtMs: number | null = 20_000_000) {
   const calls: string[] = [];
   const repository: EventProgressSweepRepository = {
     readEvent: async () => null,
-    readEventProgressOutbox: async () => record,
+    readEventProgressOutbox: async () =>
+      retainEventProgressRecord("pending", record),
     listDueEventProgressOutboxes: async () =>
-      record ? [{ outboxId: plan.outboxId, record }] : [],
+      record
+        ? [
+            {
+              outboxId: plan.outboxId,
+              record: retainEventProgressRecord("pending", record),
+            },
+          ]
+        : [],
     commitEventPlan: async (commands) => {
       for (const command of commands)
         if (command.kind === "progress-outbox") record = command.value;

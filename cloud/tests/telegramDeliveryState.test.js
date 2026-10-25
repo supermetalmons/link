@@ -6,6 +6,7 @@ const {
   omitKeys,
   preserveSendEvidence,
   readDelivery,
+  deliveryDocument,
   readPendingDelete,
   resolvePendingDeleteId,
   writeCleanup,
@@ -59,7 +60,7 @@ test("delivery views retain historical encodings and untouched fields", () => {
     resolvePendingDeleteId(delivery.pendingDelete),
     resolvePendingDeleteId(source.pendingDelete),
   );
-  assert.deepEqual(delivery.source, original);
+  assert.deepEqual(deliveryDocument(delivery), original);
   assert.deepEqual(source, original);
 });
 

@@ -436,6 +436,43 @@ test("creation and refresh use conservative request-relative deadlines with eith
   }
 });
 
+test("JWT timing claims decode unknown JSON with the existing numeric and lifetime policy", async () => {
+  const issuedAt = 1_700_000_000;
+  const expiresAt = issuedAt + 300;
+  for (const claims of [
+    null,
+    false,
+    7,
+    "claims",
+    [],
+    {},
+    { iat: String(issuedAt), exp: expiresAt },
+    { iat: issuedAt, exp: String(expiresAt) },
+    { iat: issuedAt + 0.5, exp: expiresAt },
+    { iat: issuedAt, exp: expiresAt + 0.5 },
+    { iat: 0, exp: 300 },
+    { iat: issuedAt, exp: issuedAt },
+    { iat: issuedAt, exp: issuedAt - 1 },
+    { iat: issuedAt, exp: expiresAt + 1 },
+    { iat: Number.MAX_SAFE_INTEGER + 1, exp: expiresAt },
+    { iat: issuedAt, exp: Number.MAX_SAFE_INTEGER + 1 },
+  ]) {
+    const body = response(issuedAt);
+    body.accessToken = `header.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`;
+    globalThis.fetch = async () => json(body);
+    await assert.rejects(sessionApi.refresh(session), { code: "unavailable" });
+  }
+  const body = response(issuedAt);
+  body.accessToken = `header.${Buffer.from(JSON.stringify({ iat: issuedAt, exp: expiresAt, providerSpecific: "retained" })).toString("base64url")}.signature`;
+  globalThis.fetch = async () => json(body);
+  const before = performance.now();
+  const result = await sessionApi.refresh(session);
+  assert.equal(result.accessToken, body.accessToken);
+  assert.equal(result.accessExpiresAtMs, expiresAt * 1000);
+  assert.ok(result.accessDeadlineMs >= before + 299_000);
+  assert.ok(result.accessDeadlineMs <= performance.now() + 299_000);
+});
+
 test("network and body time consume token lifetime without depending on later wall-clock changes", async (t) => {
   let elapsed = 1000;
   t.mock.method(performance, "now", () => elapsed);

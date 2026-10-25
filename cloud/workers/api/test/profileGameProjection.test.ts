@@ -1,4 +1,10 @@
 import {
+  profileProjectionWriterFixture,
+  profileProjectionRepairWriterFixture,
+} from "./eventProjectionRecoveryFixture.ts";
+import { eventProjectionOutboxFixture } from "./profileDataBoundaryFixture.ts";
+import { eventDocumentFixture } from "./eventCompatibilityFixture.ts";
+import {
   projectionRecoveryEntryIdentity,
   projectionRecoveryPage,
 } from "./projectionRecoveryFixtures.ts";
@@ -14,7 +20,6 @@ import type {
   RatingProfileGameProjectionRepository,
   RatingUpdateData,
 } from "../src/ratingContracts.ts";
-import type { EventProjectionRecoveryWriter } from "../src/eventProjectionRecoveryD1.ts";
 import {
   claimAutomatchSweepCandidate,
   claimEventSweepCandidate,
@@ -1335,7 +1340,7 @@ test("event projection cannot write after its lease is taken over", async () => 
         writes.push(nextWrites);
       },
       async getEvent() {
-        return {
+        return eventDocumentFixture({
           eventId: "event-1",
           status: "scheduled",
           startAtMs: 100,
@@ -1346,7 +1351,7 @@ test("event projection cannot write after its lease is taken over", async () => 
               loginUid: "removed-login",
             },
           },
-        };
+        });
       },
       async readProfileOwnershipSnapshot({ loginUids, profileIds }) {
         if (!tookOver) {
@@ -2621,7 +2626,7 @@ test("rating recovery retains falsy failures after healthy dispatch and gives Qu
 });
 
 test("event recovery helpers accept only their required outbox capabilities", async () => {
-  const state: EventProjectionRecoveryWriter = {
+  const state = profileProjectionWriterFixture({
     async claim(snapshot, requestId, expectedLastQueuedAtMs, nowMs) {
       assert.deepEqual(
         [snapshot.eventId, requestId, expectedLastQueuedAtMs, nowMs],
@@ -2635,7 +2640,7 @@ test("event recovery helpers accept only their required outbox capabilities", as
       assert.equal(decision.commit, false);
       return { committed: false, decision: decision.decision, value: null };
     },
-  };
+  });
   assert.equal(
     await claimEventSweepCandidate(
       state,
@@ -2643,7 +2648,10 @@ test("event recovery helpers accept only their required outbox capabilities", as
         snapshot: {
           kind: "profile-game",
           eventId: "event-1",
-          record: eventOutbox("request-1", 0),
+          record: eventProjectionOutboxFixture(
+            "profile-game",
+            eventOutbox("request-1", 0),
+          ),
           recordJson: JSON.stringify(eventOutbox("request-1", 0)),
         },
         lastQueuedAtMs: 0,
@@ -2672,7 +2680,7 @@ test("event recovery normalizes every non-null malformed marker", async () => {
   const runRepair = async (value: unknown, eventId = "event-1") => {
     let current = value;
     const result = await repairInvalidEventSweepEntry(
-      {
+      profileProjectionRepairWriterFixture({
         transact: async (_eventId, updater) => {
           const value = current as Parameters<typeof updater>[0];
           const decision = updater(value);
@@ -2686,7 +2694,7 @@ test("event recovery normalizes every non-null malformed marker", async () => {
             value: decision.value,
           };
         },
-      },
+      }),
       eventId,
       600_000,
       () => "repair-request",

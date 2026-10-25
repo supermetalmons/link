@@ -1,3 +1,9 @@
+import { eventProjectionOutboxFixture } from "./profileDataBoundaryFixture.ts";
+import {
+  retainedAutomatchPageFixture,
+  retainedAutomatchPageReaderFixture,
+  retainedAutomatchSnapshotFixture,
+} from "./automatchRecordFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createRatingRepository } from "../src/ratingRepository.ts";
@@ -418,26 +424,26 @@ test("profile-link concurrent sweeps retain the five-minute cutoff and dispatch 
 
 test("event pages release admissions and retain repair-before-first-claim error ordering", async () => {
   for (const failRepair of [false, true]) {
-    const data: EventProjectionRecoverySnapshot[] = records(21).map(
-      ({ inviteId }, index) => {
-        const record =
-          failRepair && index === 10
-            ? { status: "bad" }
-            : {
-                schemaVersion: 1,
-                status: "pending",
-                requestId: `request-${inviteId}`,
-                lastQueuedAtMs: 1,
-                cleanupOwnerProfileIds: {},
-              };
-        return {
-          kind: "profile-game",
-          eventId: inviteId,
-          record,
-          recordJson: JSON.stringify(record),
-        };
-      },
-    );
+    const data: EventProjectionRecoverySnapshot<"profile-game">[] = records(
+      21,
+    ).map(({ inviteId }, index) => {
+      const record =
+        failRepair && index === 10
+          ? { status: "bad" }
+          : {
+              schemaVersion: 1,
+              status: "pending",
+              requestId: `request-${inviteId}`,
+              lastQueuedAtMs: 1,
+              cleanupOwnerProfileIds: {},
+            };
+      return {
+        kind: "profile-game",
+        eventId: inviteId,
+        record: eventProjectionOutboxFixture("profile-game", record),
+        recordJson: JSON.stringify(record),
+      };
+    });
     const firstClaimFailure = new Error("first-claim");
     const secondClaimFailure = new Error("second-claim");
     const repairFailure = new Error("second-page-repair");
@@ -445,7 +451,7 @@ test("event pages release admissions and retain repair-before-first-claim error 
     let releases = 0;
     let active = 0;
     const { batches, env } = queueFixture(() => assert.equal(active, 1));
-    const recovery: EventProjectionRecoveryStore = {
+    const recovery: EventProjectionRecoveryStore<"profile-game"> = {
       listDue: async () => assert.fail("unexpected-legacy-scan"),
       async listDuePage(cutoff, limit, excluded = []) {
         assert.equal(cutoff, 300_000);
@@ -470,7 +476,7 @@ test("event pages release admissions and retain repair-before-first-claim error 
                 throw secondClaimFailure;
               return true;
             },
-            transact: async () => {
+            repairInvalid: async () => {
               throw repairFailure;
             },
           });
@@ -551,10 +557,9 @@ test("automatch due and malformed pages retain independent caps and repair-befor
   ) => {
     assert.equal(cutoff, 300_000);
     dueScans++;
-    return recoveryRecordPageFixture(
-      Object.fromEntries(healthy),
-      limit,
-      excluded,
+    return retainedAutomatchPageFixture(
+      "profileGameProjectionOutbox/automatch",
+      recoveryRecordPageFixture(Object.fromEntries(healthy), limit, excluded),
     );
   };
   state.projectionRecovery.listMalformedAutomatchProfileOutboxesPage = async (
@@ -562,10 +567,9 @@ test("automatch due and malformed pages retain independent caps and repair-befor
     excluded = [],
   ) => {
     malformedScans++;
-    return recoveryRecordPageFixture(
-      Object.fromEntries(malformed),
-      limit,
-      excluded,
+    return retainedAutomatchPageFixture(
+      "profileGameProjectionOutbox/automatch",
+      recoveryRecordPageFixture(Object.fromEntries(malformed), limit, excluded),
     );
   };
   const { batches, env } = queueFixture();
@@ -622,10 +626,9 @@ test("Telegram automatch paging never reclaims the first page at the same timest
     excluded = [],
   ) => {
     assert.equal(cutoff, nowMs);
-    return recoveryRecordPageFixture(
-      Object.fromEntries(values),
-      limit,
-      excluded,
+    return retainedAutomatchPageFixture(
+      "telegramProjectionOutbox/automatch",
+      recoveryRecordPageFixture(Object.fromEntries(values), limit, excluded),
     );
   };
   const { batches, env } = queueFixture();
@@ -661,7 +664,12 @@ for (const lane of ["profile-game", "telegram"] as const) {
     const snapshots = new Map<string, AutomatchOutboxClaimSnapshot>(
       [...recordsById].flatMap(([key, value], index) =>
         index % 2 === 0
-          ? [[key, { root, key, value, revision: index + 1 }] as const]
+          ? [
+              [
+                key,
+                retainedAutomatchSnapshotFixture(root, key, value, index + 1),
+              ] as const,
+            ]
           : [],
       ),
     );
@@ -671,13 +679,13 @@ for (const lane of ["profile-game", "telegram"] as const) {
       transactPath: async () => assert.fail("unexpected-repair"),
     });
     const claims: string[] = [];
-    const claim: typeof state.claimAutomatchProfileOutbox = async (
-      inviteId,
-      requestId,
-      expected,
-      atMs,
-      signal,
-      snapshot,
+    const claim = async (
+      inviteId: string,
+      requestId: string,
+      expected: number,
+      atMs: number,
+      signal?: AbortSignal,
+      snapshot?: AutomatchOutboxClaimSnapshot,
     ) => {
       assert.equal(requestId, `request-${inviteId}`);
       assert.equal(expected, 1);
@@ -704,7 +712,11 @@ for (const lane of ["profile-game", "telegram"] as const) {
     let count: number;
     if (lane === "profile-game") {
       state.claimAutomatchProfileOutbox = claim;
-      state.projectionRecovery.listDueAutomatchProfileOutboxesPage = readPage;
+      state.projectionRecovery.listDueAutomatchProfileOutboxesPage =
+        retainedAutomatchPageReaderFixture(
+          "profileGameProjectionOutbox/automatch",
+          readPage,
+        );
       state.projectionRecovery.listMalformedAutomatchProfileOutboxesPage =
         async () => ({ entries: null, scannedIdentities: [] });
       count = await sweepAutomatchProfileGameProjections(env, {
@@ -714,7 +726,11 @@ for (const lane of ["profile-game", "telegram"] as const) {
       });
     } else {
       state.claimAutomatchTelegramOutbox = claim;
-      state.projectionRecovery.listDueAutomatchTelegramOutboxesPage = readPage;
+      state.projectionRecovery.listDueAutomatchTelegramOutboxesPage =
+        retainedAutomatchPageReaderFixture(
+          "telegramProjectionOutbox/automatch",
+          readPage,
+        );
       count = await sweepAutomatchProjections(env, state, logger, nowMs);
     }
     const expectedIds = [...recordsById.keys()].slice(0, 20);
@@ -740,12 +756,12 @@ for (const lane of ["profile-game", "telegram"] as const) {
 
 test("malformed profile outboxes never become seeded claim candidates", () => {
   const value = { status: "broken", lastQueuedAtMs: 1 };
-  const snapshot: AutomatchOutboxClaimSnapshot = {
-    root: "profileGameProjectionOutbox/automatch",
-    key: "invalid",
+  const snapshot = retainedAutomatchSnapshotFixture(
+    "profileGameProjectionOutbox/automatch",
+    "invalid",
     value,
-    revision: 2,
-  };
+    2,
+  );
   assert.deepEqual(
     automatchSweepEntries({ invalid: value }, new Map([["invalid", snapshot]])),
     [{ kind: "invalid", inviteId: "invalid" }],

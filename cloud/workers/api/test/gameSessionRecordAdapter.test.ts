@@ -1,3 +1,4 @@
+import { retainedAutomatchSnapshotFixture } from "./automatchRecordFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -6,7 +7,6 @@ import {
 } from "../../../runtime/automatchRecords.js";
 import { createTypedGameSessionPort } from "../src/gameSessionRecordAdapter.ts";
 import { rawGameplayTestPort } from "./gameSessionTestPorts.ts";
-import type { AutomatchOutboxClaimSnapshot } from "../src/automatchD1/types.ts";
 
 function fixture(records: Map<string, unknown>) {
   const reads: Array<{ path: string; signal?: AbortSignal }> = [];
@@ -29,12 +29,12 @@ function fixture(records: Map<string, unknown>) {
 test("claim adapters forward recovery snapshots and cancellation without serializing them", async () => {
   const { raw } = fixture(new Map());
   const signal = new AbortController().signal;
-  const snapshot: AutomatchOutboxClaimSnapshot = {
-    root: "profileGameProjectionOutbox/automatch",
-    key: "invite",
-    value: { requestId: "request" },
-    revision: 7,
-  };
+  const snapshot = retainedAutomatchSnapshotFixture(
+    "profileGameProjectionOutbox/automatch",
+    "invite",
+    { requestId: "request" },
+    7,
+  );
   const calls: unknown[][] = [];
   raw.claimAutomatchProfileOutbox = async (...args) => {
     calls.push(args);
@@ -56,10 +56,12 @@ test("claim adapters forward recovery snapshots and cancellation without seriali
     ),
     true,
   );
-  const telegramSnapshot: AutomatchOutboxClaimSnapshot = {
-    ...snapshot,
-    root: "telegramProjectionOutbox/automatch",
-  };
+  const telegramSnapshot = retainedAutomatchSnapshotFixture(
+    "telegramProjectionOutbox/automatch",
+    "invite",
+    { requestId: "request" },
+    7,
+  );
   assert.equal(
     await port.claimAutomatchTelegramOutbox(
       "invite",
@@ -137,7 +139,9 @@ test("outbox reads retain invalid raw request IDs for cancellation confirmation"
   );
   const snapshot = await port.readAutomatchProfileOutbox("invite");
   assert.equal(snapshot.value, null);
-  assert.equal(snapshot.raw, rawOutbox);
+  assert.equal("raw" in snapshot, false);
+  assert.equal(snapshot.matchesCancellationRequest("operation"), true);
+  assert.equal(snapshot.matchesCancellationRequest(" operation "), false);
   assert.equal(reads.length, 1);
   assert.deepEqual(rawOutbox, {
     requestId: " operation ",
@@ -163,15 +167,23 @@ test("typed reads preserve failures and cancellation from raw persistence", asyn
   );
 });
 
-test("normal ports expose typed operations and isolate raw recovery callbacks", () => {
+test("normal ports expose typed operations and named recovery commands", () => {
   const { port } = fixture(new Map());
   assert.equal("readMutationReceipt" in port, false);
   assert.equal("transactAutomatchTelegramSource" in port, false);
   assert.equal("transactAutomatchProfileOutbox" in port, false);
+  assert.equal(
+    "transactRawAutomatchProfileOutbox" in port.projectionRecovery,
+    false,
+  );
+  assert.equal(
+    "transactRawAutomatchTelegramOutbox" in port.projectionRecovery,
+    false,
+  );
   assert.equal("listMalformedAutomatchProfileOutboxes" in port, false);
   assert.equal(typeof port.mergeAutomatchTelegramRatingResult, "function");
   assert.equal(
-    typeof port.projectionRecovery.transactRawAutomatchProfileOutbox,
+    typeof port.projectionRecovery.repairInvalidAutomatchProfileOutbox,
     "function",
   );
 });

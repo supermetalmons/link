@@ -17,6 +17,7 @@ exports.normalizeSolanaAddress =
   exports.WITHDRAWAL_LEASE_MS =
   exports.EVENT_PRIZE_ADMIN_WALLET =
     void 0;
+const records_js_1 = require("./eventPrizes/records.js");
 const eventPrizeProjectionState_js_1 = require("./eventPrizeProjectionState.js");
 Object.defineProperty(exports, "filterProjectableEventPrizeAssignments", {
   enumerable: true,
@@ -128,7 +129,9 @@ const isWithdrawalRecordOwnedByRequest = (
   const normalizedCanonicalRecordSourceProfileId = normalizeString(
     canonicalRecordSourceProfileId,
   );
-  const recordProfileId = normalizeString(value.profileId);
+  const recordProfileId = (0, records_js_1.withdrawalOwnership)(
+    value,
+  ).profileId;
   return (
     (normalizedProfileId &&
       (recordProfileId === normalizedProfileId ||
@@ -136,14 +139,18 @@ const isWithdrawalRecordOwnedByRequest = (
           recordProfileId === normalizedCanonicalRecordSourceProfileId &&
           normalizedCanonicalRecordProfileId === normalizedProfileId))) ||
     (normalizedRequesterUid &&
-      normalizeString(value.requesterUid) === normalizedRequesterUid)
+      (0, records_js_1.withdrawalOwnership)(value).requesterUid ===
+        normalizedRequesterUid)
   );
 };
 exports.isWithdrawalRecordOwnedByRequest = isWithdrawalRecordOwnedByRequest;
 const getWithdrawalProjectionProfileIds = ({ withdrawal, profileIds }) =>
   Array.from(
     new Set(
-      [withdrawal?.entitledProfileId, withdrawal?.profileId]
+      [
+        (0, records_js_1.withdrawalOwnership)(withdrawal).entitledProfileId,
+        (0, records_js_1.withdrawalOwnership)(withdrawal).profileId,
+      ]
         .concat(Array.isArray(profileIds) ? profileIds : [])
         .map(normalizeString)
         .filter(Boolean),
@@ -161,10 +168,10 @@ const buildWithdrawalCompletion = ({
   completedAtMs,
 }) => {
   const entitledProfileId =
-    normalizeString(withdrawal.entitledProfileId) ||
-    normalizeString(withdrawal.profileId) ||
+    (0, records_js_1.withdrawalOwnership)(withdrawal).entitledProfileId ||
+    (0, records_js_1.withdrawalOwnership)(withdrawal).profileId ||
     profileId;
-  const completed = {
+  const completed = (0, records_js_1.writeCompletedWithdrawal)({
     eventId,
     prizeId,
     assetAddress,
@@ -175,16 +182,23 @@ const buildWithdrawalCompletion = ({
     ),
     profileId,
     entitledProfileId,
-    place: Number(withdrawal.place),
+    place: (0, records_js_1.withdrawalPlace)(withdrawal),
     recipientAddress,
-    requesterUid: normalizeString(withdrawal.requesterUid),
+    requesterUid: (0, records_js_1.withdrawalOwnership)(withdrawal)
+      .requesterUid,
     status: "completed",
     transactionSignature,
-    startedAtMs: Number(withdrawal.startedAtMs) || completedAtMs,
-    submittedAtMs: Number(withdrawal.submittedAtMs) || completedAtMs,
+    startedAtMs: (0, records_js_1.withdrawalStartedAtForCompletion)(
+      withdrawal,
+      completedAtMs,
+    ),
+    submittedAtMs: (0, records_js_1.withdrawalSubmittedAtForCompletion)(
+      withdrawal,
+      completedAtMs,
+    ),
     completedAtMs,
     updatedAtMs: completedAtMs,
-  };
+  });
   return completed;
 };
 exports.buildWithdrawalCompletion = buildWithdrawalCompletion;
@@ -202,11 +216,19 @@ const decideWithdrawalClaim = ({
   leaseId,
   nowMs,
 }) => {
-  const existing = current && typeof current === "object" ? current : {};
-  const existingProfileId = normalizeString(existing.profileId);
-  const existingRecipientAddress = normalizeString(existing.recipientAddress);
-  const existingLeaseId = normalizeString(existing.leaseId);
-  const leaseExpiresAtMs = Number(existing.leaseExpiresAtMs) || 0;
+  const existing =
+    (0, records_js_1.readWithdrawalDocument)(current) ||
+    (0, records_js_1.readWithdrawalDocument)({});
+  const existingProfileId = (0, records_js_1.withdrawalOwnership)(
+    existing,
+  ).profileId;
+  const existingRecipientAddress = (0, records_js_1.withdrawalRecipientAddress)(
+    existing,
+  );
+  const existingLeaseId = (0, records_js_1.withdrawalLeaseId)(existing);
+  const leaseExpiresAtMs = (0, records_js_1.withdrawalLeaseExpiresAtMs)(
+    existing,
+  );
   const recordMatchesPrize = (0,
   eventPrizeProjectionState_js_1.isWithdrawalRecordForPrize)(
     existing,
@@ -221,17 +243,17 @@ const decideWithdrawalClaim = ({
     canonicalRecordProfileId,
     canonicalRecordSourceProfileId,
   );
-  if (existing.status === "completed") {
+  if ((0, records_js_1.withdrawalStatus)(existing) === "completed") {
     return recordMatchesPrize && recordOwnedByRequest
       ? { kind: "completed", value: existing }
       : { kind: "forbidden", value: existing };
   }
-  if (existing.status === "blocked") {
+  if ((0, records_js_1.withdrawalStatus)(existing) === "blocked") {
     return recordMatchesPrize && recordOwnedByRequest
       ? { kind: "blocked", value: existing }
       : { kind: "forbidden", value: existing };
   }
-  if (existing.status === "submitted") {
+  if ((0, records_js_1.withdrawalStatus)(existing) === "submitted") {
     if (!recordMatchesPrize || !recordOwnedByRequest) {
       return { kind: "forbidden", value: existing };
     }
@@ -239,7 +261,7 @@ const decideWithdrawalClaim = ({
       return { kind: "destination-mismatch", value: existing };
     }
   } else if (
-    existing.status === "processing" &&
+    (0, records_js_1.withdrawalStatus)(existing) === "processing" &&
     leaseExpiresAtMs > nowMs &&
     existingLeaseId &&
     existingLeaseId !== leaseId
@@ -252,33 +274,35 @@ const decideWithdrawalClaim = ({
       return { kind: "busy", value: existing };
     }
   }
-  const preserveSubmitted = existing.status === "submitted";
+  const preserveSubmitted =
+    (0, records_js_1.withdrawalStatus)(existing) === "submitted";
   const assetStandard = (0,
   eventPrizeProjectionState_js_1.getEventPrizeAssetStandard)(eventId, prizeId);
+  const claimed = {
+    eventId,
+    prizeId,
+    assetAddress,
+    assetStandard,
+    entitledProfileId: preserveSubmitted
+      ? (0, records_js_1.withdrawalOwnership)(existing).entitledProfileId ||
+        existingProfileId
+      : profileId,
+    profileId,
+    place,
+    recipientAddress,
+    requesterUid,
+    leaseId,
+    leaseExpiresAtMs: nowMs + WITHDRAWAL_LEASE_MS,
+    startedAtMs: preserveSubmitted
+      ? (0, records_js_1.withdrawalStartedAtForClaim)(existing, nowMs)
+      : nowMs,
+    updatedAtMs: nowMs,
+  };
   return {
     kind: "acquired",
-    value: {
-      ...(preserveSubmitted ? existing : {}),
-      eventId,
-      prizeId,
-      assetAddress,
-      ...(assetStandard ? { assetStandard } : {}),
-      entitledProfileId: preserveSubmitted
-        ? normalizeString(existing.entitledProfileId) || existingProfileId
-        : profileId,
-      profileId,
-      place,
-      recipientAddress,
-      requesterUid,
-      status: preserveSubmitted ? "submitted" : "processing",
-      leaseId,
-      leaseExpiresAtMs: nowMs + WITHDRAWAL_LEASE_MS,
-      startedAtMs:
-        preserveSubmitted && Number.isFinite(existing.startedAtMs)
-          ? Math.floor(existing.startedAtMs)
-          : nowMs,
-      updatedAtMs: nowMs,
-    },
+    value: preserveSubmitted
+      ? (0, records_js_1.writeReacquiredSubmittedWithdrawal)(existing, claimed)
+      : (0, records_js_1.writeProcessingWithdrawal)(claimed),
   };
 };
 exports.decideWithdrawalClaim = decideWithdrawalClaim;

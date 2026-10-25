@@ -121,17 +121,168 @@ const removeMatchingStorageKeys = (
   keysToRemove.forEach((key) => store.removeItem(key));
 };
 
-function getItem<T>(key: StorageKey | string, defaultValue: T): T {
+type BoardColorSetsByTheme = { light: string | null; dark: string | null };
+
+type StorageReadValues = {
+  isMuted: boolean;
+  preferredAssetsSet: AssetsSet;
+  boardStyleSet: BoardStyleSet | null;
+  boardColorSet: string;
+  boardColorSetsByTheme: BoardColorSetsByTheme;
+  isExperimentingWithSprites: boolean;
+  playerEmojiId: EmojiId;
+  playerEmojiAura: string;
+  loginId: string;
+  profileId: string;
+  ethAddress: string;
+  solAddress: string;
+  username: string;
+  playerRating: number;
+  playerTotalManaPoints: number;
+  playerMiningLastRockDate: string | null;
+  playerMiningMaterials: Record<string, number>;
+  cardBackgroundId: number;
+  cardSubtitleId: number;
+  profileMons: string;
+  profileCounter: string;
+  playerNonce: number;
+  completedProblems: string[];
+  tutorialCompleted: boolean;
+  isFirstLaunch: boolean;
+  islandMonType: string;
+  leaderboardType: string;
+  botAutomoveMode: string;
+};
+type NullableStorageWriteKey =
+  | "playerRating"
+  | "playerTotalManaPoints"
+  | "cardBackgroundId"
+  | "cardSubtitleId"
+  | "profileMons"
+  | "profileCounter"
+  | "playerNonce";
+type PendingAutomatchStorageKey =
+  `${typeof PENDING_AUTOMATCH_OPERATION_PREFIX}${string}`;
+type StorageWriteValues = Omit<StorageReadValues, NullableStorageWriteKey> & {
+  [Key in NullableStorageWriteKey]: StorageReadValues[Key] | null;
+} & {
+  cardStickers: string | null;
+  reactionExtraStickerCache: ReactionExtraStickerCache | null;
+  reactionExtraStickerIds: number[];
+  reactionExtraStickerProfileId: string;
+} & {
+  [Key in PendingAutomatchStorageKey]: PendingAutomatchOperation | null;
+};
+
+type StoredItem = { raw: string; value: unknown };
+
+function readStoredItem(
+  key: StorageKey | PendingAutomatchStorageKey,
+): StoredItem | undefined {
   const item = localStorage.getItem(key);
-  if (item === null || item === "null") return defaultValue;
+  if (item === null || item === "null") return undefined;
   try {
-    return JSON.parse(item) as T;
+    const value: unknown = JSON.parse(item);
+    return { raw: item, value };
   } catch {
-    return item as unknown as T;
+    return { raw: item, value: item };
   }
 }
 
-function setItem<T>(key: StorageKey | string, value: T): void {
+function readStoredValue(
+  key: StorageKey | PendingAutomatchStorageKey,
+  defaultValue: unknown,
+): unknown {
+  const stored = readStoredItem(key);
+  return stored === undefined ? defaultValue : stored.value;
+}
+
+const textValue = (value: unknown, raw: string): string | undefined =>
+  typeof value === "string"
+    ? value
+    : typeof value === "number" || typeof value === "boolean"
+      ? raw
+      : undefined;
+const numberValue = (value: unknown): number | undefined =>
+  typeof value === "number" ? value : undefined;
+const booleanValue = (value: unknown): boolean | undefined =>
+  typeof value === "boolean" ? value : undefined;
+const isAssetsSet = (value: unknown): value is AssetsSet =>
+  value === "Pixel" || value === "Original" || value === "Pangchiu";
+const isBoardStyleSet = (value: unknown): value is BoardStyleSet =>
+  value === "Grid" || value === "Pangchiu";
+const isNullableString = (value: unknown): value is string | null =>
+  value === null || typeof value === "string";
+const isBoardColorSetsByTheme = (
+  value: unknown,
+): value is BoardColorSetsByTheme => {
+  if (!value || typeof value !== "object") return false;
+  const fields = value as { light?: unknown; dark?: unknown };
+  return isNullableString(fields.light) && isNullableString(fields.dark);
+};
+const isNumberRecord = (value: unknown): value is Record<string, number> =>
+  value !== null &&
+  typeof value === "object" &&
+  !Array.isArray(value) &&
+  Object.values(value).every((entry) => typeof entry === "number");
+const isStringArray = (value: unknown): value is string[] =>
+  Array.isArray(value) &&
+  value.every((entry: unknown) => typeof entry === "string");
+
+const storageDecoders: {
+  [Key in keyof StorageReadValues]: (
+    value: unknown,
+    raw: string,
+  ) => StorageReadValues[Key] | undefined;
+} = {
+  isMuted: booleanValue,
+  preferredAssetsSet: (value) => (isAssetsSet(value) ? value : undefined),
+  boardStyleSet: (value) =>
+    value === null || isBoardStyleSet(value) ? value : undefined,
+  boardColorSet: textValue,
+  boardColorSetsByTheme: (value) =>
+    isBoardColorSetsByTheme(value) ? value : undefined,
+  isExperimentingWithSprites: booleanValue,
+  playerEmojiId: (value) =>
+    typeof value === "string" || typeof value === "number" ? value : undefined,
+  playerEmojiAura: textValue,
+  loginId: textValue,
+  profileId: textValue,
+  ethAddress: textValue,
+  solAddress: textValue,
+  username: textValue,
+  playerRating: numberValue,
+  playerTotalManaPoints: numberValue,
+  playerMiningLastRockDate: (value, raw) =>
+    value === null ? null : textValue(value, raw),
+  playerMiningMaterials: (value) => (isNumberRecord(value) ? value : undefined),
+  cardBackgroundId: numberValue,
+  cardSubtitleId: numberValue,
+  profileMons: textValue,
+  profileCounter: textValue,
+  playerNonce: numberValue,
+  completedProblems: (value) => (isStringArray(value) ? value : undefined),
+  tutorialCompleted: booleanValue,
+  isFirstLaunch: booleanValue,
+  islandMonType: textValue,
+  leaderboardType: textValue,
+  botAutomoveMode: textValue,
+};
+
+function getItem<Key extends keyof StorageReadValues>(
+  key: Key,
+  defaultValue: NoInfer<StorageReadValues[Key]>,
+): StorageReadValues[Key] {
+  const stored = readStoredItem(key);
+  if (stored === undefined) return defaultValue;
+  const decoded = storageDecoders[key](stored.value, stored.raw);
+  return decoded === undefined ? defaultValue : decoded;
+}
+
+function setItem<Key extends keyof StorageWriteValues>(
+  key: Key,
+  value: NoInfer<StorageWriteValues[Key]>,
+): void {
   if (value === null) {
     localStorage.removeItem(key);
     return;
@@ -146,7 +297,7 @@ export const storage = {
   getPendingAutomatchOperation: (
     uid: string,
   ): PendingAutomatchOperation | null => {
-    const value = getItem<unknown>(
+    const value = readStoredValue(
       `${PENDING_AUTOMATCH_OPERATION_PREFIX}${uid}`,
       null,
     );
@@ -194,7 +345,7 @@ export const storage = {
 
   getIsMuted: (defaultValue: boolean): boolean => {
     try {
-      const storedValue = getItem<unknown>(STORAGE_KEYS.IS_MUTED, defaultValue);
+      const storedValue = getItem(STORAGE_KEYS.IS_MUTED, defaultValue);
       return typeof storedValue === "boolean" ? storedValue : defaultValue;
     } catch {
       return defaultValue;
@@ -368,7 +519,9 @@ export const storage = {
   },
 
   getCardStickers: (defaultValue: string): string => {
-    return JSON.stringify(getItem(STORAGE_KEYS.CARD_STICKERS, defaultValue));
+    return JSON.stringify(
+      readStoredValue(STORAGE_KEYS.CARD_STICKERS, defaultValue),
+    );
   },
 
   setCardStickers: (value: string | null): void => {
@@ -378,7 +531,7 @@ export const storage = {
   getReactionExtraStickerCache: (
     defaultValue: ReactionExtraStickerCache | null,
   ): ReactionExtraStickerCache | null => {
-    const value = getItem<unknown>(
+    const value = readStoredValue(
       STORAGE_KEYS.REACTION_EXTRA_STICKER_CACHE,
       defaultValue,
     );
@@ -439,7 +592,7 @@ export const storage = {
   },
 
   addCompletedProblemId: (id: string): void => {
-    const current = getItem<string[]>(STORAGE_KEYS.COMPLETED_PROBLEMS, []);
+    const current = getItem(STORAGE_KEYS.COMPLETED_PROBLEMS, []);
     if (!current.includes(id)) {
       current.push(id);
       setItem(STORAGE_KEYS.COMPLETED_PROBLEMS, current);

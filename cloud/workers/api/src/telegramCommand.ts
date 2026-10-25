@@ -1,3 +1,19 @@
+import type {
+  ApiRequest,
+  ApiJsonBody,
+  ApiJsonStatus,
+  TelegramRecoveryAction as RecoveryAction,
+  TelegramSendCommand as SendCommand,
+  TelegramRecoveryCommand as RecoveryCommand,
+  TelegramRecoveryStatusCommand as RecoveryStatusCommand,
+} from "@mons/shared/api-contracts";
+import { replaceTelegramDesired } from "../../../runtime/telegram/messageProjectionRecords.js";
+import {
+  previewTelegramRecovery,
+  requestTelegramRecovery,
+  persistedTelegramRecovery,
+  readTelegramRecoveryStatus,
+} from "./telegramCommandRecords.ts";
 import {
   buildTelegramSendDesired,
   validateTelegramMessageKey,
@@ -19,7 +35,6 @@ import {
   createD1TelegramRepository,
   readTelegramStorageMode,
 } from "./telegramD1.ts";
-
 export const TELEGRAM_COMMAND_PATH = "/internal/telegram/command";
 export const MAX_TELEGRAM_COMMAND_BODY_BYTES = 32 * 1024;
 
@@ -32,46 +47,7 @@ const REQUEST_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ADMIN_MESSAGE_PREFIX = "admin:";
 
-type RecoveryAction =
-  "abandon" | "confirm-send-absent" | "confirm-send-applied";
-
-type SendCommand = {
-  destination: string;
-  generation: string;
-  instanceKey: string;
-  kind: "send";
-  messageKey: string;
-  parseMode?: string | null;
-  silent?: boolean;
-  sourceRevision: string | number;
-  text: string;
-};
-
-type RecoveryCommand = {
-  action: RecoveryAction;
-  kind: "recovery-preview" | "recovery-request";
-  messageId?: number;
-  messageKey: string;
-  requestId?: string;
-};
-
-type RecoveryStatusCommand = {
-  kind: "recovery-status";
-  messageKey: string;
-  requestId: string;
-};
-
-type EventReminderRefreshCommand = {
-  kind: "event-reminder-refresh";
-  eventId: string;
-};
-
-type TelegramCommand =
-  | EventReminderRefreshCommand
-  | RecoveryCommand
-  | RecoveryStatusCommand
-  | SendCommand;
-
+type TelegramCommand = ApiRequest<"POST /internal/telegram/command">;
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -199,7 +175,7 @@ function parseCommand(body: string): TelegramCommand {
     if (kind === "recovery-request" && !REQUEST_ID_PATTERN.test(requestId)) {
       throw new TypeError("invalid-request-id");
     }
-    return {
+    const command: unknown = {
       kind,
       messageKey: validateTelegramMessageKey(nonEmptyString(value.messageKey)),
       action,
@@ -208,6 +184,7 @@ function parseCommand(body: string): TelegramCommand {
         : { messageId: Number(value.messageId) }),
       ...(kind === "recovery-request" ? { requestId } : {}),
     };
+    return command as RecoveryCommand;
   }
   if (kind === "recovery-status") {
     if (!exactKeys(value, ["kind", "messageKey", "requestId"])) {
@@ -226,9 +203,11 @@ function parseCommand(body: string): TelegramCommand {
   throw new TypeError("invalid-command");
 }
 
-function commandResponse(
-  status: number,
-  body: Record<string, unknown>,
+function commandResponse<
+  Status extends ApiJsonStatus<"POST /internal/telegram/command">,
+>(
+  status: Status,
+  body: ApiJsonBody<"POST /internal/telegram/command", NoInfer<Status>>,
   headers: HeadersInit = {},
 ): Response {
   return new Response(JSON.stringify(body), {
@@ -240,31 +219,6 @@ function commandResponse(
       ...headers,
     },
   });
-}
-
-function sameRecovery(
-  request: Record<string, unknown>,
-  command: RecoveryCommand,
-): boolean {
-  return (
-    nonEmptyString(request.action) === command.action &&
-    (command.messageId === undefined
-      ? request.messageId === undefined
-      : Number(request.messageId) === command.messageId)
-  );
-}
-
-function recoveryEligibility(recordValue: unknown): {
-  attemptId: string;
-  record: Record<string, unknown>;
-} | null {
-  const message = record(recordValue) || {};
-  const delivery = record(message.delivery) || {};
-  const sendInFlight = record(delivery.sendInFlight) || {};
-  const attemptId = nonEmptyString(sendInFlight.attemptId);
-  return delivery.status === "uncertain" && attemptId
-    ? { attemptId, record: message }
-    : null;
 }
 
 async function handleSend(
@@ -280,7 +234,7 @@ async function handleSend(
     producer: "admin-command",
   });
   await repository.transactMessage(command.messageKey, (current) => ({
-    value: { ...(record(current) || {}), desired },
+    value: replaceTelegramDesired(current, desired),
     decision: "admin-desired-persisted",
   }));
   await enqueueInitialTelegramDelivery(env, {
@@ -300,28 +254,16 @@ async function handleRecoveryPreview(
   command: RecoveryCommand,
   repository: TelegramRepository,
 ): Promise<Response> {
-  const eligible = recoveryEligibility(
+  const eligible = previewTelegramRecovery(
     await repository.getMessage(command.messageKey),
+    command,
   );
-  if (!eligible) {
-    return commandResponse(409, {
-      ok: false,
-      error: "recovery-not-required",
-    });
+  if (!eligible.eligible) {
+    return commandResponse(409, { ok: false, error: "recovery-not-required" });
   }
-  const pending = record(eligible.record.manualRecovery) || {};
-  const delivery = record(eligible.record.delivery) || {};
-  const pendingRequestId = nonEmptyString(pending.requestId);
-  const processedRequestId = nonEmptyString(delivery.lastRecoveryRequestId);
-  if (
-    pendingRequestId &&
-    pendingRequestId !== processedRequestId &&
-    !sameRecovery(pending, command)
-  ) {
-    return commandResponse(409, {
-      ok: false,
-      error: "recovery-conflict",
-    });
+  const { pendingRequestId, processedRequestId } = eligible;
+  if (eligible.conflict) {
+    return commandResponse(409, { ok: false, error: "recovery-conflict" });
   }
   return commandResponse(200, {
     ok: true,
@@ -343,45 +285,22 @@ async function handleRecoveryRequest(
   let conflict = "";
   const transaction = await repository.transactMessage(
     command.messageKey,
-    (current) => {
-      const eligible = recoveryEligibility(current);
-      if (!eligible) {
-        conflict = "recovery-not-required";
-        return { commit: false, decision: conflict };
-      }
-      const message = eligible.record;
-      const delivery = record(message.delivery) || {};
-      const pending = record(message.manualRecovery) || {};
-      const pendingRequestId = nonEmptyString(pending.requestId);
-      const processedRequestId = nonEmptyString(delivery.lastRecoveryRequestId);
-      if (pendingRequestId && pendingRequestId !== processedRequestId) {
-        if (!sameRecovery(pending, command)) {
-          conflict = "recovery-conflict";
-        }
-        return { commit: false, decision: conflict || "recovery-resumed" };
-      }
-      return {
-        value: {
-          ...message,
-          manualRecovery: {
-            requestId: command.requestId,
-            action: command.action,
-            ...(command.messageId === undefined
-              ? {}
-              : { messageId: command.messageId }),
-          },
+    (current) =>
+      requestTelegramRecovery(
+        current,
+        command,
+        (reason) => {
+          conflict = reason;
         },
-        decision: "recovery-requested",
-      };
-    },
+        () => conflict,
+      ),
   );
   if (conflict) {
     return commandResponse(409, { ok: false, error: conflict });
   }
-  const persisted = record(transaction.value) || {};
-  const request = record(persisted.manualRecovery) || {};
-  const requestId = nonEmptyString(request.requestId);
-  if (!requestId || !sameRecovery(request, command)) {
+  const persisted = persistedTelegramRecovery(transaction.value, command);
+  const requestId = persisted.requestId;
+  if (!persisted.matches) {
     return commandResponse(409, {
       ok: false,
       error: "recovery-conflict",
@@ -406,32 +325,19 @@ async function handleRecoveryStatus(
   command: RecoveryStatusCommand,
   repository: TelegramRepository,
 ): Promise<Response> {
-  const message = record(await repository.getMessage(command.messageKey)) || {};
-  const delivery = record(message.delivery) || {};
-  const result = record(message.manualRecoveryResult) || {};
-  if (nonEmptyString(result.requestId) === command.requestId) {
+  const status = readTelegramRecoveryStatus(
+    await repository.getMessage(command.messageKey),
+    command.requestId,
+  );
+  if (status) {
     return commandResponse(200, {
       ok: true,
       messageKey: command.messageKey,
       requestId: command.requestId,
-      status: nonEmptyString(result.status) || "rejected",
-      action: nonEmptyString(result.action),
-      deliveryStatus: nonEmptyString(delivery.status) || null,
-      ...(nonEmptyString(result.code)
-        ? { code: nonEmptyString(result.code) }
-        : {}),
+      ...status,
     });
   }
-  const pending = record(message.manualRecovery) || {};
-  if (nonEmptyString(pending.requestId) === command.requestId) {
-    return commandResponse(200, {
-      ok: true,
-      messageKey: command.messageKey,
-      requestId: command.requestId,
-      status: "pending",
-      deliveryStatus: nonEmptyString(delivery.status) || null,
-    });
-  }
+
   return commandResponse(404, { ok: false, error: "recovery-not-found" });
 }
 

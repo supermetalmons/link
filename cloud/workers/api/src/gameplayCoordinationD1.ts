@@ -63,6 +63,12 @@ export type MatchTimerStartReconciliationItem = MatchTimerStartMarker & {
   playerId: string;
 };
 
+export type RetainedTimerCleanupInput = {
+  matchId?: unknown;
+  playerId?: unknown;
+  opponentId?: unknown;
+};
+
 export type MatchTimerStartStoreFailureOperation =
   | "delete"
   | "delete-if-unchanged"
@@ -93,6 +99,7 @@ export type MatchTimerStartStore = {
     opponentId: string,
     matchId: string,
   ) => Promise<void>;
+  deleteRetainedPair(input: RetainedTimerCleanupInput): Promise<void>;
   listOldest: (limit?: number) => Promise<MatchTimerStartReconciliationItem[]>;
   touchIfUnchanged: (
     marker: MatchTimerStartReconciliationItem,
@@ -135,7 +142,7 @@ function assertTimestamp(value: number, message: string): void {
   }
 }
 
-function assertKey(value: string, message: string): void {
+function assertKey(value: unknown, message: string): asserts value is string {
   if (typeof value !== "string" || value.length === 0 || value.includes("/")) {
     throw new TypeError(message);
   }
@@ -159,7 +166,7 @@ function assertGameSessionMutationLock(
   assertNonempty(ownerId, "invalid-game-session-mutation-lock-owner-id");
 }
 
-function assertMatchTimerStartKeys(playerId: string, matchId: string): void {
+function assertMatchTimerStartKeys(playerId: unknown, matchId: unknown): void {
   assertKey(playerId, "invalid-match-timer-start-player-id");
   assertKey(matchId, "invalid-match-timer-start-match-id");
 }
@@ -330,6 +337,25 @@ export function createGameSessionMutationLockStore(
 export function createMatchTimerStartStore(
   db: Pick<D1Database, "batch" | "prepare">,
 ): MatchTimerStartStore {
+  const deletePair = async (
+    playerId: unknown,
+    opponentId: unknown,
+    matchId: unknown,
+  ) => {
+    try {
+      assertMatchTimerStartKeys(playerId, matchId);
+      assertKey(opponentId, "invalid-match-timer-start-opponent-id");
+      await db
+        .prepare(
+          `DELETE FROM match_timer_starts
+             WHERE match_id = ? AND player_id IN (?, ?)`,
+        )
+        .bind(matchId, playerId, opponentId)
+        .run();
+    } catch (error) {
+      throw new MatchTimerStartStoreFailure("delete-pair", error);
+    }
+  };
   return {
     async getOrAdvance(playerId, opponentId, matchId, candidate, updatedAtMs) {
       try {
@@ -503,21 +529,9 @@ export function createMatchTimerStartStore(
       }
     },
 
-    async deletePair(playerId, opponentId, matchId) {
-      try {
-        assertMatchTimerStartKeys(playerId, matchId);
-        assertKey(opponentId, "invalid-match-timer-start-opponent-id");
-        await db
-          .prepare(
-            `DELETE FROM match_timer_starts
-             WHERE match_id = ? AND player_id IN (?, ?)`,
-          )
-          .bind(matchId, playerId, opponentId)
-          .run();
-      } catch (error) {
-        throw new MatchTimerStartStoreFailure("delete-pair", error);
-      }
-    },
+    deletePair,
+    deleteRetainedPair: (input) =>
+      deletePair(input.playerId, input.opponentId, input.matchId),
 
     async listOldest(limit = MATCH_TIMER_START_SWEEP_LIMIT) {
       try {

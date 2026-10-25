@@ -1,3 +1,6 @@
+import { readEventTelegramProjectionDocument } from "../../../runtime/telegram/eventProjectionRecords.js";
+import { eventIntentFixture } from "../test/transitionIntentFixture.ts";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -20,7 +23,7 @@ const eventId = "NN3eRzoZo80";
 const profileId = "profile-one";
 
 function eventRecord(id = eventId) {
-  return {
+  return eventDocumentFixture({
     schemaVersion: 2,
     eventId: id,
     status: "scheduled",
@@ -30,7 +33,7 @@ function eventRecord(id = eventId) {
     participants: {},
     rounds: {},
     unknownFutureField: { retained: true },
-  };
+  });
 }
 
 async function withAdmission<T>(
@@ -132,7 +135,11 @@ async function seed() {
         lastQueuedAtMs: 100,
       },
     },
-    { kind: "telegram-state", eventId, value: { retained: true } },
+    {
+      kind: "telegram-state",
+      eventId,
+      value: readEventTelegramProjectionDocument({ retained: true }),
+    },
     { kind: "telegram-generation", eventId, value: 1 },
   ]);
   return progress;
@@ -161,7 +168,10 @@ function mixedPlan(
     {
       kind: "telegram-state",
       eventId,
-      value: { retained: true, updated: true },
+      value: readEventTelegramProjectionDocument({
+        retained: true,
+        updated: true,
+      }),
     },
   ];
 }
@@ -325,7 +335,7 @@ describe("event mutation snapshot batches", () => {
             await withAdmission((admission) =>
               createEventTransitionIntent(
                 testEnv.EVENT_DB,
-                {
+                eventIntentFixture({
                   schemaVersion: 1,
                   transitionId: "concurrent-transition",
                   eventId,
@@ -334,7 +344,7 @@ describe("event mutation snapshot batches", () => {
                   rtdbEffects: {},
                   createdAtMs: 200,
                   updatedAtMs: 200,
-                },
+                }),
                 { admission },
               ),
             );

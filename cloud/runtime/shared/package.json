@@ -4,6 +4,7 @@
   "private": true,
   "type": "commonjs",
   "exports": {
+    "./api-contracts": "./api-contracts.js",
     "./auth": "./auth.js",
     "./event-prizes": "./event-prizes.js",
     "./events": "./events.js",
@@ -11,6 +12,7 @@
     "./game-variants": "./game-variants.js",
     "./game-sessions": "./game-sessions.js",
     "./ids": "./ids.js",
+    "./invite-records": "./invite-records.js",
     "./invite-metadata": "./invite-metadata.js",
     "./invite-wagers": "./invite-wagers.js",
     "./match-protocol": "./match-protocol.js",

@@ -1,8 +1,10 @@
+import type { ApiQuery } from "@mons/shared/api-contracts";
 import { GAME_SESSION_OPERATION_ID_PATTERN } from "@mons/shared/game-sessions";
 import {
   AUTOMATCH_API_MAX_RESPONSE_BYTES,
   isStartAutomatchRequest,
   parseStartAutomatchApiResponse,
+  type CancelAutomatchRequest,
   type CancelAutomatchResponse,
   type StartAutomatchApiResponse,
   type StartAutomatchResponse,
@@ -33,7 +35,6 @@ import {
   gameplayMutationGuard,
   type GameplayRequestContext,
 } from "./runtime.ts";
-
 function createAutomatchRuntime(context: GameplayRequestContext) {
   const { dependencies } = context;
   const dispatch = createGameplayProjectionDispatch(context);
@@ -51,8 +52,12 @@ function createAutomatchRuntime(context: GameplayRequestContext) {
   return { ...context, automatchDependencies };
 }
 
-export function readAutomatchOperationId(request: Request): string {
-  const values = new URL(request.url).searchParams.getAll("operationId");
+export function readAutomatchOperationId(
+  request: Request,
+): ApiQuery<"POST /automatch/start">["operationId"] {
+  const values = new URL(request.url).searchParams.getAll(
+    "operationId" satisfies keyof ApiQuery<"POST /automatch/start">,
+  );
   if (
     values.length !== 1 ||
     !GAME_SESSION_OPERATION_ID_PATTERN.test(values[0])
@@ -93,10 +98,15 @@ export async function enrichAutomatchResponse(
   },
   readBootstrap = readAuthenticatedGameBootstrap,
 ): Promise<StartAutomatchApiResponse> {
-  const requested = new URL(request.url).searchParams.getAll("bootstrap");
+  const requested = new URL(request.url).searchParams.getAll(
+    "bootstrap" satisfies keyof ApiQuery<"POST /automatch/start">,
+  );
   if (
     requested.length !== 1 ||
-    requested[0] !== "1" ||
+    requested[0] !==
+      ("1" satisfies NonNullable<
+        ApiQuery<"POST /automatch/start">["bootstrap"]
+      >) ||
     !response.ok ||
     response.mode !== "matched" ||
     request.signal.aborted
@@ -155,7 +165,7 @@ export const automatchRoutes = [
     runtime: createAutomatchRuntime,
     parse(body) {
       if (Object.keys(body).length !== 0) throw invalidRequest();
-      return body;
+      return body as CancelAutomatchRequest;
     },
     handle: (_body, { identity, repository, automatchDependencies }) =>
       cancelAutomatch(identity, repository, automatchDependencies),

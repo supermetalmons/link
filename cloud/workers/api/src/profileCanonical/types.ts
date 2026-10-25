@@ -1,3 +1,9 @@
+import type {
+  CanonicalProfileLegacyDocument,
+  CanonicalAuthMetadataDocument,
+  CanonicalAuthResultDocument,
+  CanonicalRatingPayloadDocument,
+} from "./retainedRecords.ts";
 import { MAX_PROFILE_MERGE_TARGET_HOPS } from "../../../../runtime/profileMergeTargets.js";
 import { type MiningMaterialName } from "@mons/shared/mining";
 import { type CompletePlayerProfile } from "@mons/shared/profiles";
@@ -9,8 +15,6 @@ export const CANONICAL_PROFILE_INTERNAL_REDIRECT_LIMIT =
   MAX_PROFILE_MERGE_TARGET_HOPS;
 
 export const CANONICAL_PROFILE_LEADERBOARD_LIMIT = 99;
-
-export type JsonObject = Record<string, unknown>;
 
 export type D1Value = ArrayBuffer | null | number | string;
 
@@ -40,7 +44,7 @@ export type CanonicalProfileValue = {
   createdAtMs: number;
   emojiPresent: boolean;
   gameplayEmoji: string | number;
-  legacyFields: JsonObject;
+  legacyFields: CanonicalProfileLegacyDocument;
   mergedAtMs: number | null;
   mergedIntoProfileId: string | null;
   profile: CompletePlayerProfile;
@@ -130,7 +134,7 @@ export type CanonicalMergeTarget = {
 };
 
 export type CanonicalMergeTargetValue = CanonicalMergeTarget & {
-  sourceLegacyFields: JsonObject;
+  sourceLegacyFields: CanonicalProfileLegacyDocument;
 };
 
 export type CanonicalAuthOperationValue = {
@@ -138,14 +142,45 @@ export type CanonicalAuthOperationValue = {
   errorMessage: string | null;
   kind: "unlink" | "verify";
   loginUid: string;
-  meta: JsonObject | null;
+  meta: CanonicalAuthMetadataDocument | null;
   method: AuthMethodKey;
   operationId: string;
-  result: JsonObject | null;
+  result: CanonicalAuthResultDocument | null;
   startedAtMs: number;
   status: "failed" | "started" | "success";
   updatedAtMs: number;
 };
+
+export type CanonicalAuthOperationStartWrite = Omit<
+  CanonicalAuthOperationValue,
+  "kind" | "meta" | "status" | "result" | "errorCode" | "errorMessage"
+> & {
+  status: "started";
+  result: null;
+  errorCode: null;
+  errorMessage: null;
+} & (
+    | { kind: "verify"; meta: CanonicalAuthMetadataDocument }
+    | { kind: "unlink"; meta: null }
+  );
+export type CanonicalAuthOperationUpdateWrite = Omit<
+  CanonicalAuthOperationValue,
+  "status" | "result" | "errorCode" | "errorMessage"
+> &
+  (
+    | {
+        status: "success";
+        result: CanonicalAuthResultDocument;
+        errorCode: null;
+        errorMessage: null;
+      }
+    | {
+        status: "failed";
+        result: null;
+        errorCode: string;
+        errorMessage: string;
+      }
+  );
 
 export type CanonicalAuthOperationSnapshot = CanonicalAuthOperationValue & {
   revision: number;
@@ -198,7 +233,7 @@ export type CanonicalRatingUpdateValue = {
   opponentProfileId: string | null;
   ownerToken: string;
   ownerUid: string;
-  payload: JsonObject;
+  payload: CanonicalRatingPayloadDocument;
   playerId: string;
   playerProfileId: string | null;
   profileGameProjectionState: CanonicalProjectionState | null;
@@ -603,8 +638,8 @@ export type CanonicalMutation =
       opponentProfileId: string;
       profileId: string;
     }
-  | { kind: "insert-auth-operation"; value: CanonicalAuthOperationValue }
-  | { kind: "update-auth-operation"; value: CanonicalAuthOperationValue }
+  | { kind: "insert-auth-operation"; value: CanonicalAuthOperationStartWrite }
+  | { kind: "update-auth-operation"; value: CanonicalAuthOperationUpdateWrite }
   | { kind: "delete-auth-operation"; operationId: string }
   | {
       kind: "insert-method-revocation";

@@ -1,6 +1,6 @@
 // Generated from src/eventPrizes/submissionRecovery.ts. Run npm run generate:runtime.
+import type { WithdrawalDocument } from "./records.js";
 import type { Umi } from "@metaplex-foundation/umi";
-import type { WithdrawalData } from "./types.js";
 import type {
   SubmittedTransaction,
   SubmittedInspection,
@@ -8,7 +8,7 @@ import type {
 } from "./solanaTypes.js";
 type SubmittedRecoveryInput = {
   umi: Umi;
-  withdrawal: WithdrawalData;
+  withdrawal: WithdrawalDocument;
   assetOwner: string;
   recipientAddress: string;
   inspection?: SubmittedInspection | null;
@@ -33,7 +33,7 @@ declare const inspectSubmittedWithdrawal: ({
   withdrawal,
 }: {
   umi: Umi;
-  withdrawal: WithdrawalData;
+  withdrawal: WithdrawalDocument;
 }) => Promise<SubmittedInspection>;
 declare const recoverSubmittedWithdrawal: ({
   umi,

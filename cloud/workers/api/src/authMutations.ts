@@ -1,3 +1,7 @@
+import type {
+  ApiRequestValidator,
+  ApiResponse,
+} from "@mons/shared/api-contracts";
 import {
   isAppleAuthVerificationRequest,
   isAuthMethodUnlinkRequest,
@@ -34,7 +38,6 @@ import {
   readStoredLoginUid,
 } from "./authPolicy.ts";
 import { X_FLOW_TTL_MS } from "./xFlow.ts";
-
 const AUTH_MUTATION_MAX_BODY_BYTES = 16 * 1024;
 const AUTH_MUTATION_DEADLINE_MS = 40_000;
 
@@ -152,7 +155,11 @@ async function executeAuthMutation(
       signal: operationSignal,
     });
   if (pathname === "/auth/methods/sol/verify") {
-    if (!isSolanaAuthVerificationRequest(payload)) {
+    if (
+      !(
+        isSolanaAuthVerificationRequest satisfies ApiRequestValidator<`POST ${typeof pathname}`>
+      )(payload)
+    ) {
       invalidRequest();
     }
     const opId = `intent:${payload.intentId}`;
@@ -199,7 +206,9 @@ async function executeAuthMutation(
         payload.intentId,
         intent.consumedAtMs,
       );
-      return { ok: false };
+      return { ok: false } satisfies
+        | ApiResponse<`POST ${typeof pathname}`>
+        | Promise<ApiResponse<`POST ${typeof pathname}`>>;
     }
     const normalized = normalizeMethodValue("sol", payload.address);
     const input = {
@@ -213,10 +222,16 @@ async function executeAuthMutation(
       opId,
     } as const;
     const concurrentReplay = await service.prepareVerifiedMethod(input, intent);
-    return concurrentReplay || service.linkVerifiedMethod(input);
+    return (concurrentReplay || service.linkVerifiedMethod(input)) satisfies
+      | ApiResponse<`POST ${typeof pathname}`>
+      | Promise<ApiResponse<`POST ${typeof pathname}`>>;
   }
   if (pathname === "/auth/methods/eth/verify") {
-    if (!isEthereumAuthVerificationRequest(payload)) {
+    if (
+      !(
+        isEthereumAuthVerificationRequest satisfies ApiRequestValidator<`POST ${typeof pathname}`>
+      )(payload)
+    ) {
       invalidRequest();
     }
     const opId = `intent:${payload.intentId}`;
@@ -235,13 +250,17 @@ async function executeAuthMutation(
     try {
       recoveredAddress = verifyMessage(payload.message, payload.signature);
     } catch {
-      return { ok: false };
+      return { ok: false } satisfies
+        | ApiResponse<`POST ${typeof pathname}`>
+        | Promise<ApiResponse<`POST ${typeof pathname}`>>;
     }
     if (
       normalizeMethodValue("eth", recoveredAddress) !==
       normalizeMethodValue("eth", message.address)
     ) {
-      return { ok: false };
+      return { ok: false } satisfies
+        | ApiResponse<`POST ${typeof pathname}`>
+        | Promise<ApiResponse<`POST ${typeof pathname}`>>;
     }
     const intent = await service.readIntent(
       identity.uid,
@@ -264,7 +283,9 @@ async function executeAuthMutation(
         payload.intentId,
         intent.consumedAtMs,
       );
-      return { ok: false };
+      return { ok: false } satisfies
+        | ApiResponse<`POST ${typeof pathname}`>
+        | Promise<ApiResponse<`POST ${typeof pathname}`>>;
     }
     try {
       validateSiweLocation(message);
@@ -291,10 +312,16 @@ async function executeAuthMutation(
       opId,
     } as const;
     const concurrentReplay = await service.prepareVerifiedMethod(input, intent);
-    return concurrentReplay || service.linkVerifiedMethod(input);
+    return (concurrentReplay || service.linkVerifiedMethod(input)) satisfies
+      | ApiResponse<`POST ${typeof pathname}`>
+      | Promise<ApiResponse<`POST ${typeof pathname}`>>;
   }
   if (pathname === "/auth/methods/apple/verify") {
-    if (!isAppleAuthVerificationRequest(payload)) {
+    if (
+      !(
+        isAppleAuthVerificationRequest satisfies ApiRequestValidator<`POST ${typeof pathname}`>
+      )(payload)
+    ) {
       invalidRequest();
     }
     const opId = `intent:${payload.intentId}`;
@@ -323,18 +350,34 @@ async function executeAuthMutation(
       opId,
     } as const;
     const concurrentReplay = await service.prepareVerifiedMethod(input, intent);
-    return concurrentReplay || service.linkVerifiedMethod(input);
+    return (concurrentReplay || service.linkVerifiedMethod(input)) satisfies
+      | ApiResponse<`POST ${typeof pathname}`>
+      | Promise<ApiResponse<`POST ${typeof pathname}`>>;
   }
   if (pathname === "/auth/methods/unlink") {
-    if (!isAuthMethodUnlinkRequest(payload)) {
+    if (
+      !(
+        isAuthMethodUnlinkRequest satisfies ApiRequestValidator<`POST ${typeof pathname}`>
+      )(payload)
+    ) {
       invalidRequest();
     }
-    return service.unlinkMethod(identity.uid, payload.method, payload.opId);
+    return service.unlinkMethod(
+      identity.uid,
+      payload.method,
+      payload.opId,
+    ) satisfies
+      | ApiResponse<`POST ${typeof pathname}`>
+      | Promise<ApiResponse<`POST ${typeof pathname}`>>;
   }
   if (pathname !== "/auth/x/flows/complete") {
     throw new AuthApiFailure(404, "not-found", "not-found");
   }
-  if (!isXAuthCompletionRequest(payload)) {
+  if (
+    !(
+      isXAuthCompletionRequest satisfies ApiRequestValidator<"POST /auth/x/flows/complete">
+    )(payload)
+  ) {
     invalidRequest();
   }
   const stateRepository =
@@ -451,7 +494,9 @@ async function executeAuthMutation(
     }
     const status = cleanString(flow.status);
     if (status === "completed") {
-      return completedFlowResult(flow);
+      return completedFlowResult(flow) satisfies
+        | ApiResponse<`POST ${typeof pathname}`>
+        | Promise<ApiResponse<`POST ${typeof pathname}`>>;
     }
     if (status === "failed") {
       throw new AuthApiFailure(
@@ -504,15 +549,15 @@ async function executeAuthMutation(
   const opId = `x-redirect:${payload.flowId}`;
   const replay = await service.peekVerifyReplay(opId, "x", identity.uid);
   if (replay) {
-    return (
-      (await commitTerminalFlow(flow, {
-        status: "completed",
-        result: { profileId: replay.profileId, opId: replay.opId },
-        completedAtMs: nowMs,
-        updatedAtMs: nowMs,
-        errorCode: null,
-      })) || replay
-    );
+    return ((await commitTerminalFlow(flow, {
+      status: "completed",
+      result: { profileId: replay.profileId, opId: replay.opId },
+      completedAtMs: nowMs,
+      updatedAtMs: nowMs,
+      errorCode: null,
+    })) || replay) satisfies
+      | ApiResponse<`POST ${typeof pathname}`>
+      | Promise<ApiResponse<`POST ${typeof pathname}`>>;
   }
   const input = {
     uid: identity.uid,
@@ -541,7 +586,9 @@ async function executeAuthMutation(
         updatedAtMs: nowMs,
       });
       if (racedResult) {
-        return racedResult;
+        return racedResult satisfies
+          | ApiResponse<`POST ${typeof pathname}`>
+          | Promise<ApiResponse<`POST ${typeof pathname}`>>;
       }
       throw new AuthApiFailure(
         504,
@@ -552,18 +599,18 @@ async function executeAuthMutation(
     throw error;
   }
   const completedAtMs = (dependencies.now || Date.now)();
-  return (
-    (await commitTerminalFlow(flow, {
-      status: "completed",
-      result: {
-        profileId: response.profileId,
-        opId: response.opId,
-      },
-      completedAtMs,
-      updatedAtMs: completedAtMs,
-      errorCode: null,
-    })) || response
-  );
+  return ((await commitTerminalFlow(flow, {
+    status: "completed",
+    result: {
+      profileId: response.profileId,
+      opId: response.opId,
+    },
+    completedAtMs,
+    updatedAtMs: completedAtMs,
+    errorCode: null,
+  })) || response) satisfies
+    | ApiResponse<`POST ${typeof pathname}`>
+    | Promise<ApiResponse<`POST ${typeof pathname}`>>;
 }
 
 export async function handleAuthMutation(

@@ -1,8 +1,8 @@
 import type {
-  EventJsonRecord,
   EventPrizeAssignmentRecord,
   EventReads,
 } from "../../../runtime/eventReads.js";
+import { readEventDocument } from "../../../runtime/events/documents.js";
 import type { StateQuery } from "../test/stateRepositoryTestTypes.ts";
 import type { EventOutboxReads } from "../src/eventOutboxReadRepository.ts";
 
@@ -21,11 +21,7 @@ export function eventReadFixture(
     listDueEventProfileGameProjectionOutboxes: unexpectedOutboxRead,
     listDueEventTelegramProjectionOutboxes: unexpectedOutboxRead,
     readEvent: async (eventId, signal) =>
-      (await read(
-        `events/${eventId}`,
-        undefined,
-        signal,
-      )) as EventJsonRecord | null,
+      readEventDocument(await read(`events/${eventId}`, undefined, signal)),
     readEventPrizeSelections: async (eventId, signal) =>
       ((await read(`eventPrizeSelections/${eventId}`, undefined, signal)) ??
         {}) as Record<string, string>,
@@ -41,7 +37,7 @@ export function eventReadFixture(
         read(`eventPrizeSelections/${eventId}`, undefined, signal),
       ]);
       return {
-        event: event as EventJsonRecord | null,
+        event: readEventDocument(event),
         eventId,
         prizeSelections: (prizeSelections ?? {}) as Record<string, string>,
         revision: event ? 1 : 0,
@@ -59,12 +55,21 @@ export function eventReadFixture(
         revision: prizes ? 1 : 0,
       };
     },
-    listEventsByStatus: async (status, limit, signal) =>
-      ((await read(
-        "events",
-        { orderBy: "status", equalTo: status, limitToFirst: limit },
-        signal,
-      )) ?? {}) as Record<string, EventJsonRecord>,
+    listEventsByStatus: async (status, limit, signal) => {
+      const events =
+        (await read(
+          "events",
+          { orderBy: "status", equalTo: status, limitToFirst: limit },
+          signal,
+        )) ?? {};
+      return Object.fromEntries(
+        Object.entries(events).map(([eventId, value]) => {
+          const event = readEventDocument(value);
+          if (!event) throw new TypeError("invalid event list fixture");
+          return [eventId, event];
+        }),
+      );
+    },
     listProfileEventPrizeAssignments: async (profileId, query = {}, signal) =>
       ((await read(
         `profileEventPrizes/${profileId}`,

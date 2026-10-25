@@ -1,3 +1,9 @@
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
+import {
+  matchCreationFixture,
+  matchRecordFixture,
+} from "../test/matchRecordFixture.ts";
+import { unwrapMatchStateWireFixture } from "../test/matchRecordFixture.ts";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -5,7 +11,7 @@ import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { canonicalMatchOperations } from "../src/matchStateClient.ts";
 import { readMatchStateRoutes } from "../src/matchStateD1.ts";
 import { readMatchStateRecord } from "../src/matchStateRouting.ts";
-import { getMatchStateRpc, unwrapMatchStateRpc } from "../src/matchStateRpc.ts";
+import { getMatchStateRpc } from "../src/matchStateRpc.ts";
 import { createMatchStateSource } from "../src/matchStateSource.ts";
 
 const db = env.PROFILE_GAMES_DB;
@@ -143,7 +149,11 @@ describe("strict match runtime", () => {
         {
           ...request,
           marker: "created",
-          value: { color: "white", fen: "initial", flatMovesString: "" },
+          value: matchCreationFixture({
+            color: "white",
+            fen: "initial",
+            flatMovesString: "",
+          }),
         },
       ],
     });
@@ -178,7 +188,7 @@ describe("strict match runtime", () => {
         {
           ...request,
           marker: "created",
-          value: { color: "white", fen: "initial" },
+          value: matchCreationFixture({ color: "white", fen: "initial" }),
         },
       ],
     });
@@ -221,7 +231,7 @@ describe("strict match runtime", () => {
           {
             ...request,
             marker: "created",
-            value: {
+            value: matchCreationFixture({
               color: "white",
               fen: "initial",
               flatMovesString: "",
@@ -229,13 +239,13 @@ describe("strict match runtime", () => {
               timer: "4;12345",
               aura: "retained",
               extra: { retained: true },
-            },
+            }),
           },
         ],
       });
       const rpc = getMatchStateRpc(env, request.inviteId);
       const readPair = async () =>
-        unwrapMatchStateRpc(
+        unwrapMatchStateWireFixture(
           await rpc.readCanonicalMatchPair({
             ...request,
             epoch: 2,
@@ -244,7 +254,9 @@ describe("strict match runtime", () => {
         );
       const initial = await readPair();
       let loseReply = true;
-      const loseFirstReply = async <T>(work: Promise<T>): Promise<T> => {
+      const loseFirstReply = async <Work extends PromiseLike<unknown>>(
+        work: Work,
+      ): Promise<Awaited<Work>> => {
         const result = await work;
         expect(result).toMatchObject({ ok: true });
         if (loseReply) {
@@ -285,7 +297,7 @@ describe("strict match runtime", () => {
         ...initial,
         revision: initial.revision + 1,
         playerMatch: {
-          ...initial.playerMatch,
+          ...matchRecordFixture(initial.playerMatch),
           ...(operation === "move"
             ? { fen: "first", flatMovesString: "a" }
             : { status: "surrendered" }),
@@ -399,10 +411,13 @@ describe("strict match runtime", () => {
           () => operations.surrenderCanonical(request),
           () => operations.startCanonical(timerRequest),
           () =>
-            operations.claimCanonical(timerRequest, {
-              eventOwned: true,
-              eventId: "event-one",
-            }),
+            operations.claimCanonical(
+              timerRequest,
+              inviteDocumentFixture({
+                eventOwned: true,
+                eventId: "event-one",
+              }),
+            ),
         ]) {
           await expect(execute()).rejects.toThrow(control.message);
           expect(reads).toBe(++expectedReads);
@@ -448,7 +463,7 @@ describe("strict match runtime", () => {
         {
           ...request,
           marker: "created",
-          value: { color: "white", fen: "initial" },
+          value: matchCreationFixture({ color: "white", fen: "initial" }),
         },
       ],
     };

@@ -1,18 +1,21 @@
+import { readDelivery } from "./deliveryState.js";
+import type { TextDesiredView } from "./desiredRecords.js";
+import {
+  messageDeliveryDocument,
+  type TelegramAppliedDocument,
+} from "./records.js";
+import {
+  markSendInFlightRecord,
+  acknowledgeSendRecord,
+} from "./deliverySendRecords.js";
+import { messageDocument } from "./records.js";
 import type { TelegramClient } from "./client.js";
 import type { TelegramDeliveryControl } from "./deliveryControl.js";
-import { normalizeTimestamp, omitRetryState } from "./deliveryPolicy.js";
+import { normalizeTimestamp } from "./deliveryPolicy.js";
 import {
-  appendPendingDelete,
-  buildPendingDeleteId,
   ensureCommitted,
-  normalizeString,
-  omitKeys,
-  writeCleanup,
-  writeDelivery,
   type DesiredContext,
   type DesiredSendOperations,
-  type RawRecord,
-  type SendInFlight,
 } from "./deliveryState.js";
 import { readProperty } from "./values.js";
 export function createTelegramSendDelivery({
@@ -55,56 +58,28 @@ export function createTelegramSendDelivery({
     previousApplied,
     nowMs,
   }: DesiredContext & {
+    desired: TextDesiredView;
     chatId: string;
-    previousApplied: RawRecord | null;
+    previousApplied: TelegramAppliedDocument | null;
     nowMs: number;
     requestedGeneration?: string;
   }) => {
     const attemptId = createAttemptId();
-    const marker: SendInFlight = {
-      attemptId,
-      revision: desired.revision,
-      destination: desired.destination,
-      chatId,
-      instanceKey: desired.instanceKey,
-      contentHash: desired.contentHash,
-      startedAtMs: nowMs,
-      apiGateOwner: `send:${attemptId}`,
-    };
+    const marker = desired.createSendMarker(attemptId, chatId, nowMs);
     const marked = await updateOwned(
       messageKey,
       ownerToken,
-      (record, delivery) => {
-        if (
-          normalizeString(readProperty(record.desired, "revision")) !==
-          desired.revision
-        ) {
-          return {
-            ...record,
-            delivery: writeDelivery({
-              ...omitKeys(delivery, ["leaseOwner", "leaseExpiresAtMs"]),
-              status: "pending",
-              revision: normalizeString(
-                readProperty(record.desired, "revision"),
-              ),
-            }),
-          };
-        }
-        return {
-          ...record,
-          delivery: {
-            ...delivery.source,
-            sendInFlight: marker,
-          },
-        };
-      },
+      (record, delivery) =>
+        markSendInFlightRecord(messageDocument(record), delivery, {
+          desired,
+          marker,
+        }),
     );
     if (
       !marked.committed ||
-      readProperty(
-        readProperty(marked.value?.delivery, "sendInFlight"),
-        "revision",
-      ) !== desired.revision
+      !readDelivery(
+        messageDeliveryDocument(marked.value),
+      ).sendInFlightMatchesRevision(desired.revision)
     ) {
       return { status: "stale" };
     }
@@ -113,7 +88,7 @@ export function createTelegramSendDelivery({
       messageKey,
       ownerToken,
       desired,
-      currentDelivery: marked.value?.delivery,
+      currentDelivery: messageDeliveryDocument(marked.value),
     });
     if (expired) {
       return expired;
@@ -133,7 +108,7 @@ export function createTelegramSendDelivery({
         ownerToken,
         desired,
         result: buildGateBlockedFailure(gateResult, checkedAtMs),
-        currentDelivery: marked.value?.delivery,
+        currentDelivery: messageDeliveryDocument(marked.value),
         persistBeforeSchedule: true,
       });
       return {
@@ -145,10 +120,16 @@ export function createTelegramSendDelivery({
     const callAtMs = now();
     if (
       normalizeTimestamp(
-        readProperty(marked.value?.delivery, "retryDeadlineAtMs"),
+        readProperty(
+          messageDeliveryDocument(marked.value),
+          "retryDeadlineAtMs",
+        ),
       ) > 0 &&
       normalizeTimestamp(
-        readProperty(marked.value?.delivery, "retryDeadlineAtMs"),
+        readProperty(
+          messageDeliveryDocument(marked.value),
+          "retryDeadlineAtMs",
+        ),
       ) <= callAtMs
     ) {
       const expiredResult = { code: "safe-retry-window-exhausted" };
@@ -164,89 +145,26 @@ export function createTelegramSendDelivery({
       return { status: "terminal", reason: expiredResult.code };
     }
 
-    const result = await client.sendTelegramMessage({
-      chatId,
-      text: desired.text,
-      parseMode: desired.parseMode || null,
-      silent: desired.silent === true,
-      disableWebPagePreview: desired.disableWebPagePreview !== false,
-    });
+    const result = await client.sendTelegramMessage(desired.sendInput(chatId));
     if (result.ok) {
-      const applied = {
-        destination: desired.destination,
+      const applied = desired.createAppliedReceipt(
         chatId,
-        messageId: result.messageId,
-        instanceKey: desired.instanceKey,
-        revision: desired.revision,
-        contentHash: desired.contentHash,
-        appliedAtMs: nowMs,
-      };
+        result.messageId,
+        nowMs,
+      );
       const receiptWrite = await updateOwned(
         messageKey,
         ownerToken,
-        (record, delivery) => {
-          const latestRevision = normalizeString(
-            readProperty(record.desired, "revision"),
-          );
-          const nextDelivery = writeDelivery({
-            ...omitRetryState(
-              omitKeys(delivery, [
-                "leaseOwner",
-                "leaseExpiresAtMs",
-                "sendInFlight",
-                "lastError",
-                "deadLetterAtMs",
-                "apiGateOwner",
-                "apiGateGeneration",
-                "apiGateStartedAtMs",
-                "appliedStateUnknown",
-              ]),
-            ),
-            ...(latestRevision === desired.revision
-              ? {
-                  status: "delivered" as const,
-                  revision: latestRevision || desired.revision,
-                  deliveredAtMs: nowMs,
-                }
-              : {
-                  status: "pending" as const,
-                  revision: latestRevision || desired.revision,
-                }),
-            apiGateSettleOwner: marker.apiGateOwner,
-          });
-          if (latestRevision !== desired.revision) {
-            nextDelivery.attempts = 0;
-          }
-          if (
-            previousApplied &&
-            typeof previousApplied.messageId === "number" &&
-            Number.isInteger(previousApplied.messageId) &&
-            previousApplied.messageId > 0 &&
-            (previousApplied.messageId !== result.messageId ||
-              normalizeString(previousApplied.chatId) !== chatId)
-          ) {
-            const pendingDelete = writeCleanup({
-              chatId: normalizeString(previousApplied.chatId) || chatId,
-              messageId: previousApplied.messageId,
-              instanceKey: normalizeString(previousApplied.instanceKey),
-              pendingDeleteId: buildPendingDeleteId({
-                chatId: normalizeString(previousApplied.chatId) || chatId,
-                messageId: previousApplied.messageId,
-              }),
-              status: "pending",
-              attempts: 0,
-            });
-            Object.assign(
-              nextDelivery,
-              appendPendingDelete(nextDelivery, pendingDelete),
-            );
-          }
-          return {
-            ...record,
+        (record, delivery) =>
+          acknowledgeSendRecord(messageDocument(record), delivery, {
             applied,
-            delivery: nextDelivery,
-          };
-        },
+            chatId,
+            desired,
+            marker,
+            nowMs,
+            previousApplied,
+            result,
+          }),
       );
       ensureCommitted(receiptWrite, "send-receipt-not-persisted");
       await settlePersistedApiGate({
@@ -264,7 +182,7 @@ export function createTelegramSendDelivery({
         desired,
         result,
         safeRejectedAttemptId: marker.attemptId,
-        currentDelivery: marked.value?.delivery,
+        currentDelivery: messageDeliveryDocument(marked.value),
         apiGateOwner: marker.apiGateOwner,
       });
       return {

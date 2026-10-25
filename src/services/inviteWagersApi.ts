@@ -1,15 +1,24 @@
+import type {
+  ApiSocketUrl,
+  ApiRoutePath,
+  ApiResponse,
+} from "@mons/shared/api-contracts";
 import { normalizeRecordKey } from "@mons/shared/ids";
 import {
   INVITE_WAGERS_MAX_MESSAGE_BYTES,
   INVITE_WAGERS_SOCKET_PROTOCOL,
   isReadInviteWagersResponse,
-  type ReadInviteWagersResponse,
 } from "@mons/shared/invite-wagers";
 import {
   REACTION_AUTH_PROTOCOL_PREFIX,
   isReactionSocketToken,
 } from "@mons/shared/reactions";
-import { readSnapshotJson, type AuthTokenProvider } from "./apiTransport";
+import {
+  readSnapshotJson,
+  type AuthTokenProvider,
+  type EndpointSnapshotJsonRead,
+} from "./apiTransport";
+type ReadInviteWagersResponse = ApiResponse<"GET /invites/:inviteId/wagers">;
 
 const INVITE_WAGERS_API_ROOT = "https://api.mons.link";
 export const INVITE_WAGERS_REQUEST_TIMEOUT_MS = 10_000;
@@ -28,14 +37,18 @@ export class InviteWagersApiError extends Error {
   }
 }
 
-function wagersPath(inviteId: string): string {
+function wagersPath(
+  inviteId: string,
+): ApiRoutePath<"GET /invites/:inviteId/wagers"> {
   if (!inviteId || normalizeRecordKey(inviteId) !== inviteId) {
     throw new InviteWagersApiError("invalid-invite");
   }
   return `/invites/${encodeURIComponent(inviteId)}/wagers`;
 }
 
-export function getInviteWagersSocketUrl(inviteId: string): string {
+export function getInviteWagersSocketUrl(
+  inviteId: string,
+): ApiSocketUrl<"GET /invites/:inviteId/wagers/socket"> {
   return `${INVITE_WAGERS_API_ROOT.replace("https:", "wss:")}${wagersPath(inviteId)}/socket`;
 }
 
@@ -66,5 +79,5 @@ export async function readInviteWagersViaApi(
       payload.snapshot.inviteId === inviteId,
     createError: (code, status, retryAfterMs) =>
       new InviteWagersApiError(code, status, retryAfterMs),
-  });
+  } satisfies EndpointSnapshotJsonRead<"GET /invites/:inviteId/wagers">);
 }

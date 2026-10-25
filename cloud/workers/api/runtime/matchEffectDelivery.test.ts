@@ -1,3 +1,7 @@
+import {
+  timerStartStoreFixture,
+  matchEffectFixture,
+} from "../test/matchClaimFixture.ts";
 import { env } from "cloudflare:workers";
 import { runInDurableObject, type D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, expect, it, vi } from "vitest";
@@ -10,9 +14,9 @@ import {
   MatchStateStore,
   type MatchStateStoreOptions,
 } from "../src/matchStateStore.ts";
-import type { MatchStateEffect } from "../src/matchStateTypes.ts";
 import { createMatchTimerStartStore } from "../src/gameplayCoordinationD1.ts";
 import { buildEventProgressPlan } from "../src/eventProgressCodec.ts";
+import { readDueMatchEffect } from "../src/matchEffectCodec.ts";
 import {
   acquireEventWriteAdmission,
   commitEventMutations,
@@ -29,7 +33,7 @@ const testEnv = env as Env & {
   TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
 };
 
-const effect: MatchStateEffect = {
+const effect = matchEffectFixture({
   effectId: "timer:invite:match",
   inviteId: "invite",
   matchId: "match",
@@ -42,17 +46,15 @@ const effect: MatchStateEffect = {
   reason: "timer-claimed",
   nextAtMs: 100,
   attempts: 0,
-};
+});
 
 function environment(
   onDispatch: () => Promise<void>,
   cleanupLegacyTimerStarts: Parameters<typeof createMatchEffectDelivery>[1] = (
     input,
   ) =>
-    createMatchTimerStartStore(testEnv.PROFILE_GAMES_DB).deletePair(
-      input.playerId,
-      input.opponentId,
-      input.matchId,
+    createMatchTimerStartStore(testEnv.PROFILE_GAMES_DB).deleteRetainedPair(
+      input,
     ),
 ) {
   let dispatched = 0;
@@ -84,7 +86,7 @@ async function localTimerEffect(
   eventId: string | null,
 ) {
   const now = 2_000_000_000_000;
-  const timerStarts = {
+  const timerStarts = timerStartStoreFixture({
     getOrAdvance: vi.fn<MatchStateStoreOptions["timerStarts"]["getOrAdvance"]>(
       async () => {
         throw new Error("unexpected-d1-timer-write");
@@ -95,7 +97,7 @@ async function localTimerEffect(
         throw new Error("unexpected-d1-timer-cleanup");
       },
     ),
-  };
+  });
   const settings = {
     timerStarts,
     newMatchTimerStorage: "local",
@@ -313,9 +315,9 @@ it.each(["event", null])(
       throw new Error("unexpected-timer-cleanup");
     });
     const f = environment(async () => {}, cleanup);
-    await expect(f.deliver({ ...effect, eventId })).rejects.toThrow(
-      "profile-writes-disabled",
-    );
+    await expect(
+      f.deliver(matchEffectFixture({ ...effect, eventId })),
+    ).rejects.toThrow("profile-writes-disabled");
     expect(cleanup).not.toHaveBeenCalled();
     expect(await timerCount()).toBe(2);
     expect(await admissionCount()).toBe(0);
@@ -325,7 +327,7 @@ it.each(["event", null])(
 
 it("cleans non-event timer markers without creating an event outbox or Workflow", async () => {
   const f = environment(async () => {});
-  await f.deliver({ ...effect, eventId: null });
+  await f.deliver(matchEffectFixture({ ...effect, eventId: null }));
   expect(await timerCount()).toBe(0);
   expect(await admissionCount()).toBe(0);
   expect(f.dispatched()).toBe(0);
@@ -334,6 +336,67 @@ it("cleans non-event timer markers without creating an event outbox or Workflow"
       "SELECT COUNT(*) AS count FROM event_progress_outboxes",
     ).first<number>("count"),
   ).toBe(0);
+});
+
+it("cleans legacy timers before rejecting malformed progress fields and releases the admission", async () => {
+  const f = environment(async () => {
+    throw new Error("unexpected Workflow");
+  });
+  const retained = readDueMatchEffect({
+    payload_json: JSON.stringify({
+      ...effect,
+      eventId: 42,
+      sourceKey: ["retained"],
+      reason: 7,
+    }),
+    next_at_ms: 100,
+    attempts: 0,
+  });
+  await expect(f.deliver(retained)).rejects.toThrow(
+    "invalid-event-progress-outbox",
+  );
+  expect(await timerCount()).toBe(0);
+  expect(await admissionCount()).toBe(0);
+  expect(f.dispatched()).toBe(0);
+  expect(
+    await testEnv.EVENT_DB.prepare(
+      "SELECT COUNT(*) AS count FROM event_progress_outboxes",
+    ).first<number>("count"),
+  ).toBe(0);
+});
+
+it("local retained cleanup skips malformed actor fields before the non-event return", async () => {
+  const room = testEnv.INVITE_REACTIONS.getByName(crypto.randomUUID());
+  await runInDurableObject(room, async (_instance, ctx) => {
+    try {
+      const { store, timerStarts, now } = await localTimerEffect(
+        ctx.storage,
+        null,
+      );
+      const markers = localMarkers(ctx.storage);
+      const retained = readDueMatchEffect({
+        payload_json: JSON.stringify({
+          ...effect,
+          eventId: null,
+          playerId: [],
+          opponentId: { retained: true },
+        }),
+        next_at_ms: now,
+        attempts: 0,
+      });
+      const f = environment(async () => {
+        throw new Error("unexpected Workflow");
+      }, store.cleanupRetainedTimerStarts.bind(store));
+      await expect(f.deliver(retained)).resolves.toBeUndefined();
+      expect(localMarkers(ctx.storage)).toEqual(markers);
+      expect(timerStarts.deletePair).not.toHaveBeenCalled();
+      expect(await timerCount()).toBe(2);
+      expect(await admissionCount()).toBe(0);
+      expect(f.dispatched()).toBe(0);
+    } finally {
+      await ctx.storage.deleteAlarm();
+    }
+  });
 });
 
 it.each(["event", null])(
@@ -352,7 +415,7 @@ it.each(["event", null])(
         expect(markers).toHaveLength(1);
         const f = environment(
           async () => {},
-          store.cleanupLegacyTimerStarts.bind(store),
+          store.cleanupRetainedTimerStarts.bind(store),
         );
         await new MatchEffectsDispatcher(store.effects, {
           deliver: f.deliver,
@@ -394,7 +457,7 @@ it("rejects an inconsistent local cohort before cleanup or event dispatch", asyn
       ctx.storage.sql.exec("DELETE FROM match_state_timer_cohorts");
       const f = environment(
         async () => {},
-        store.cleanupLegacyTimerStarts.bind(store),
+        store.cleanupRetainedTimerStarts.bind(store),
       );
 
       await expect(f.deliver(pending[0])).rejects.toThrow(

@@ -1,15 +1,16 @@
+import type {
+  ApiRequest,
+  ApiJsonStatus,
+  ApiJsonBody,
+} from "@mons/shared/api-contracts";
 import { readBoundedBody } from "./http.ts";
-import {
-  normalizeTaskPayload,
-  type TelegramTaskPayload,
-} from "../../../runtime/telegram/taskIdentity.js";
+import { normalizeTaskPayload } from "../../../runtime/telegram/taskIdentity.js";
 import {
   createTelegramBridgeSignature,
   hasValidTelegramBridgeSignature,
   MAX_TIMESTAMP_SKEW_SECONDS,
 } from "./telegramBridgeAuth.ts";
 import { readTelegramStorageMode } from "./telegramD1.ts";
-
 const MAX_BRIDGE_BODY_BYTES = 8 * 1024;
 const BRIDGE_KEYS = new Set([
   "generation",
@@ -19,9 +20,24 @@ const BRIDGE_KEYS = new Set([
   "taskKind",
 ]);
 
-function bridgeResponse(status: number, error?: string): Response {
+function bridgeResponse(
+  status: ApiJsonStatus<"POST /internal/telegram/delivery">,
+  error:
+    | "method-not-allowed"
+    | "invalid-request"
+    | "unauthenticated"
+    | "telegram-frozen"
+    | "telegram-command-required",
+): Response {
   return new Response(
-    JSON.stringify(error ? { ok: false, error } : { ok: true }),
+    JSON.stringify(
+      error
+        ? ({ ok: false, error } satisfies ApiJsonBody<
+            "POST /internal/telegram/delivery",
+            typeof status
+          >)
+        : { ok: true },
+    ),
     {
       status,
       headers: {
@@ -33,7 +49,9 @@ function bridgeResponse(status: number, error?: string): Response {
   );
 }
 
-function parseInitialTask(body: string): TelegramTaskPayload {
+function parseInitialTask(
+  body: string,
+): ApiRequest<"POST /internal/telegram/delivery"> {
   const value = JSON.parse(body) as unknown;
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("invalid-task");
@@ -55,7 +73,7 @@ function parseInitialTask(body: string): TelegramTaskPayload {
   ) {
     throw new Error("invalid-task");
   }
-  return payload;
+  return payload as ApiRequest<"POST /internal/telegram/delivery">;
 }
 
 export async function handleTelegramBridge(

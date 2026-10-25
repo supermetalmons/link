@@ -1,3 +1,4 @@
+import { inviteRematchState } from "@mons/shared/invite-records";
 import {
   parseInviteMatchIndex,
   parseRematchIndices,
@@ -41,7 +42,8 @@ export async function authorizeMatchMutation(
   if (participants.status === "invalid") {
     throw new AuthApiFailure(409, "failed-precondition", "invite-invalid");
   }
-  const { source: invite, hostId, guestId } = participants;
+  const { source, hostId, guestId } = participants;
+  const invite = inviteRematchState(source);
   if (request.playerId !== hostId && request.playerId !== guestId) {
     throw new AuthApiFailure(403, "permission-denied", "permission-denied");
   }

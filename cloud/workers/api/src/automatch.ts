@@ -1,4 +1,10 @@
 import {
+  readInviteDocument,
+  inviteTrimmedParticipants,
+  inviteProjectionState,
+  mergeInviteAutomatchOperation,
+} from "@mons/shared/invite-records";
+import {
   emptyAutomatchEntryFields,
   type AutomatchEntryRead,
 } from "../../../runtime/automatchRecords.js";
@@ -43,7 +49,6 @@ import {
   measureAutomatchPhase,
 } from "./automatchTelemetry.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
-import { isSafeRecordKey } from "./recordKeys.ts";
 import type { AutomatchRepository } from "./gameplayContracts.ts";
 import {
   GameSessionMutationLeaseReleaseFailure,
@@ -74,12 +79,6 @@ const AUTOMATCH_OWNER_LOCK_MIN_RETRY_MS = 25;
 const AUTOMATCH_OWNER_LOCK_MAX_RETRY_MS = 1_000;
 const AUTOMATCH_UID_LOOKUP_LIMIT = 2;
 const AUTOMATCH_OWNER_LOGIN_UID_LIMIT = 512;
-
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
 
 function normalizeString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -484,22 +483,6 @@ export async function cancelOwnedQueuedAutomatches(
   );
 }
 
-function readAutomatchOperationIds(value: unknown): Record<string, string> {
-  const operationIds = toRecord(value);
-  if (!operationIds) return {};
-  const valid: [string, string][] = [];
-  for (const [uid, operationId] of Object.entries(operationIds)) {
-    if (
-      isSafeRecordKey(uid) &&
-      typeof operationId === "string" &&
-      isSafeRecordKey(operationId)
-    ) {
-      valid.push([uid, operationId]);
-    }
-  }
-  return Object.fromEntries(valid);
-}
-
 async function persistExistingAutomatchReceipt(
   identity: RequestIdentity,
   request: StartAutomatchOperationRequest,
@@ -521,9 +504,8 @@ async function persistExistingAutomatchReceipt(
           repository.readInviteMetadata(inviteId, signal),
         ]);
         const queueUid = normalizeString(queueValue.record?.uid);
-        const invite = toRecord(inviteValue);
-        const hostId = normalizeString(invite?.hostId);
-        const guestId = normalizeString(invite?.guestId);
+        const invite = readInviteDocument(inviteValue);
+        const { hostId, guestId } = inviteTrimmedParticipants(invite);
         if (!invite || !owned.has(hostId)) return null;
         let response: SuccessfulStartAutomatchResponse;
         if (guestId) {
@@ -532,7 +514,7 @@ async function persistExistingAutomatchReceipt(
           queueUid &&
           owned.has(queueUid) &&
           hostId === queueUid &&
-          invite.automatchStateHint !== "canceled"
+          inviteProjectionState(invite).automatchStateHint !== "canceled"
         ) {
           response = pendingAutomatchResponse(inviteId);
         } else {
@@ -765,21 +747,21 @@ async function attemptAutomatch(
           repository.readAutomatchEntry(queued.inviteId, signal),
           repository.readInviteMetadata(queued.inviteId, signal),
         ]);
-        const currentInvite = toRecord(currentInviteValue);
+        const currentInvite = readInviteDocument(currentInviteValue);
+        const participants = inviteTrimmedParticipants(currentInvite);
         if (
           normalizeString(currentQueueValue.record?.uid) !== existingUid ||
-          normalizeString(currentInvite?.hostId) !== existingUid ||
-          normalizeString(currentInvite?.guestId)
+          participants.hostId !== existingUid ||
+          participants.guestId
         ) {
           return null;
         }
-        inviteChange.value = {
-          ...inviteChange.value,
-          automatchOperationIds: {
-            ...readAutomatchOperationIds(currentInvite?.automatchOperationIds),
-            [identity.uid]: request.operationId,
-          },
-        };
+        inviteChange.value = mergeInviteAutomatchOperation(
+          inviteChange.value,
+          currentInvite,
+          identity.uid,
+          request.operationId,
+        );
         return { response: matchedResponse, changes };
       },
       commit: (changes) => repository.commitSessionChanges(changes, signal),

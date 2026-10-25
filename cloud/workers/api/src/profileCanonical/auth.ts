@@ -1,3 +1,7 @@
+import {
+  retainCanonicalAuthMetadata,
+  retainCanonicalAuthResult,
+} from "./retainedRecords.ts";
 import { type AuthMethodKey } from "@mons/shared/auth";
 import { canonicalProfileRedirectCte } from "./redirectSql.ts";
 import {
@@ -99,6 +103,15 @@ export function parseCanonicalAuthMethodRow(
   };
 }
 
+function retainNullableAuthMetadata(value: unknown) {
+  const parsed = parseNullableObjectJson(value);
+  return parsed === null ? null : retainCanonicalAuthMetadata(parsed);
+}
+function retainNullableAuthResult(value: unknown) {
+  const parsed = parseNullableObjectJson(value);
+  return parsed === null ? null : retainCanonicalAuthResult(parsed);
+}
+
 export function parseCanonicalAuthOperationRow(
   value: unknown,
 ): CanonicalAuthOperationSnapshot {
@@ -118,8 +131,8 @@ export function parseCanonicalAuthOperationRow(
     method: authMethod(row.method),
     loginUid: nonempty(row.login_uid),
     status: row.status,
-    meta: parseNullableObjectJson(row.meta_json),
-    result: parseNullableObjectJson(row.result_json),
+    meta: retainNullableAuthMetadata(row.meta_json),
+    result: retainNullableAuthResult(row.result_json),
     errorCode: nullableString(row.error_code),
     errorMessage: nullableString(row.error_message),
     startedAtMs: safeInteger(row.started_at_ms),

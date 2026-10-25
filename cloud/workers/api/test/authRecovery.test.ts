@@ -673,11 +673,12 @@ function prizeRecoveryService(
 
 test("event prize recovery rereads the source entitlement under its lease", async () => {
   const profile = recoveryProfileDb();
+  const liveAssignment = {
+    ...prizeAssignment("1111", 200),
+    delivery: { channel: "wallet", revision: 2 },
+  };
   const prizeStore = recoveryPrizeStore({
-    liveAssignment: {
-      ...prizeAssignment("1111", 200),
-      delivery: { channel: "wallet", revision: 2 },
-    },
+    liveAssignment,
     targetAssignment: {
       ...prizeAssignment("1111", 200),
       profileId: "target-profile",

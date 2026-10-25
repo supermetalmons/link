@@ -33,7 +33,6 @@ export type ProfileGameProjectionState = Pick<
 export type EventProfileProjectionState = Pick<
   EventStore,
   | "readEventProfileGameProjectionOutbox"
-  | "transactEventProfileGameProjectionOutbox"
   | "claimEventProfileGameProjectionOutbox"
   | "acknowledgeEventProfileGameProjectionOutbox"
   | "transactEventLease"
@@ -139,7 +138,9 @@ export type AutomatchRecoveryDependencies = RecoveryDependencies &
 
 export type EventRecoveryDependencies = RecoveryDependencies &
   Pick<ProfileGameProjectionDependencies, "createRequestId"> & {
-    createEventRecovery?: (env: Env) => EventProjectionRecoveryStore;
+    createEventRecovery?: (
+      env: Env,
+    ) => EventProjectionRecoveryStore<"profile-game">;
   };
 
 export type ProfileLinkRecoveryDependencies = Pick<

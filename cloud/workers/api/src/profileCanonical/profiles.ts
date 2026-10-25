@@ -1,3 +1,8 @@
+import {
+  retainCanonicalProfileLegacy,
+  emptyCanonicalProfileLegacy,
+  type CanonicalProfileLegacyDocument,
+} from "./retainedRecords.ts";
 import { MATERIAL_KEYS } from "@mons/shared/mining";
 import {
   type CompletePlayerProfile,
@@ -21,7 +26,6 @@ import {
   type MergeTargetRow,
   type CanonicalProfileValue,
   type CanonicalProfileFieldsValue,
-  type JsonObject,
   type CanonicalProfileState,
   CANONICAL_PROFILE_INTERNAL_REDIRECT_LIMIT,
   CANONICAL_PROFILE_LEADERBOARD_LIMIT,
@@ -208,7 +212,9 @@ export function parseCanonicalProfileRow(
   return {
     ...parseCanonicalPublicProfileRow(row),
     revision: safeInteger(row.revision, 1),
-    legacyFields: parseObjectJson(row.legacy_fields_json),
+    legacyFields: retainCanonicalProfileLegacy(
+      parseObjectJson(row.legacy_fields_json),
+    ),
     createdAtMs: safeInteger(row.created_at_ms),
     updatedAtMs: safeInteger(row.updated_at_ms),
     mergedAtMs: nullableSafeInteger(row.merged_at_ms),
@@ -297,7 +303,7 @@ type ProfileMaterializationInput = {
   createdAtMs: number;
   emojiPresent?: boolean;
   gameplayEmoji?: string | number;
-  legacyFields?: JsonObject;
+  legacyFields?: CanonicalProfileLegacyDocument;
   mergedAtMs?: number | null;
   mergedIntoProfileId?: string | null;
   profile: CompletePlayerProfile;
@@ -375,7 +381,7 @@ export function materializeCanonicalProfile(
 ): CanonicalProfileValue {
   const value = {
     ...materializeProfileFields(input),
-    legacyFields: input.legacyFields || {},
+    legacyFields: input.legacyFields || emptyCanonicalProfileLegacy(),
   };
   assertCanonicalProfileValue(value);
   return value;

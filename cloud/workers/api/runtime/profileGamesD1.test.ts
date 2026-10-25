@@ -1,3 +1,8 @@
+import {
+  projectionDocumentFixture,
+  projectionFixtureFields,
+  commitProjectionCompatibility,
+} from "../test/profileDataBoundaryFixture.ts";
 import type { NavigationGamesCursor } from "@mons/shared/navigation";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
@@ -111,7 +116,7 @@ function gameData(
   listSortAt: number,
   status: "active" | "waiting" = "waiting",
 ) {
-  return {
+  return projectionDocumentFixture({
     entityType: "game",
     inviteId,
     kind: "direct",
@@ -126,11 +131,11 @@ function gameData(
     opponentEmoji: status === "active" ? 7 : null,
     automatchStateHint: null,
     isPendingAutomatch: false,
-  };
+  });
 }
 
 function eventData(eventId: string, updatedAt: number) {
-  return {
+  return projectionDocumentFixture({
     schemaVersion: 1,
     source: "event-projector",
     entityType: "event",
@@ -146,7 +151,7 @@ function eventData(eventId: string, updatedAt: number) {
     participantCount: 1,
     participantPreview: [],
     winnerDisplayName: "",
-  };
+  });
 }
 
 function historicalPair(matchId = "invite-1") {
@@ -407,7 +412,7 @@ describe("profile game projection D1 repository", () => {
       "profile-1",
       ["invite-1"],
     ).then((rows) => rows.get("invite-1") ?? null);
-    expect(projection?.data.updatedAt).toBe(2_000);
+    expect(projectionFixtureFields(projection?.data)?.updatedAt).toBe(2_000);
     expect(projection?.version).toBe(1);
 
     await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
@@ -430,16 +435,24 @@ describe("profile game projection D1 repository", () => {
 
   it("rejects projections without a stable list timestamp", () => {
     expect(() =>
-      encodeProfileGameProjection("profile-1", "invite-1", {
-        ...gameData("invite-1", 1_000),
-        listSortAt: null,
-      }),
+      encodeProfileGameProjection(
+        "profile-1",
+        "invite-1",
+        projectionDocumentFixture({
+          ...gameData("invite-1", 1_000),
+          listSortAt: null,
+        }),
+      ),
     ).toThrow("invalid-profile-game-projection-list-sort");
     expect(() =>
-      encodeProfileGameProjection("profile-1", "invite-1", {
-        ...gameData("invite-1", 1_000),
-        listSortAt: { timestamp: 1_000 },
-      }),
+      encodeProfileGameProjection(
+        "profile-1",
+        "invite-1",
+        projectionDocumentFixture({
+          ...gameData("invite-1", 1_000),
+          listSortAt: { timestamp: 1_000 },
+        }),
+      ),
     ).toThrow("invalid-profile-game-projection-list-sort");
   });
 
@@ -469,7 +482,7 @@ describe("profile game projection D1 repository", () => {
       });
       for (const type of ["update", "delete"] as const) {
         await expect(
-          commitProfileGameProjectionWrites(database, [
+          commitProjectionCompatibility(database, [
             {
               type: "delete",
               profileId: "profile-1",
@@ -1187,11 +1200,13 @@ describe("profile game projection D1 repository", () => {
       ]),
     ).rejects.toThrow();
     expect(
-      (
-        await getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
-          "invite-1",
-        ]).then((rows) => rows.get("invite-1") ?? null)
-      )?.data.listSortAt,
+      projectionFixtureFields(
+        (
+          await getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
+            "invite-1",
+          ]).then((rows) => rows.get("invite-1") ?? null)
+        )?.data,
+      )?.listSortAt,
     ).toBe(9_000);
   });
 
@@ -1322,11 +1337,13 @@ describe("profile game projection D1 repository", () => {
       },
     ]);
     expect(
-      (
-        await getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
-          "invite-1",
-        ]).then((rows) => rows.get("invite-1") ?? null)
-      )?.data.listSortAt,
+      projectionFixtureFields(
+        (
+          await getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
+            "invite-1",
+          ]).then((rows) => rows.get("invite-1") ?? null)
+        )?.data,
+      )?.listSortAt,
     ).toBe(2_000);
     await expect(
       commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [

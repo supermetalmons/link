@@ -1,3 +1,4 @@
+import { queueFor } from "./queueProducers.ts";
 import {
   normalizeTaskPayload,
   type TelegramTaskPayload,
@@ -27,7 +28,7 @@ export async function enqueueInitialTelegramDelivery(
   input: InitialTelegramDelivery,
 ): Promise<TelegramTaskPayload> {
   const payload = buildInitialTelegramDeliveryTask(input);
-  await env.TELEGRAM_DELIVERY_QUEUE.send(payload);
+  await queueFor(env, "TELEGRAM_DELIVERY_QUEUE").send(payload);
   console.info(
     JSON.stringify({
       event: "telegram_delivery_enqueued",
@@ -43,5 +44,5 @@ export async function enqueueTelegramDeliveryTask(
   env: Env,
   payload: TelegramTaskPayload,
 ): Promise<void> {
-  await env.TELEGRAM_DELIVERY_QUEUE.send(payload);
+  await queueFor(env, "TELEGRAM_DELIVERY_QUEUE").send(payload);
 }

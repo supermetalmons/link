@@ -1,7 +1,20 @@
-import { resolveEventTelegramAnnouncements } from "@mons/shared/events";
-import { buildTelegramEditDesired } from "../../../runtime/telegram/desiredStateCore.js";
+import type { QueueProducer } from "./queueProducers.ts";
+import { retainEventTelegramEndedResults } from "../../../runtime/telegram/eventProjectionRecords.js";
 import {
-  EVENT_TELEGRAM_PROJECTION_GUARD_FIELD,
+  deferEventTelegramProjectionTexts,
+  eventTelegramProjectionGeneration,
+  eventTelegramProjectionNeedsResults,
+  type EventTelegramProjectionStateDocument,
+  type EventTelegramTextField,
+} from "../../../runtime/telegram/eventProjectionRecords.js";
+import {
+  messageAppliedDocument,
+  type TelegramAppliedDocument,
+} from "../../../runtime/telegram/records.js";
+import { projectEventMessage } from "../../../runtime/telegram/messageProjectionRecords.js";
+import { resolveEventTelegramAnnouncements } from "@mons/shared/events";
+
+import {
   addEventTelegramProjectionGuard,
   buildEventTelegramDispatches,
   buildEventTelegramProjection,
@@ -41,7 +54,7 @@ const EVENT_TELEGRAM_PROJECTION_OWNER_UID = "event-telegram-projector";
 const EVENT_PROJECTION_SWEEP_LIMIT = 100;
 
 export type EventProjectionSweepCandidate = {
-  snapshot: EventProjectionRecoverySnapshot;
+  snapshot: EventProjectionRecoverySnapshot<"telegram">;
   task: EventTelegramProjectionTask;
   updatedAtMs: number;
 };
@@ -94,22 +107,16 @@ function readProjectionGeneration(value: unknown): number {
     : 0;
 }
 
-function persistedProjectionGeneration(value: unknown): number {
-  const record = toRecord(value);
-  const guard = toRecord(record?.[EVENT_TELEGRAM_PROJECTION_GUARD_FIELD]);
-  return readProjectionGeneration(guard?.generation);
-}
-
 async function commitFencedProjectionUpdate(
   state: EventStore,
   eventId: string,
-  value: Record<string, unknown>,
+  value: EventTelegramProjectionStateDocument,
   generation: number,
 ): Promise<boolean> {
   const result = await state.transactEventTelegramProjectionState(
     eventId,
     (current) => {
-      if (persistedProjectionGeneration(current) > generation) {
+      if (eventTelegramProjectionGeneration(current) > generation) {
         return { commit: false, decision: "newer-projection" };
       }
       return { value, decision: "projection-committed" };
@@ -123,67 +130,11 @@ async function commitFencedDesiredUpdate(
   messageKey: string,
   value: EventTelegramDesiredChange["value"],
   generation: number,
-  expectedApplied?: Record<string, unknown>,
+  expectedApplied?: TelegramAppliedDocument,
 ): Promise<boolean | "deferred"> {
-  const result = await telegram.transactMessage(messageKey, (current) => {
-    const record = asObject(current);
-    if (persistedProjectionGeneration(record.desired) > generation) {
-      return { commit: false, decision: "newer-projection" };
-    }
-    if (expectedApplied) {
-      const desired = asObject(value);
-      const delivery = asObject(record.delivery);
-      const abandoned = asObject(delivery.abandonedSend);
-      if (
-        delivery.status === "terminal" &&
-        asObject(delivery.lastError).code === "manually-abandoned" &&
-        abandoned.destination === desired.destination &&
-        abandoned.instanceKey === desired.instanceKey
-      ) {
-        return { commit: false, decision: "abandoned" };
-      }
-      const applied = asObject(record.applied);
-      if (
-        delivery.sendInFlight ||
-        [
-          "destination",
-          "instanceKey",
-          "messageId",
-          "contentHash",
-          "revision",
-        ].some((key) => applied[key] !== expectedApplied[key])
-      ) {
-        const previousDesired = asObject(record.desired);
-        if (
-          desired.operation === "edit" &&
-          desired.ifMissing === "skip" &&
-          previousDesired.destination === desired.destination &&
-          previousDesired.instanceKey === desired.instanceKey
-        ) {
-          return {
-            value: {
-              ...record,
-              desired: {
-                ...buildTelegramEditDesired({
-                  ...previousDesired,
-                  ifMissing: "skip",
-                  sourceRevision: desired.sourceRevision,
-                }),
-                [EVENT_TELEGRAM_PROJECTION_GUARD_FIELD]:
-                  desired[EVENT_TELEGRAM_PROJECTION_GUARD_FIELD],
-              },
-            },
-            decision: "delivery-changed",
-          };
-        }
-        return { commit: false, decision: "delivery-changed" };
-      }
-    }
-    return {
-      value: { ...record, desired: value },
-      decision: "projection-committed",
-    };
-  });
+  const result = await telegram.transactMessage(messageKey, (current) =>
+    projectEventMessage(current, value, generation, expectedApplied),
+  );
   return result.decision === "delivery-changed"
     ? "deferred"
     : result.committed === true;
@@ -235,7 +186,6 @@ export async function processEventProjectionTask(
       return eventData === null ? "missing" : "not-v2";
     }
     const event = asObject(eventData);
-    const projectionState = asObject(rawState);
     const generation = readProjectionGeneration(rawGeneration);
     const announcements = resolveEventTelegramAnnouncements(event);
     const upcomingMessageKey = `event:${task.eventId}:upcoming`;
@@ -265,14 +215,12 @@ export async function processEventProjectionTask(
         readReminderMessage(),
         announcements.results &&
         event.status === "ended" &&
-        projectionState.endedAnnouncementArmed === true &&
-        (typeof projectionState.endedText !== "string" ||
-          projectionState.endedText === "")
+        eventTelegramProjectionNeedsResults(rawState)
           ? loadEndedMatchResults(eventData, {
               readRatingUpdates: (operationIds) =>
                 rating.readRatingUpdates(operationIds),
             })
-          : {},
+          : retainEventTelegramEndedResults({}),
       ]);
     const projection = buildEventTelegramProjection({
       eventId: task.eventId,
@@ -304,14 +252,14 @@ export async function processEventProjectionTask(
     const editableMessages = new Map([
       [
         upcomingMessageKey,
-        { textField: "upcomingText", message: upcomingMessage },
+        { textField: "upcomingText" as const, message: upcomingMessage },
       ],
       [
         reminderMessageKey,
-        { textField: "reminderText", message: reminderMessage },
+        { textField: "reminderText" as const, message: reminderMessage },
       ],
     ]);
-    const deferredTextFields = new Set<string>();
+    const deferredTextFields = new Set<EventTelegramTextField>();
     if (guarded.desired.length > 0) {
       await refreshLock();
       const committedDesiredChanges: EventTelegramDesiredChange[] = [];
@@ -322,7 +270,7 @@ export async function processEventProjectionTask(
           messageKey,
           value,
           generation,
-          editable ? asObject(asObject(editable.message).applied) : undefined,
+          editable ? messageAppliedDocument(editable.message) : undefined,
         );
         if (committed === "deferred") {
           deferredTextFields.add(editable!.textField);
@@ -349,18 +297,11 @@ export async function processEventProjectionTask(
       state,
       task.eventId,
       deferredTextFields.size > 0
-        ? {
-            ...asObject(projectedState),
-            ...Object.fromEntries(
-              Array.from(deferredTextFields, (field) => [
-                field,
-                typeof projectionState[field] === "string"
-                  ? projectionState[field]
-                  : "",
-              ]),
-            ),
-            lastProjectedSignature: "",
-          }
+        ? deferEventTelegramProjectionTexts(
+            projectedState,
+            rawState,
+            deferredTextFields,
+          )
         : projectedState,
       generation,
     );
@@ -373,7 +314,7 @@ export async function processEventProjectionTask(
 }
 
 export function eventProjectionSweepEntries(
-  snapshots: readonly EventProjectionRecoverySnapshot[],
+  snapshots: readonly EventProjectionRecoverySnapshot<"telegram">[],
 ): EventProjectionSweepEntry[] {
   const records = Object.fromEntries(
     snapshots.map((snapshot) => [snapshot.eventId, snapshot]),
@@ -398,7 +339,7 @@ export function eventProjectionSweepEntries(
 }
 
 export async function claimEventProjectionSweepCandidate(
-  writer: Pick<EventProjectionRecoveryWriter, "claim">,
+  writer: Pick<EventProjectionRecoveryWriter<"telegram">, "claim">,
   candidate: EventProjectionSweepCandidate,
   nowMs: number,
 ): Promise<boolean> {
@@ -411,38 +352,16 @@ export async function claimEventProjectionSweepCandidate(
 }
 
 async function markInvalidEventProjectionSweepEntry(
-  writer: Pick<EventProjectionRecoveryWriter, "transact">,
+  writer: Pick<EventProjectionRecoveryWriter<"telegram">, "markInvalid">,
   eventId: string,
   nowMs: number,
 ): Promise<void> {
-  await writer.transact(eventId, (current) => {
-    const record = toRecord(current);
-    const updatedAtMs = record?.updatedAtMs;
-    if (
-      !record ||
-      (parseEventProjectionOutbox(current) && isSafeRecordKey(eventId)) ||
-      typeof updatedAtMs !== "number" ||
-      !Number.isFinite(updatedAtMs) ||
-      updatedAtMs > nowMs
-    ) {
-      return { commit: false, decision: "changed" };
-    }
-    return {
-      value: {
-        ...record,
-        status: "dead",
-        reason: "invalid-record",
-        updatedAtMs: null,
-        deadAtMs: nowMs,
-      },
-      decision: "dead",
-    };
-  });
+  await writer.markInvalid(eventId, nowMs);
 }
 
 export async function sweepEventTelegramProjections(
-  queue: Queue<TelegramProjectionTask>,
-  recovery: EventProjectionRecoveryStore,
+  queue: Pick<QueueProducer<TelegramProjectionTask>, "sendBatch">,
+  recovery: EventProjectionRecoveryStore<"telegram">,
   nowMs: number,
   logger: Pick<Console, "error"> = console,
 ): Promise<number> {

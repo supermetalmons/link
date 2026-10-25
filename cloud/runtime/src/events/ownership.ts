@@ -1,4 +1,17 @@
-import type { EventData, EventParticipant } from "./model.js";
+import type {
+  EventData,
+  EventParticipant,
+  EventParticipants,
+} from "./model.js";
+import {
+  eventState,
+  eventParticipants,
+  eventParticipantEntries,
+  eventParticipantState,
+  eventPrizeOwnerProfileIds,
+  createEventParticipantsDocument,
+  copyEventParticipant,
+} from "./documents.js";
 export type EventOwnershipProfile = {
   aura: string;
   emoji: number | string;
@@ -32,7 +45,7 @@ type Signature_buildEventOwnershipQuery = (
 type Signature_canonicalizeEventParticipants = (
   event: EventData,
   snapshot: EventOwnershipSnapshot,
-) => { didChange: boolean; participantsById: Record<string, EventParticipant> };
+) => { didChange: boolean; participantsById: EventParticipants };
 type Signature_directRequesterParticipation = (
   event: EventData,
   requesterUid: string,
@@ -94,22 +107,17 @@ const uniqueStrings = (values: readonly unknown[]) =>
   Array.from(new Set(values.map(normalizeString).filter(Boolean)));
 
 const participantEntries = (event: EventData | null | undefined) =>
-  Object.entries(
-    event && event.participants && typeof event.participants === "object"
-      ? event.participants
-      : {},
-  ).flatMap(([profileId, value]) =>
-    value && typeof value === "object"
-      ? [
-          {
-            key: normalizeString(profileId),
-            participant: value,
-            profileId:
-              normalizeString(value.profileId) || normalizeString(profileId),
-            loginUid: normalizeString(value.loginUid),
-          },
-        ]
-      : [],
+  eventParticipantEntries(eventParticipants(event)).map(
+    ([profileId, participant]) => {
+      const value = eventParticipantState(participant);
+      return {
+        key: normalizeString(profileId),
+        participant,
+        profileId:
+          normalizeString(value.profileId) || normalizeString(profileId),
+        loginUid: normalizeString(value.loginUid),
+      };
+    },
   );
 
 const buildEventOwnershipQuery: Signature_buildEventOwnershipQuery = (
@@ -117,25 +125,17 @@ const buildEventOwnershipQuery: Signature_buildEventOwnershipQuery = (
   { loginUids = [], profileIds = [] } = {},
 ) => {
   const entries = participantEntries(event);
-  const assignments =
-    event &&
-    event.prizeAssignments &&
-    typeof event.prizeAssignments === "object"
-      ? Object.values(event.prizeAssignments)
-      : [];
   return {
     loginUids: uniqueStrings([
       ...loginUids,
-      normalizeString(event && event.createdByLoginUid),
+      normalizeString(eventState(event).createdByLoginUid),
       ...entries.map(({ loginUid }) => loginUid),
     ]),
     profileIds: uniqueStrings([
       ...profileIds,
-      normalizeString(event && event.createdByProfileId),
+      normalizeString(eventState(event).createdByProfileId),
       ...entries.flatMap(({ key, profileId }) => [key, profileId]),
-      ...assignments.map((assignment) =>
-        normalizeString(assignment && assignment.profileId),
-      ),
+      ...eventPrizeOwnerProfileIds(event),
     ]),
   };
 };
@@ -222,10 +222,10 @@ const directRequesterParticipation: Signature_directRequesterParticipation = (
   if (direct.isParticipant) return direct;
   if (
     requesterUid &&
-    normalizeString(event && event.createdByLoginUid) === requesterUid
+    normalizeString(eventState(event).createdByLoginUid) === requesterUid
   ) {
     return requesterParticipation([
-      normalizeString(event && event.createdByProfileId),
+      normalizeString(eventState(event).createdByProfileId),
     ]);
   }
   return requesterParticipation([]);
@@ -258,7 +258,9 @@ const resolveRequesterParticipation: Signature_resolveRequesterParticipation = (
       : [],
   );
   if (matches.length > 0) return requesterParticipation(matches);
-  const creatorProfileId = normalizeString(event && event.createdByProfileId);
+  const creatorProfileId = normalizeString(
+    eventState(event).createdByProfileId,
+  );
   return requesterParticipation(
     creatorProfileId &&
       getCanonicalProfileId(snapshot, creatorProfileId) === requesterProfileId
@@ -308,7 +310,10 @@ const canonicalizeEventParticipants: Signature_canonicalizeEventParticipants = (
 ) => {
   const entries = participantEntries(event);
   if (entries.length === 0) {
-    return { didChange: false, participantsById: {} };
+    return {
+      didChange: false,
+      participantsById: createEventParticipantsDocument(),
+    };
   }
   const canonicalProfileIds = resolveOwnedProfileReferences(
     snapshot,
@@ -319,10 +324,12 @@ const canonicalizeEventParticipants: Signature_canonicalizeEventParticipants = (
   for (let index = 0; index < entries.length; index += 1) {
     const entry = entries[index];
     const canonicalProfileId = canonicalProfileIds[index];
-    participantsById[canonicalProfileId] = {
-      ...entry.participant,
-      profileId: canonicalProfileId,
-    };
+    participantsById[canonicalProfileId] = copyEventParticipant(
+      entry.participant,
+      {
+        profileId: canonicalProfileId,
+      },
+    );
     if (
       entry.key !== canonicalProfileId ||
       entry.profileId !== canonicalProfileId
@@ -330,7 +337,10 @@ const canonicalizeEventParticipants: Signature_canonicalizeEventParticipants = (
       didChange = true;
     }
   }
-  return { didChange, participantsById };
+  return {
+    didChange,
+    participantsById: createEventParticipantsDocument(participantsById),
+  };
 };
 
 const canonicalizeEventPrizeSelections = <T>(

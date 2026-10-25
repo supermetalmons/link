@@ -38,7 +38,7 @@ export type ProjectionRecoveryDependencies = Omit<
   ProjectionDependencies,
   "createStateRepository"
 > & {
-  createEventRecovery?: (env: Env) => EventProjectionRecoveryStore;
+  createEventRecovery?: (env: Env) => EventProjectionRecoveryStore<"telegram">;
   createStateRepository?: (
     env: Env,
   ) => ReturnType<

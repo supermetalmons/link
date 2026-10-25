@@ -1,10 +1,11 @@
+import {
+  readTelegramMessageDocument,
+  readTelegramControlDocument,
+} from "../../../runtime/telegram/records.js";
+import type { TransactionDecision } from "../../../runtime/transactions.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  createTelegramRepository,
-  type TelegramStorage,
-  type TelegramStoredRecord,
-} from "../../../runtime/telegram/repositoryCore.js";
+import { createTelegramRepository } from "../../../runtime/telegram/repositoryCore.js";
 import {
   handleTelegramCommand,
   MAX_TELEGRAM_COMMAND_BODY_BYTES,
@@ -17,14 +18,13 @@ const SECRET = TELEGRAM_TEST_ENV.TELEGRAM_QUEUE_BRIDGE_SECRET;
 
 function repositoryState(initial: Record<string, unknown> = {}) {
   const values = new Map(Object.entries(initial));
-  const transact = async (
+  const transact = async <Value extends object>(
     key: string,
-    updater: Parameters<TelegramStorage["transactMessage"]>[1],
+    updater: (current: Value | null) => TransactionDecision<Value>,
+    read: (value: unknown) => Value | null,
   ) => {
-    const current = (values.get(key) ?? null) as TelegramStoredRecord | null;
-    const output = updater(current) as
-      | { commit: false; decision?: string }
-      | { value: unknown; decision?: string };
+    const current = read(values.get(key) ?? null);
+    const output = updater(current);
     if ("commit" in output && output.commit === false) {
       return {
         committed: false,
@@ -37,19 +37,22 @@ function repositoryState(initial: Record<string, unknown> = {}) {
     return {
       committed: true,
       decision: output.decision,
-      value: output.value as TelegramStoredRecord | null,
+      value: output.value,
     };
   };
   const repository = createTelegramRepository({
     readMessage: async (key) =>
-      (values.get(`telegramMessages/${key}`) ??
-        null) as TelegramStoredRecord | null,
+      readTelegramMessageDocument(
+        values.get(`telegramMessages/${key}`) ?? null,
+      ),
     transactMessage: (key, updater) =>
-      transact(`telegramMessages/${key}`, updater),
+      transact(`telegramMessages/${key}`, updater, readTelegramMessageDocument),
     readControl: async () =>
-      (values.get("telegramDeliveryControl") ??
-        null) as TelegramStoredRecord | null,
-    transactControl: (updater) => transact("telegramDeliveryControl", updater),
+      readTelegramControlDocument(
+        values.get("telegramDeliveryControl") ?? null,
+      ),
+    transactControl: (updater) =>
+      transact("telegramDeliveryControl", updater, readTelegramControlDocument),
   });
   return { repository, values };
 }
@@ -192,14 +195,14 @@ test("persists exact recovery requests and exposes metadata-only status", async 
   assert.equal(requested.status, 202);
   assert.equal(sent.length, 1);
   await state.repository.transactMessage(messageKey, (current) => ({
-    value: {
-      ...(current as Record<string, unknown>),
+    value: readTelegramMessageDocument({
+      ...current,
       manualRecoveryResult: {
         requestId,
         action: "confirm-send-absent",
         status: "accepted",
       },
-    },
+    })!,
   }));
   const status = await handleTelegramCommand(
     await signedRequest({ kind: "recovery-status", messageKey, requestId }),

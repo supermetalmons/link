@@ -1,3 +1,4 @@
+import { readEventTelegramProjectionDocument } from "../../../runtime/telegram/eventProjectionRecords.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { EventMutation } from "../../../runtime/eventCommands.js";
@@ -48,7 +49,11 @@ const cases: Array<{
       admission,
       telegramProjectionSnapshot: { eventId: "event-one", current: null },
     },
-    valid: { kind: "telegram-state", eventId: "event-one", value: {} },
+    valid: {
+      kind: "telegram-state",
+      eventId: "event-one",
+      value: readEventTelegramProjectionDocument({}),
+    },
     wrongId: { kind: "telegram-generation", eventId: "event-two", value: 1 },
     wrongKind: { kind: "telegram-outbox", eventId: "event-one", value: null },
     error: "invalid-telegram-projection-snapshot-scope",

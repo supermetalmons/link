@@ -1,16 +1,14 @@
 // Generated from src/events/gameProjectionModel.ts. Run npm run generate:runtime.
+import type { NavigationGameStatus } from "@mons/shared/navigation";
+import type { ProjectionProfileDocument } from "../profileGameProjectionRecords.js";
+import {
+  inviteIsEventOwned as isEventOwnedInvite,
+  type InviteDocument,
+} from "@mons/shared/invite-records";
 import type { RecomputeInviteProjectionOptions } from "../profileGamesProjectionCore.js";
 import { getNavigationSortBucket } from "@mons/shared/navigation";
-import { isEventOwnedInvite } from "@mons/shared/events";
-export type ProjectionProfile = Record<string, unknown> & {
-  custom?: {
-    emoji?: unknown;
-  };
-};
-export type ProjectionInvite = Record<string, unknown> & {
-  hostId?: unknown;
-  guestId?: unknown;
-};
+export type ProjectionProfile = ProjectionProfileDocument;
+export type ProjectionInvite = InviteDocument;
 type InviteProjectionInput = {
   inviteId: string;
   inviteData: ProjectionInvite | null;
@@ -21,10 +19,10 @@ declare const PROJECTOR_SCHEMA_VERSION = 2;
 declare const normalizeString: (value: unknown) => string | null;
 declare const readTimestampMillis: (value: unknown) => number | null;
 declare const getProfileDisplayName: (
-  profileData: ProjectionProfile | null | undefined,
+  source: ProjectionProfile | null | undefined,
 ) => string;
 declare const getProfileEmoji: (
-  profileData: ProjectionProfile | null | undefined,
+  document: ProjectionProfile | null | undefined,
 ) => number | null;
 declare const getEmojiId: (value: unknown) => number | null;
 declare const deriveProjectionStatus: ({
@@ -32,7 +30,7 @@ declare const deriveProjectionStatus: ({
   inviteData,
   automatchStateHint,
   latestMatchRatingCompleted,
-}: InviteProjectionInput) => "pending" | "waiting" | "active" | "ended";
+}: InviteProjectionInput) => NavigationGameStatus;
 declare const shouldProjectInvite: ({
   inviteId,
   inviteData,
@@ -71,7 +69,7 @@ declare const getOwnerContext: ({
   hostLoginId: string | null;
   guestLoginId: string | null;
 }) => {
-  ownerRole: string;
+  ownerRole: "host" | "guest";
   ownerLoginId: string | null;
   opponentProfileId: string | null;
   opponentLoginId: string | null;

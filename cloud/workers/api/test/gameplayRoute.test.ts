@@ -1,3 +1,5 @@
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
+import { matchDocumentFixture } from "./matchRecordFixture.ts";
 import { gameplayTestPort } from "./gameSessionTestPorts.ts";
 import type { TestGameplayRepository as GameplayRepository } from "./wagerFrozenTestUtils.ts";
 import {
@@ -1689,20 +1691,21 @@ test("routes exact authenticated rating updates without a new rate limit", async
       return { status: "committed", data: plan.repairData };
     },
     readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
-    readInviteMetadata: async () => ({
-      hostId: ratingRequest.playerId,
-      guestId: ratingRequest.opponentId,
-    }),
+    readInviteMetadata: async () =>
+      retainedInviteSourceFixture({
+        hostId: ratingRequest.playerId,
+        guestId: ratingRequest.opponentId,
+      }),
     readMatchRecord: async ({ playerId, matchId }) => {
       assert.equal(matchId, ratingRequest.matchId);
-      return {
+      return matchDocumentFixture({
         color: playerId === ratingRequest.playerId ? "white" : "black",
         emojiId: playerId === ratingRequest.playerId ? 1 : 2,
         fen: new Game().toFen(),
         flatMovesString: "",
         status: playerId === ratingRequest.playerId ? "" : "surrendered",
         timer: "",
-      };
+      });
     },
     readMatchPair: async (input) => ({
       ...input,

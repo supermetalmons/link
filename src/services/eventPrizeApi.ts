@@ -1,3 +1,7 @@
+import type {
+  ApiPathRequest,
+  ApiPathResponse,
+} from "@mons/shared/api-contracts";
 import {
   isEventPrizeWithdrawalCompletedResponse,
   isEventPrizeWithdrawalProcessingResponse,
@@ -11,7 +15,6 @@ import {
   type ApiErrorPolicy,
   type AuthTokenProvider,
 } from "./apiTransport";
-
 const EVENT_PRIZE_API_ROOT = "https://api.mons.link";
 const EVENT_PRIZE_API_REQUEST_TIMEOUT_MS = 15_000;
 const EVENT_PRIZE_API_DEADLINE_MS = 135_000;
@@ -74,15 +77,18 @@ const withdrawalErrorPolicy: ApiErrorPolicy = {
   timeoutMessage: "Prize withdrawal timed out.",
 };
 
-async function postWithdrawalRequest(
-  path: string,
-  body: Record<string, unknown>,
+type WithdrawalPath =
+  "/events/prizes/withdrawals" | "/events/prizes/withdrawals/status";
+
+async function postWithdrawalRequest<const Path extends WithdrawalPath>(
+  path: Path,
+  body: ApiPathRequest<"POST", NoInfer<Path>>,
   tokenProvider: AuthTokenProvider,
   deadlineAt: number,
   dependencies: Required<
     Pick<EventPrizeApiDependencies, "fetcher" | "now" | "requestTimeoutMs">
   >,
-): Promise<EventPrizeWithdrawalResponse> {
+): Promise<ApiPathResponse<"POST", Path>> {
   const remainingMs = deadlineAt - dependencies.now();
   if (remainingMs <= 0) {
     throw new EventPrizeWithdrawalApiError(

@@ -5,6 +5,7 @@ exports.reconcileCompletedWithdrawalProjections =
   exports.finalizeWithdrawal =
   exports.attemptCompletedWithdrawalProjectionReconciliation =
     void 0;
+const records_js_1 = require("./records.js");
 const errors_js_1 = require("./errors.js");
 const eventPrizeWithdrawalState_js_1 = require("../eventPrizeWithdrawalState.js");
 const normalizeString = (value) =>
@@ -74,7 +75,9 @@ const finalizeWithdrawal = async (
   dependencies,
 ) => {
   const { withdrawals, readProfileByLoginUid } = dependencies;
-  const requesterUid = normalizeString(withdrawal.requesterUid);
+  const requesterUid = (0, records_js_1.withdrawalOwnership)(
+    withdrawal,
+  ).requesterUid;
   if (!requesterUid) {
     throw new errors_js_1.EventPrizeWithdrawalError(
       "failed-precondition",
@@ -122,7 +125,7 @@ const finalizeWithdrawal = async (
     transactionSignature,
     completedAtMs,
   });
-  await withdrawals.replaceRecords([{ eventId, prizeId, value: completed }]);
+  await withdrawals.replaceCompleted([{ eventId, prizeId, value: completed }]);
   await reconcileCompletedWithdrawalProjections(
     {
       withdrawal: completed,

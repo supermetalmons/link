@@ -1,3 +1,8 @@
+import {
+  readStoredMatchJson,
+  storedMatchValue,
+  type RetainedMatchValue,
+} from "./matchRecordCodec.ts";
 import { RETIRED_STATE_BACKEND } from "./stateCompatibility.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import { readD1FirstRow } from "./d1Reads.ts";
@@ -261,7 +266,7 @@ export async function readLegacyMatchStates(
   db: D1Database,
   inputs: readonly { playerId: string; matchId: string }[],
   signal?: AbortSignal,
-): Promise<unknown[]> {
+): Promise<RetainedMatchValue[]> {
   signal?.throwIfAborted();
   if (inputs.length === 0) return [];
   for (const input of inputs) {
@@ -282,9 +287,12 @@ export async function readLegacyMatchStates(
   if (results.length !== inputs.length)
     throw new MatchStateD1Failure("legacy-record-unavailable");
   const missing: { playerId: string; matchId: string }[] = [];
-  const values = results.map((result, index): unknown => {
+  const values = results.map((result, index): RetainedMatchValue => {
     const row = result.results[0];
-    if (row) return JSON.parse(row.record_json);
+    if (row)
+      return storedMatchValue(
+        readStoredMatchJson({ value_json: row.record_json }, "legacy"),
+      );
     missing.push(inputs[index]);
     return null;
   });

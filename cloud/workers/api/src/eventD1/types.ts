@@ -1,8 +1,15 @@
+import type { EventProgressDocument } from "../../../../runtime/eventProgressRecords.js";
+import type { EventProjectionOutboxDocument } from "../../../../runtime/eventProjectionOutboxRecords.js";
+import type {
+  InviteSourceMutation,
+  RetainedInviteMutationBatch,
+} from "../inviteSourceD1.ts";
 import { STATE_EFFECTS_FIELD } from "../stateCompatibility.ts";
+import type { EventTelegramProjectionStateDocument } from "../../../../runtime/telegram/eventProjectionRecords.js";
 import type {
   EventJsonRecord,
   EventPrizeAssignmentRecord,
-  EventSnapshot,
+  EventSnapshot as DomainEventSnapshot,
 } from "../../../../runtime/eventReads.js";
 
 export const MAX_EVENT_TRANSACTION_ATTEMPTS = 12;
@@ -33,23 +40,32 @@ export type EventLeaseGuard = {
   ownerUid: string;
 };
 
+declare const eventIntentUpdates: unique symbol;
+export type EventIntentUpdates = { readonly [eventIntentUpdates]: true };
+declare const eventIntentEffects: unique symbol;
+export type EventIntentEffects = { readonly [eventIntentEffects]: true };
+declare const eventIntentEnvelope: unique symbol;
 type EventTransitionIntentBase = {
-  canonicalUpdates: Record<string, unknown>;
+  readonly [eventIntentEnvelope]: true;
+  canonicalUpdates: EventIntentUpdates;
   createdAtMs: number;
   eventId: string;
   expectedRevision: number;
-  [STATE_EFFECTS_FIELD]: Record<string, unknown>;
+  [STATE_EFFECTS_FIELD]: EventIntentEffects;
   transitionId: string;
   updatedAtMs: number;
 };
 
-export type EventInviteSourceMutation = {
-  current: {
-    inviteId: string;
-    value: Record<string, unknown> | null;
-    revision: number;
-  };
-  value: Record<string, unknown>;
+export type EventInviteSourceMutation = InviteSourceMutation;
+export type EventTransitionDraftInput = {
+  schemaVersion: 1;
+  canonicalUpdates: EventIntentUpdates;
+  createdAtMs: number;
+  eventId: string;
+  expectedRevision: number;
+  [STATE_EFFECTS_FIELD]: EventIntentEffects;
+  transitionId: string;
+  updatedAtMs: number;
 };
 
 export type EventTransitionIntent = EventTransitionIntentBase &
@@ -59,11 +75,9 @@ export type EventTransitionIntent = EventTransitionIntentBase &
         schemaVersion: 2;
         sourceEpoch: number;
         payloadDigest: string;
-        inviteMutations: EventInviteSourceMutation[];
+        inviteMutations: RetainedInviteMutationBatch;
       }
   );
-
-export type EventOutboxRecord = Record<string, unknown>;
 
 export class EventD1Failure extends Error {
   constructor(message = "event-d1-unavailable", options?: ErrorOptions) {
@@ -140,6 +154,10 @@ export type ProfilePrizeAssignmentSnapshot = {
   revision: number;
 };
 
+export type EventSnapshot = Omit<DomainEventSnapshot, "event"> & {
+  event: EventJsonRecord | null;
+};
+
 export type StoredEventSnapshot = EventSnapshot & {
   pendingTransitionId: string | null;
 };
@@ -152,7 +170,7 @@ export type ProgressOutboxSnapshot = {
 export type TelegramProjectionState = {
   generation: number;
   revision: number;
-  state: EventJsonRecord;
+  state: EventTelegramProjectionStateDocument;
 };
 
 export type TelegramProjectionSnapshot = {
@@ -168,10 +186,16 @@ export type EventMutationOptions = {
   eventSnapshot?: StoredEventSnapshot;
   expectedEventRevisions?: Readonly<Record<string, number>>;
   expectedRecords?: {
-    progress?: Readonly<Record<string, unknown>>;
-    dead?: Readonly<Record<string, unknown>>;
-    profileGame?: Readonly<Record<string, unknown>>;
-    telegram?: Readonly<Record<string, unknown>>;
+    progress?: Readonly<
+      Record<string, EventProgressDocument<"pending"> | null>
+    >;
+    dead?: Readonly<Record<string, EventProgressDocument<"dead"> | null>>;
+    profileGame?: Readonly<
+      Record<string, EventProjectionOutboxDocument<"profile-game"> | null>
+    >;
+    telegram?: Readonly<
+      Record<string, EventProjectionOutboxDocument<"telegram"> | null>
+    >;
   };
   expectedProfilePrizeRevisions?: Readonly<Record<string, number>>;
   expectedTelegramStateRevisions?: Readonly<Record<string, number>>;

@@ -646,3 +646,39 @@ test("a confirmed finished match archives undelivered actions and survives reloa
   assert.equal(restoredBarrier.error.message, "match-move-finished");
   assert.equal(restored.requests.length, 0);
 });
+
+test("restoration retains journal extensions until an explicit write and leaves malformed bytes untouched", () => {
+  const key = moveDeliveryStorageKey(scope);
+  const stored = {
+    version: 1,
+    scope,
+    confirmed: { ...initial, retained: { keep: true } },
+    pending: [{ moveFen: "a", fen: "next-fen", retained: [null, false] }],
+    gameVariant: " legacy ",
+    finished: false,
+  };
+  const raw = JSON.stringify(stored);
+  const h = harness({ online: false, records: new Map([[key, raw]]) });
+  assert.equal(h.records.get(key), raw);
+  assert.deepEqual(h.errors, []);
+  assert.deepEqual(h.outbox.latest, { flatMovesString: "a", fen: "next-fen" });
+  h.outbox.enqueue("b", "last-fen");
+  const rewritten = h.stored();
+  assert.deepEqual(rewritten.confirmed.retained, { keep: true });
+  assert.deepEqual(rewritten.pending[0].retained, [null, false]);
+  assert.equal(rewritten.gameVariant, " legacy ");
+  assert.equal(Object.hasOwn(rewritten, "finished"), false);
+  for (const invalid of [
+    null,
+    { ...stored, scope: { ...scope, loginUid: "other" } },
+    { ...stored, pending: [{ moveFen: "a-b", fen: "next-fen" }] },
+  ]) {
+    const bytes = JSON.stringify(invalid);
+    const failed = harness({ online: false, records: new Map([[key, bytes]]) });
+    assert.equal(failed.outbox.hasPendingMoves, false);
+    assert.deepEqual(failed.outbox.latest, initial);
+    assert.equal(failed.errors.length, 1);
+    assert.equal(failed.errors[0].kind, "storage");
+    assert.equal(failed.records.get(key), bytes);
+  }
+});

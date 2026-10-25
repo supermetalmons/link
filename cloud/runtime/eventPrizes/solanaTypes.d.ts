@@ -7,14 +7,15 @@ import type {
 import type { EventPrizeStandard } from "@mons/shared/event-prizes";
 import type {
   WithdrawalCompletionDependencies,
-  WithdrawalData,
   SubmittedTransactionStatus,
 } from "./types.js";
+import type { WithdrawalDocument } from "./records.js";
+import type { EventPrizeAssignmentRecord } from "../eventReads.js";
 export type WithdrawalRuntimeDependencies = WithdrawalCompletionDependencies & {
   readProfileEventPrizeAssignment(
     profileId: string,
     eventId: string,
-  ): Promise<WithdrawalData | null>;
+  ): Promise<EventPrizeAssignmentRecord | null>;
   createEventPrizeUmi(standard: EventPrizeStandard): Umi;
   resolveWithdrawalProfileId(profileId: string): Promise<string>;
 };
@@ -23,7 +24,7 @@ export type SubmittedTransaction = {
   transactionSignature: string;
   blockhash: string;
   lastValidBlockHeight: number;
-  persistedWithdrawal?: WithdrawalData;
+  persistedWithdrawal?: WithdrawalDocument;
 };
 export type PrizeAssetState = {
   assetOwner: string;

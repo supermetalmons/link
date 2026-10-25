@@ -1,3 +1,4 @@
+import { matchCreationWireValue } from "../src/matchRecordCodec.ts";
 import type {
   StateRepository,
   StateQuery,
@@ -26,7 +27,10 @@ export function eventMatchTestPort(state: StateRepository): MatchStatePort {
               throw new Error("event-match-creation-conflict");
             }
             return {
-              value: { ...record.value, sessionCreation: record.marker },
+              value: {
+                ...Object(matchCreationWireValue(record.value)),
+                sessionCreation: record.marker,
+              },
               decision: "created",
             };
           },
@@ -146,22 +150,6 @@ export async function transactEventRepositoryFixture(
       id,
       parts[0],
       updater as Parameters<EventStore["transactProfileEventPrize"]>[2],
-      signal,
-    );
-  if (root === "profileGameProjectionOutbox" && id === "event")
-    return store.transactEventProfileGameProjectionOutbox(
-      parts[0],
-      updater as Parameters<
-        EventStore["transactEventProfileGameProjectionOutbox"]
-      >[1],
-      signal,
-    );
-  if (root === "telegramProjectionOutbox" && id === "event")
-    return store.transactEventTelegramProjectionOutbox(
-      parts[0],
-      updater as Parameters<
-        EventStore["transactEventTelegramProjectionOutbox"]
-      >[1],
       signal,
     );
   throw new Error(

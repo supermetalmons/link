@@ -6,6 +6,7 @@ exports.MAX_RECORD_KEY_BYTES =
   exports.AUTO_INVITE_PREFIX =
   exports.ALPHANUMERIC_CHARACTERS =
     void 0;
+exports.isCanonicalLoginUid = isCanonicalLoginUid;
 exports.buildAutoInviteId = buildAutoInviteId;
 exports.computeHash32 = computeHash32;
 exports.createSeededRandom = createSeededRandom;
@@ -49,6 +50,23 @@ function normalizeRecordKey(value) {
 }
 function isSafeRecordKey(value) {
   return normalizeRecordKey(value) !== null;
+}
+function isCanonicalLoginUid(value) {
+  if (
+    typeof value !== "string" ||
+    value === "" ||
+    value.length > 128 ||
+    value !== value.trim() ||
+    !isSafeRecordKey(value)
+  ) {
+    return false;
+  }
+  try {
+    encodeURIComponent(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 function randomAlphanumeric(length, random = Math.random) {
   let value = "";

@@ -1,3 +1,4 @@
+import { materializeProfileCompatibility as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import type { CompletePlayerProfile } from "@mons/shared/profiles";
@@ -5,7 +6,6 @@ import { beforeAll, describe, expect, it } from "vitest";
 import {
   CanonicalProfileCorruption,
   commitCanonicalPlan,
-  materializeCanonicalProfile,
   readCanonicalProfileAggregateSnapshot,
   type CanonicalProfileSnapshot,
 } from "../src/profileCanonicalD1.ts";

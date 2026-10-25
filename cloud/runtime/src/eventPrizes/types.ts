@@ -1,26 +1,43 @@
+import type { TransactionResult } from "../transactions.js";
+import type { WithdrawalClaimInput } from "../eventPrizeWithdrawalState.js";
 import type {
-  TransactionDecision,
-  TransactionResult,
-} from "../transactions.js";
+  CompletedWithdrawalDocument,
+  WithdrawalDocument,
+  WithdrawalSubmissionEvidence,
+} from "./records.js";
 
-export type WithdrawalData = Record<string, unknown>;
+export type WithdrawalClaimCommand = Omit<
+  WithdrawalClaimInput,
+  "current" | "nowMs"
+>;
+
+export type WithdrawalTransactionResult = TransactionResult<WithdrawalDocument>;
 
 export type WithdrawalRecord = {
-  read(): Promise<WithdrawalData | null>;
-  transaction(
-    update: (
-      current: WithdrawalData | null,
-    ) => TransactionDecision<WithdrawalData>,
-  ): Promise<TransactionResult<WithdrawalData>>;
+  read(): Promise<WithdrawalDocument | null>;
+  claim(input: WithdrawalClaimCommand): Promise<WithdrawalTransactionResult>;
+  releaseProcessing(leaseId: string): Promise<WithdrawalTransactionResult>;
+  block(input: {
+    leaseId: string;
+    observedOwner: string;
+  }): Promise<WithdrawalTransactionResult>;
+  persistSubmission(
+    input: WithdrawalSubmissionEvidence & { leaseId: string },
+  ): Promise<WithdrawalTransactionResult>;
+  discardSubmission(input: {
+    leaseId: string;
+    transactionSignature: string;
+  }): Promise<WithdrawalTransactionResult>;
 };
 
 export type WithdrawalStore = {
+  get(eventId: string, prizeId: string): Promise<WithdrawalDocument | null>;
   record(eventId: string, prizeId: string): WithdrawalRecord;
-  replaceRecords(
+  replaceCompleted(
     records: readonly {
       eventId: string;
       prizeId: string;
-      value: WithdrawalData | null;
+      value: CompletedWithdrawalDocument;
     }[],
   ): Promise<void>;
 };
@@ -40,12 +57,12 @@ export type WithdrawalCompletionDependencies =
     readProfileByLoginUid(
       uid: string,
       fields?: readonly string[],
-    ): Promise<{ id: unknown } | null>;
+    ): Promise<{ id: string } | null>;
     now?: () => number;
   };
 
 export type WithdrawalCompletionInput = {
-  withdrawal: WithdrawalData;
+  withdrawal: WithdrawalDocument;
   profileId: string;
   eventId: string;
   prizeId: string;

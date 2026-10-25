@@ -10,7 +10,6 @@ export type EventProfileGameProjectionState = Pick<
   | "readEvent"
   | "readMatchRecords"
   | "readEventProfileGameProjectionOutbox"
-  | "transactEventProfileGameProjectionOutbox"
   | "claimEventProfileGameProjectionOutbox"
   | "acknowledgeEventProfileGameProjectionOutbox"
   | "transactEventLease"
@@ -28,8 +27,6 @@ export function createEventProfileGameProjectionState(
       readInviteMetadataMany(env.PROFILE_GAMES_DB, inviteIds, signal),
     readEventProfileGameProjectionOutbox:
       state.readEventProfileGameProjectionOutbox,
-    transactEventProfileGameProjectionOutbox:
-      state.transactEventProfileGameProjectionOutbox,
     claimEventProfileGameProjectionOutbox:
       state.claimEventProfileGameProjectionOutbox,
     acknowledgeEventProfileGameProjectionOutbox:

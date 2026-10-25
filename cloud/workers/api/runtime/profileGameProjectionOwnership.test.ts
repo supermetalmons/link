@@ -1,3 +1,5 @@
+import { retainedInviteSourceFixture } from "../test/inviteDocumentFixture.ts";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
 import type { CompletePlayerProfile } from "@mons/shared/profiles";
 import { decodeAutomatchEntry } from "../../../runtime/automatchRecords.js";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
@@ -357,7 +359,7 @@ describe("D1-authoritative profile game projection ownership", () => {
       state: {
         async readInviteMetadata(candidateInviteId) {
           expect(candidateInviteId).toBe(inviteId);
-          return { hostId: loginUid };
+          return retainedInviteSourceFixture({ hostId: loginUid });
         },
         async readAutomatchEntry(id) {
           const path = `automatch/${id}`;
@@ -424,12 +426,12 @@ describe("D1-authoritative profile game projection ownership", () => {
       state: {
         async readInviteMetadata(candidateInviteId) {
           expect(candidateInviteId).toBe(inviteId);
-          return {
+          return retainedInviteSourceFixture({
             hostId: hostLoginId,
             guestId: guestLoginId,
             hostRematches: "1x",
             guestRematches: "1x",
-          };
+          });
         },
         async readAutomatchEntry(id) {
           const path = `automatch/${id}`;
@@ -512,12 +514,12 @@ describe("D1-authoritative profile game projection ownership", () => {
       state: {
         async readInviteMetadata(candidateInviteId) {
           expect(candidateInviteId).toBe(inviteId);
-          return {
+          return retainedInviteSourceFixture({
             hostId: hostLoginId,
             guestId: guestLoginId,
             hostRematches: "x",
             guestRematches: "x",
-          };
+          });
         },
         async readAutomatchEntry(id) {
           const path = `automatch/${id}`;
@@ -589,12 +591,12 @@ describe("D1-authoritative profile game projection ownership", () => {
         state: {
           async readInviteMetadata(candidateInviteId) {
             expect(candidateInviteId).toBe(inviteId);
-            return {
+            return retainedInviteSourceFixture({
               hostId: hostLoginId,
               guestId: guestLoginId,
               hostRematches: "x",
               guestRematches: "x",
-            };
+            });
           },
           readAutomatchEntry: async () => decodeAutomatchEntry(null),
         },
@@ -661,14 +663,14 @@ describe("D1-authoritative profile game projection ownership", () => {
         state: {
           async readInviteMetadata(candidateInviteId) {
             expect(candidateInviteId).toBe(entry.inviteId);
-            return {
+            return retainedInviteSourceFixture({
               eventOwned: true,
               hostId: hostLoginId,
               guestId: guestLoginId,
               ...(entry.status === "done"
                 ? {}
                 : { matchesRatingUpdates: { [entry.inviteId]: true } }),
-            };
+            });
           },
           async readAutomatchEntry(id) {
             const path = `automatch/${id}`;
@@ -898,10 +900,10 @@ describe("D1-authoritative profile game projection ownership", () => {
         async readInviteMetadata(inviteId) {
           const inviteIndex = inviteIds.indexOf(inviteId);
           if (inviteIndex >= 0) {
-            return {
+            return retainedInviteSourceFixture({
               hostId: hostLoginUids[inviteIndex],
               guestId: guestLoginUids[inviteIndex],
-            };
+            });
           }
           throw new Error(`unexpected-invite-metadata-read:${inviteId}`);
         },
@@ -1004,7 +1006,7 @@ describe("D1-authoritative profile game projection ownership", () => {
         },
         async readEvent(candidateEventId) {
           expect(candidateEventId).toBe(eventId);
-          return {
+          return eventDocumentFixture({
             eventId,
             status: "scheduled",
             startAtMs: 100,
@@ -1012,7 +1014,7 @@ describe("D1-authoritative profile game projection ownership", () => {
             participants: {
               [profileId]: { profileId, loginUid },
             },
-          };
+          });
         },
       },
       wait: async () => undefined,

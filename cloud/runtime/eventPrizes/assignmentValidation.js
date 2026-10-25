@@ -11,13 +11,14 @@ const validatePrizeAssignment = ({
   prizeId,
   profileId,
 }) => {
-  const place = Number(assignment?.place);
+  const fields = assignment;
+  const place = Number(fields?.place);
   if (
     !assignment ||
-    normalizeString(assignment.eventId) !== eventId ||
-    normalizeString(assignment.prizeId) !== prizeId ||
-    normalizeString(assignment.profileId) !== profileId ||
-    ![1, 2, 3].includes(place)
+    normalizeString(fields?.eventId) !== eventId ||
+    normalizeString(fields?.prizeId) !== prizeId ||
+    normalizeString(fields?.profileId) !== profileId ||
+    (place !== 1 && place !== 2 && place !== 3)
   ) {
     throw new errors_js_1.EventPrizeWithdrawalError(
       "not-found",

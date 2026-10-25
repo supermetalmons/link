@@ -1,3 +1,4 @@
+import { matchDocumentFixture } from "../test/matchRecordFixture.ts";
 import { env } from "cloudflare:workers";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -93,14 +94,18 @@ async function fixture(failCompletedWrite = false) {
     }): Promise<import("../src/matchStateTypes.ts").MatchStateRecord | null> {
       if (matchId !== inviteId) throw new Error("unexpected-match-read");
       if (playerId === host)
-        return { color: "white", fen: "fixture", flatMovesString: "" };
+        return matchDocumentFixture({
+          color: "white",
+          fen: "fixture",
+          flatMovesString: "",
+        });
       if (playerId === guest)
-        return {
+        return matchDocumentFixture({
           color: "black",
           fen: "fixture",
           flatMovesString: "",
           status: "surrendered",
-        };
+        });
       throw new Error("unexpected-player-read");
     },
     async readMatchRecords(inputs, signal) {

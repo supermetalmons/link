@@ -5,6 +5,8 @@ exports.createEventProfileGameProjectionCore =
   exports.READ_RETRY_DELAY_MS =
   exports.READ_RETRY_ATTEMPTS =
     void 0;
+const profileGameProjectionRecords_js_1 = require("./profileGameProjectionRecords.js");
+const documents_js_1 = require("./events/documents.js");
 const navigation_1 = require("@mons/shared/navigation");
 const ownership_js_1 = require("./events/ownership.js");
 const eventProjectionModel_js_1 = require("./events/eventProjectionModel.js");
@@ -49,22 +51,20 @@ const createEventProfileGameProjectionCore = ({
     throw failure;
   };
   const participantEntries = (participants) =>
-    Object.entries(participants).flatMap(([key, value]) =>
-      value && typeof value === "object" && !Array.isArray(value)
-        ? [
-            {
-              key: (0, eventProjectionModel_js_1.normalizeString)(key),
-              loginUid: (0, eventProjectionModel_js_1.normalizeString)(
-                value.loginUid,
-              ),
-              participant: value,
-              profileId:
-                (0, eventProjectionModel_js_1.normalizeString)(
-                  value.profileId,
-                ) || (0, eventProjectionModel_js_1.normalizeString)(key),
-            },
-          ]
-        : [],
+    (0, documents_js_1.plainEventParticipantEntries)(participants).map(
+      ([key, participant]) => {
+        const value = (0, documents_js_1.eventParticipantState)(participant);
+        return {
+          key: (0, eventProjectionModel_js_1.normalizeString)(key),
+          loginUid: (0, eventProjectionModel_js_1.normalizeString)(
+            value.loginUid,
+          ),
+          participant,
+          profileId:
+            (0, eventProjectionModel_js_1.normalizeString)(value.profileId) ||
+            (0, eventProjectionModel_js_1.normalizeString)(key),
+        };
+      },
     );
   const readOwnershipPlan = async (participants, cleanupOwnerProfileIds) => {
     const entries = participantEntries(participants);
@@ -112,10 +112,10 @@ const createEventProfileGameProjectionCore = ({
     const canonicalParticipants = {};
     entries.forEach((entry, index) => {
       const ownerProfileId = ownerProfileIds[index];
-      canonicalParticipants[ownerProfileId] = {
-        ...entry.participant,
+      canonicalParticipants[ownerProfileId] = (0,
+      documents_js_1.copyEventParticipant)(entry.participant, {
         profileId: ownerProfileId,
-      };
+      });
     });
     const allProfileIds = new Set([
       ...entries.flatMap(({ key, profileId }) => [key, profileId]),
@@ -137,7 +137,8 @@ const createEventProfileGameProjectionCore = ({
           Boolean(profileId && !currentOwnerIds.has(profileId)),
         ),
       ],
-      canonicalParticipants,
+      canonicalParticipants: (0,
+      documents_js_1.createEventParticipantsDocument)(canonicalParticipants),
       ownerProfileIds,
     };
   };
@@ -167,9 +168,8 @@ const createEventProfileGameProjectionCore = ({
       throw new TypeError("event projection source fence is invalid");
     }
     const participants =
-      eventData?.participants && typeof eventData.participants === "object"
-        ? eventData.participants
-        : {};
+      (0, documents_js_1.eventParticipants)(eventData) ||
+      (0, documents_js_1.createEventParticipantsDocument)();
     const normalizedCleanupOwnerProfileIds = Array.from(
       new Set(
         cleanupOwnerProfileIds
@@ -184,7 +184,9 @@ const createEventProfileGameProjectionCore = ({
     } = await readOwnershipPlan(participants, normalizedCleanupOwnerProfileIds);
     const status = (0,
     eventProjectionModel_js_1.mapEventStatusToNavigationStatus)(
-      (0, eventProjectionModel_js_1.normalizeString)(eventData?.status),
+      (0, eventProjectionModel_js_1.normalizeString)(
+        (0, documents_js_1.eventState)(eventData).status,
+      ),
     );
     const previewParticipants = (0,
     eventProjectionModel_js_1.buildPreviewParticipants)(canonicalParticipants);
@@ -196,7 +198,7 @@ const createEventProfileGameProjectionCore = ({
           type: "merge",
           profileId: ownerProfileId,
           eventId,
-          data: {
+          data: (0, profileGameProjectionRecords_js_1.createEventProjection)({
             schemaVersion: 1,
             source: "event-projector",
             entityType: "event",
@@ -209,17 +211,24 @@ const createEventProfileGameProjectionCore = ({
             ),
             ownerProfileId,
             startAt:
-              typeof eventData.startAtMs === "number"
-                ? toTimestampMillis(eventData.startAtMs)
+              typeof (0, documents_js_1.eventState)(eventData).startAtMs ===
+              "number"
+                ? toTimestampMillis(
+                    (0, documents_js_1.eventState)(eventData).startAtMs,
+                  )
                 : null,
             updatedAt: toTimestampMillis(
-              typeof eventData.updatedAtMs === "number"
-                ? eventData.updatedAtMs
+              typeof (0, documents_js_1.eventState)(eventData).updatedAtMs ===
+                "number"
+                ? (0, documents_js_1.eventState)(eventData).updatedAtMs
                 : now(),
             ),
             endedAt:
-              typeof eventData.endedAtMs === "number"
-                ? toTimestampMillis(eventData.endedAtMs)
+              typeof (0, documents_js_1.eventState)(eventData).endedAtMs ===
+              "number"
+                ? toTimestampMillis(
+                    (0, documents_js_1.eventState)(eventData).endedAtMs,
+                  )
                 : null,
             participantCount: previewParticipants.length,
             participantPreview: previewParticipants.slice(
@@ -227,9 +236,9 @@ const createEventProfileGameProjectionCore = ({
               eventProjectionModel_js_1.NAVIGATION_PARTICIPANT_PREVIEW_LIMIT,
             ),
             winnerDisplayName: (0, eventProjectionModel_js_1.normalizeString)(
-              eventData.winnerDisplayName,
+              (0, documents_js_1.eventState)(eventData).winnerDisplayName,
             ),
-          },
+          }),
         });
       }
     }
@@ -266,9 +275,8 @@ const createEventProfileGameProjectionCore = ({
       return event;
     });
     (0, eventProjectionModel_js_1.getOwnerProfileIds)(
-      liveData?.participants && typeof liveData.participants === "object"
-        ? liveData.participants
-        : {},
+      (0, documents_js_1.eventParticipants)(liveData) ||
+        (0, documents_js_1.createEventParticipantsDocument)(),
     ).forEach((profileId) => cleanupIds.add(profileId));
     const result = await projectEvent(
       eventId,

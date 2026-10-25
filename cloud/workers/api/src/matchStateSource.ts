@@ -1,5 +1,4 @@
 import type {
-  MatchStateJson,
   MatchStatePair,
   MatchStatePairRequest,
 } from "./matchStateTypes.ts";
@@ -12,7 +11,16 @@ import {
   readMatchStateRecords,
   type MatchStateReadTiming,
 } from "./matchStateRouting.ts";
-import { getMatchStateRpc, unwrapMatchStateRpc } from "./matchStateRpc.ts";
+import {
+  getMatchStateRpc,
+  unwrapMatchStateRpc,
+  decodeMatchStatePair,
+  decodeMatchStateCreateResult,
+} from "./matchStateRpc.ts";
+import {
+  matchCreateWireRequest,
+  matchEventEffectsWireRequest,
+} from "./matchStateWire.ts";
 import { runMatchStateReads } from "./matchStateReadPool.ts";
 
 type MatchPairReadTiming = MatchStateReadTiming & { roomReadsMs: number };
@@ -46,6 +54,7 @@ async function readMatchStatePairs(
                     env,
                     input.inviteId,
                   ).readCanonicalMatchPair({ ...input, epoch: control.epoch }),
+                  decodeMatchStatePair,
                 ),
             ),
             signal,
@@ -65,12 +74,10 @@ export function createMatchStateSource(env: Env): MatchStatePort {
   return {
     async readMatchRecord(input, signal) {
       const value = await readMatchStateRecord(env, input, { signal });
-      return value as MatchStateJson;
+      return value;
     },
     async readMatchRecords(inputs, signal) {
-      return (await readMatchStateRecords(env, inputs, {
-        signal,
-      })) as MatchStateJson[];
+      return await readMatchStateRecords(env, inputs, { signal });
     },
     async readMatchPair(input, signal) {
       return (await readMatchStatePairs(env, [input], signal))[0];
@@ -108,11 +115,14 @@ export function createMatchStateSource(env: Env): MatchStatePort {
         env.PROFILE_GAMES_DB,
       );
       unwrapMatchStateRpc(
-        await getMatchStateRpc(env, input.inviteId).createCanonicalMatch({
-          inviteId: input.inviteId,
-          epoch: control.epoch,
-          records: input.records,
-        }),
+        await getMatchStateRpc(env, input.inviteId).createCanonicalMatch(
+          matchCreateWireRequest({
+            inviteId: input.inviteId,
+            epoch: control.epoch,
+            records: input.records,
+          }),
+        ),
+        decodeMatchStateCreateResult,
       );
       await registerMatchStateRoutes(
         env.PROFILE_GAMES_DB,
@@ -136,9 +146,10 @@ export function createMatchStateSource(env: Env): MatchStatePort {
           env,
           input.inviteId,
         ).applyCanonicalMatchEventEffects(
-          { ...input, epoch: control.epoch },
+          matchEventEffectsWireRequest({ ...input, epoch: control.epoch }),
           { deferNotifications: true },
         ),
+        decodeMatchStateCreateResult,
       );
       if (input.creations?.length) {
         await registerMatchStateRoutes(

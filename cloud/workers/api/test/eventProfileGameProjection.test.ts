@@ -1,3 +1,4 @@
+import { eventDocumentFixture } from "./eventCompatibilityFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -24,7 +25,8 @@ function createRepository(input: {
     async getEvent() {
       const index = Math.min(eventReadIndex, events.length - 1);
       eventReadIndex += 1;
-      return events[index];
+      const event = events[index];
+      return event ? eventDocumentFixture(event) : null;
     },
     async readProfileOwnershipSnapshot(query) {
       return {
@@ -70,7 +72,7 @@ test("event projection preserves the payload and stale-owner cleanup", async () 
   });
   const result = await core.projectEvent(
     "event-1",
-    {
+    eventDocumentFixture({
       status: "active",
       startAtMs: 100,
       startedAtMs: 110,
@@ -87,7 +89,7 @@ test("event projection preserves the payload and stale-owner cleanup", async () 
           joinedAtMs: 1,
         },
       },
-    },
+    }),
     ["stale"],
   );
   assert.deepEqual(result, {
@@ -136,11 +138,14 @@ test("event projection refuses missing and retired canonical owners", async () =
   });
   await assert.rejects(
     () =>
-      missing.core.projectEvent("event-1", {
-        participants: {
-          source: { loginUid: "login-1", profileId: "source" },
-        },
-      }),
+      missing.core.projectEvent(
+        "event-1",
+        eventDocumentFixture({
+          participants: {
+            source: { loginUid: "login-1", profileId: "source" },
+          },
+        }),
+      ),
     /profile-ownership-unavailable/,
   );
   assert.deepEqual(missing.writes, []);
@@ -151,11 +156,14 @@ test("event projection refuses missing and retired canonical owners", async () =
   });
   await assert.rejects(
     () =>
-      retired.core.projectEvent("event-1", {
-        participants: {
-          retired: { loginUid: "login-1", profileId: "retired" },
-        },
-      }),
+      retired.core.projectEvent(
+        "event-1",
+        eventDocumentFixture({
+          participants: {
+            retired: { loginUid: "login-1", profileId: "retired" },
+          },
+        }),
+      ),
     /profile-ownership-unavailable/,
   );
   assert.deepEqual(retired.writes, []);
@@ -305,11 +313,14 @@ test("event projection reads one ownership snapshot", async () => {
   const core = createEventProfileGameProjectionCore({
     repository,
   });
-  await core.projectEvent("event-1", {
-    participants: {
-      "profile-1": { loginUid: "login-1", profileId: "profile-1" },
-    },
-  });
+  await core.projectEvent(
+    "event-1",
+    eventDocumentFixture({
+      participants: {
+        "profile-1": { loginUid: "login-1", profileId: "profile-1" },
+      },
+    }),
+  );
   assert.equal(ownershipReads, 1);
 });
 
@@ -322,11 +333,11 @@ test("event projection forwards its monotonic source fence to the commit", async
 
   await core.projectEvent(
     "event-1",
-    {
+    eventDocumentFixture({
       participants: {
         "profile-1": { loginUid: "login-1", profileId: "profile-1" },
       },
-    },
+    }),
     [],
     { sourceFence },
   );

@@ -7,9 +7,10 @@ export type FreshMatchRecord<
   TEmojiId = unknown,
   TAura = unknown,
   TGameVariant extends string = string,
+  TColor extends string = string,
 > = {
   version: typeof CONTROLLER_VERSION;
-  color: string;
+  color: TColor;
   emojiId: TEmojiId;
   aura: TAura;
   gameVariant: TGameVariant;
@@ -17,6 +18,17 @@ export type FreshMatchRecord<
   status: "";
   flatMovesString: "";
   timer: "";
+};
+export type MatchCreationRecord = {
+  version: number;
+  color: "white" | "black";
+  emojiId: number | string;
+  aura: string | null;
+  gameVariant: string;
+  fen: string;
+  status: string;
+  flatMovesString: string;
+  timer: string;
 };
 export type MatchHistoryRecord = {
   color?: unknown;
@@ -33,17 +45,18 @@ declare function buildFreshMatchRecord<
   TEmojiId,
   TAura,
   TGameVariant extends string,
+  TColor extends string,
 >({
   color,
   emojiId,
   aura,
   seed,
 }: {
-  color: string;
+  color: TColor;
   emojiId: TEmojiId;
   aura: TAura;
   seed: MatchSeedRecord<TGameVariant>;
-}): FreshMatchRecord<TEmojiId, TAura, TGameVariant>;
+}): FreshMatchRecord<TEmojiId, TAura, TGameVariant, TColor>;
 declare function movesFromFlatString(value: unknown): string[];
 declare function buildOrderedMoveHistory(
   player: MatchHistoryRecord,

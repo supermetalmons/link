@@ -1,12 +1,16 @@
+import type { InviteDocument } from "@mons/shared/invite-records";
 import type { WagerStateSnapshot } from "./wagerStateD1.ts";
 
+declare const inviteWagerDocument: unique symbol;
+export type InviteWagerDocument = { readonly [inviteWagerDocument]: true };
+
 export function composeInviteWagerSource(
-  source: unknown,
+  source: InviteDocument | null,
   states: readonly WagerStateSnapshot[],
   shallow = false,
-): unknown {
+): InviteWagerDocument | null {
   if (source === null || typeof source !== "object" || Array.isArray(source)) {
-    return source;
+    return source as null;
   }
   const invite: Record<string, unknown> = { ...source };
   delete invite.wagers;
@@ -25,5 +29,5 @@ export function composeInviteWagerSource(
   if (Object.keys(markers).length) {
     invite.matchesWagerResolutions = shallow ? true : markers;
   }
-  return invite;
+  return invite as InviteWagerDocument;
 }

@@ -7,8 +7,20 @@ exports.sendTelegramMessage =
   exports.editTelegramMessage =
   exports.deleteTelegramMessage =
   exports.TELEGRAM_HTTP_TIMEOUT_MS =
+  exports.retainTelegramMediaGroupInput =
+  exports.retainTelegramDeleteInput =
+  exports.retainTelegramEditInput =
+  exports.retainTelegramSendInput =
     void 0;
 const values_js_1 = require("./values.js");
+const retainTelegramSendInput = (value) => value;
+exports.retainTelegramSendInput = retainTelegramSendInput;
+const retainTelegramEditInput = (value) => value;
+exports.retainTelegramEditInput = retainTelegramEditInput;
+const retainTelegramDeleteInput = (value) => value;
+exports.retainTelegramDeleteInput = retainTelegramDeleteInput;
+const retainTelegramMediaGroupInput = (value) => value;
+exports.retainTelegramMediaGroupInput = retainTelegramMediaGroupInput;
 const TELEGRAM_API_ROOT = "https://api.telegram.org";
 const TELEGRAM_HTTP_TIMEOUT_MS = 10_000;
 exports.TELEGRAM_HTTP_TIMEOUT_MS = TELEGRAM_HTTP_TIMEOUT_MS;
@@ -85,14 +97,14 @@ const buildFailure = ({
   httpStatus,
   retryAfterSeconds,
 });
-const telegramRequest = async ({
+async function telegramRequest({
   operation,
   method,
   body,
   token,
   fetchImpl = globalThis.fetch,
   timeoutMs = TELEGRAM_HTTP_TIMEOUT_MS,
-}) => {
+}) {
   const normalizedToken = normalizeString(token);
   if (!normalizedToken) {
     return buildFailure({
@@ -305,7 +317,7 @@ const telegramRequest = async ({
     description: description || "Telegram rejected the request",
     httpStatus: response.status,
   });
-};
+}
 const sendTelegramMessage = async ({
   chatId,
   text,
@@ -415,8 +427,8 @@ const deleteTelegramMessage = async ({
   token,
   fetchImpl,
   timeoutMs,
-}) =>
-  telegramRequest({
+}) => {
+  return telegramRequest({
     operation: "delete",
     method: "deleteMessage",
     body: {
@@ -427,4 +439,5 @@ const deleteTelegramMessage = async ({
     fetchImpl,
     timeoutMs,
   });
+};
 exports.deleteTelegramMessage = deleteTelegramMessage;

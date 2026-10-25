@@ -1,3 +1,4 @@
+import { matchDocumentFixture } from "./matchRecordFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
@@ -48,11 +49,13 @@ function route(input: Request, epoch = 1): Route {
 }
 
 function records(input: MatchStateRecordsRequest): MatchStateRecord[] {
-  return input.requests.map((request) => ({
-    ...request,
-    inviteId: input.inviteId,
-    epoch: input.epoch,
-  }));
+  return input.requests.map((request) =>
+    matchDocumentFixture({
+      ...request,
+      inviteId: input.inviteId,
+      epoch: input.epoch,
+    }),
+  );
 }
 
 function fixture({

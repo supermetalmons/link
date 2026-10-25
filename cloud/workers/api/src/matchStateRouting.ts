@@ -5,7 +5,12 @@ import {
   readMatchStateRouteSnapshot,
   type MatchStateControl,
 } from "./matchStateD1.ts";
-import { getMatchStateRpc, unwrapMatchStateRpc } from "./matchStateRpc.ts";
+import {
+  getMatchStateRpc,
+  unwrapMatchStateRpc,
+  decodeRoutedMatchRecords,
+} from "./matchStateRpc.ts";
+import type { RetainedMatchValue } from "./matchRecordCodec.ts";
 import type { ReadMatchSnapshotRequest } from "@mons/shared/game-sessions";
 import { MAX_MATCH_STATE_RECORD_READS } from "./matchStateTypes.ts";
 import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
@@ -114,7 +119,7 @@ export async function readMatchStateRecord(
   env: Env,
   request: ReadMatchSnapshotRequest,
   options: { signal?: AbortSignal; fetcher?: typeof fetch } = {},
-): Promise<unknown> {
+): Promise<RetainedMatchValue> {
   return (await readMatchStateRecords(env, [request], options))[0];
 }
 
@@ -141,7 +146,7 @@ export async function readMatchStateRecords(
   env: Env,
   inputs: readonly ReadMatchSnapshotRequest[],
   { signal }: { signal?: AbortSignal } = {},
-): Promise<unknown[]> {
+): Promise<RetainedMatchValue[]> {
   signal?.throwIfAborted();
   if (!Array.isArray(inputs) || inputs.length > MAX_MATCH_STATE_RECORD_READS)
     throw new Error("match-state-invalid-read-batch");
@@ -158,7 +163,7 @@ export async function readMatchStateRecords(
     env,
     () => readMatchStateRouteSnapshot(env.PROFILE_GAMES_DB, inputs),
     async ({ control, routes }) => {
-      const results: unknown[] = Array(inputs.length).fill(null);
+      const results: RetainedMatchValue[] = Array(inputs.length).fill(null);
       const rooms = new Map<
         string,
         Array<{ input: ReadMatchSnapshotRequest; index: number }>
@@ -199,13 +204,10 @@ export async function readMatchStateRecords(
               epoch: control.epoch,
               requests: entries.map(({ input }) => input),
             }),
+            (value) => decodeRoutedMatchRecords(value, entries.length),
           );
-          if (!Array.isArray(records) || records.length !== entries.length)
-            throw new Error("match-state-record-unavailable");
           for (const [offset, entry] of entries.entries()) {
             const record = records[offset];
-            if (record === null || record === undefined)
-              throw new Error("match-state-record-unavailable");
             results[entry.index] = record;
           }
         });

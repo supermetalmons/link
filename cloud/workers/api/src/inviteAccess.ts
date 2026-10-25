@@ -1,3 +1,8 @@
+import {
+  inviteMutationParticipants,
+  type InviteDocument,
+  type PresentationInviteView,
+} from "@mons/shared/invite-records";
 import type {
   ResolveInviteRoleRequest,
   ResolveInviteRoleResponse,
@@ -32,10 +37,6 @@ type ParticipantResolution = {
   ownership: ProfileOwnershipSnapshot | null;
   role: "guest" | "host";
 };
-
-function readStoredString(value: unknown): string {
-  return typeof value === "string" ? value : "";
-}
 
 export async function resolveInviteActor(
   identity: RequestIdentity,
@@ -88,7 +89,7 @@ export async function resolveInviteRole(
 export async function resolveInviteRoleFromSnapshot(
   identity: RequestIdentity,
   request: ResolveInviteRoleRequest,
-  storedInvite: unknown,
+  storedInvite: InviteDocument | PresentationInviteView | null,
   repository: ProfileOwnershipReader,
 ): Promise<ResolveInviteRoleResponse> {
   const participants = decodeCanonicalInviteParticipants(storedInvite);
@@ -120,11 +121,11 @@ export async function resolveInviteRoleFromSnapshot(
 
 export async function resolveInviteParticipant(
   identity: RequestIdentity,
-  invite: Record<string, unknown>,
+  invite: InviteDocument,
   repository: ProfileOwnershipReader,
 ): Promise<ParticipantResolution> {
-  const hostUid = readStoredString(invite.hostId);
-  const guestUid = readStoredString(invite.guestId);
+  const { hostId: hostUid, guestId: guestUid } =
+    inviteMutationParticipants(invite);
   if (!isSafeRecordKey(hostUid) || !isSafeRecordKey(guestUid)) {
     throw new AuthApiFailure(409, "failed-precondition", "missing-opponent");
   }

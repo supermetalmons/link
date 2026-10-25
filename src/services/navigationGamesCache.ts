@@ -17,7 +17,7 @@ interface NavigationGamesRuntimeEntry {
 }
 
 interface PersistedTopGamesPayload {
-  version: number;
+  version: 3;
   updatedAtMs: number;
   topGames: NavigationItem[];
 }
@@ -110,7 +110,7 @@ const sanitizeNavigationGameItem = (value: unknown): NavigationItem | null => {
         : 0;
     const participantPreview = Array.isArray(raw.participantPreview)
       ? raw.participantPreview
-          .map((participant) => {
+          .map((participant: unknown) => {
             if (!participant || typeof participant !== "object") {
               return null;
             }
@@ -263,21 +263,26 @@ const readPersistedTopCache = (
       return [];
     }
 
-    const parsed = JSON.parse(raw) as PersistedTopGamesPayload;
+    const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") {
       localStorage.removeItem(storageKey);
       return [];
     }
 
-    if (parsed.version !== NAVIGATION_GAMES_PERSISTED_TOP_CACHE_VERSION) {
+    const fields = parsed as {
+      version?: unknown;
+      updatedAtMs?: unknown;
+      topGames?: unknown;
+    };
+    if (fields.version !== NAVIGATION_GAMES_PERSISTED_TOP_CACHE_VERSION) {
       localStorage.removeItem(storageKey);
       return [];
     }
 
     const updatedAtMs =
-      typeof parsed.updatedAtMs === "number" &&
-      Number.isFinite(parsed.updatedAtMs)
-        ? Math.floor(parsed.updatedAtMs)
+      typeof fields.updatedAtMs === "number" &&
+      Number.isFinite(fields.updatedAtMs)
+        ? Math.floor(fields.updatedAtMs)
         : 0;
     if (
       updatedAtMs <= 0 ||
@@ -287,7 +292,7 @@ const readPersistedTopCache = (
       return [];
     }
 
-    return sanitizeNavigationGames(parsed.topGames, {
+    return sanitizeNavigationGames(fields.topGames, {
       maxItems: Number.MAX_SAFE_INTEGER,
       excludeOptimistic: true,
     });

@@ -1,10 +1,16 @@
+import type { ApiUrlPath, ApiResponse } from "@mons/shared/api-contracts";
 import { normalizeRecordKey } from "@mons/shared/ids";
 import {
   GAME_BOOTSTRAP_MAX_RESPONSE_BYTES,
   isReadGameBootstrapResponse,
-  type ReadGameBootstrapResponse,
 } from "@mons/shared/game-bootstrap";
-import { readSnapshotJson, type AuthTokenProvider } from "./apiTransport";
+import {
+  readSnapshotJson,
+  type AuthTokenProvider,
+  type EndpointSnapshotJsonRead,
+} from "./apiTransport";
+type ReadGameBootstrapResponse =
+  ApiResponse<"GET /invites/:inviteId/bootstrap">;
 
 const GAME_BOOTSTRAP_API_ROOT = "https://api.mons.link";
 export const GAME_BOOTSTRAP_REQUEST_TIMEOUT_MS = 10_000;
@@ -26,7 +32,7 @@ export class GameBootstrapApiError extends Error {
 function bootstrapPath(
   inviteId: string,
   selection: "current" | "approved",
-): string {
+): ApiUrlPath<"GET /invites/:inviteId/bootstrap"> {
   if (!inviteId || normalizeRecordKey(inviteId) !== inviteId) {
     throw new GameBootstrapApiError("invalid-invite");
   }
@@ -50,5 +56,5 @@ export async function readGameBootstrapViaApi(
       payload.metadata.inviteId === inviteId,
     createError: (code, status, retryAfterMs) =>
       new GameBootstrapApiError(code, status, retryAfterMs),
-  });
+  } satisfies EndpointSnapshotJsonRead<"GET /invites/:inviteId/bootstrap">);
 }

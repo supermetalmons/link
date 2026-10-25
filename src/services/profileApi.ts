@@ -1,15 +1,17 @@
+import type {
+  ApiPathRequest,
+  ApiPathResponse,
+} from "@mons/shared/api-contracts";
 import {
   isLeaderboardReadResponse,
   isProfileCustomizationUpdateResponse,
   isProfileLookupResponse,
   isResolveProfileIdResponse,
   type CompletePlayerProfile,
-  type LeaderboardReadRequest,
   type LeaderboardReadResponse,
   type LeaderboardReadType,
   type ProfileLookupRequest,
   type ProfileLookupResponse,
-  type ResolveProfileIdRequest,
   type ProfileCustomizationUpdateRequest,
   type ProfileCustomizationUpdateResponse,
 } from "@mons/shared/profiles";
@@ -20,10 +22,8 @@ import {
 } from "./apiTransport";
 import {
   isUsernameEditResponse,
-  type UsernameEditRequest,
   type UsernameEditResponse,
 } from "@mons/shared/usernames";
-
 const PROFILE_API_ROOT = "https://api.mons.link";
 const PROFILE_API_TIMEOUT_MS = 15_000;
 const PROFILE_API_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -49,18 +49,20 @@ const profileErrorPolicy: ApiErrorPolicy = {
   timeoutMessage: "Profile request timed out.",
 };
 
-async function profileRequest<T>(
-  path: string,
-  body:
-    | ProfileLookupRequest
-    | ResolveProfileIdRequest
-    | LeaderboardReadRequest
-    | ProfileCustomizationUpdateRequest
-    | UsernameEditRequest,
+type ProfilePath =
+  | "/profiles/lookup"
+  | "/profiles/canonical-id"
+  | "/leaderboards/read"
+  | "/profiles/custom"
+  | "/profiles/username";
+
+async function profileRequest<const Path extends ProfilePath>(
+  path: Path,
+  body: ApiPathRequest<"POST", NoInfer<Path>>,
   tokenProvider: AuthTokenProvider,
-  validate: (value: unknown) => value is T,
+  validate: (value: unknown) => value is ApiPathResponse<"POST", NoInfer<Path>>,
   options: { keepalive?: boolean } = {},
-): Promise<T> {
+): Promise<ApiPathResponse<"POST", Path>> {
   return authenticatedJsonRequest({
     url: `${PROFILE_API_ROOT}${path}`,
     createRequestInit: () => ({

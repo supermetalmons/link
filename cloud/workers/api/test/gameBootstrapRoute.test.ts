@@ -1,3 +1,4 @@
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -94,11 +95,11 @@ function setup(source = metadata(), caller = "host-login") {
   repository.readInviteMetadata = async (id) => {
     calls.admission++;
     assert.equal(id, inviteId);
-    return {
+    return retainedInviteSourceFixture({
       ...source.snapshot,
       ...(source.passwordProtected ? { password: true } : {}),
       automatchOperationIds: source.automatchOperationIds,
-    };
+    });
   };
   repository.readMatchRecord = async () => {
     throw new Error("unexpected-record-read");
@@ -343,7 +344,7 @@ test("unknown or invalid invites and failed admission never access a Durable Obj
     });
     state.repository.readInviteMetadata = async () => {
       if (value instanceof Error) throw value;
-      return value;
+      return retainedInviteSourceFixture(value);
     };
     const response = await read(state);
     assert.equal(response.status, status);

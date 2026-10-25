@@ -9,31 +9,25 @@ import type {
   TelegramBarrierProofResult,
   TelegramLocalRetryBarrier,
 } from "./deliveryRetryTypes.js";
-import type { TelegramTaskKind } from "./taskIdentity.js";
+import type { TelegramTaskKind, TelegramTaskPayload } from "./taskIdentity.js";
+import type { RetainedTelegramRetrySchedule } from "./retryRecords.js";
+import type {
+  TelegramApiGateDocument,
+  TelegramApiGateWrite,
+  TelegramMessageDocument,
+} from "./records.js";
 export type TelegramApiGateResult = {
   acquired: boolean;
   reason: string;
   retryNotBeforeMs: number;
-  gate: Record<string, unknown>;
+  gate: TelegramApiGateDocument;
 };
-export type TelegramRetrySchedule = {
-  messageKey: string;
-  revision: string;
-  taskKind: string;
-  retrySequence: number;
-  generation: string;
-  retryStartedAtMs?: number;
-  retryDeadlineAtMs?: number;
-  retryAtMs?: number;
+export type TelegramRetrySchedule = TelegramTaskPayload & {
   scheduleTimeMs?: number;
-  safeRejectedAttemptId?: unknown;
-  pendingDeleteId?: unknown;
-  retryProofLeaseOwner?: unknown;
-  proofTaskKind?: unknown;
-  barrierProofOwner?: unknown;
-  barrierRetryNotBeforeMs?: unknown;
-  apiGateReclaimOwner?: unknown;
-  apiGateSettleOwner?: unknown;
+};
+export type TelegramRetryScheduleResult = {
+  scheduled: boolean;
+  taskId?: string;
 };
 export type TelegramReconcileInput = {
   messageKey: string;
@@ -66,17 +60,19 @@ export type TelegramEngineOptions = {
   localRetryBarrier?: TelegramLocalRetryBarrier;
 };
 export type TelegramRepository = {
-  getMessage(messageKey: string): Promise<unknown>;
+  getMessage(messageKey: string): Promise<TelegramMessageDocument | null>;
   transactMessage(
     messageKey: string,
     updater: (
-      current: Record<string, unknown> | null,
-    ) => TransactionDecision<Record<string, unknown>>,
-  ): Promise<TransactionResult<Record<string, unknown>>>;
+      current: TelegramMessageDocument | null,
+    ) => TransactionDecision<TelegramMessageDocument>,
+  ): Promise<TransactionResult<TelegramMessageDocument>>;
   getRetryNotBeforeMs(): Promise<number>;
   extendRetryNotBeforeMs(candidateMs: number): Promise<number>;
   acquireApiGate(
-    input: Record<string, unknown>,
+    input: TelegramApiGateWrite & {
+      reclaimOwner?: string;
+    },
   ): Promise<TelegramApiGateResult>;
   releaseApiGate(owner: string): Promise<boolean>;
   extendRetryBarrierAndReleaseApiGate(
@@ -84,13 +80,31 @@ export type TelegramRepository = {
   ): Promise<TelegramBarrierProofResult>;
 };
 export type TelegramRetryScheduler = (
-  input: TelegramRetrySchedule,
-) => Promise<Record<string, unknown>>;
+  input: TelegramRetrySchedule | RetainedTelegramRetrySchedule,
+) => Promise<TelegramRetryScheduleResult>;
 export type TelegramEngineResult = {
   status: string;
   reason?: string;
   retryAtMs?: number | null;
   scheduled?: boolean;
-  cleanup?: unknown;
+  cleanup?: TelegramCleanupResult | TelegramCleanupOutcome;
   cleanupScheduled?: boolean;
+};
+export type TelegramCleanupOutcome =
+  | "missing"
+  | "stale"
+  | "blocked-uncertain"
+  | "invalid"
+  | "rate-limit-proof-pending"
+  | "locked"
+  | "exhausted"
+  | "deferred"
+  | "acquired"
+  | "deleted"
+  | "orphaned";
+export type TelegramCleanupResult = Omit<
+  TelegramEngineResult,
+  "cleanup" | "cleanupScheduled"
+> & {
+  cleanup?: TelegramCleanupOutcome;
 };

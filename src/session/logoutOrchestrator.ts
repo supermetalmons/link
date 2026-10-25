@@ -72,27 +72,28 @@ const parseLogoutSignal = (value: unknown): LogoutSignal | null => {
     return null;
   }
   try {
-    const parsed = JSON.parse(value) as {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object") return null;
+    const fields = parsed as {
       id?: unknown;
       generation?: unknown;
       cleanupMode?: unknown;
-    } | null;
+    };
     if (
-      !parsed ||
-      typeof parsed.id !== "string" ||
-      parsed.id === "" ||
-      typeof parsed.generation !== "string" ||
-      !parsed.generation
+      typeof fields.id !== "string" ||
+      fields.id === "" ||
+      typeof fields.generation !== "string" ||
+      !fields.generation
     ) {
       return null;
     }
     const cleanupMode =
-      parsed.cleanupMode === "thorough"
+      fields.cleanupMode === "thorough"
         ? "thorough"
-        : parsed.cleanupMode === "fast"
+        : fields.cleanupMode === "fast"
           ? "fast"
           : undefined;
-    return { id: parsed.id, generation: parsed.generation, cleanupMode };
+    return { id: fields.id, generation: fields.generation, cleanupMode };
   } catch {
     return null;
   }
@@ -103,34 +104,35 @@ const parseSignInSignal = (value: unknown): SignInSignal | null => {
     return null;
   }
   try {
-    const parsed = JSON.parse(value) as {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object") return null;
+    const fields = parsed as {
       id?: unknown;
       tabId?: unknown;
       profileId?: unknown;
       loginId?: unknown;
       generation?: unknown;
-    } | null;
+    };
     if (
-      !parsed ||
-      typeof parsed.id !== "string" ||
-      parsed.id === "" ||
-      typeof parsed.tabId !== "string" ||
-      parsed.tabId === "" ||
-      typeof parsed.profileId !== "string" ||
-      parsed.profileId === "" ||
-      typeof parsed.loginId !== "string" ||
-      parsed.loginId === "" ||
-      typeof parsed.generation !== "string" ||
-      !parsed.generation
+      typeof fields.id !== "string" ||
+      fields.id === "" ||
+      typeof fields.tabId !== "string" ||
+      fields.tabId === "" ||
+      typeof fields.profileId !== "string" ||
+      fields.profileId === "" ||
+      typeof fields.loginId !== "string" ||
+      fields.loginId === "" ||
+      typeof fields.generation !== "string" ||
+      !fields.generation
     ) {
       return null;
     }
     return {
-      id: parsed.id,
-      tabId: parsed.tabId,
-      profileId: parsed.profileId,
-      loginId: parsed.loginId,
-      generation: parsed.generation,
+      id: fields.id,
+      tabId: fields.tabId,
+      profileId: fields.profileId,
+      loginId: fields.loginId,
+      generation: fields.generation,
     };
   } catch {
     return null;
@@ -144,33 +146,34 @@ const parsePendingLogoutWipeMarker = (
     return null;
   }
   try {
-    const parsed = JSON.parse(value) as {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object") return null;
+    const fields = parsed as {
       id?: unknown;
       generation?: unknown;
       createdAtMs?: unknown;
       cleanupMode?: unknown;
-    } | null;
+    };
     if (
-      !parsed ||
-      typeof parsed.id !== "string" ||
-      parsed.id === "" ||
-      typeof parsed.generation !== "string" ||
-      !parsed.generation
+      typeof fields.id !== "string" ||
+      fields.id === "" ||
+      typeof fields.generation !== "string" ||
+      !fields.generation
     ) {
       return null;
     }
     const createdAtMs =
-      typeof parsed.createdAtMs === "number"
-        ? parsed.createdAtMs
-        : Number(parsed.createdAtMs);
+      typeof fields.createdAtMs === "number"
+        ? fields.createdAtMs
+        : Number(fields.createdAtMs);
     if (!Number.isFinite(createdAtMs)) {
       return null;
     }
     const cleanupMode: LogoutCleanupMode =
-      parsed.cleanupMode === "thorough" ? "thorough" : "fast";
+      fields.cleanupMode === "thorough" ? "thorough" : "fast";
     return {
-      id: parsed.id,
-      generation: parsed.generation,
+      id: fields.id,
+      generation: fields.generation,
       createdAtMs: Math.floor(createdAtMs),
       cleanupMode,
     };

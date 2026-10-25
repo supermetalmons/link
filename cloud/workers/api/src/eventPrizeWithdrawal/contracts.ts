@@ -7,6 +7,7 @@ import {
 } from "@mons/shared/event-prizes";
 import { EVENT_PRIZE_ADMIN_WALLET } from "../../../../runtime/eventPrizeWithdrawalState.js";
 import { EventPrizeWithdrawalError } from "../../../../runtime/eventPrizes/errors.js";
+import type { WithdrawalResponseFields } from "../../../../runtime/eventPrizes/records.js";
 import { AuthApiFailure, type AuthErrorCode } from "../authErrors.ts";
 
 export type EventPrizeWithdrawalWorkflowParams = {
@@ -98,7 +99,7 @@ export function toEventPrizeApiFailure(error: unknown): AuthApiFailure {
 
 export function buildCompletedResponse(
   operationId: string,
-  withdrawal: Record<string, unknown>,
+  withdrawal: WithdrawalResponseFields,
 ): EventPrizeWithdrawalCompletedResponse {
   const response = {
     ok: true,

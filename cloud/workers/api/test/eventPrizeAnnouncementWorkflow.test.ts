@@ -1,3 +1,4 @@
+import { retainEventProgressRecord } from "../../../runtime/eventProgressRecords.js";
 import type {
   WorkflowEvent,
   WorkflowStep,
@@ -90,7 +91,7 @@ async function harness(
       now: () => nowMs,
       readOutbox: async (outboxId) => {
         assert.equal(outboxId, plan.outboxId);
-        return record;
+        return retainEventProgressRecord("pending", record);
       },
       deliver: async (input) => {
         assert.deepEqual(input, {

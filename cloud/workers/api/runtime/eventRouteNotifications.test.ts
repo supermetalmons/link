@@ -1,3 +1,4 @@
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, expect, it } from "vitest";
@@ -118,7 +119,7 @@ it("returns a freshly committed HTTP snapshot while room notifications are still
     {
       kind: "event",
       eventId,
-      value: {
+      value: eventDocumentFixture({
         schemaVersion: 2,
         eventId,
         status: "scheduled",
@@ -136,7 +137,7 @@ it("returns a freshly committed HTTP snapshot while room notifications are still
           matches: false,
           results: false,
         },
-      },
+      }),
     },
   ]);
   const allowNotifications = Promise.withResolvers<void>();

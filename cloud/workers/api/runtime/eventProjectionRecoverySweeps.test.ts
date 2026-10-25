@@ -5,6 +5,7 @@ import { EventWritesDisabled, type EventD1Connection } from "../src/eventD1.ts";
 import {
   createEventProjectionRecoveryStore,
   type EventProjectionRecoveryKind,
+  type EventProjectionRecoveryStore,
 } from "../src/eventProjectionRecoveryD1.ts";
 import { sweepEventTelegramProjections } from "../src/eventTelegramProjection.ts";
 import { sweepEventProfileGameProjections } from "../src/profileGameProjection/recovery.ts";
@@ -122,9 +123,19 @@ function observeSweep(
       kind === "profile-game"
         ? sweepEventProfileGameProjections(
             { ...testEnv, EVENT_PROFILE_GAME_PROJECTION_QUEUE: queue },
-            { createEventRecovery: () => recovery, now: () => nowMs, logger },
+            {
+              createEventRecovery: () =>
+                recovery as EventProjectionRecoveryStore<"profile-game">,
+              now: () => nowMs,
+              logger,
+            },
           )
-        : sweepEventTelegramProjections(queue, recovery, nowMs, logger),
+        : sweepEventTelegramProjections(
+            queue,
+            recovery as EventProjectionRecoveryStore<"telegram">,
+            nowMs,
+            logger,
+          ),
   };
 }
 

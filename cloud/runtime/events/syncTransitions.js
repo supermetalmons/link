@@ -3,16 +3,12 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.buildActiveEventSyncPlan = buildActiveEventSyncPlan;
 exports.buildEndedEventSyncPlan = buildEndedEventSyncPlan;
+const documents_js_1 = require("./documents.js");
 const event_prizes_1 = require("@mons/shared/event-prizes");
 const eventCommands_js_1 = require("../eventCommands.js");
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 const normalizeStringOrNull = (value) => normalizeString(value) || null;
-const toFiniteInteger = (value, fallback = 0) => {
-  const numeric = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(numeric) ? Math.floor(numeric) : fallback;
-};
-const cloneValue = (value) => JSON.parse(JSON.stringify(value));
 async function resolveEventMatches(
   rounds,
   thirdPlaceMatch,
@@ -28,13 +24,10 @@ async function resolveEventMatches(
   let thirdPlaceMatchChanged = false;
   const sortedRoundIndexes = getSortedRoundIndexes(rounds);
   for (const roundIndex of sortedRoundIndexes) {
-    const round = rounds[String(roundIndex)];
-    if (!round || !round.matches || typeof round.matches !== "object") {
-      continue;
-    }
-    const resolvedEntries = await resolveRoundMatchesWithConcurrency(
-      round.matches,
-    );
+    const round = (0, documents_js_1.eventRoundAt)(rounds, String(roundIndex));
+    const matches = (0, documents_js_1.eventRoundMatches)(round);
+    if (!matches) continue;
+    const resolvedEntries = await resolveRoundMatchesWithConcurrency(matches);
     for (const entry of resolvedEntries) {
       const { matchRecord, resolved } = entry;
       if (!resolved) {
@@ -73,37 +66,40 @@ async function buildActiveEventSyncPlan(
   const updates = [];
   let didChange = false;
   let eventPrizeAssignmentsForProjectionCleanup = null;
-  const normalizedOriginalCurrentRoundIndex = toFiniteInteger(
-    event.currentRoundIndex,
-    NaN,
-  );
+  const normalizedOriginalCurrentRoundIndex = (0,
+  documents_js_1.eventCurrentRoundIndex)(event, NaN);
   const originalCurrentRoundIndex = Number.isFinite(
     normalizedOriginalCurrentRoundIndex,
   )
     ? normalizedOriginalCurrentRoundIndex
     : null;
-  const originalStatus = normalizeString(event.status) || "active";
+  const originalState = (0, documents_js_1.eventState)(event);
+  const originalStatus = normalizeString(originalState.status) || "active";
   const originalEndedAtMs =
-    typeof event.endedAtMs === "number" ? Math.floor(event.endedAtMs) : null;
-  const originalWinnerProfileId = normalizeStringOrNull(event.winnerProfileId);
+    typeof originalState.endedAtMs === "number"
+      ? Math.floor(originalState.endedAtMs)
+      : null;
+  const originalWinnerProfileId = normalizeStringOrNull(
+    (0, documents_js_1.eventState)(event).winnerProfileId,
+  );
   const originalWinnerDisplayName = normalizeStringOrNull(
-    event.winnerDisplayName,
+    (0, documents_js_1.eventState)(event).winnerDisplayName,
   );
-  const rounds = cloneValue(
-    event.rounds && typeof event.rounds === "object" ? event.rounds : {},
+  const rounds = (0, documents_js_1.cloneEventRounds)(
+    (0, documents_js_1.eventRounds)(event) ||
+      (0, documents_js_1.createEventRoundsDocument)(),
   );
-  let participants = cloneValue(
-    event.participants && typeof event.participants === "object"
-      ? event.participants
-      : {},
+  let participants = (0, documents_js_1.cloneEventParticipants)(
+    (0, documents_js_1.eventParticipants)(event) ||
+      (0, documents_js_1.createEventParticipantsDocument)(),
   );
   const supportsThirdPlaceMatch = hasThirdPlaceMatchField(event);
-  let thirdPlaceMatch =
-    supportsThirdPlaceMatch &&
-    event.thirdPlaceMatch &&
-    typeof event.thirdPlaceMatch === "object"
-      ? cloneValue(event.thirdPlaceMatch)
-      : null;
+  const storedThirdPlaceMatch = supportsThirdPlaceMatch
+    ? (0, documents_js_1.eventThirdPlaceMatch)(event)
+    : null;
+  let thirdPlaceMatch = storedThirdPlaceMatch
+    ? (0, documents_js_1.cloneEventMatch)(storedThirdPlaceMatch)
+    : null;
   const inviteUpdates = [];
   let participantsChanged = false;
   let { roundsChanged, thirdPlaceMatchChanged } = await resolveEventMatches(
@@ -163,7 +159,9 @@ async function buildActiveEventSyncPlan(
     earliestUnresolvedRoundIndex !== null
       ? earliestUnresolvedRoundIndex
       : finalRoundIndex;
-  event.currentRoundIndex = nextCurrentRoundIndex;
+  (0, documents_js_1.patchEventDocument)(event, {
+    currentRoundIndex: nextCurrentRoundIndex,
+  });
   const participantStateResult = rebuildParticipantStatesFromRounds({
     participantsById: participants,
     rounds,
@@ -176,18 +174,30 @@ async function buildActiveEventSyncPlan(
   }
   if (eventShouldEnd) {
     const winnerParticipant =
-      (winnerProfileId && participants[winnerProfileId]) || null;
-    event.status = "ended";
-    if (typeof event.endedAtMs !== "number") {
-      event.endedAtMs = nowMs;
+      (winnerProfileId &&
+        (0, documents_js_1.eventParticipantAt)(
+          participants,
+          winnerProfileId,
+        )) ||
+      null;
+    (0, documents_js_1.patchEventDocument)(event, { status: "ended" });
+    let endedAtMs = (0, documents_js_1.eventState)(event).endedAtMs;
+    if (typeof endedAtMs !== "number") {
+      endedAtMs = nowMs;
+      (0, documents_js_1.patchEventDocument)(event, { endedAtMs });
     }
-    event.winnerProfileId = winnerProfileId;
-    event.winnerDisplayName = winnerParticipant
-      ? winnerParticipant.displayName
-      : null;
+    (0, documents_js_1.patchEventDocument)(event, {
+      winnerProfileId: winnerProfileId,
+    });
+    (0, documents_js_1.copyEventWinnerDisplayName)(event, winnerParticipant);
     if ((0, event_prizes_1.isEventPrizeEvent)(eventId)) {
-      if (typeof event.prizeSelectionsLockedAtMs !== "number") {
-        event.prizeSelectionsLockedAtMs = nowMs;
+      if (
+        typeof (0, documents_js_1.eventState)(event)
+          .prizeSelectionsLockedAtMs !== "number"
+      ) {
+        (0, documents_js_1.patchEventDocument)(event, {
+          prizeSelectionsLockedAtMs: nowMs,
+        });
         updates.push(
           (0, eventCommands_js_1.eventField)(
             eventId,
@@ -202,14 +212,16 @@ async function buildActiveEventSyncPlan(
         rounds,
         participantsById: participants,
         thirdPlaceMatch,
-        assignedAtMs: event.endedAtMs,
+        assignedAtMs: endedAtMs,
         ownershipSnapshot,
         prizeSelections,
       });
       if (Object.keys(prizeAssignmentResult.assignments).length > 0) {
         eventPrizeAssignmentsForProjectionCleanup =
           prizeAssignmentResult.assignments;
-        event.prizeAssignments = prizeAssignmentResult.assignments;
+        (0, documents_js_1.patchEventDocument)(event, {
+          prizeAssignments: prizeAssignmentResult.assignments,
+        });
         await addEventPrizeAssignmentUpdates({
           updates,
           eventId,
@@ -219,15 +231,16 @@ async function buildActiveEventSyncPlan(
       }
     }
   } else {
-    event.status = "active";
-    event.endedAtMs = null;
-    event.winnerProfileId = null;
-    event.winnerDisplayName = null;
+    (0, documents_js_1.patchEventDocument)(event, { status: "active" });
+    (0, documents_js_1.patchEventDocument)(event, { endedAtMs: null });
+    (0, documents_js_1.patchEventDocument)(event, { winnerProfileId: null });
+    (0, documents_js_1.patchEventDocument)(event, { winnerDisplayName: null });
   }
   let eventChanged = false;
+  const nextState = (0, documents_js_1.eventState)(event);
   const normalizedCurrentRoundIndex =
-    typeof event.currentRoundIndex === "number"
-      ? Math.floor(event.currentRoundIndex)
+    typeof nextState.currentRoundIndex === "number"
+      ? Math.floor(nextState.currentRoundIndex)
       : null;
   if (normalizedCurrentRoundIndex !== originalCurrentRoundIndex) {
     updates.push(
@@ -239,7 +252,7 @@ async function buildActiveEventSyncPlan(
     );
     eventChanged = true;
   }
-  const normalizedStatus = normalizeString(event.status) || "active";
+  const normalizedStatus = eventShouldEnd ? "ended" : "active";
   if (normalizedStatus !== originalStatus) {
     updates.push(
       (0, eventCommands_js_1.eventField)(eventId, "status", normalizedStatus),
@@ -247,7 +260,9 @@ async function buildActiveEventSyncPlan(
     eventChanged = true;
   }
   const normalizedEndedAtMs =
-    typeof event.endedAtMs === "number" ? Math.floor(event.endedAtMs) : null;
+    typeof nextState.endedAtMs === "number"
+      ? Math.floor(nextState.endedAtMs)
+      : null;
   if (normalizedEndedAtMs !== originalEndedAtMs) {
     updates.push(
       (0, eventCommands_js_1.eventField)(
@@ -259,7 +274,7 @@ async function buildActiveEventSyncPlan(
     eventChanged = true;
   }
   const normalizedWinnerProfileId = normalizeStringOrNull(
-    event.winnerProfileId,
+    (0, documents_js_1.eventState)(event).winnerProfileId,
   );
   if (normalizedWinnerProfileId !== originalWinnerProfileId) {
     updates.push(
@@ -272,7 +287,7 @@ async function buildActiveEventSyncPlan(
     eventChanged = true;
   }
   const normalizedWinnerDisplayName = normalizeStringOrNull(
-    event.winnerDisplayName,
+    (0, documents_js_1.eventState)(event).winnerDisplayName,
   );
   if (normalizedWinnerDisplayName !== originalWinnerDisplayName) {
     updates.push(
@@ -336,16 +351,17 @@ async function buildEndedEventSyncPlan(
   const updates = [];
   let didChange = false;
   let eventPrizeAssignmentsForProjectionCleanup = null;
-  const rounds = cloneValue(
-    event.rounds && typeof event.rounds === "object" ? event.rounds : {},
+  const rounds = (0, documents_js_1.cloneEventRounds)(
+    (0, documents_js_1.eventRounds)(event) ||
+      (0, documents_js_1.createEventRoundsDocument)(),
   );
   const supportsThirdPlaceMatch = hasThirdPlaceMatchField(event);
-  let thirdPlaceMatch =
-    supportsThirdPlaceMatch &&
-    event.thirdPlaceMatch &&
-    typeof event.thirdPlaceMatch === "object"
-      ? cloneValue(event.thirdPlaceMatch)
-      : null;
+  const storedThirdPlaceMatch = supportsThirdPlaceMatch
+    ? (0, documents_js_1.eventThirdPlaceMatch)(event)
+    : null;
+  let thirdPlaceMatch = storedThirdPlaceMatch
+    ? (0, documents_js_1.cloneEventMatch)(storedThirdPlaceMatch)
+    : null;
   let prizeStateChanged = false;
   let { roundsChanged, thirdPlaceMatchChanged } = await resolveEventMatches(
     rounds,
@@ -359,9 +375,8 @@ async function buildEndedEventSyncPlan(
       rounds,
       nowMs,
       participantsById:
-        event.participants && typeof event.participants === "object"
-          ? event.participants
-          : {},
+        (0, documents_js_1.eventParticipants)(event) ||
+        (0, documents_js_1.createEventParticipantsDocument)(),
       inviteUpdates: [],
       thirdPlaceMatch,
       allowInviteCreation: false,
@@ -372,12 +387,13 @@ async function buildEndedEventSyncPlan(
     }
   }
   if ((0, event_prizes_1.isEventPrizeEvent)(eventId)) {
-    if (typeof event.prizeSelectionsLockedAtMs !== "number") {
+    const state = (0, documents_js_1.eventState)(event);
+    if (typeof state.prizeSelectionsLockedAtMs !== "number") {
       updates.push(
         (0, eventCommands_js_1.eventField)(
           eventId,
           "prizeSelectionsLockedAtMs",
-          typeof event.endedAtMs === "number" ? event.endedAtMs : nowMs,
+          typeof state.endedAtMs === "number" ? state.endedAtMs : nowMs,
         ),
       );
       prizeStateChanged = true;
@@ -387,12 +403,11 @@ async function buildEndedEventSyncPlan(
       event,
       rounds,
       participantsById:
-        event.participants && typeof event.participants === "object"
-          ? event.participants
-          : {},
+        (0, documents_js_1.eventParticipants)(event) ||
+        (0, documents_js_1.createEventParticipantsDocument)(),
       thirdPlaceMatch,
       assignedAtMs:
-        typeof event.endedAtMs === "number" ? event.endedAtMs : nowMs,
+        typeof state.endedAtMs === "number" ? state.endedAtMs : nowMs,
       ownershipSnapshot,
       prizeSelections,
     });

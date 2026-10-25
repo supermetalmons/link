@@ -1,3 +1,4 @@
+import { queueFor } from "./queueProducers.ts";
 import type {
   EventCommand,
   EventCommitPlan,
@@ -7,6 +8,7 @@ import { isSafeRecordKey } from "./recordKeys.ts";
 import type { EventTelegramProjectionTask } from "./telegramProjectionTasks.ts";
 import type { PreparedEventMutation } from "./eventMutationCommit.ts";
 import { EVENT_TELEGRAM_PROJECTION_SCHEMA_VERSION } from "./telegramProjectionOutbox.ts";
+import type { EventTelegramProjectionRequest } from "./telegramProjectionOutbox.ts";
 
 export { EVENT_TELEGRAM_PROJECTION_SCHEMA_VERSION } from "./telegramProjectionOutbox.ts";
 
@@ -41,7 +43,7 @@ function eventIdsFromUpdates(updates: readonly EventCommand[]): string[] {
 export function buildEventTelegramProjectionOutbox(
   requestId: string,
   updatedAtMs: number,
-): Record<string, unknown> {
+): EventTelegramProjectionRequest {
   if (!isSafeRecordKey(requestId)) {
     throw new TypeError(STATE_FAILURE_MESSAGES.invalidRequestId);
   }
@@ -67,7 +69,7 @@ export function prepareEventTelegramProjection(
   const enqueue =
     dependencies.enqueue ||
     ((task: EventTelegramProjectionTask) =>
-      env.TELEGRAM_PROJECTION_QUEUE.send(task));
+      queueFor(env, "TELEGRAM_PROJECTION_QUEUE").send(task));
   const logger = dependencies.logger || console;
   const now = dependencies.now || Date.now;
   const eventIds = eventIdsFromUpdates(updates);

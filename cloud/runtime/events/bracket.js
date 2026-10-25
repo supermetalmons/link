@@ -28,6 +28,7 @@ exports.setMatchSlotParticipant =
   exports.buildFixedBracketState =
   exports.addEventPrizeAssignmentUpdates =
     void 0;
+const documents_js_1 = require("./documents.js");
 const eventCommands_js_1 = require("../eventCommands.js");
 const matchOutcome_js_1 = require("../matchOutcome.js");
 const eventPrizeAwards_js_1 = require("../eventPrizeAwards.js");
@@ -148,16 +149,23 @@ const createEventBracketRuntime = (dependencies = {}) => {
       throw (0, ownership_js_1.profileOwnershipUnavailable)();
     const placementReferences = placementProfileIds.map((profileId) => {
       const participant =
-        participantsById?.[profileId] ||
-        Object.values(participantsById || {}).find(
-          (candidate) =>
-            candidate &&
-            typeof candidate === "object" &&
-            normalizeString(candidate.profileId) === profileId,
-        );
+        (0, documents_js_1.eventParticipantAt)(participantsById, profileId) ||
+        (0, documents_js_1.eventParticipantEntries)(participantsById)
+          .map(([, value]) => value)
+          .find(
+            (candidate) =>
+              candidate &&
+              typeof candidate === "object" &&
+              normalizeString(
+                (0, documents_js_1.eventParticipantState)(candidate).profileId,
+              ) === profileId,
+          );
       return {
         profileId,
-        loginUid: normalizeString(participant && participant.loginUid),
+        loginUid: normalizeString(
+          participant &&
+            (0, documents_js_1.eventParticipantState)(participant).loginUid,
+        ),
       };
     });
     const canonicalPlacementProfileIds = (0,
@@ -170,16 +178,24 @@ const createEventBracketRuntime = (dependencies = {}) => {
       profileId: canonicalPlacementProfileIds[index],
     }));
     const placementProfileIdSet = new Set(placementProfileIds);
-    const participantEntries = Object.entries(participantsById || {});
+    const participantEntries = (0, documents_js_1.eventParticipantEntries)(
+      participantsById,
+    );
     const participantProfileIds = ([profileId, participant]) =>
       [
         normalizeString(profileId),
-        normalizeString(participant && participant.profileId),
+        normalizeString(
+          participant &&
+            (0, documents_js_1.eventParticipantState)(participant).profileId,
+        ),
       ].filter(Boolean);
     const isPlacementParticipant = ([profileId, participant]) =>
       placementProfileIdSet.has(normalizeString(profileId)) ||
       placementProfileIdSet.has(
-        normalizeString(participant && participant.profileId),
+        normalizeString(
+          participant &&
+            (0, documents_js_1.eventParticipantState)(participant).profileId,
+        ),
       );
     const placementParticipantEntries = participantEntries.filter(
       isPlacementParticipant,
@@ -205,7 +221,11 @@ const createEventBracketRuntime = (dependencies = {}) => {
     );
     const canonicalSelections = (0,
     ownership_js_1.canonicalizeEventPrizeSelections)(
-      { participants: Object.fromEntries(placementParticipantEntries) },
+      (0, documents_js_1.readEventDocument)({
+        participants: (0, documents_js_1.createEventParticipantsDocument)(
+          Object.fromEntries(placementParticipantEntries),
+        ),
+      }),
       placementSelections,
       ownershipSnapshot,
     ).selectionsByProfileId;
@@ -213,13 +233,6 @@ const createEventBracketRuntime = (dependencies = {}) => {
       placements: canonicalPlacements,
       selections: canonicalSelections,
     };
-  };
-  const toFiniteInteger = (value, fallback = 0) => {
-    const numeric = typeof value === "number" ? value : Number(value);
-    if (!Number.isFinite(numeric)) {
-      return fallback;
-    }
-    return Math.floor(numeric);
   };
   const reconcileBracketMatchReadiness = (input) =>
     (0, startTransitionCore_js_1.reconcileBracketMatchReadiness)({
@@ -241,42 +254,52 @@ const createEventBracketRuntime = (dependencies = {}) => {
     const sortedRoundIndexes = (0,
     startTransitionCore_js_1.getSortedRoundIndexes)(rounds);
     for (const roundIndex of sortedRoundIndexes) {
-      const round = rounds[String(roundIndex)];
-      if (!round || !round.matches || typeof round.matches !== "object") {
+      const round = (0, documents_js_1.eventRoundAt)(
+        rounds,
+        String(roundIndex),
+      );
+      if (
+        !round ||
+        !(0, documents_js_1.eventRoundMatches)(round) ||
+        typeof (0, documents_js_1.eventRoundMatches)(round) !== "object"
+      ) {
         continue;
       }
       const matchKeys = (0, startTransitionCore_js_1.getSortedMatchKeys)(
-        round.matches,
+        (0, documents_js_1.eventRoundMatches)(round),
       );
       for (const matchKey of matchKeys) {
-        const match = round.matches[matchKey];
+        const match = (0, documents_js_1.eventMatchAt)(
+          (0, documents_js_1.eventRoundMatches)(round),
+          matchKey,
+        );
         if (!match || typeof match !== "object") {
           continue;
         }
         if (!(0, startTransitionCore_js_1.isMatchResolved)(match)) {
           continue;
         }
-        const loserProfileId = normalizeString(match && match.loserProfileId);
+        const loserProfileId = normalizeString(
+          match && (0, documents_js_1.eventMatchState)(match).loserProfileId,
+        );
         if (!loserProfileId || eliminationsByProfileId[loserProfileId]) {
           continue;
         }
         eliminationsByProfileId[loserProfileId] = {
           eliminatedRoundIndex: roundIndex,
           eliminatedByProfileId:
-            normalizeString(match && match.winnerProfileId) || null,
+            normalizeString(
+              match &&
+                (0, documents_js_1.eventMatchState)(match).winnerProfileId,
+            ) || null,
         };
       }
     }
     const normalizedWinnerProfileId = normalizeStringOrNull(winnerProfileId);
-    const nextParticipants = {};
+    const replacements = new Map();
     let didChange = false;
-    for (const [profileId, participant] of Object.entries(
-      participantsById || {},
-    )) {
-      if (!participant || typeof participant !== "object") {
-        nextParticipants[profileId] = participant;
-        continue;
-      }
+    for (const [profileId, participant] of (0,
+    documents_js_1.eventParticipantEntries)(participantsById)) {
       const elimination = eliminationsByProfileId[profileId] || null;
       let state = "active";
       let eliminatedRoundIndex = null;
@@ -292,30 +315,40 @@ const createEventBracketRuntime = (dependencies = {}) => {
         eliminatedRoundIndex = elimination.eliminatedRoundIndex;
         eliminatedByProfileId = elimination.eliminatedByProfileId;
       }
+      const participantState = (0, documents_js_1.eventParticipantState)(
+        participant,
+      );
       const normalizedCurrentEliminatedRoundIndex =
-        typeof participant.eliminatedRoundIndex === "number"
-          ? Math.floor(participant.eliminatedRoundIndex)
+        typeof participantState.eliminatedRoundIndex === "number"
+          ? Math.floor(participantState.eliminatedRoundIndex)
           : null;
       const normalizedCurrentEliminatedByProfileId = normalizeStringOrNull(
-        participant.eliminatedByProfileId,
+        (0, documents_js_1.eventParticipantState)(participant)
+          .eliminatedByProfileId,
       );
       if (
-        participant.state !== state ||
+        (0, documents_js_1.eventParticipantState)(participant).state !==
+          state ||
         normalizedCurrentEliminatedRoundIndex !== eliminatedRoundIndex ||
         normalizedCurrentEliminatedByProfileId !== eliminatedByProfileId
       ) {
         didChange = true;
       }
-      nextParticipants[profileId] = {
-        ...participant,
-        state,
-        eliminatedRoundIndex,
-        eliminatedByProfileId,
-      };
+      replacements.set(
+        profileId,
+        (0, documents_js_1.copyEventParticipant)(participant, {
+          state,
+          eliminatedRoundIndex,
+          eliminatedByProfileId,
+        }),
+      );
     }
     return {
       didChange,
-      participantsById: nextParticipants,
+      participantsById: (0, documents_js_1.copyEventParticipants)(
+        participantsById,
+        replacements,
+      ),
     };
   };
   const getEventPrizeDisqualifiedIdentityKeys = ({
@@ -324,14 +357,17 @@ const createEventBracketRuntime = (dependencies = {}) => {
   }) => {
     const identityKeys = new Set();
     const addMatchIdentities = (match) => {
-      if (!match || match.winnerDisqualified !== true) {
+      if (
+        !match ||
+        (0, documents_js_1.eventMatchState)(match).winnerDisqualified !== true
+      ) {
         return;
       }
       for (const value of [
-        match.hostProfileId,
-        match.hostLoginUid,
-        match.guestProfileId,
-        match.guestLoginUid,
+        (0, documents_js_1.eventMatchState)(match).hostProfileId,
+        (0, documents_js_1.eventMatchState)(match).hostLoginUid,
+        (0, documents_js_1.eventMatchState)(match).guestProfileId,
+        (0, documents_js_1.eventMatchState)(match).guestLoginUid,
       ]) {
         const identityKey = normalizeString(value);
         if (identityKey) {
@@ -341,11 +377,13 @@ const createEventBracketRuntime = (dependencies = {}) => {
     };
     for (const roundIndex of (0,
     startTransitionCore_js_1.getSortedRoundIndexes)(rounds)) {
-      const matches = rounds[String(roundIndex)]?.matches;
+      const matches = (0, documents_js_1.eventRoundMatches)(
+        (0, documents_js_1.eventRoundAt)(rounds, String(roundIndex)),
+      );
       for (const matchKey of (0, startTransitionCore_js_1.getSortedMatchKeys)(
         matches,
       )) {
-        addMatchIdentities(matches[matchKey]);
+        addMatchIdentities((0, documents_js_1.eventMatchAt)(matches, matchKey));
       }
     }
     addMatchIdentities(thirdPlaceMatch);
@@ -355,8 +393,12 @@ const createEventBracketRuntime = (dependencies = {}) => {
     if (!participant) {
       return false;
     }
-    const profileId = normalizeString(participant.profileId);
-    const loginUid = normalizeString(participant.loginUid);
+    const profileId = normalizeString(
+      (0, documents_js_1.eventParticipantState)(participant).profileId,
+    );
+    const loginUid = normalizeString(
+      (0, documents_js_1.eventParticipantState)(participant).loginUid,
+    );
     return (
       (profileId && identityKeys.has(profileId)) ||
       (loginUid && identityKeys.has(loginUid))
@@ -364,12 +406,16 @@ const createEventBracketRuntime = (dependencies = {}) => {
   };
   const getResolvedMatchProfileId = (match, result) => {
     const directProfileId = normalizeString(
-      result === "winner" ? match?.winnerProfileId : match?.loserProfileId,
+      result === "winner"
+        ? (0, documents_js_1.eventMatchState)(match).winnerProfileId
+        : (0, documents_js_1.eventMatchState)(match).loserProfileId,
     );
     if (directProfileId) {
       return directProfileId;
     }
-    const status = normalizeString(match?.status);
+    const status = normalizeString(
+      (0, documents_js_1.eventMatchState)(match).status,
+    );
     const winnerSide =
       status === "host" ? "host" : status === "guest" ? "guest" : null;
     if (!winnerSide) {
@@ -381,7 +427,11 @@ const createEventBracketRuntime = (dependencies = {}) => {
         : winnerSide === "host"
           ? "guest"
           : "host";
-    return normalizeString(match?.[`${side}ProfileId`]);
+    return normalizeString(
+      (0, documents_js_1.eventMatchState)(match)[
+        side === "guest" ? "guestProfileId" : "hostProfileId"
+      ],
+    );
   };
   const getEventPrizePlacements = ({
     event,
@@ -392,22 +442,28 @@ const createEventBracketRuntime = (dependencies = {}) => {
     const sortedRoundIndexes = (0,
     startTransitionCore_js_1.getSortedRoundIndexes)(rounds);
     const finalRoundIndex = sortedRoundIndexes[sortedRoundIndexes.length - 1];
-    const finalRound = rounds[String(finalRoundIndex)];
-    const finalMatchKey = (0, startTransitionCore_js_1.getSortedMatchKeys)(
-      finalRound?.matches,
-    )[0];
-    const finalMatch = finalRound?.matches?.[finalMatchKey];
-    if (!finalMatch) {
-      return [];
-    }
+    const finalRound = (0, documents_js_1.eventRoundAt)(
+      rounds,
+      String(finalRoundIndex),
+    );
+    const finalMatches = (0, documents_js_1.eventPlacementMatches)(finalRound);
+    const finalMatchEntry =
+      finalMatches[
+        (0, startTransitionCore_js_1.getSortedMatchKeys)(finalMatches)[0]
+      ];
+    if (!finalMatchEntry?.present) return [];
+    const finalMatch = finalMatchEntry.match;
     const disqualifiedIdentityKeys = getEventPrizeDisqualifiedIdentityKeys({
       rounds,
       thirdPlaceMatch,
     });
     const winnerProfileId =
-      normalizeString(event?.winnerProfileId) ||
+      normalizeString((0, documents_js_1.eventState)(event).winnerProfileId) ||
       getResolvedMatchProfileId(finalMatch, "winner");
-    const winner = participantsById[winnerProfileId];
+    const winner = (0, documents_js_1.eventParticipantAt)(
+      participantsById,
+      winnerProfileId,
+    );
     if (
       !winner ||
       isEventPrizeParticipantDisqualified(winner, disqualifiedIdentityKeys)
@@ -419,7 +475,10 @@ const createEventBracketRuntime = (dependencies = {}) => {
     const placementCandidates = [];
     const pushCandidate = (profileId) => {
       const normalizedProfileId = normalizeString(profileId);
-      const participant = participantsById[normalizedProfileId];
+      const participant = (0, documents_js_1.eventParticipantAt)(
+        participantsById,
+        normalizedProfileId,
+      );
       if (
         !normalizedProfileId ||
         !participant ||
@@ -438,7 +497,8 @@ const createEventBracketRuntime = (dependencies = {}) => {
     if (Object.keys(participantsById).length >= 3 && thirdPlaceMatch) {
       pushCandidate(getResolvedMatchProfileId(thirdPlaceMatch, "winner"));
     }
-    Object.values(participantsById)
+    (0, documents_js_1.eventParticipantEntries)(participantsById)
+      .map(([, value]) => value)
       .filter(
         (participant) =>
           !isEventPrizeParticipantDisqualified(
@@ -447,26 +507,44 @@ const createEventBracketRuntime = (dependencies = {}) => {
           ),
       )
       .sort((left, right) => {
-        const leftRound = Number.isFinite(left.eliminatedRoundIndex)
-          ? Math.floor(left.eliminatedRoundIndex)
+        const leftRound = Number.isFinite(
+          (0, documents_js_1.eventParticipantState)(left).eliminatedRoundIndex,
+        )
+          ? Math.floor(
+              (0, documents_js_1.eventParticipantState)(left)
+                .eliminatedRoundIndex,
+            )
           : -1;
-        const rightRound = Number.isFinite(right.eliminatedRoundIndex)
-          ? Math.floor(right.eliminatedRoundIndex)
+        const rightRound = Number.isFinite(
+          (0, documents_js_1.eventParticipantState)(right).eliminatedRoundIndex,
+        )
+          ? Math.floor(
+              (0, documents_js_1.eventParticipantState)(right)
+                .eliminatedRoundIndex,
+            )
           : -1;
         if (leftRound !== rightRound) {
           return rightRound - leftRound;
         }
         const joinedDifference =
-          toFiniteInteger(left.joinedAtMs, 0) -
-          toFiniteInteger(right.joinedAtMs, 0);
+          (0, documents_js_1.eventParticipantJoinedOrder)(left, 0) -
+          (0, documents_js_1.eventParticipantJoinedOrder)(right, 0);
         if (joinedDifference !== 0) {
           return joinedDifference;
         }
-        return normalizeString(left.profileId).localeCompare(
-          normalizeString(right.profileId),
+        return normalizeString(
+          (0, documents_js_1.eventParticipantState)(left).profileId,
+        ).localeCompare(
+          normalizeString(
+            (0, documents_js_1.eventParticipantState)(right).profileId,
+          ),
         );
       })
-      .forEach((participant) => pushCandidate(participant.profileId));
+      .forEach((participant) =>
+        pushCandidate(
+          (0, documents_js_1.eventParticipantState)(participant).profileId,
+        ),
+      );
     if (placementCandidates[0]) {
       placements.push({ place: 2, profileId: placementCandidates[0] });
     }
@@ -658,9 +736,8 @@ const createEventBracketRuntime = (dependencies = {}) => {
       participantsById,
       thirdPlaceMatch,
     });
-    const storedAssignments = (0,
-    eventPrizeAwards_js_1.normalizeEventPrizeAssignments)(
-      event?.prizeAssignments,
+    const storedAssignments = (0, documents_js_1.eventPrizeAssignments)(
+      event,
       eventId,
     );
     if (
@@ -691,13 +768,23 @@ const createEventBracketRuntime = (dependencies = {}) => {
   const getRoundMatchRead = (matchRecord) => {
     if (!matchRecord || typeof matchRecord !== "object") return null;
     if (
-      ["bye", "host", "guest"].includes(normalizeString(matchRecord.status))
+      ["bye", "host", "guest"].includes(
+        normalizeString(
+          (0, documents_js_1.eventMatchState)(matchRecord).status,
+        ),
+      )
     ) {
       return null;
     }
-    const playerId = normalizeString(matchRecord.hostLoginUid);
-    const opponentId = normalizeString(matchRecord.guestLoginUid);
-    const inviteId = normalizeString(matchRecord.inviteId);
+    const playerId = normalizeString(
+      (0, documents_js_1.eventMatchState)(matchRecord).hostLoginUid,
+    );
+    const opponentId = normalizeString(
+      (0, documents_js_1.eventMatchState)(matchRecord).guestLoginUid,
+    );
+    const inviteId = normalizeString(
+      (0, documents_js_1.eventMatchState)(matchRecord).inviteId,
+    );
     return playerId && opponentId && inviteId
       ? { inviteId, matchId: inviteId, playerId, opponentId }
       : null;
@@ -706,9 +793,13 @@ const createEventBracketRuntime = (dependencies = {}) => {
     if (!matchRecord || typeof matchRecord !== "object") {
       return null;
     }
-    const existingStatus = normalizeString(matchRecord.status);
+    const existingStatus = normalizeString(
+      (0, documents_js_1.eventMatchState)(matchRecord).status,
+    );
     if (existingStatus === "bye") {
-      const winnerProfileId = normalizeString(matchRecord.winnerProfileId);
+      const winnerProfileId = normalizeString(
+        (0, documents_js_1.eventMatchState)(matchRecord).winnerProfileId,
+      );
       if (!winnerProfileId) {
         return null;
       }
@@ -720,15 +811,27 @@ const createEventBracketRuntime = (dependencies = {}) => {
     }
     if (existingStatus === "host" || existingStatus === "guest") {
       const winnerProfileId =
-        normalizeString(matchRecord.winnerProfileId) ||
+        normalizeString(
+          (0, documents_js_1.eventMatchState)(matchRecord).winnerProfileId,
+        ) ||
         (existingStatus === "host"
-          ? normalizeString(matchRecord.hostProfileId)
-          : normalizeString(matchRecord.guestProfileId));
+          ? normalizeString(
+              (0, documents_js_1.eventMatchState)(matchRecord).hostProfileId,
+            )
+          : normalizeString(
+              (0, documents_js_1.eventMatchState)(matchRecord).guestProfileId,
+            ));
       const loserProfileId =
-        normalizeString(matchRecord.loserProfileId) ||
+        normalizeString(
+          (0, documents_js_1.eventMatchState)(matchRecord).loserProfileId,
+        ) ||
         (existingStatus === "host"
-          ? normalizeString(matchRecord.guestProfileId)
-          : normalizeString(matchRecord.hostProfileId));
+          ? normalizeString(
+              (0, documents_js_1.eventMatchState)(matchRecord).guestProfileId,
+            )
+          : normalizeString(
+              (0, documents_js_1.eventMatchState)(matchRecord).hostProfileId,
+            ));
       if (!winnerProfileId) {
         return null;
       }
@@ -748,21 +851,29 @@ const createEventBracketRuntime = (dependencies = {}) => {
     if (outcome.winner === "player") {
       return {
         status: "host",
-        winnerProfileId: normalizeString(matchRecord.hostProfileId),
-        loserProfileId: normalizeStringOrNull(matchRecord.guestProfileId),
+        winnerProfileId: normalizeString(
+          (0, documents_js_1.eventMatchState)(matchRecord).hostProfileId,
+        ),
+        loserProfileId: normalizeStringOrNull(
+          (0, documents_js_1.eventMatchState)(matchRecord).guestProfileId,
+        ),
       };
     }
     if (outcome.winner === "opponent") {
       return {
         status: "guest",
-        winnerProfileId: normalizeString(matchRecord.guestProfileId),
-        loserProfileId: normalizeStringOrNull(matchRecord.hostProfileId),
+        winnerProfileId: normalizeString(
+          (0, documents_js_1.eventMatchState)(matchRecord).guestProfileId,
+        ),
+        loserProfileId: normalizeStringOrNull(
+          (0, documents_js_1.eventMatchState)(matchRecord).hostProfileId,
+        ),
       };
     }
     return null;
   };
   const resolveRoundMatchesWithConcurrency = async (matchesByKey) => {
-    const entries = Object.entries(matchesByKey || {});
+    const entries = (0, documents_js_1.eventMatchEntries)(matchesByKey);
     if (entries.length <= 0) {
       return [];
     }

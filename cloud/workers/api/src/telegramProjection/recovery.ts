@@ -1,3 +1,9 @@
+import type { QueueProducer } from "../queueProducers.ts";
+import { queueFor } from "../queueProducers.ts";
+import {
+  readAutomatchTelegramRecoveryEntries,
+  type AutomatchTelegramRecoveryCandidate,
+} from "../automatchProjectionRecords.ts";
 import type {
   GameSessionPort,
   GameSessionRecoveryContext,
@@ -6,13 +12,7 @@ import { createEventGameplayRepository } from "../eventRepository.ts";
 import { createGameplayRepository } from "../gameplayRepository.ts";
 import { createRatingRepository } from "../ratingRepository.ts";
 import type { RatingProjectionRepository } from "../ratingContracts.ts";
-import { isSafeRecordKey } from "../recordKeys.ts";
-import type { AutomatchOutboxClaimSnapshot } from "../automatchD1/types.ts";
-import type {
-  AutomatchTelegramProjectionTask,
-  TelegramProjectionTask,
-} from "../telegramProjectionTasks.ts";
-import { parseAutomatchTelegramProjectionOutbox as parseOutbox } from "../telegramProjectionOutbox.ts";
+import type { TelegramProjectionTask } from "../telegramProjectionTasks.ts";
 import { readTelegramStorageMode } from "../telegramD1.ts";
 import { sweepEventTelegramProjections } from "../eventTelegramProjection.ts";
 import { createEventProjectionRecoveryStore } from "../eventProjectionRecoveryD1.ts";
@@ -33,53 +33,10 @@ import type {
   ProjectionLogger,
 } from "./types.ts";
 
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-type AutomatchSweepCandidate = {
-  task: AutomatchTelegramProjectionTask;
-  updatedAtMs: number;
-  snapshot?: AutomatchOutboxClaimSnapshot;
-};
-
-type AutomatchSweepEntry =
-  | { kind: "candidate"; value: AutomatchSweepCandidate }
-  | { inviteId: string; kind: "invalid" };
-
-function automatchSweepEntries(
-  value: unknown,
-  snapshots?: ReadonlyMap<string, AutomatchOutboxClaimSnapshot>,
-): AutomatchSweepEntry[] {
-  const records = toRecord(value) || {};
-  return Object.entries(records).flatMap(([inviteId, raw]) => {
-    const outbox = parseOutbox(raw);
-    const snapshot = snapshots?.get(inviteId);
-    return [
-      outbox && isSafeRecordKey(inviteId)
-        ? {
-            kind: "candidate" as const,
-            value: {
-              ...(snapshot ? { snapshot } : {}),
-              task: {
-                kind: "automatch-telegram-projection" as const,
-                inviteId,
-                requestId: outbox.requestId,
-              },
-              updatedAtMs: outbox.updatedAtMs,
-            },
-          }
-        : { kind: "invalid" as const, inviteId },
-    ];
-  });
-}
-
 export function automatchSweepCandidates(
   value: unknown,
-): AutomatchSweepCandidate[] {
-  return automatchSweepEntries(value).flatMap((entry) =>
+): AutomatchTelegramRecoveryCandidate[] {
+  return readAutomatchTelegramRecoveryEntries(value).flatMap((entry) =>
     entry.kind === "candidate" ? [entry.value] : [],
   );
 }
@@ -90,7 +47,7 @@ export function automatchSweepTasks(value: unknown): TelegramProjectionTask[] {
 
 export async function claimAutomatchSweepCandidate(
   state: GameSessionPort,
-  candidate: AutomatchSweepCandidate,
+  candidate: AutomatchTelegramRecoveryCandidate,
   nowMs: number,
 ): Promise<boolean> {
   return state.claimAutomatchTelegramOutbox(
@@ -103,41 +60,8 @@ export async function claimAutomatchSweepCandidate(
   );
 }
 
-async function markInvalidAutomatchSweepEntry(
-  state: GameSessionRecoveryContext,
-  inviteId: string,
-  nowMs: number,
-): Promise<void> {
-  await state.projectionRecovery.transactRawAutomatchTelegramOutbox(
-    inviteId,
-    (current) => {
-      const record = toRecord(current);
-      const updatedAtMs = record?.updatedAtMs;
-      if (
-        !record ||
-        (parseOutbox(current) && isSafeRecordKey(inviteId)) ||
-        typeof updatedAtMs !== "number" ||
-        !Number.isFinite(updatedAtMs) ||
-        updatedAtMs > nowMs
-      ) {
-        return { commit: false, decision: "changed" };
-      }
-      return {
-        value: {
-          ...record,
-          status: "dead",
-          reason: "invalid-record",
-          updatedAtMs: null,
-          deadAtMs: nowMs,
-        },
-        decision: "dead",
-      };
-    },
-  );
-}
-
 export async function sendTaskBatches(
-  queue: Queue<TelegramProjectionTask>,
+  queue: Pick<QueueProducer<TelegramProjectionTask>, "sendBatch">,
   tasks: TelegramProjectionTask[],
 ): Promise<void> {
   return sendQueueTasks(queue, tasks);
@@ -157,7 +81,8 @@ export async function sweepAutomatchProjections(
           PROJECTION_SWEEP_LIMIT,
           excludedIdentities,
         ),
-      (page) => automatchSweepEntries(page.entries, page.snapshots),
+      (page) =>
+        readAutomatchTelegramRecoveryEntries(page.entries, page.snapshots),
     );
     let sentCount = 0;
     const claimFailures: Error[] = [];
@@ -171,7 +96,11 @@ export async function sweepAutomatchProjections(
       );
       const { failures: pageRepairFailures } = await collectProjectionRepairs(
         invalidInviteIds,
-        (inviteId) => markInvalidAutomatchSweepEntry(state, inviteId, nowMs),
+        (inviteId) =>
+          state.projectionRecovery.repairInvalidAutomatchTelegramOutbox(
+            inviteId,
+            nowMs,
+          ),
         "projection-invalid-record-failed",
         (inviteId, error, itemIndex) =>
           reportRecoveryFailure(
@@ -192,7 +121,7 @@ export async function sweepAutomatchProjections(
         claim: (candidate) =>
           claimAutomatchSweepCandidate(state, candidate, nowMs),
         toTask: ({ task }) => task,
-        queue: env.TELEGRAM_PROJECTION_QUEUE,
+        queue: queueFor(env, "TELEGRAM_PROJECTION_QUEUE"),
         fallbackErrorMessage: "projection-claim-failed",
         onClaimFailure: ({ task }, error, itemIndex) =>
           reportRecoveryFailure(
@@ -253,7 +182,7 @@ export async function sweepRatingProjections(
     for await (const { entries, itemOffset } of pages) {
       const result = await recoverAndEnqueueProjectionScan({
         entries,
-        queue: env.TELEGRAM_PROJECTION_QUEUE,
+        queue: queueFor(env, "TELEGRAM_PROJECTION_QUEUE"),
         async quarantine(entry) {
           const quarantined = await rating.quarantineRatingRecoveryEntry(
             entry,
@@ -347,7 +276,7 @@ export async function sweepTelegramProjections(
   const [automatch, event, ratingCount] = await Promise.allSettled([
     sweepAutomatchProjections(env, state, logger, nowMs),
     sweepEventTelegramProjections(
-      env.TELEGRAM_PROJECTION_QUEUE,
+      queueFor(env, "TELEGRAM_PROJECTION_QUEUE"),
       (
         dependencies.createEventRecovery ||
         ((workerEnv: Env) =>

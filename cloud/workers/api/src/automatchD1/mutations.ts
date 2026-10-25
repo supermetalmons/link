@@ -8,11 +8,13 @@ import { runOptimisticTransaction } from "../optimisticTransaction.ts";
 import {
   AutomatchD1Failure,
   type AutomatchRecordMutation,
+  type RetainedAutomatchMutationBatch,
   type AutomatchRoot,
   type AutomatchD1StoreOptions,
 } from "./types.ts";
 import {
   encodeValue,
+  retainAutomatchMutation,
   isAutomatchRevisionConflict,
   nestedValue,
   requireKey,
@@ -22,6 +24,16 @@ import {
   timestamp,
 } from "./codec.ts";
 import type { createAutomatchReads } from "./reads.ts";
+
+type MutationEvidence = {
+  current: {
+    root: AutomatchRoot;
+    key: string;
+    value: unknown;
+    revision: number;
+  };
+  value: unknown;
+};
 
 export function createAutomatchMutations(
   db: D1Database,
@@ -48,8 +60,8 @@ export function createAutomatchMutations(
     return [...writeGuards(), backendGuard()];
   }
 
-  function buildRevisionGuardStatements(
-    mutations: readonly AutomatchRecordMutation[],
+  function revisionGuards(
+    mutations: readonly MutationEvidence[],
   ): D1PreparedStatement[] {
     const keys = new Set<string>();
     return mutations.map(({ current, value }) => {
@@ -75,15 +87,15 @@ export function createAutomatchMutations(
     });
   }
 
-  function buildCommitStatements(
-    mutations: readonly AutomatchRecordMutation[],
+  function commitStatements(
+    mutations: readonly MutationEvidence[],
     nowMs = now(),
   ): D1PreparedStatement[] {
     timestamp(nowMs);
     return [
       ...(writeGuards?.() || []),
       backendGuard(),
-      ...buildRevisionGuardStatements(mutations),
+      ...revisionGuards(mutations),
       ...mutations.map(({ current, value }) => {
         const { table, valueColumn, revisionColumn } = requireRoot(
           current.root,
@@ -97,6 +109,27 @@ export function createAutomatchMutations(
           .bind(current.key, encodeValue(value), current.revision + 1, nowMs);
       }),
     ];
+  }
+
+  function buildRevisionGuardStatements(
+    mutations: readonly AutomatchRecordMutation[],
+  ) {
+    return revisionGuards(mutations);
+  }
+
+  function buildCommitStatements(
+    mutations: readonly AutomatchRecordMutation[],
+    nowMs = now(),
+  ) {
+    return commitStatements(mutations, nowMs);
+  }
+
+  function buildRetainedCommitStatements(
+    mutations: RetainedAutomatchMutationBatch,
+    nowMs: number,
+  ): D1PreparedStatement[] {
+    const evidence: unknown = mutations;
+    return commitStatements(evidence as readonly MutationEvidence[], nowMs);
   }
 
   async function commit(
@@ -161,7 +194,7 @@ export function createAutomatchMutations(
     const snapshots = await readMutationRecords(entries, signal);
     return entries.map(({ root, changes }, index) => {
       const current = snapshots[index];
-      let value = current.value;
+      let value: unknown = current.value;
       for (const change of changes) {
         if (change.kind === "mutation-receipt") {
           value = resolveAutomatchServerValues(
@@ -215,7 +248,7 @@ export function createAutomatchMutations(
           );
         }
       }
-      return { current, value };
+      return retainAutomatchMutation(current, value);
     });
   }
 
@@ -230,7 +263,7 @@ export function createAutomatchMutations(
       maxAttempts: 25,
       async read() {
         const current = await read(root, key, signal);
-        return { record: current.value, version: current.revision };
+        return { record: current.value as unknown, version: current.revision };
       },
       getValue: (current) => current.record,
       decide(current) {
@@ -247,10 +280,13 @@ export function createAutomatchMutations(
           key,
           value: current.record,
           revision: current.version,
-        };
+        } as Awaited<ReturnType<typeof read>>;
         const value = resolveAutomatchServerValues(next, snapshot.value, nowMs);
         return {
-          applied: await commit([{ current: snapshot, value }], signal),
+          applied: await commit(
+            [retainAutomatchMutation(snapshot, value)],
+            signal,
+          ),
           value,
         };
       },
@@ -305,6 +341,7 @@ export function createAutomatchMutations(
     buildWriteGuardStatements,
     buildRevisionGuardStatements,
     buildCommitStatements,
+    buildRetainedCommitStatements,
     commit,
     prepareChanges,
     transactRecord,

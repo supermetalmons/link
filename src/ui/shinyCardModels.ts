@@ -102,7 +102,7 @@ export class ProfileScopedUndoHistory {
 
 export const parseStickerMap = (json: string): Record<string, string> => {
   try {
-    const parsed = JSON.parse(json);
+    const parsed: unknown = JSON.parse(json);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return {};
     }

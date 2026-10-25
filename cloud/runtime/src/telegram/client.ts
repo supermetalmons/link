@@ -3,22 +3,117 @@ export type TelegramFetch = (
   input: string,
   init: RequestInit,
 ) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
-export type TelegramMessageInput = Record<string, unknown> & {
+export type TelegramTransportOptions = {
+  token?: string;
   fetchImpl?: TelegramFetch;
   timeoutMs?: number;
 };
-type TelegramRequest = {
-  method: string;
+export type TelegramSendInput = TelegramTransportOptions & {
+  chatId: string | number;
+  text: string;
+  parseMode?: string | null;
+  silent?: boolean;
+  disableWebPagePreview?: boolean;
+};
+export type TelegramEditInput = Omit<TelegramSendInput, "silent"> & {
+  messageId: number;
+};
+export type TelegramDeleteInput = TelegramTransportOptions & {
+  chatId: string | number;
+  messageId: number;
+};
+export type TelegramMediaGroupInput = TelegramTransportOptions & {
+  chatId: string | number;
+  imageUrls: readonly string[];
+  text: string;
+  parseMode?: string | null;
+  silent?: boolean;
+  hasSpoiler?: boolean;
+};
+declare const retainedTelegramRequest: unique symbol;
+export type RetainedTelegramSendInput = {
+  readonly [retainedTelegramRequest]: "send";
+};
+export type RetainedTelegramEditInput = {
+  readonly [retainedTelegramRequest]: "edit";
+};
+export type RetainedTelegramDeleteInput = {
+  readonly [retainedTelegramRequest]: "delete";
+};
+export type RetainedTelegramMediaGroupInput = {
+  readonly [retainedTelegramRequest]: "send-media-group";
+};
+export const retainTelegramSendInput = (
+  value: unknown,
+): RetainedTelegramSendInput => value as RetainedTelegramSendInput;
+export const retainTelegramEditInput = (
+  value: unknown,
+): RetainedTelegramEditInput => value as RetainedTelegramEditInput;
+export const retainTelegramDeleteInput = (
+  value: unknown,
+): RetainedTelegramDeleteInput => value as RetainedTelegramDeleteInput;
+export const retainTelegramMediaGroupInput = (
+  value: unknown,
+): RetainedTelegramMediaGroupInput => value as RetainedTelegramMediaGroupInput;
+
+type RequestFields = {
+  chatId?: unknown;
+  messageId?: unknown;
+  text?: unknown;
+  parseMode?: unknown;
+  silent?: unknown;
+  disableWebPagePreview?: unknown;
+  imageUrls?: unknown;
+  hasSpoiler?: unknown;
+  token?: unknown;
+  fetchImpl?: TelegramFetch;
+  timeoutMs?: number;
+};
+type RequestOptions = {
   token: unknown;
   fetchImpl?: TelegramFetch;
   timeoutMs?: number;
-} & (
-  | {
-      operation: "send-media-group";
-      body: Record<string, unknown> & { media: unknown[] };
-    }
-  | { operation: "send" | "edit" | "delete"; body: Record<string, unknown> }
-);
+};
+type MessageBody = {
+  chat_id: unknown;
+  text: unknown;
+  disable_web_page_preview: unknown;
+  parse_mode?: unknown;
+};
+type MediaItem = {
+  type: "photo";
+  media: string;
+  has_spoiler?: true;
+  caption?: unknown;
+  parse_mode?: unknown;
+};
+type TelegramRequest = RequestOptions &
+  (
+    | {
+        operation: "send-media-group";
+        method: "sendMediaGroup";
+        body: {
+          chat_id: unknown;
+          media: MediaItem[];
+          disable_notification: unknown;
+        };
+      }
+    | {
+        operation: "send";
+        method: "sendMessage";
+        body: MessageBody & { disable_notification: unknown };
+      }
+    | {
+        operation: "edit";
+        method: "editMessageText";
+        body: MessageBody & { message_id: unknown };
+      }
+    | {
+        operation: "delete";
+        method: "deleteMessage";
+        body: { chat_id: unknown; message_id: unknown };
+      }
+  );
 export type TelegramFailure = {
   ok: false;
   classification: "missing" | "retryable" | "terminal" | "uncertain";
@@ -27,18 +122,51 @@ export type TelegramFailure = {
   httpStatus: number | null;
   retryAfterSeconds: number | null;
 };
-export type TelegramSuccess = {
+type SuccessBase = {
   ok: true;
-  outcome: "deleted" | "edited" | "not-found" | "not-modified" | "sent";
   httpStatus: number;
-  messageId?: number;
-  messageIds?: number[];
 };
+export type TelegramSendSuccess = SuccessBase & {
+  outcome: "sent";
+  messageId: number;
+  messageIds?: never;
+};
+export type TelegramMediaGroupSuccess = SuccessBase & {
+  outcome: "sent";
+  messageIds: number[];
+  messageId?: never;
+};
+export type TelegramEditSuccess = SuccessBase & {
+  outcome: "edited" | "not-modified";
+  messageId?: never;
+  messageIds?: never;
+};
+export type TelegramDeleteSuccess = SuccessBase & {
+  outcome: "deleted" | "not-found";
+  messageId?: never;
+  messageIds?: never;
+};
+export type TelegramSuccess =
+  | TelegramSendSuccess
+  | TelegramMediaGroupSuccess
+  | TelegramEditSuccess
+  | TelegramDeleteSuccess;
+export type TelegramSendResult = TelegramFailure | TelegramSendSuccess;
+export type TelegramMediaGroupResult =
+  TelegramFailure | TelegramMediaGroupSuccess;
+export type TelegramEditResult = TelegramFailure | TelegramEditSuccess;
+export type TelegramDeleteResult = TelegramFailure | TelegramDeleteSuccess;
 export type TelegramResult = TelegramFailure | TelegramSuccess;
 export type TelegramClient = {
-  sendTelegramMessage(input: TelegramMessageInput): Promise<TelegramResult>;
-  editTelegramMessage(input: TelegramMessageInput): Promise<TelegramResult>;
-  deleteTelegramMessage(input: TelegramMessageInput): Promise<TelegramResult>;
+  sendTelegramMessage(
+    input: TelegramSendInput | RetainedTelegramSendInput,
+  ): Promise<TelegramSendResult>;
+  editTelegramMessage(
+    input: TelegramEditInput | RetainedTelegramEditInput,
+  ): Promise<TelegramEditResult>;
+  deleteTelegramMessage(
+    input: TelegramDeleteInput | RetainedTelegramDeleteInput,
+  ): Promise<TelegramDeleteResult>;
 };
 const TELEGRAM_API_ROOT = "https://api.telegram.org";
 const TELEGRAM_HTTP_TIMEOUT_MS = 10_000;
@@ -121,14 +249,26 @@ const buildFailure = ({
   retryAfterSeconds,
 });
 
-const telegramRequest = async ({
+function telegramRequest(
+  input: TelegramRequest & { operation: "send" },
+): Promise<TelegramSendResult>;
+function telegramRequest(
+  input: TelegramRequest & { operation: "send-media-group" },
+): Promise<TelegramMediaGroupResult>;
+function telegramRequest(
+  input: TelegramRequest & { operation: "edit" },
+): Promise<TelegramEditResult>;
+function telegramRequest(
+  input: TelegramRequest & { operation: "delete" },
+): Promise<TelegramDeleteResult>;
+async function telegramRequest({
   operation,
   method,
   body,
   token,
   fetchImpl = globalThis.fetch,
   timeoutMs = TELEGRAM_HTTP_TIMEOUT_MS,
-}: TelegramRequest): Promise<TelegramResult> => {
+}: TelegramRequest): Promise<TelegramResult> {
   const normalizedToken = normalizeString(token);
   if (!normalizedToken) {
     return buildFailure({
@@ -335,11 +475,11 @@ const telegramRequest = async ({
     description: description || "Telegram rejected the request",
     httpStatus: response.status,
   });
-};
+}
 
 const sendTelegramMessage: (
-  input: TelegramMessageInput,
-) => Promise<TelegramResult> = async ({
+  input: TelegramSendInput | RetainedTelegramSendInput,
+) => Promise<TelegramSendResult> = async ({
   chatId,
   text,
   parseMode = null,
@@ -348,8 +488,8 @@ const sendTelegramMessage: (
   token,
   fetchImpl,
   timeoutMs,
-}) => {
-  const body: Record<string, unknown> = {
+}: RequestFields & Partial<RetainedTelegramSendInput>) => {
+  const body: MessageBody & { disable_notification: unknown } = {
     chat_id: chatId,
     text,
     disable_web_page_preview: disableWebPagePreview,
@@ -369,8 +509,8 @@ const sendTelegramMessage: (
 };
 
 const sendTelegramMediaGroup: (
-  input: TelegramMessageInput,
-) => Promise<TelegramResult> = async ({
+  input: TelegramMediaGroupInput | RetainedTelegramMediaGroupInput,
+) => Promise<TelegramMediaGroupResult> = async ({
   chatId,
   imageUrls,
   text,
@@ -380,7 +520,7 @@ const sendTelegramMediaGroup: (
   token,
   fetchImpl,
   timeoutMs,
-}) => {
+}: RequestFields & Partial<RetainedTelegramMediaGroupInput>) => {
   const normalizedImageUrls = Array.isArray(imageUrls)
     ? imageUrls.map(normalizeString)
     : [];
@@ -396,7 +536,7 @@ const sendTelegramMediaGroup: (
     method: "sendMediaGroup",
     body: {
       chat_id: chatId,
-      media: normalizedImageUrls.map((imageUrl, index) => ({
+      media: normalizedImageUrls.map<MediaItem>((imageUrl, index) => ({
         type: "photo",
         media: imageUrl,
         ...(hasSpoiler ? { has_spoiler: true } : {}),
@@ -416,8 +556,8 @@ const sendTelegramMediaGroup: (
 };
 
 const editTelegramMessage: (
-  input: TelegramMessageInput,
-) => Promise<TelegramResult> = async ({
+  input: TelegramEditInput | RetainedTelegramEditInput,
+) => Promise<TelegramEditResult> = async ({
   chatId,
   messageId,
   text,
@@ -426,8 +566,8 @@ const editTelegramMessage: (
   token,
   fetchImpl,
   timeoutMs,
-}) => {
-  const body: Record<string, unknown> = {
+}: RequestFields & Partial<RetainedTelegramEditInput>) => {
+  const body: MessageBody & { message_id: unknown } = {
     chat_id: chatId,
     message_id: messageId,
     text,
@@ -447,15 +587,15 @@ const editTelegramMessage: (
 };
 
 const deleteTelegramMessage: (
-  input: TelegramMessageInput,
-) => Promise<TelegramResult> = async ({
+  input: TelegramDeleteInput | RetainedTelegramDeleteInput,
+) => Promise<TelegramDeleteResult> = async ({
   chatId,
   messageId,
   token,
   fetchImpl,
   timeoutMs,
-}) =>
-  telegramRequest({
+}: RequestFields & Partial<RetainedTelegramDeleteInput>) => {
+  return telegramRequest({
     operation: "delete",
     method: "deleteMessage",
     body: {
@@ -466,6 +606,7 @@ const deleteTelegramMessage: (
     fetchImpl,
     timeoutMs,
   });
+};
 
 export {
   TELEGRAM_HTTP_TIMEOUT_MS,

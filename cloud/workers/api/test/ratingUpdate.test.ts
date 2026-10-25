@@ -1,3 +1,5 @@
+import { inviteDocumentFixture } from "./inviteDocumentFixture.ts";
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import type { MatchStateRecord } from "../src/matchStateTypes.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -139,7 +141,7 @@ function ratingPlan(
 ) {
   return buildRatingPlan({
     historicalMatchPair: historicalMatchPair(),
-    invite: {},
+    invite: inviteDocumentFixture({}),
     matchId: request.matchId,
     nowMs: Date.UTC(2026, 7, 21),
     player: profile("profile-player"),
@@ -259,7 +261,8 @@ function createRepository({
       finalPlan = buildPlan(playerProfile, opponentProfile);
       return { status: "committed", data: finalPlan.repairData };
     },
-    readInviteMetadata: async () => invite as Record<string, unknown> | null,
+    readInviteMetadata: async () =>
+      retainedInviteSourceFixture(invite as Record<string, unknown> | null),
     readMatchRecord: async ({ playerId }) => {
       if (failMatchReads) throw new Error("match-read-failed");
       return (
@@ -323,14 +326,14 @@ test("builds exact non-event rating, mana, and Telegram fields", () => {
   const historical = historicalMatchPair();
   const result = buildRatingPlan({
     historicalMatchPair: historical,
-    invite: {
+    invite: inviteDocumentFixture({
       telegramDeliveryVersion: 2,
       wagers: {
         [request.matchId]: {
           agreed: { material: "dust", count: 3 },
         },
       },
-    },
+    }),
     matchId: request.matchId,
     nowMs,
     opponent,
@@ -397,7 +400,7 @@ test("event ratings preserve win and mana without applying a rating delta", () =
   const nowMs = FEB_CHALLENGE_START_UTC + 1;
   const built = buildRatingPlan({
     historicalMatchPair: historical,
-    invite: { eventOwned: true, eventId: "event-1" },
+    invite: inviteDocumentFixture({ eventOwned: true, eventId: "event-1" }),
     matchId: request.matchId,
     nowMs,
     opponent: profile("profile-opponent"),
@@ -519,14 +522,14 @@ test("preserves wager message coercion and the explicit wager match key", () => 
   ]) {
     const built = ratingPlan({
       matchId: "wager-match",
-      invite: {
+      invite: inviteDocumentFixture({
         wagers: {
           "wager-match": {
             agreed: { material: ` ${material} `, count: "2.5" },
           },
           [request.matchId]: { agreed: { material: "dust", count: 99 } },
         },
-      },
+      }),
     });
     assert.equal(
       built.ratingUpdate.updateRatingMessage,
@@ -543,7 +546,9 @@ test("preserves wager message coercion and the explicit wager match key", () => 
   ]) {
     assert.equal(
       ratingPlan({
-        invite: { wagers: { [request.matchId]: { agreed } } },
+        invite: inviteDocumentFixture({
+          wagers: { [request.matchId]: { agreed } },
+        }),
       }).ratingUpdate.updateRatingMessage,
       "Alice 1631↑ Bob 1272↓ (0 - 0)",
     );
@@ -595,7 +600,10 @@ test("preserves event eligibility and omitted projection keys", () => {
     { eventId: " event-1 ", telegramDeliveryVersion: 2 },
     { eventOwned: true, telegramDeliveryVersion: 2 },
   ]) {
-    const built = ratingPlan({ invite, nowMs: FEB_CHALLENGE_START_UTC });
+    const built = ratingPlan({
+      invite: inviteDocumentFixture(invite),
+      nowMs: FEB_CHALLENGE_START_UTC,
+    });
     assert.equal(built.ratingUpdate.isEventMatch, true);
     assert.equal(built.ratingUpdate.didApplyRatingDelta, false);
     assert.equal(built.ratingUpdate.telegramDeliveryVersion, null);
@@ -624,7 +632,7 @@ test("preserves event eligibility and omitted projection keys", () => {
 test("completes rating records without profile writes when profiles are absent", () => {
   const built = buildRatingPlan({
     historicalMatchPair: historicalMatchPair(),
-    invite: {},
+    invite: inviteDocumentFixture({}),
     matchId: request.matchId,
     nowMs: Date.UTC(2026, 7, 21),
     opponent: null,
@@ -644,7 +652,7 @@ test("completes rating records without profile writes when profiles are absent",
 test("completes merged-profile ratings without profile or challenge writes", () => {
   const built = buildRatingPlan({
     historicalMatchPair: historicalMatchPair(),
-    invite: {},
+    invite: inviteDocumentFixture({}),
     matchId: request.matchId,
     nowMs: FEB_CHALLENGE_START_UTC + 1,
     opponent: profile("shared-profile", { username: "Bob" }),
@@ -700,7 +708,7 @@ test("scores a surrender from the valid match replica", () => {
   );
   const built = buildRatingPlan({
     historicalMatchPair: historicalMatchPair(),
-    invite: {},
+    invite: inviteDocumentFixture({}),
     matchId: request.matchId,
     nowMs: Date.UTC(2026, 7, 21),
     opponent: profile("profile-opponent"),
@@ -841,12 +849,12 @@ test("freezes rating-valid matches with legacy presentation fields", async () =>
 
 test("event ratings persist and dispatch one deterministic progress outbox", async () => {
   const state = createRepository({
-    invite: {
+    invite: inviteDocumentFixture({
       hostId: request.playerId,
       guestId: request.opponentId,
       eventOwned: true,
       eventId: "event-1",
-    },
+    }),
   });
   const progressPlans: Array<{
     outboxId: string;
@@ -880,12 +888,12 @@ test("event ratings persist and dispatch one deterministic progress outbox", asy
 
 test("event ratings retain a pending recovery marker when match repair fails", async () => {
   const state = createRepository({
-    invite: {
+    invite: inviteDocumentFixture({
       hostId: request.playerId,
       guestId: request.opponentId,
       eventOwned: true,
       eventId: "event-1",
-    },
+    }),
   });
   state.repository.putEventProgressOutbox = async () => {
     throw new Error("state-unavailable");
@@ -1061,14 +1069,14 @@ test("finalizer replays retain finalized projection eligibility and order", asyn
     for (const kind of ["v2", "legacy", "event"] as const) {
       await t.test(`${status}: ${kind}`, async () => {
         const state = createRepository({
-          invite: {
+          invite: inviteDocumentFixture({
             hostId: request.playerId,
             guestId: request.opponentId,
             ...(kind !== "legacy" ? { telegramDeliveryVersion: 2 } : {}),
             ...(kind === "event"
               ? { eventOwned: true, eventId: "event-1" }
               : {}),
-          },
+          }),
         });
         if (status === "replayed") {
           state.repository.finalizeRatingUpdate = async () => ({
@@ -1113,13 +1121,13 @@ test("completion repairs finish before dispatch and stop on repair failures", as
     await t.test(failure || "success", async () => {
       const state = createRepository({
         leaseStatus: "done",
-        invite: {
+        invite: inviteDocumentFixture({
           hostId: request.playerId,
           guestId: request.opponentId,
           ...(failure !== "challenge"
             ? { eventOwned: true, eventId: "event-1" }
             : {}),
-        },
+        }),
       });
       const data = completedData({
         shouldUpdateFebruaryChallenge: failure === "challenge",
@@ -1444,7 +1452,10 @@ test("rejects participant mismatches and invalid game states", async () => {
   );
   assert.equal(unrelatedMatch.getOperationReads(), 0);
   const participantMismatch = createRepository({
-    invite: { hostId: "other", guestId: request.opponentId },
+    invite: inviteDocumentFixture({
+      hostId: "other",
+      guestId: request.opponentId,
+    }),
   });
   await assert.rejects(
     () => updateRatings(identity, request, participantMismatch.repository),

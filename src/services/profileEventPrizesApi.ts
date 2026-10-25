@@ -1,10 +1,14 @@
+import type {
+  ApiQuery,
+  ApiResponse,
+  ApiHttpUrl,
+} from "@mons/shared/api-contracts";
 import {
   MAX_PROFILE_EVENT_PRIZES_CURSOR_LENGTH,
   profileEventPrizesPageEtag,
   isProfileEventPrizesPageResponse,
   isProfileEventPrizesResponse,
   type EventPrizeAssignmentWireRecord,
-  type ProfileEventPrizesPageResponse,
   type ProfileEventPrizesResponse,
 } from "@mons/shared/event-prizes";
 import { eventBookmarkEpoch } from "@mons/shared/events";
@@ -16,7 +20,6 @@ import {
   type ConditionalRead,
   type ConditionalReadOptions,
 } from "./gameplayTransport";
-
 function invalidPrizeResponse(): GameplayApiError {
   return new GameplayApiError(
     "unavailable",
@@ -51,7 +54,8 @@ export function readProfileEventPrizesViaApi(
   const normalizedProfileId = profileId.trim();
   return withConditionalGameplayReads(tokenProvider, options, async (read) => {
     for (let attempt = 0; attempt < 2; attempt++) {
-      let cursor: string | null = null;
+      let cursor: NonNullable<ApiQuery<"GET /events/prizes">["cursor"]> | null =
+        null;
       let bookmark = attempt === 0 ? options.bookmark : null;
       const requestedEtag = attempt === 0 ? options.etag : null;
       let snapshot: { revision: number; etag: string; epoch: string } | null =
@@ -60,30 +64,35 @@ export function readProfileEventPrizesViaApi(
       const cursors = new Set<string>();
       try {
         while (true) {
-          const url = new URL(`${GAMEPLAY_API_ROOT}/events/prizes`);
-          url.searchParams.set("pagination", "1");
-          if (cursor !== null) url.searchParams.set("cursor", cursor);
-          const result: ConditionalRead<
-            ProfileEventPrizesResponse | ProfileEventPrizesPageResponse
-          > = await read(
-            url,
-            (
-              value,
-            ): value is
-              ProfileEventPrizesResponse | ProfileEventPrizesPageResponse =>
-              (isProfileEventPrizesPageResponse(value) ||
-                (cursor === null && isProfileEventPrizesResponse(value))) &&
-              value.profileId === normalizedProfileId,
-            { bookmark, etag: cursor === null ? requestedEtag : null },
+          const url = new URL(
+            `${GAMEPLAY_API_ROOT}/events/prizes` satisfies ApiHttpUrl<"GET /events/prizes">,
           );
+          url.searchParams.set(
+            "pagination" satisfies keyof ApiQuery<"GET /events/prizes">,
+            "1" satisfies NonNullable<
+              ApiQuery<"GET /events/prizes">["pagination"]
+            >,
+          );
+          if (cursor !== null)
+            url.searchParams.set(
+              "cursor" satisfies keyof ApiQuery<"GET /events/prizes">,
+              cursor,
+            );
+          const result: ConditionalRead<ApiResponse<"GET /events/prizes">> =
+            await read(
+              url,
+              (value): value is ApiResponse<"GET /events/prizes"> =>
+                (isProfileEventPrizesPageResponse(value) ||
+                  (cursor === null && isProfileEventPrizesResponse(value))) &&
+                value.profileId === normalizedProfileId,
+              { bookmark, etag: cursor === null ? requestedEtag : null },
+            );
           if (result.kind === "not-modified") {
             if (cursor !== null) throw invalidPrizeResponse();
             validateNotModified(result, normalizedProfileId, requestedEtag);
             return result;
           }
-          const page:
-            ProfileEventPrizesResponse | ProfileEventPrizesPageResponse =
-            result.value;
+          const page: ApiResponse<"GET /events/prizes"> = result.value;
           if (!("nextCursor" in page)) return result;
           const epoch = eventBookmarkEpoch(result.bookmark);
           if (

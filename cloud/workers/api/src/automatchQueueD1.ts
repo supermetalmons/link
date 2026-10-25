@@ -1,3 +1,4 @@
+import type { AutomatchRecordValue } from "./automatchD1/types.ts";
 import {
   AutomatchD1Failure,
   decodeSnapshot,
@@ -5,7 +6,11 @@ import {
 } from "./automatchD1.ts";
 
 export type AutomatchQueueHead =
-  | { kind: "ready"; inviteId: string; value: unknown }
+  | {
+      kind: "ready";
+      inviteId: string;
+      value: AutomatchRecordValue<"automatch">;
+    }
   | { kind: "pending"; inviteId: string; transitionId: string };
 
 export function isFifoAutomatchQueue(

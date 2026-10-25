@@ -1,3 +1,8 @@
+import type {
+  ApiUrlPath,
+  ApiRequest,
+  ApiResponse,
+} from "@mons/shared/api-contracts";
 import {
   PRESENTATION_MAX_MESSAGE_BYTES,
   isMatchPresentationConflictResponse,
@@ -5,13 +10,16 @@ import {
   isUpdateMatchPresentationRequest,
   isUpdateMatchPresentationResponse,
   type MatchPresentation,
-  type ReadMatchPresentationResponse,
-  type UpdateMatchPresentationRequest,
-  type UpdateMatchPresentationResponse,
 } from "@mons/shared/match-presentation";
 import { normalizeRecordKey } from "@mons/shared/ids";
 import { parseInviteMatchIndex } from "@mons/shared/rematches";
 import type { AuthTokenProvider } from "./authApi";
+type ReadMatchPresentationResponse =
+  ApiResponse<"GET /invites/:inviteId/matches/:matchId/presentation">;
+type UpdateMatchPresentationRequest =
+  ApiRequest<"POST /invites/:inviteId/matches/:matchId/presentation">;
+type UpdateMatchPresentationResponse =
+  ApiResponse<"POST /invites/:inviteId/matches/:matchId/presentation">;
 
 const PRESENTATION_API_ROOT = "https://api.mons.link";
 export const PRESENTATION_REQUEST_TIMEOUT_MS = 5_000;
@@ -28,7 +36,10 @@ export class MatchPresentationApiError extends Error {
   }
 }
 
-function presentationPath(inviteId: string, matchId: string): string {
+function presentationPath(
+  inviteId: string,
+  matchId: string,
+): ApiUrlPath<"GET /invites/:inviteId/matches/:matchId/presentation"> {
   if (
     normalizeRecordKey(inviteId) !== inviteId ||
     normalizeRecordKey(matchId) !== matchId ||

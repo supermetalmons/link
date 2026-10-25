@@ -1,3 +1,4 @@
+import type { ApiRequest } from "../shared/api-contracts.js";
 import { readProperty } from "./values.js";
 import type { TelegramFetch } from "./client.js";
 import { createHmac } from "node:crypto";
@@ -22,7 +23,7 @@ const signTelegramBridgeRequest = ({
     .digest("base64url");
 
 const sendTelegramCommand = async (
-  command: unknown,
+  command: ApiRequest<"POST /internal/telegram/command">,
   {
     bridgeUrl = TELEGRAM_COMMAND_BRIDGE_URL,
     fetchImpl = globalThis.fetch,

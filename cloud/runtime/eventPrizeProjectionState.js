@@ -10,6 +10,7 @@ exports.isWithdrawalRecordForPrize =
   exports.filterProjectableEventPrizeAssignments =
     void 0;
 const event_prizes_1 = require("@mons/shared/event-prizes");
+const records_js_1 = require("./eventPrizes/records.js");
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 const getEventPrizeAssetAddress = (eventId, prizeId) =>
@@ -24,9 +25,13 @@ const getEventPrizeAssetStandard = (eventId, prizeId) => {
   return (0, event_prizes_1.isEventPrizeStandard)(standard) ? standard : "";
 };
 exports.getEventPrizeAssetStandard = getEventPrizeAssetStandard;
-const isMatchingProfileEventPrizeAssignment = (value, eventId, prizeId) =>
-  normalizeString(value?.eventId) === normalizeString(eventId) &&
-  normalizeString(value?.prizeId) === normalizeString(prizeId);
+const isMatchingProfileEventPrizeAssignment = (value, eventId, prizeId) => {
+  const identity = value;
+  return (
+    normalizeString(identity?.eventId) === normalizeString(eventId) &&
+    normalizeString(identity?.prizeId) === normalizeString(prizeId)
+  );
+};
 exports.isMatchingProfileEventPrizeAssignment =
   isMatchingProfileEventPrizeAssignment;
 const isWithdrawalRecordForPrize = (value, eventId, prizeId, assetAddress) => {
@@ -34,16 +39,17 @@ const isWithdrawalRecordForPrize = (value, eventId, prizeId, assetAddress) => {
     return false;
   }
   const expectedAssetStandard = getEventPrizeAssetStandard(eventId, prizeId);
-  const recordedAssetStandard = normalizeString(value.assetStandard);
+  const identity = (0, records_js_1.withdrawalIdentity)(value);
+  const recordedAssetStandard = identity.assetStandard;
   const assetStandardMatches =
     ((0, event_prizes_1.isEventPrizeStandard)(recordedAssetStandard) &&
       recordedAssetStandard === expectedAssetStandard) ||
     (!recordedAssetStandard && expectedAssetStandard === "core");
   return (
     assetStandardMatches &&
-    normalizeString(value.eventId) === normalizeString(eventId) &&
-    normalizeString(value.prizeId) === normalizeString(prizeId) &&
-    normalizeString(value.assetAddress) === normalizeString(assetAddress)
+    identity.eventId === normalizeString(eventId) &&
+    identity.prizeId === normalizeString(prizeId) &&
+    identity.assetAddress === normalizeString(assetAddress)
   );
 };
 exports.isWithdrawalRecordForPrize = isWithdrawalRecordForPrize;
@@ -51,7 +57,7 @@ const isCompletedEventPrizeWithdrawal = (value, eventId, prizeId) => {
   const assetAddress = getEventPrizeAssetAddress(eventId, prizeId);
   return (
     Boolean(assetAddress) &&
-    value?.status === "completed" &&
+    (0, records_js_1.withdrawalStatus)(value) === "completed" &&
     isWithdrawalRecordForPrize(value, eventId, prizeId, assetAddress)
   );
 };

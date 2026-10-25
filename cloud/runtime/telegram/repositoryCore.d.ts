@@ -4,7 +4,11 @@ import type {
   TransactionDecision,
   TransactionResult,
 } from "../transactions.js";
-export type TelegramStoredRecord = Record<string, unknown>;
+import {
+  type TelegramControlDocument,
+  type TelegramMessageDocument,
+} from "./records.js";
+export type TelegramStoredRecord = TelegramMessageDocument;
 export type TelegramTransactionResult = TransactionResult<TelegramStoredRecord>;
 export type TelegramStorage = {
   readMessage(messageKey: string): Promise<TelegramStoredRecord | null>;
@@ -14,12 +18,12 @@ export type TelegramStorage = {
       current: TelegramStoredRecord | null,
     ) => TransactionDecision<TelegramStoredRecord>,
   ): Promise<TelegramTransactionResult>;
-  readControl(): Promise<TelegramStoredRecord | null>;
+  readControl(): Promise<TelegramControlDocument | null>;
   transactControl(
     updater: (
-      current: TelegramStoredRecord | null,
-    ) => TransactionDecision<TelegramStoredRecord>,
-  ): Promise<TelegramTransactionResult>;
+      current: TelegramControlDocument | null,
+    ) => TransactionDecision<TelegramControlDocument>,
+  ): Promise<TransactionResult<TelegramControlDocument>>;
 };
 declare const createTelegramRepository: (
   input: TelegramStorage,

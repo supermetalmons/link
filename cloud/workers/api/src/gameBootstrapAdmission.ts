@@ -1,3 +1,4 @@
+import type { InviteDocument } from "@mons/shared/invite-records";
 import { AuthApiFailure } from "./authErrors.ts";
 import {
   parseAutomatchRuntimeControlRow,
@@ -19,7 +20,7 @@ export async function readGameBootstrapAdmission(
   db: D1Database,
   inviteId: string,
   signal: AbortSignal,
-): Promise<unknown> {
+): Promise<InviteDocument | null> {
   signal.throwIfAborted();
   const session = db.withSession("first-primary");
   const [modeRows, controlRows, transitionRows, sourceRows] =

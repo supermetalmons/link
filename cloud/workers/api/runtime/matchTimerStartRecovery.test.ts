@@ -1,3 +1,4 @@
+import { matchCreationFixture } from "../test/matchRecordFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -84,13 +85,17 @@ describe("timer reconciliation through canonical match routing", () => {
           playerId: "host",
           matchId: inviteId,
           marker: "host-created",
-          value: { color: "white", fen: "initial" },
+          value: matchCreationFixture({ color: "white", fen: "initial" }),
         },
         {
           playerId: "guest",
           matchId: inviteId,
           marker: "guest-created",
-          value: { color: "black", fen: "initial", timer: "gg" },
+          value: matchCreationFixture({
+            color: "black",
+            fen: "initial",
+            timer: "gg",
+          }),
         },
       ],
     });
@@ -218,7 +223,7 @@ describe("timer reconciliation through canonical match routing", () => {
           playerId: "present-player",
           matchId: inviteId,
           marker: "created",
-          value: { color: "white", fen: "initial" },
+          value: matchCreationFixture({ color: "white", fen: "initial" }),
         },
       ],
     });

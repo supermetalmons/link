@@ -1,13 +1,13 @@
+import { projectionFixtureFields } from "../test/profileDataBoundaryFixture.ts";
+import { materializeProfileCompatibility as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
+import { commitEventCompatibilityFixture } from "../test/eventCompatibilityFixture.ts";
 import type { CompletePlayerProfile } from "@mons/shared/profiles";
 import type { D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { beforeAll, describe, expect, it } from "vitest";
 import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
 import { createEventGameplayRepository } from "../src/eventRepository.ts";
-import {
-  commitCanonicalPlan,
-  materializeCanonicalProfile,
-} from "../src/profileCanonicalD1.ts";
+import { commitCanonicalPlan } from "../src/profileCanonicalD1.ts";
 import {
   EVENT_PROFILE_GAME_PROJECTION_QUEUE_NAME,
   type EventProfileGameProjectionTask,
@@ -151,7 +151,8 @@ describe("dedicated event preview queue D1 integration", () => {
         emojiId: index + 1,
       };
       const requestId = `event-request-${index}`;
-      await repository.commitEventPlan(
+      await commitEventCompatibilityFixture(
+        repository,
         decodeEventUpdates({
           [`events/${eventId}`]: {
             schemaVersion: 2,
@@ -208,8 +209,12 @@ describe("dedicated event preview queue D1 integration", () => {
         creatorId,
         [`event_${eventId}`],
       ).then((rows) => rows.get(`event_${eventId}`) ?? null);
-      expect(preview?.data.participantCount).toBe(index + 1);
-      expect(preview?.data.participantPreview).toHaveLength(index + 1);
+      expect(projectionFixtureFields(preview?.data)?.participantCount).toBe(
+        index + 1,
+      );
+      expect(
+        projectionFixtureFields(preview?.data)?.participantPreview,
+      ).toHaveLength(index + 1);
       expect(
         await repository.readEventProfileGameProjectionOutbox(eventId),
       ).toBeNull();

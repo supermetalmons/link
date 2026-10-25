@@ -40,7 +40,8 @@ function inventoryRequirement(
     return { collection: "specials", id: 0, count: 1 };
   }
   if (request.field === "cardStickers" && request.value) {
-    const stickers = JSON.parse(request.value) as Record<string, string>;
+    const parsed: unknown = JSON.parse(request.value);
+    const stickers = parsed as { "big-mon-top-right"?: unknown };
     if (stickers["big-mon-top-right"] === "gate") {
       return { collection: "specials", id: 2, count: 1 };
     }

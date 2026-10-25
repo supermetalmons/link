@@ -1,3 +1,4 @@
+import { queueFor } from "../queueProducers.ts";
 import { ackQueueMessage, retryQueueMessage } from "../queueMessage.ts";
 import { parseAuthRecoveryTask, RETRY_DELAY_SECONDS } from "./jobs.ts";
 import { createAuthRecoveryService } from "./processing.ts";
@@ -21,7 +22,9 @@ export async function handleAuthRecoveryMessage(
   try {
     const status = await recover(task.profileId);
     if (status === "continued") {
-      await env.AUTH_RECOVERY_QUEUE.send(task, { delaySeconds: 0 });
+      await queueFor(env, "AUTH_RECOVERY_QUEUE").send(task, {
+        delaySeconds: 0,
+      });
     }
     if (status === "done" || status === "continued") {
       ackQueueMessage(message, {

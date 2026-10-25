@@ -1,5 +1,6 @@
 import { resolveProfileMergeTargetPath } from "../../../../runtime/profileMergeTargets.js";
 import { EventPrizeWithdrawalError } from "../../../../runtime/eventPrizes/errors.js";
+import type { WithdrawalDocument } from "../../../../runtime/eventPrizes/records.js";
 import {
   createEventPrizeRepository,
   type EventPrizeRepository,
@@ -25,7 +26,7 @@ export type EventPrizeContext = {
   readWithdrawal(
     eventId: string,
     prizeId: string,
-  ): Promise<Record<string, unknown> | null>;
+  ): Promise<WithdrawalDocument | null>;
   readProfileByLoginUid(uid: string): Promise<{ id: string } | null>;
   readProfileOwnershipSnapshot: ProfileOwnershipReader["readProfileOwnershipSnapshot"];
   removeMatchingProfileEventPrizeAssignment: EventPrizeRepository["removeMatchingProfileEventPrizeAssignment"];

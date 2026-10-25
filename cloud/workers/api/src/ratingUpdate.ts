@@ -1,14 +1,17 @@
+import {
+  readInviteDocument,
+  inviteMatchesParticipants,
+  inviteRatingEvent,
+  inviteMutationParticipants,
+  inviteProjectionState,
+} from "@mons/shared/invite-records";
 import { isAutoInviteId } from "@mons/shared/ids";
 import { readGameplayMatchPair } from "./gameplayMatchReads.ts";
 import {
-  getRatingEventMetadata,
   type RatingUpdateRequest,
   type RatingUpdateResponse,
 } from "@mons/shared/ratings";
-import {
-  inviteMatchesPlayers,
-  parseInviteMatchIndex,
-} from "@mons/shared/rematches";
+import { parseInviteMatchIndex } from "@mons/shared/rematches";
 import { TELEGRAM_AUTOMATCH_VERSION } from "../../../runtime/telegram/automatchSource.js";
 import { AuthApiFailure } from "./authErrors.ts";
 import type { MatchTimerStartStore } from "./gameplayCoordinationD1.ts";
@@ -56,12 +59,6 @@ export type RatingUpdateDependencies = {
   now?: () => number;
   timerStarts: MatchTimerStartStore;
 };
-
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
 
 function failedPrecondition(message: string): AuthApiFailure {
   return new AuthApiFailure(409, "failed-precondition", message);
@@ -246,14 +243,14 @@ export async function updateRatings(
     repository.readInviteMetadata(request.inviteId),
     repository.hasCompletedRatingUpdate(request.inviteId, request.matchId),
   ]);
-  const invite = toRecord(inviteValue);
+  const invite = readInviteDocument(inviteValue);
   if (
     !invite ||
-    !inviteMatchesPlayers(invite, request.playerId, request.opponentId)
+    !inviteMatchesParticipants(invite, request.playerId, request.opponentId)
   ) {
     throw new AuthApiFailure(403, "permission-denied", "permission-denied");
   }
-  const eventMetadata = getRatingEventMetadata(invite);
+  const eventMetadata = inviteRatingEvent(invite);
   const progressEventId =
     eventMetadata.isEventMatch &&
     eventMetadata.eventOwned &&
@@ -288,9 +285,8 @@ export async function updateRatings(
   });
   const playerMatch = readMatchRecord(playerValue);
   const opponentMatch = readMatchRecord(opponentValue);
-  const hostPlayerId = typeof invite.hostId === "string" ? invite.hostId : "";
-  const guestPlayerId =
-    typeof invite.guestId === "string" ? invite.guestId : "";
+  const { hostId: hostPlayerId, guestId: guestPlayerId } =
+    inviteMutationParticipants(invite);
   const historicalMatchPair = buildHistoricalMatchPair({
     matchId: request.matchId,
     hostPlayerId,
@@ -373,8 +369,8 @@ export async function updateRatings(
       kind: "finalized",
       data: finalized.data,
       telegramProjection:
-        invite.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION &&
-        !eventMetadata.isEventMatch,
+        inviteProjectionState(invite).telegramDeliveryVersion ===
+          TELEGRAM_AUTOMATCH_VERSION && !eventMetadata.isEventMatch,
     },
     repository,
     dependencies,

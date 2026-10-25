@@ -1,3 +1,9 @@
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
+import { timerClaimFixture } from "./matchClaimFixture.ts";
+import {
+  matchDocumentFixture,
+  matchRecordFixture,
+} from "./matchRecordFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Game } from "mons-rules";
@@ -51,10 +57,12 @@ test("move decision preserves every non-move field and fills only missing varian
     flatMovesString: request.flatMovesString,
   });
   assert.equal(
-    decideMatchStateMove(
-      { ...source, gameVariant: "" },
-      { ...request, gameVariant: "Other" },
-    ).value.gameVariant,
+    matchRecordFixture(
+      decideMatchStateMove(
+        { ...source, gameVariant: "" },
+        { ...request, gameVariant: "Other" },
+      ).value,
+    )!.gameVariant,
     "Other",
   );
   assert.deepEqual(source.custom, { nested: ["legacy", 2] });
@@ -105,7 +113,7 @@ test("new creation normalization matches null deletion and array readback", () =
     numeric: { "0": "zero", "1": "one" },
     emptyArray: [],
   };
-  assert.deepEqual(normalizeCreatedMatchState(input), {
+  assert.deepEqual(normalizeCreatedMatchState(matchDocumentFixture(input)), {
     sessionCreation: "creation",
     nested: { keep: "value" },
     array: [null, { keep: "value" }],
@@ -117,7 +125,7 @@ test("new creation normalization matches null deletion and array readback", () =
 });
 
 test("committed fences require complete terminal claim evidence", () => {
-  const claim = {
+  const claim = timerClaimFixture({
     inviteId: "invite-one",
     playerId: "host-login",
     opponentId: "guest-login",
@@ -126,17 +134,20 @@ test("committed fences require complete terminal claim evidence", () => {
     turnNumber: 7,
     claimedAtMs: 123_001,
     expiresAtMs: null,
-  };
+  });
   assert.equal(isCommittedMatchStateClaim(claim, "invite-one"), true);
   assert.equal(
     isCommittedMatchStateClaim(
-      { ...claim, expiresAtMs: 123_010 },
+      timerClaimFixture({ ...claim, expiresAtMs: 123_010 }),
       "invite-one",
     ),
     false,
   );
   assert.equal(
-    isCommittedMatchStateClaim({ ...claim, turnNumber: 8 }, "invite-one"),
+    isCommittedMatchStateClaim(
+      timerClaimFixture({ ...claim, turnNumber: 8 }),
+      "invite-one",
+    ),
     false,
   );
   assert.equal(isCommittedMatchStateClaim(claim, "other-invite"), false);
@@ -149,14 +160,14 @@ function canonicalRepository(guestId = "guest-login") {
       signal?.throwIfAborted();
       paths.push(`invites/${inviteId}`);
       assert.equal(inviteId, "invite-one");
-      return {
+      return retainedInviteSourceFixture({
         hostId: "host-login",
         guestId,
         hostRematches: "",
         guestRematches: "",
         eventOwned: true,
         eventId: "event-one",
-      };
+      });
     },
     async readProfileOwnershipSnapshot() {
       throw new Error("unexpected-ownership-read");
@@ -365,8 +376,11 @@ test("newer cumulative state supersedes late prefixes and preserves legacy seman
   delete legacyNext.previousStates;
   const next = decideMatchStateMove(source, legacyNext);
   assert.equal(next.outcome, "applied");
-  assert.equal(next.value.flatMovesString, legacyNext.flatMovesString);
-  assert.equal(next.value.timer, "retained");
+  assert.equal(
+    matchRecordFixture(next.value)!.flatMovesString,
+    legacyNext.flatMovesString,
+  );
+  assert.equal(matchRecordFixture(next.value)!.timer, "retained");
 });
 
 test("cumulative moves reject divergent histories, partial-entry prefixes and mismatching FEN", () => {
@@ -437,12 +451,18 @@ test("real moves and takebacks retain distinct history when the board repeats", 
     undoOnly,
   );
   assert.equal(undoneState.outcome, "applied");
-  assert.equal(undoneState.value.fen, baseFen);
-  assert.equal(undoneState.value.flatMovesString, undoOnly.flatMovesString);
+  assert.equal(matchRecordFixture(undoneState.value)!.fen, baseFen);
+  assert.equal(
+    matchRecordFixture(undoneState.value)!.flatMovesString,
+    undoOnly.flatMovesString,
+  );
   const finalState = decideMatchStateMove(undoneState.value, final);
   assert.equal(finalState.outcome, "applied");
-  assert.equal(finalState.value.flatMovesString, final.flatMovesString);
-  assert.equal(finalState.value.extra, true);
+  assert.equal(
+    matchRecordFixture(finalState.value)!.flatMovesString,
+    final.flatMovesString,
+  );
+  assert.equal(matchRecordFixture(finalState.value)!.extra, true);
   const late = decideMatchStateMove(finalState.value, undoOnly);
   assert.equal(late.outcome, "superseded");
   assert.equal(late.value, finalState.value);

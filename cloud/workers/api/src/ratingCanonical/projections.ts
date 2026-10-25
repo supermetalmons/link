@@ -21,7 +21,10 @@ import {
   scanDueRatingTelegramProjectionsPage,
   quarantineRatingRecoveryEntry,
 } from "../ratingProjectionD1.ts";
-import { mergedRatingValue } from "./codec.ts";
+import {
+  claimedRatingProjectionValue,
+  markedRatingProjectionValue,
+} from "./codec.ts";
 import { runConflictRetry } from "../conflictRetry.ts";
 
 async function claimProjection(
@@ -49,7 +52,7 @@ async function claimProjection(
       mutations: [
         buildCanonicalRatingProjectionMutation(
           snapshot,
-          mergedRatingValue(snapshot, { [fields.updated]: claimedAtMs }),
+          claimedRatingProjectionValue(snapshot, fields, claimedAtMs),
           projection,
           payloadJson,
         ),
@@ -93,11 +96,13 @@ async function markProjection(
           mutations: [
             buildCanonicalRatingProjectionMutation(
               snapshot,
-              mergedRatingValue(snapshot, {
-                [fields.state]: state,
-                [fields.updated]: updatedAtMs,
-                [fields.reason]: reason?.trim() || null,
-              }),
+              markedRatingProjectionValue(
+                snapshot,
+                fields,
+                state,
+                updatedAtMs,
+                reason,
+              ),
               projection,
               payloadJson,
             ),

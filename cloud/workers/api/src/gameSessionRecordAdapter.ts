@@ -21,6 +21,7 @@ import {
 export function createTypedGameSessionPort(
   raw: RawGameSessionPort,
 ): GameSessionPort & GameSessionRecoveryContext {
+  const commands = createAutomatchProjectionCommands(raw);
   return {
     readInviteMetadata: (id, signal) => raw.readInviteMetadata(id, signal),
     readInviteMetadataMany: (ids, signal) =>
@@ -54,7 +55,7 @@ export function createTypedGameSessionPort(
       createAutomatchProfileOutboxSnapshot(
         await raw.readAutomatchProfileOutbox(id, signal),
       ),
-    ...createAutomatchProjectionCommands(raw),
+    ...commands,
     claimAutomatchTelegramOutbox: (...args) =>
       raw.claimAutomatchTelegramOutbox(...args),
     acknowledgeAutomatchTelegramOutbox: (...args) =>
@@ -78,10 +79,10 @@ export function createTypedGameSessionPort(
         raw.listMalformedAutomatchProfileOutboxes(...args),
       listMalformedAutomatchProfileOutboxesPage: (...args) =>
         raw.listMalformedAutomatchProfileOutboxesPage(...args),
-      transactRawAutomatchTelegramOutbox: (...args) =>
-        raw.transactAutomatchTelegramOutbox(...args),
-      transactRawAutomatchProfileOutbox: (...args) =>
-        raw.transactAutomatchProfileOutbox(...args),
+      repairInvalidAutomatchTelegramOutbox:
+        commands.repairInvalidAutomatchTelegramOutbox,
+      repairInvalidAutomatchProfileOutbox:
+        commands.repairInvalidAutomatchProfileOutbox,
     },
   };
 }

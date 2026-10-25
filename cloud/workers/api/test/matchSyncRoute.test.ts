@@ -1,3 +1,4 @@
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import { socketTestIdentity } from "./socketTestSession.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -106,7 +107,7 @@ function setup({
     readInviteMetadata: async (inviteId) => {
       calls.existence++;
       assert.equal(inviteId, "invite-one");
-      return source;
+      return retainedInviteSourceFixture(source);
     },
     readProfileOwnershipSnapshot: async (query) => ({
       canonicalProfileIdByProfileId: new Map(),
@@ -225,7 +226,7 @@ test("missing, invalid and unregistered canonical invites do not allocate a room
     const state = setup();
     state.repository.readInviteMetadata = async () => {
       if (source instanceof Error) throw source;
-      return source;
+      return retainedInviteSourceFixture(source);
     };
     state.dependencies.room = undefined;
     assert.equal((await state.handle()).status, expected);

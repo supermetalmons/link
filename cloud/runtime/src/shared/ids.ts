@@ -38,6 +38,24 @@ function isSafeRecordKey(value: unknown): value is string {
   return normalizeRecordKey(value) !== null;
 }
 
+export function isCanonicalLoginUid(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    value === "" ||
+    value.length > 128 ||
+    value !== value.trim() ||
+    !isSafeRecordKey(value)
+  ) {
+    return false;
+  }
+  try {
+    encodeURIComponent(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function randomAlphanumeric(
   length: number,
   random: RandomSource = Math.random,

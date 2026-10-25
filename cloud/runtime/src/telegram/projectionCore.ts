@@ -1,7 +1,40 @@
+import type { RetainedAutomatchValue } from "../automatchRecords.js";
+import {
+  inviteTrimmedParticipants,
+  type InviteDocument,
+} from "@mons/shared/invite-records";
 import { readProperty } from "./values.js";
+import type {
+  TelegramAutomatchProjectionGuardWrite,
+  TelegramMessageDocument,
+} from "./records.js";
 import { createHash } from "node:crypto";
 import { parseInviteMatchIndex } from "../shared/rematches.js";
 import { TELEGRAM_AUTOMATCH_VERSION } from "./automatchSource.js";
+export type AutomatchTelegramSourceDocument =
+  RetainedAutomatchValue<"telegramAutomatches">;
+export type TelegramRatingProjectionInput = {
+  telegramDeliveryVersion?: number | null;
+  status?: string;
+  isEventMatch?: boolean;
+  eventOwned?: boolean;
+  eventId?: string | null;
+  inviteId?: string;
+  matchId?: string;
+  updateRatingMessage?: string;
+  completedAtMs?: number;
+};
+export function retainAutomatchTelegramSource(
+  value: unknown,
+): AutomatchTelegramSourceDocument {
+  return value as AutomatchTelegramSourceDocument;
+}
+function sourceEvidence(
+  value: AutomatchTelegramSourceDocument | null,
+): Record<string, unknown> | null {
+  const retained: unknown = value;
+  return retained as Record<string, unknown> | null;
+}
 export type AutomatchLifecycle = "pending" | "matched" | "canceled";
 export type AutomatchTelegramProjection = {
   operation: "send" | "edit";
@@ -23,7 +56,7 @@ export type ProjectionDecision = {
 };
 export type RatingProjectionMerge = {
   changed: boolean;
-  source: unknown;
+  source: AutomatchTelegramSourceDocument | null;
   reason: "inserted" | "duplicate" | "skipped";
 };
 
@@ -45,13 +78,14 @@ const asObject: (value: unknown) => Record<string, unknown> = (
     : {};
 
 const resolveAutomatchTelegramLifecycle: (
-  source: Record<string, unknown> | null,
-  inviteData: Record<string, unknown> | null,
-) => AutomatchLifecycle | null = (source, inviteData) => {
+  source: AutomatchTelegramSourceDocument | null,
+  inviteData: InviteDocument | null,
+) => AutomatchLifecycle | null = (sourceDocument, inviteData) => {
+  const source = sourceEvidence(sourceDocument);
   if (!source || source.version !== TELEGRAM_AUTOMATCH_VERSION) {
     return null;
   }
-  if (normalizeString(inviteData && inviteData.guestId)) {
+  if (inviteTrimmedParticipants(inviteData).guestId) {
     return "matched";
   }
   if (
@@ -66,11 +100,12 @@ const resolveAutomatchTelegramLifecycle: (
 
 const getAutomatchResultFragments: (
   inviteId: string,
-  source: Record<string, unknown>,
+  source: AutomatchTelegramSourceDocument,
 ) => Array<{ matchId: string; text: string; matchIndex: number | null }> = (
   inviteId,
-  source,
+  sourceDocument,
 ) => {
+  const source = sourceEvidence(sourceDocument);
   const results =
     source && source.results && typeof source.results === "object"
       ? source.results
@@ -151,7 +186,7 @@ const containsProtectedResultDigests = (
   );
 
 const evaluateAutomatchProjectionUpdate: (
-  record: unknown,
+  record: TelegramMessageDocument | null,
   projection: AutomatchTelegramProjection,
 ) => ProjectionDecision = (record, projection) => {
   const currentRecord = asObject(record);
@@ -185,23 +220,24 @@ const evaluateAutomatchProjectionUpdate: (
 
 const buildAutomatchProjectionGuard: (
   projection: AutomatchTelegramProjection,
-) => Record<string, unknown> = (projection) => ({
+) => TelegramAutomatchProjectionGuardWrite = (projection) => ({
   schemaVersion: AUTOMATCH_PROJECTION_GUARD_VERSION,
   lifecycle: projection.lifecycle,
   sourceGeneration: normalizeGeneration(projection.sourceGeneration),
   sourceRevision: projection.sourceRevision,
-  resultDigests: asObject(projection.resultDigests),
+  resultDigests: asObject(projection.resultDigests) as Record<string, string>,
 });
 
 const renderMatchedAutomatchTelegramText: (
   inviteId: string,
-  source: Record<string, unknown>,
-) => string = (inviteId, source) => {
+  source: AutomatchTelegramSourceDocument,
+) => string = (inviteId, sourceDocument) => {
+  const source = sourceEvidence(sourceDocument);
   const matchedText = normalizeString(source && source.matchedText);
   if (!matchedText) {
     return "";
   }
-  const fragments = getAutomatchResultFragments(inviteId, source);
+  const fragments = getAutomatchResultFragments(inviteId, sourceDocument);
   if (fragments.length === 0) {
     return matchedText;
   }
@@ -233,18 +269,22 @@ const buildSourceRevision = ({
 
 const buildAutomatchTelegramProjection: (input: {
   inviteId: string;
-  source: Record<string, unknown> | null;
-  inviteData: Record<string, unknown> | null;
+  source: AutomatchTelegramSourceDocument | null;
+  inviteData: InviteDocument | null;
 }) => AutomatchTelegramProjection | null = ({
   inviteId,
-  source,
+  source: sourceDocument,
   inviteData,
 }) => {
+  const source = sourceEvidence(sourceDocument);
   const normalizedInviteId = normalizeString(inviteId);
   if (!normalizedInviteId) {
     return null;
   }
-  const lifecycle = resolveAutomatchTelegramLifecycle(source, inviteData);
+  const lifecycle = resolveAutomatchTelegramLifecycle(
+    sourceDocument,
+    inviteData,
+  );
   if (!lifecycle || !source) {
     return null;
   }
@@ -265,10 +305,16 @@ const buildAutomatchTelegramProjection: (input: {
     text = normalizeString(source.canceledText);
     ifMissing = "skip";
   } else {
-    resultFragments = getAutomatchResultFragments(normalizedInviteId, source);
+    resultFragments = getAutomatchResultFragments(
+      normalizedInviteId,
+      sourceDocument!,
+    );
     operation = resultFragments.length > 0 ? "edit" : "send";
     instanceKey = normalizeString(source.matchedInstanceKey);
-    text = renderMatchedAutomatchTelegramText(normalizedInviteId, source);
+    text = renderMatchedAutomatchTelegramText(
+      normalizedInviteId,
+      sourceDocument!,
+    );
     ifMissing = resultFragments.length > 0 ? "send" : undefined;
   }
 
@@ -299,7 +345,7 @@ const buildAutomatchTelegramProjection: (input: {
 };
 
 const isEventRatingUpdate: (
-  ratingUpdate: Record<string, unknown> | null,
+  ratingUpdate: TelegramRatingProjectionInput | null,
 ) => boolean | null = (ratingUpdate) =>
   ratingUpdate &&
   (ratingUpdate.isEventMatch === true ||
@@ -307,7 +353,7 @@ const isEventRatingUpdate: (
     normalizeString(ratingUpdate.eventId) !== "");
 
 const shouldProjectRatingTelegramUpdate: (
-  ratingUpdate: Record<string, unknown> | null,
+  ratingUpdate: TelegramRatingProjectionInput | null,
 ) => boolean = (ratingUpdate) =>
   !!ratingUpdate &&
   ratingUpdate.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION &&
@@ -318,8 +364,8 @@ const shouldProjectRatingTelegramUpdate: (
   normalizeString(ratingUpdate.updateRatingMessage) !== "";
 
 const mergeRatingResultFragment: (
-  source: unknown,
-  ratingUpdate: Record<string, unknown>,
+  source: AutomatchTelegramSourceDocument | null,
+  ratingUpdate: TelegramRatingProjectionInput,
 ) => RatingProjectionMerge = (source, ratingUpdate) => {
   const record = (source || {}) as Record<string, unknown>;
   if (
@@ -358,7 +404,7 @@ const mergeRatingResultFragment: (
   return {
     changed: true,
     reason: "inserted",
-    source: {
+    source: retainAutomatchTelegramSource({
       ...record,
       results: {
         ...existingResults,
@@ -369,13 +415,12 @@ const mergeRatingResultFragment: (
           ? currentUpdatedAtMs
           : Math.max(currentUpdatedAtMs, completedAtMs),
       generation: currentGeneration + 1,
-    },
+    }),
   };
 };
 
 export {
   AUTOMATCH_PROJECTION_GUARD_VERSION,
-  asObject,
   buildAutomatchProjectionGuard,
   buildAutomatchTelegramProjection,
   evaluateAutomatchProjectionUpdate,

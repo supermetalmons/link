@@ -1,7 +1,11 @@
+import type {
+  ApiEndpoint,
+  ApiJsonBody,
+  ApiJsonStatus,
+} from "@mons/shared/api-contracts";
 import type { NftApiRequest } from "@mons/shared/nfts";
 import bs58 from "bs58";
 import { readBoundedText } from "./boundedStreams.ts";
-
 const MAX_REQUEST_BODY_BYTES = 4096;
 
 function isValidSolanaAddress(value: string): boolean {
@@ -26,6 +30,19 @@ const BASE_HEADERS = {
   "X-Content-Type-Options": "nosniff",
 };
 
+export function jsonResponse<
+  Key extends ApiEndpoint,
+  Status extends ApiJsonStatus<Key>,
+>(
+  body: ApiJsonBody<Key, NoInfer<Status>>,
+  status: Status,
+  headers?: HeadersInit,
+): Response;
+export function jsonResponse(
+  body: unknown,
+  status: number,
+  headers?: HeadersInit,
+): Response;
 export function jsonResponse(
   body: unknown,
   status: number,

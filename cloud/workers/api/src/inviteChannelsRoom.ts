@@ -1,3 +1,5 @@
+import type { ApiTransportStatus } from "@mons/shared/api-contracts";
+import type { InviteDocument } from "@mons/shared/invite-records";
 import {
   INVITE_METADATA_REFRESH_MS,
   INVITE_METADATA_SOCKET_PROTOCOL,
@@ -23,12 +25,27 @@ import {
 import { composeInviteWagerSource } from "./inviteWagerSource.ts";
 import { createInviteChannelSnapshotStore } from "./inviteChannelSnapshotStore.ts";
 import type { WagerStateSnapshot } from "./wagerStateD1.ts";
-import type { SocketSession, SocketSessions } from "./socketSession.ts";
+import type { SocketSessions } from "./socketSession.ts";
+import {
+  readSocketAttachment,
+  retainedSocketCanReceiveInvite,
+  socketAttachmentChannel,
+  untrimmedSocketInviteKey,
+  type InviteChannel,
+  type InviteSocketAccess,
+  type InviteSocketAttachment,
+  type RetainedSocketAttachment,
+  type SocketInviteKey,
+} from "./socketAttachmentRecords.ts";
 import {
   readSocketAdmission,
   validateCurrentSocketAdmission,
 } from "./socketAdmission.ts";
-import { acceptRoomSocket, sendSocketSnapshot } from "./socketUpgrade.ts";
+import {
+  acceptRoomSocket,
+  sendSocketSnapshot,
+  type InviteChannelSnapshotMessage,
+} from "./socketUpgrade.ts";
 import {
   socketCapacityFull,
   type SocketCapacityLimits,
@@ -41,12 +58,9 @@ import {
   spectatorIpSocketTag,
   type SocketRole,
 } from "./socketTags.ts";
-
-type InviteChannel = "metadata" | "wagers";
-
 type MetadataRead = {
   metadata: InviteMetadataReadResult;
-  value: unknown;
+  value: InviteDocument | null;
   generation: number;
   version: number;
   invalidationGeneration: number;
@@ -63,37 +77,19 @@ type StoredInviteIdentity = {
   invite_id: string;
 };
 
-type InviteSocketAttachment = {
-  channel: InviteChannel;
-  schemaVersion: 1;
-  inviteId: string;
-  role: SocketRole;
-  actorUid: string | null;
-} & SocketSession;
-
 export function canReceiveInvite(
-  attachment: Pick<
-    InviteSocketAttachment,
-    "role" | "actorUid" | "authenticated"
-  >,
+  attachment: InviteSocketAccess,
   source: Extract<InviteMetadataReadResult, { status: "ok" }>,
-): boolean {
-  if (attachment.role === "host") {
-    return (
-      attachment.authenticated && attachment.actorUid === source.snapshot.hostId
-    );
-  }
-  if (attachment.role === "guest") {
-    return (
-      attachment.authenticated &&
-      source.snapshot.guestId !== null &&
-      attachment.actorUid === source.snapshot.guestId
-    );
-  }
-  return (
-    source.snapshot.guestId !== null ||
-    (attachment.authenticated && !source.passwordProtected)
-  );
+): boolean;
+export function canReceiveInvite(
+  attachment: RetainedSocketAttachment,
+  source: Extract<InviteMetadataReadResult, { status: "ok" }>,
+): unknown;
+export function canReceiveInvite(
+  attachment: InviteSocketAccess | RetainedSocketAttachment,
+  source: Extract<InviteMetadataReadResult, { status: "ok" }>,
+): unknown {
+  return retainedSocketCanReceiveInvite(attachment, source);
 }
 
 function logWagersRefreshFailure(inviteId: string, error: unknown): void {
@@ -105,7 +101,7 @@ function logWagersRefreshFailure(inviteId: string, error: unknown): void {
 }
 
 type InviteChannelsDependencies = {
-  readInvite: (inviteId: string) => Promise<unknown>;
+  readInvite: (inviteId: string) => Promise<InviteDocument | null>;
   readWagerStates: (inviteId: string) => Promise<WagerStateSnapshot[]>;
   scheduleAlarm: (atMs: number) => Promise<void>;
   capacityFull: (role: SocketRole) => boolean;
@@ -140,9 +136,17 @@ export class InviteChannelsRoom {
     this.snapshots = createInviteChannelSnapshotStore(ctx.storage.sql);
   }
 
-  pinInvite(inviteId: string, options: { cache?: boolean } = {}): void {
+  pinInvite(inviteId: string, options?: { cache?: boolean }): void;
+  pinInvite(
+    inviteId: SocketInviteKey,
+    options?: { cache?: boolean },
+  ): asserts inviteId is string;
+  pinInvite(
+    inviteId: SocketInviteKey,
+    options: { cache?: boolean } = {},
+  ): asserts inviteId is string {
     if (
-      inviteId !== inviteId.trim() ||
+      untrimmedSocketInviteKey(inviteId) ||
       !isSafeRecordKey(inviteId) ||
       (this.ctx.id.name && this.ctx.id.name !== inviteId)
     ) {
@@ -200,10 +204,10 @@ export class InviteChannelsRoom {
     return this.ctx
       .getWebSockets(channel ? channelSocketTag(channel) : undefined)
       .filter((socket) => {
-        const attachment = socket.deserializeAttachment();
+        const attachment = readSocketAttachment(socket);
         return (
-          (attachment?.channel === "metadata" ||
-            attachment?.channel === "wagers") &&
+          (socketAttachmentChannel(attachment) === "metadata" ||
+            socketAttachmentChannel(attachment) === "wagers") &&
           this.dependencies.socketSessions.active(socket) &&
           (!activeOnly || socket.readyState === WebSocket.OPEN)
         );
@@ -269,12 +273,7 @@ export class InviteChannelsRoom {
     };
     const serialized = changed ? JSON.stringify(message) : null;
     for (const socket of sockets) {
-      if (
-        !canReceiveInvite(
-          socket.deserializeAttachment() as InviteSocketAttachment,
-          source,
-        )
-      ) {
+      if (!canReceiveInvite(readSocketAttachment(socket), source)) {
         socket.close(1008, "Invite access changed");
       } else if (serialized) {
         this.dependencies.socketSessions.send(socket, serialized);
@@ -288,10 +287,7 @@ export class InviteChannelsRoom {
       if (
         metadata.status === "missing" ||
         (metadata.status === "ok" &&
-          !canReceiveInvite(
-            socket.deserializeAttachment() as InviteSocketAttachment,
-            metadata,
-          ))
+          !canReceiveInvite(readSocketAttachment(socket), metadata))
       ) {
         socket.close(1008, "Invite access changed");
       }
@@ -327,12 +323,7 @@ export class InviteChannelsRoom {
       };
       const serialized = JSON.stringify(message);
       for (const socket of this.inviteSockets("wagers", true)) {
-        if (
-          canReceiveInvite(
-            socket.deserializeAttachment() as InviteSocketAttachment,
-            metadata,
-          )
-        ) {
+        if (canReceiveInvite(readSocketAttachment(socket), metadata)) {
           this.dependencies.socketSessions.send(socket, serialized);
         }
       }
@@ -649,7 +640,13 @@ export class InviteChannelsRoom {
       actorUid = actor ? decodeURIComponent(actor) : null;
       this.pinInvite(inviteId);
     } catch {
-      return new Response(`Invalid ${channel} invite`, { status: 400 });
+      return new Response(`Invalid ${channel} invite`, {
+        status: 400 satisfies ApiTransportStatus<
+          | "GET /invites/:inviteId/metadata/socket"
+          | "GET /invites/:inviteId/wagers/socket",
+          "text"
+        >,
+      });
     }
     const parsed = readSocketAdmission(request, {
       headerPrefix: name,
@@ -657,10 +654,22 @@ export class InviteChannelsRoom {
       actorUid,
     });
     if (parsed.status === "invalid") {
-      return new Response(`Invalid ${channel} admission`, { status: 400 });
+      return new Response(`Invalid ${channel} admission`, {
+        status: 400 satisfies ApiTransportStatus<
+          | "GET /invites/:inviteId/metadata/socket"
+          | "GET /invites/:inviteId/wagers/socket",
+          "text"
+        >,
+      });
     }
     if (parsed.status === "expired")
-      return new Response("Session expired", { status: 401 });
+      return new Response("Session expired", {
+        status: 401 satisfies ApiTransportStatus<
+          | "GET /invites/:inviteId/metadata/socket"
+          | "GET /invites/:inviteId/wagers/socket",
+          "text"
+        >,
+      });
     const { role, ip, session } = parsed.admission;
     const attachment: InviteSocketAttachment = {
       channel,
@@ -678,7 +687,11 @@ export class InviteChannelsRoom {
     const admit = async (): Promise<Response> => {
       if (this.inviteRoomFull(channel, role, ip)) {
         return new Response(`${name} room is full`, {
-          status: 429,
+          status: 429 satisfies ApiTransportStatus<
+            | "GET /invites/:inviteId/metadata/socket"
+            | "GET /invites/:inviteId/wagers/socket",
+            "text"
+          >,
           headers: { "Retry-After": "60" },
         });
       }
@@ -696,7 +709,13 @@ export class InviteChannelsRoom {
       ): Response => {
         if (source.status !== "ok" || metadata.status !== "ok") {
           return new Response(`Invite ${channel} unavailable`, {
-            status: source.status === "missing" ? 404 : 409,
+            status: (source.status === "missing"
+              ? 404
+              : 409) satisfies ApiTransportStatus<
+              | "GET /invites/:inviteId/metadata/socket"
+              | "GET /invites/:inviteId/wagers/socket",
+              "text"
+            >,
           });
         }
         const rejected = validateCurrentSocketAdmission({
@@ -715,7 +734,7 @@ export class InviteChannelsRoom {
           attachment,
           admissionSocketTags(channel, role, ip),
         );
-        const message = {
+        const message: InviteChannelSnapshotMessage = {
           schemaVersion: 1,
           type: "snapshot",
           snapshot: source.snapshot,

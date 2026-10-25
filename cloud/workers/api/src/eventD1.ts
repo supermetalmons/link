@@ -1,7 +1,7 @@
+export type { EventSnapshot } from "./eventD1/types.ts";
 export type {
   EventJsonRecord,
   EventPrizeAssignmentRecord,
-  EventSnapshot,
   ProfileEventPrizeSnapshot,
 } from "../../../runtime/eventReads.js";
 export {
@@ -13,7 +13,6 @@ export {
   type EventLeaseGuard,
   type EventInviteSourceMutation,
   type EventTransitionIntent,
-  type EventOutboxRecord,
   EventD1Failure,
   EventD1Conflict,
   EventWritesDisabled,
@@ -73,8 +72,6 @@ export {
   transactStoredProfileEventPrize,
   transactEventProgressOutbox,
   transactEventProgressDeadOutbox,
-  transactEventProfileGameProjectionOutbox,
-  transactEventTelegramProjectionOutbox,
   transactEventTelegramProjectionState,
   transactEventRecord,
   transactEventField,

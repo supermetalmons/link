@@ -1,4 +1,9 @@
 import {
+  retainCanonicalRatingPayload,
+  type CanonicalRatingPayloadDocument,
+} from "../profileCanonical/retainedRecords.ts";
+import type { canonicalRatingProjectionFields } from "../profileCanonical/accounting.ts";
+import {
   isHistoricalMatchPair,
   type HistoricalMatchPair,
 } from "@mons/shared/game-sessions";
@@ -7,7 +12,19 @@ import type {
   CanonicalRatingUpdateValue,
   CanonicalProfileSnapshot,
 } from "../profileCanonical/types.ts";
-import type { RatingProfile, RatingUpdateData } from "../ratingContracts.ts";
+import type {
+  RatingProfile,
+  RatingUpdateData,
+  RatingCompletionPatch,
+  RatingLeaseInput,
+} from "../ratingContracts.ts";
+
+function payloadFields(
+  value: CanonicalRatingPayloadDocument,
+): Record<string, unknown> {
+  const retained: unknown = value;
+  return retained as Record<string, unknown>;
+}
 
 function string(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -67,7 +84,7 @@ export function ratingProfileFromSnapshot(
 export function ratingData(
   snapshot: CanonicalRatingUpdateSnapshot,
 ): RatingUpdateData {
-  const fields = snapshot.payload;
+  const fields = payloadFields(snapshot.payload);
   const historicalMatchArchiveVersion = Object.hasOwn(
     fields,
     "historicalMatchArchiveVersion",
@@ -141,8 +158,9 @@ export function ratingData(
 
 export function ratingValue(
   operationId: string,
-  fields: Record<string, unknown>,
+  document: CanonicalRatingPayloadDocument,
 ): CanonicalRatingUpdateValue {
+  const fields = payloadFields(document);
   const status = fields.status === "done" ? "done" : "processing";
   const startedAtMs = number(fields.startedAtMs);
   const completedAtMs =
@@ -152,7 +170,7 @@ export function ratingValue(
   }
   return {
     operationId,
-    payload: fields,
+    payload: document,
     status,
     inviteId: string(fields.inviteId),
     matchId: string(fields.matchId),
@@ -188,13 +206,88 @@ export function ratingValue(
   };
 }
 
+function mergedRatingFields(
+  snapshot: CanonicalRatingUpdateSnapshot,
+  patch: RatingCompletionPatch | RatingProjectionPatch,
+): CanonicalRatingUpdateValue {
+  return ratingValue(
+    snapshot.operationId,
+    retainCanonicalRatingPayload({
+      ...snapshot.payload,
+      updatedAtMs: snapshot.updatedAtMs,
+      ...patch,
+    }),
+  );
+}
+
 export function mergedRatingValue(
   snapshot: CanonicalRatingUpdateSnapshot,
-  patch: Record<string, unknown>,
+  patch: RatingCompletionPatch,
 ): CanonicalRatingUpdateValue {
-  return ratingValue(snapshot.operationId, {
-    ...snapshot.payload,
-    updatedAtMs: snapshot.updatedAtMs,
-    ...patch,
+  return mergedRatingFields(snapshot, patch);
+}
+
+type RatingProjectionFields = ReturnType<
+  typeof canonicalRatingProjectionFields
+>;
+type RatingProjectionPatch = Partial<
+  Record<RatingProjectionFields["state"], "dead" | "done">
+> &
+  Partial<Record<RatingProjectionFields["updated"], number>> &
+  Partial<Record<RatingProjectionFields["reason"], string | null>>;
+
+export function claimedRatingProjectionValue(
+  snapshot: CanonicalRatingUpdateSnapshot,
+  fields: RatingProjectionFields,
+  claimedAtMs: number,
+): CanonicalRatingUpdateValue {
+  return mergedRatingFields(snapshot, { [fields.updated]: claimedAtMs });
+}
+
+export function markedRatingProjectionValue(
+  snapshot: CanonicalRatingUpdateSnapshot,
+  fields: RatingProjectionFields,
+  state: "dead" | "done",
+  updatedAtMs: number,
+  reason: string | undefined,
+): CanonicalRatingUpdateValue {
+  return mergedRatingFields(snapshot, {
+    [fields.state]: state,
+    [fields.updated]: updatedAtMs,
+    [fields.reason]: reason?.trim() || null,
   });
+}
+
+export type RatingLeasePayloadWrite = {
+  inviteId: string;
+  matchId: string;
+  playerId: string;
+  opponentId: string;
+  ownerUid: string;
+  ownerToken: string;
+  status: "processing";
+  startedAtMs: number;
+  updatedAtMs: number;
+  leaseExpiresAtMs: number;
+};
+
+export function ratingLeasePayload(
+  snapshot: CanonicalRatingUpdateSnapshot | null,
+  input: RatingLeaseInput,
+  data: RatingUpdateData | null,
+  attemptNowMs: number,
+): CanonicalRatingPayloadDocument {
+  return retainCanonicalRatingPayload({
+    ...(snapshot?.payload || {}),
+    inviteId: input.inviteId,
+    matchId: input.matchId,
+    playerId: input.playerId,
+    opponentId: input.opponentId,
+    ownerUid: input.ownerUid,
+    ownerToken: input.ownerToken,
+    status: "processing",
+    startedAtMs: data?.startedAtMs || attemptNowMs,
+    updatedAtMs: attemptNowMs,
+    leaseExpiresAtMs: attemptNowMs + input.leaseMs,
+  } satisfies RatingLeasePayloadWrite);
 }

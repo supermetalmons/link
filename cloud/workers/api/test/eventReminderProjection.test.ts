@@ -1,3 +1,5 @@
+import { readTelegramAnnouncementPayloadDocument } from "../src/telegramAnnouncementRecords.ts";
+import { eventDocumentFixture } from "./eventCompatibilityFixture.ts";
 import { encodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -38,12 +40,12 @@ function sentReceipt(
     updatedAtMs: NOW_MS - 4_000,
     payloadDigest: "original-digest",
     messageIds: [23001],
-    payload: {
+    payload: readTelegramAnnouncementPayloadDocument({
       chatId: "community-chat",
       text: buildSundayMonsReminder({ eventId: EVENT_ID, leadMs }).text,
       parseMode: "HTML",
       silent: false,
-    },
+    }),
   };
 }
 
@@ -83,7 +85,7 @@ function fixture() {
     eventRepository: {
       readEvent: async (eventId) => {
         assert.equal(eventId, EVENT_ID);
-        return eventData;
+        return eventData ? eventDocumentFixture(eventData) : null;
       },
       commitEventPlan: async (plan) =>
         void writes.push(encodeEventUpdates(plan)),
@@ -127,7 +129,7 @@ test("adopts the original sent reminder as a complete edit-only delivery without
   assert.equal(message.desired.ifMissing, "skip");
   assert.equal(message.desired.destination, "community");
   assert.equal(message.desired.instanceKey, `${MESSAGE_KEY}:v2`);
-  assert.equal(message.desired.text, receipt.payload!.text);
+  assert.equal(message.desired.text, Reflect.get(receipt.payload!, "text"));
   assert.equal(message.desired.parseMode, "HTML");
   assert.equal(message.desired.silent, false);
   assert.equal(message.desired.disableWebPagePreview, true);
@@ -204,7 +206,10 @@ test("only a valid confirmed reminder for the exact event and destination can be
       { hasSpoiler: true },
     ].map((payload) => ({
       ...receipt,
-      payload: { ...receipt.payload, ...payload },
+      payload: readTelegramAnnouncementPayloadDocument({
+        ...receipt.payload,
+        ...payload,
+      }),
     })),
   ]) {
     const state = telegramStore();
@@ -225,7 +230,11 @@ test("adopts reminders already containing participants from their actual sent te
   for (const leadMs of [10_800_000, 14_400_000] as const) {
     for (const suffix of ["", "\n\n1. ivan"]) {
       const receipt = sentReceipt(leadMs);
-      receipt.payload!.text += suffix;
+      Reflect.set(
+        receipt.payload!,
+        "text",
+        Reflect.get(receipt.payload!, "text") + suffix,
+      );
       const state = telegramStore();
       const result = (await adoptSundayMonsReminderMessage({
         eventId: EVENT_ID,
@@ -233,7 +242,7 @@ test("adopts reminders already containing participants from their actual sent te
         telegram: state.telegram,
         chatId: "community-chat",
       })) as Record<string, Record<string, unknown>>;
-      assert.equal(result.desired.text, receipt.payload!.text);
+      assert.equal(result.desired.text, Reflect.get(receipt.payload!, "text"));
     }
   }
 });
@@ -329,4 +338,46 @@ test("a failed queue dispatch retains the pending marker for scheduled recovery"
   });
   assert.equal(state.writes.length, 1);
   assert.equal(state.logs.length, 1);
+});
+
+test("retains the third reminder text observation through adoption and refresh", async () => {
+  const createReceipt = () => {
+    const receipt = sentReceipt();
+    const text = Reflect.get(receipt.payload!, "text");
+    let reads = 0;
+    Object.defineProperty(receipt.payload!, "text", {
+      enumerable: true,
+      get() {
+        reads++;
+        return reads < 3 ? text : null;
+      },
+    });
+    return { receipt, reads: () => reads };
+  };
+  const adoption = createReceipt();
+  const store = telegramStore();
+  await assert.rejects(
+    adoptSundayMonsReminderMessage({
+      eventId: EVENT_ID,
+      receipt: adoption.receipt,
+      telegram: store.telegram,
+      chatId: "community-chat",
+    }),
+    { name: "TypeError", message: "text must be a non-empty string" },
+  );
+  assert.equal(adoption.reads(), 3);
+  assert.equal(store.transactions(), 0);
+  assert.equal(store.read(), null);
+
+  const refresh = createReceipt();
+  const state = fixture();
+  state.setReceipt(refresh.receipt);
+  assert.deepEqual(await state.refresh(), {
+    status: "queued",
+    requestId: "refresh-request",
+    messageKey: MESSAGE_KEY,
+  });
+  assert.equal(refresh.reads(), 3);
+  assert.equal(state.writes.length, 1);
+  assert.equal(state.queued.length, 1);
 });

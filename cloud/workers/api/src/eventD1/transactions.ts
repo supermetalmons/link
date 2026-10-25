@@ -1,4 +1,10 @@
 import {
+  retainEventProgressRecord,
+  type EventProgressDocument,
+} from "../../../../runtime/eventProgressRecords.js";
+import type { EventProjectionOutboxDocument } from "../../../../runtime/eventProjectionOutboxRecords.js";
+import type { EventTelegramProjectionStateDocument } from "../../../../runtime/telegram/eventProjectionRecords.js";
+import {
   type EventD1Connection,
   type EventMutationOptions,
   type EventWriteAdmission,
@@ -7,13 +13,12 @@ import {
   EventD1Conflict,
   type EventTransactionOptions,
   EventD1Failure,
-  type EventOutboxRecord,
 } from "./types.ts";
 import type {
   TransactionDecision,
   TransactionResult,
 } from "../../../../runtime/transactions.js";
-import type { EventMutation } from "../../../../runtime/eventCommands.js";
+import type { EventPersistenceMutation as EventMutation } from "../eventPersistenceCommands.ts";
 import { commitEventMutationsInternal } from "./commit.ts";
 import {
   readEventPrizeSelectionSnapshot,
@@ -239,8 +244,8 @@ export function transactEventProgressOutbox(
   db: EventD1Connection,
   outboxId: string,
   updater: (
-    current: EventOutboxRecord | null,
-  ) => TransactionDecision<EventOutboxRecord>,
+    current: EventProgressDocument<"pending"> | null,
+  ) => TransactionDecision<EventProgressDocument<"pending">>,
   options: EventTransactionOptions,
 ) {
   return transactEventValue(
@@ -251,10 +256,15 @@ export function transactEventProgressOutbox(
       const value =
         snapshot.recordJson === null
           ? null
-          : (decodeJson(snapshot.recordJson) as EventOutboxRecord);
+          : retainEventProgressRecord(
+              "pending",
+              decodeJson(snapshot.recordJson),
+            );
       return {
         value,
-        mutation: (value: EventOutboxRecord | null): EventMutation => ({
+        mutation: (
+          value: EventProgressDocument<"pending"> | null,
+        ): EventMutation => ({
           kind: "progress-outbox",
           outboxId,
           value,
@@ -270,8 +280,8 @@ export function transactEventProgressDeadOutbox(
   db: EventD1Connection,
   outboxId: string,
   updater: (
-    current: EventOutboxRecord | null,
-  ) => TransactionDecision<EventOutboxRecord>,
+    current: EventProgressDocument<"dead"> | null,
+  ) => TransactionDecision<EventProgressDocument<"dead">>,
   options: EventTransactionOptions,
 ) {
   return transactEventValue(
@@ -281,7 +291,9 @@ export function transactEventProgressDeadOutbox(
       const value = await readEventProgressDeadOutbox(db, outboxId);
       return {
         value,
-        mutation: (value: EventOutboxRecord | null): EventMutation => ({
+        mutation: (
+          value: EventProgressDocument<"dead"> | null,
+        ): EventMutation => ({
           kind: "progress-dead",
           outboxId,
           value,
@@ -297,8 +309,8 @@ export function transactEventProfileGameProjectionOutbox(
   db: EventD1Connection,
   eventId: string,
   updater: (
-    current: EventOutboxRecord | null,
-  ) => TransactionDecision<EventOutboxRecord>,
+    current: EventProjectionOutboxDocument<"profile-game"> | null,
+  ) => TransactionDecision<EventProjectionOutboxDocument<"profile-game">>,
   options: EventTransactionOptions,
 ) {
   return transactEventValue(
@@ -308,7 +320,9 @@ export function transactEventProfileGameProjectionOutbox(
       const value = await readEventProfileGameProjectionOutbox(db, eventId);
       return {
         value,
-        mutation: (value: EventOutboxRecord | null): EventMutation => ({
+        mutation: (
+          value: EventProjectionOutboxDocument<"profile-game"> | null,
+        ): EventMutation => ({
           kind: "profile-game-outbox",
           eventId,
           value,
@@ -324,8 +338,8 @@ export function transactEventTelegramProjectionOutbox(
   db: EventD1Connection,
   eventId: string,
   updater: (
-    current: EventOutboxRecord | null,
-  ) => TransactionDecision<EventOutboxRecord>,
+    current: EventProjectionOutboxDocument<"telegram"> | null,
+  ) => TransactionDecision<EventProjectionOutboxDocument<"telegram">>,
   options: EventTransactionOptions,
 ) {
   return transactEventValue(
@@ -335,7 +349,9 @@ export function transactEventTelegramProjectionOutbox(
       const value = await readEventTelegramProjectionOutbox(db, eventId);
       return {
         value,
-        mutation: (value: EventOutboxRecord | null): EventMutation => ({
+        mutation: (
+          value: EventProjectionOutboxDocument<"telegram"> | null,
+        ): EventMutation => ({
           kind: "telegram-outbox",
           eventId,
           value,
@@ -351,8 +367,8 @@ export function transactEventTelegramProjectionState(
   db: EventD1Connection,
   eventId: string,
   updater: (
-    current: EventOutboxRecord | null,
-  ) => TransactionDecision<EventOutboxRecord>,
+    current: EventTelegramProjectionStateDocument | null,
+  ) => TransactionDecision<EventTelegramProjectionStateDocument>,
   options: EventTransactionOptions,
 ) {
   return transactEventValue(
@@ -362,7 +378,9 @@ export function transactEventTelegramProjectionState(
       const current = await readEventTelegramProjectionState(db, eventId);
       return {
         value: cloneJson(current?.state || null),
-        mutation: (value: EventOutboxRecord | null): EventMutation => ({
+        mutation: (
+          value: EventTelegramProjectionStateDocument | null,
+        ): EventMutation => ({
           kind: "telegram-state",
           eventId,
           value,

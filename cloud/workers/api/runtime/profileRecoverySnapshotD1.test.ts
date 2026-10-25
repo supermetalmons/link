@@ -1,3 +1,5 @@
+import { projectionDocumentFixture } from "../test/profileDataBoundaryFixture.ts";
+import { materializeProfileCompatibility as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
 import { env } from "cloudflare:workers";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it, vi } from "vitest";
@@ -8,7 +10,6 @@ import {
 import {
   CanonicalProfileCorruption,
   commitCanonicalPlan,
-  materializeCanonicalProfile,
   readCanonicalAuthRecoveryJob,
   readCanonicalProfile,
   readCanonicalProfileAggregates,
@@ -664,7 +665,7 @@ describe("profile recovery finalization snapshot", () => {
         type: "create",
         profileId: f.sourceId,
         projectionId: f.sourceId,
-        data: {
+        data: projectionDocumentFixture({
           entityType: "game",
           inviteId: f.sourceId,
           kind: "direct",
@@ -680,7 +681,7 @@ describe("profile recovery finalization snapshot", () => {
           opponentEmoji: null,
           automatchStateHint: null,
           isPendingAutomatch: false,
-        },
+        }),
       },
     ]);
     const observed = observeDatabase();

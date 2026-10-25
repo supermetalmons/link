@@ -1,3 +1,4 @@
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import { attachMemoryWagerFrozenStore } from "./wagerFrozenTestUtils.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -194,7 +195,10 @@ test("participant checks use metadata without loading wagers or direct-owner pro
     readInviteMetadata: async (inviteId) => {
       metadataReads++;
       assert.equal(inviteId, "invite");
-      return { hostId: " host ", guestId: " guest " };
+      return retainedInviteSourceFixture({
+        hostId: " host ",
+        guestId: " guest ",
+      });
     },
     readState: async () => {
       throw new Error("unexpected-aggregate-read");
@@ -227,7 +231,9 @@ test("metadata participant checks preserve missing and invalid participant failu
     [{ hostId: "host", guestId: null }, "missing-opponent"],
   ];
   for (const [metadata, reason] of cases) {
-    const value = repository({ readInviteMetadata: async () => metadata });
+    const value = repository({
+      readInviteMetadata: async () => retainedInviteSourceFixture(metadata),
+    });
     assert.deepEqual(
       await resolveWagerParticipantUids(identity, "invite", value),
       {
@@ -241,10 +247,11 @@ test("metadata participant checks preserve missing and invalid participant failu
       identity,
       "invite",
       repository({
-        readInviteMetadata: async () => ({
-          hostId: "host/unsafe",
-          guestId: "guest",
-        }),
+        readInviteMetadata: async () =>
+          retainedInviteSourceFixture({
+            hostId: "host/unsafe",
+            guestId: "guest",
+          }),
       }),
     ),
     /invalid-wager-participant/,

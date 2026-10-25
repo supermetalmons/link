@@ -1,3 +1,7 @@
+import { retainEventProgressRecord } from "../../../runtime/eventProgressRecords.js";
+import { eventProjectionOutboxFixture } from "../test/profileDataBoundaryFixture.ts";
+import { eventIntentFixture } from "../test/transitionIntentFixture.ts";
+import { eventRoundFixture } from "../test/eventCompatibilityFixture.ts";
 import { commitEventMutations } from "../src/eventD1.ts";
 import { commitEventMutationsInternal } from "../src/eventD1/commit.ts";
 import { readProfilePrizeMutationSnapshots } from "../src/eventD1/reads.ts";
@@ -268,7 +272,9 @@ function createEventTransitionIntent(
   intent: Parameters<typeof createEventTransitionIntentRaw>[1],
 ) {
   return withD1Admission((admission) =>
-    createEventTransitionIntentRaw(db, intent, { admission }),
+    createEventTransitionIntentRaw(db, intent, {
+      admission,
+    }),
   );
 }
 
@@ -471,7 +477,7 @@ describe("event D1 store", () => {
                 )
               : createEventTransitionIntentRaw(
                   observed.database,
-                  {
+                  eventIntentFixture({
                     schemaVersion: 1,
                     transitionId: "test-transition",
                     eventId,
@@ -480,7 +486,7 @@ describe("event D1 store", () => {
                     rtdbEffects: {},
                     createdAtMs: 1,
                     updatedAtMs: 1,
-                  },
+                  }),
                   { admission },
                 );
           const failure = await operation.catch((error: unknown) => error);
@@ -509,7 +515,12 @@ describe("event D1 store", () => {
     const before = await readEventSnapshot(testEnv.EVENT_DB, eventId);
     for (const invalid of ["", "bad/key", "bad#key", " padded "]) {
       const changes: EventMutation[] = [
-        { kind: "event-round", eventId, roundKey: invalid, value: {} },
+        {
+          kind: "event-round",
+          eventId,
+          roundKey: invalid,
+          value: eventRoundFixture({}),
+        },
         {
           kind: "event-match-status",
           eventId,
@@ -1605,11 +1616,17 @@ describe("event D1 store", () => {
         };
         const before = await readEventSnapshot(testEnv.EVENT_DB, eventId);
         if (timing === "before the read")
-          await createEventTransitionIntent(testEnv.EVENT_DB, intent);
+          await createEventTransitionIntent(
+            testEnv.EVENT_DB,
+            eventIntentFixture(intent),
+          );
         const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
           async beforeWriteBatch(attempt) {
             if (timing === "after the read" && attempt === 1)
-              await createEventTransitionIntent(testEnv.EVENT_DB, intent);
+              await createEventTransitionIntent(
+                testEnv.EVENT_DB,
+                eventIntentFixture(intent),
+              );
           },
         });
         await expect(
@@ -2693,7 +2710,10 @@ describe("event D1 store", () => {
         async batch(statements) {
           if (attachIntent && !attached) {
             attached = true;
-            await createEventTransitionIntent(testEnv.EVENT_DB, intent);
+            await createEventTransitionIntent(
+              testEnv.EVENT_DB,
+              eventIntentFixture(intent),
+            );
           }
           return testEnv.EVENT_DB.batch(statements);
         },
@@ -3849,8 +3869,14 @@ describe("event D1 store", () => {
       createdAtMs: 200,
       updatedAtMs: 200,
     };
-    await createEventTransitionIntent(testEnv.EVENT_DB, intent);
-    await createEventTransitionIntent(testEnv.EVENT_DB, intent);
+    await createEventTransitionIntent(
+      testEnv.EVENT_DB,
+      eventIntentFixture(intent),
+    );
+    await createEventTransitionIntent(
+      testEnv.EVENT_DB,
+      eventIntentFixture(intent),
+    );
     expect(await listPendingEventTransitionIntents(testEnv.EVENT_DB)).toEqual([
       { ...intent, attempts: 0 },
     ]);
@@ -3881,7 +3907,10 @@ describe("event D1 store", () => {
       createdAtMs: 200,
       updatedAtMs: 200,
     };
-    await createEventTransitionIntent(testEnv.EVENT_DB, intent);
+    await createEventTransitionIntent(
+      testEnv.EVENT_DB,
+      eventIntentFixture(intent),
+    );
 
     await expect(
       testEnv.EVENT_DB.prepare(
@@ -3993,7 +4022,10 @@ describe("event D1 store", () => {
         createdAtMs: 200,
         updatedAtMs: 200,
       };
-      await createEventTransitionIntent(testEnv.EVENT_DB, intent);
+      await createEventTransitionIntent(
+        testEnv.EVENT_DB,
+        eventIntentFixture(intent),
+      );
       const readStorage = async () => {
         const prizes = await readPrizeStorage();
         const results = await testEnv.EVENT_DB.batch<Record<string, unknown>>([
@@ -4693,7 +4725,13 @@ describe("event D1 store", () => {
               : {}),
           },
           scope === "explicit-expectation"
-            ? { expectedRecords: { progress: { [outboxId]: outbox } } }
+            ? {
+                expectedRecords: {
+                  progress: {
+                    [outboxId]: retainEventProgressRecord("pending", outbox),
+                  },
+                },
+              }
             : {},
         ),
       ).rejects.toBeInstanceOf(EventD1Conflict);
@@ -4779,7 +4817,16 @@ describe("event D1 store", () => {
       patchEventOwnedPaths(
         testEnv.EVENT_DB,
         { [path]: null },
-        { expectedRecords: { profileGame: { [eventId]: originalOutbox } } },
+        {
+          expectedRecords: {
+            profileGame: {
+              [eventId]: eventProjectionOutboxFixture(
+                "profile-game",
+                originalOutbox,
+              ),
+            },
+          },
+        },
       ),
     ).rejects.toBeInstanceOf(EventD1Conflict);
     expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(
@@ -4789,7 +4836,16 @@ describe("event D1 store", () => {
     await patchEventOwnedPaths(
       testEnv.EVENT_DB,
       { [path]: null },
-      { expectedRecords: { profileGame: { [eventId]: currentOutbox } } },
+      {
+        expectedRecords: {
+          profileGame: {
+            [eventId]: eventProjectionOutboxFixture(
+              "profile-game",
+              currentOutbox,
+            ),
+          },
+        },
+      },
     );
     expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toBeNull();
   });
@@ -4834,7 +4890,12 @@ describe("event D1 store", () => {
         {
           expectedProfilePrizeRevisions: { [profileId]: 1 },
           expectedRecords: {
-            profileGame: { [eventId]: originalOutbox },
+            profileGame: {
+              [eventId]: eventProjectionOutboxFixture(
+                "profile-game",
+                originalOutbox,
+              ),
+            },
           },
           expectedTelegramStateRevisions: { [eventId]: 1 },
         },

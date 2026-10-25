@@ -1,4 +1,9 @@
 {
+  "automatchRecords.js": [
+    "decodeAutomatchEntries",
+    "decodeAutomatchEntry",
+    "emptyAutomatchEntryFields"
+  ],
   "eventCommands.js": [
     "eventCommandIdentity",
     "eventField",
@@ -6,6 +11,7 @@
     "isEventMutation",
     "mergeEventPlans"
   ],
+  "eventLeases.js": [],
   "eventPrizeAwards.js": [
     "EVENT_PRIZE_PLACES",
     "buildEventPrizeAssignments",
@@ -20,6 +26,84 @@
     "isCompletedEventPrizeWithdrawal",
     "isMatchingProfileEventPrizeAssignment",
     "isWithdrawalRecordForPrize"
+  ],
+  "eventPrizes/assets.js": [
+    "buildCompressedTransferBuilder",
+    "createPrizeAssetVerificationError",
+    "loadPrizeAssetState",
+    "validateCompressedPrizeAsset"
+  ],
+  "eventPrizes/assignmentValidation.js": ["validatePrizeAssignment"],
+  "eventPrizes/errors.js": ["EventPrizeWithdrawalError"],
+  "eventPrizes/projectionReconciliation.js": [
+    "attemptCompletedWithdrawalProjectionReconciliation",
+    "finalizeWithdrawal",
+    "reconcileCompletedWithdrawalProjections"
+  ],
+  "eventPrizes/records.js": [
+    "readStoredWithdrawalDocument",
+    "readWithdrawalDocument",
+    "storedWithdrawalMatchesIdentity",
+    "withdrawalExecutionStatus",
+    "withdrawalIdentity",
+    "withdrawalLastValidBlockHeight",
+    "withdrawalLeaseExpiresAtMs",
+    "withdrawalLeaseId",
+    "withdrawalOwnership",
+    "withdrawalPlace",
+    "withdrawalRecipientAddress",
+    "withdrawalResponseFields",
+    "withdrawalStartedAtForClaim",
+    "withdrawalStartedAtForCompletion",
+    "withdrawalStatus",
+    "withdrawalStorageUpdatedAtMs",
+    "withdrawalSubmissionStrings",
+    "withdrawalSubmittedAtForCompletion",
+    "withdrawalSubmittedAtForPersistence",
+    "writeBlockedWithdrawal",
+    "writeCompletedWithdrawal",
+    "writeProcessingWithdrawal",
+    "writeReacquiredSubmittedWithdrawal",
+    "writeSubmittedWithdrawal"
+  ],
+  "eventPrizes/requests.js": ["readWithdrawalRequest"],
+  "eventPrizes/solana.js": [
+    "CONFIRMATION_COMMITMENT",
+    "CONFIRMATION_TIMEOUT_MS",
+    "SEND_TRANSACTION_TIMEOUT_MS",
+    "SIGNATURE_STATUS_TIMEOUT_MS",
+    "TRANSACTION_STATUS_RETRY_DELAYS_MS",
+    "createEventPrizeUmi",
+    "getRpcUrl",
+    "loadSolanaDependencies"
+  ],
+  "eventPrizes/solanaTypes.js": [],
+  "eventPrizes/storage.js": [],
+  "eventPrizes/submissionRecovery.js": [
+    "inspectSubmittedWithdrawal",
+    "reconcileSubmittedAssetState",
+    "recoverSubmittedWithdrawal"
+  ],
+  "eventPrizes/submittedTransactions.js": [
+    "buildSubmittedTransaction",
+    "deserializePersistedSubmittedTransaction",
+    "getSubmittedTransactionSignature",
+    "isDefinitiveSubmittedTransactionFailure",
+    "sendAndConfirmSubmittedTransaction",
+    "waitForSubmittedTransactionStatus"
+  ],
+  "eventPrizes/types.js": [],
+  "eventPrizes/withdrawalOrchestrator.js": [
+    "handleWithdrawEventPrize",
+    "validatePrizeAssignment"
+  ],
+  "eventPrizes/withdrawalRepository.js": [
+    "acquireWithdrawalClaim",
+    "createWithdrawalRecordCommands",
+    "discardDefinitiveSubmittedTransaction",
+    "markWithdrawalBlocked",
+    "persistSubmittedTransaction",
+    "releaseProcessingClaim"
   ],
   "eventPrizeWithdrawalState.js": [
     "EVENT_PRIZE_ADMIN_WALLET",
@@ -38,57 +122,19 @@
     "isWithdrawalRecordOwnedByRequest",
     "normalizeSolanaAddress"
   ],
-  "eventPrizes/assets.js": [
-    "buildCompressedTransferBuilder",
-    "createPrizeAssetVerificationError",
-    "loadPrizeAssetState",
-    "validateCompressedPrizeAsset"
-  ],
-  "eventPrizes/errors.js": ["EventPrizeWithdrawalError"],
-  "eventPrizes/projectionReconciliation.js": [
-    "attemptCompletedWithdrawalProjectionReconciliation",
-    "finalizeWithdrawal",
-    "reconcileCompletedWithdrawalProjections"
-  ],
-  "eventPrizes/solana.js": [
-    "CONFIRMATION_COMMITMENT",
-    "CONFIRMATION_TIMEOUT_MS",
-    "SEND_TRANSACTION_TIMEOUT_MS",
-    "SIGNATURE_STATUS_TIMEOUT_MS",
-    "TRANSACTION_STATUS_RETRY_DELAYS_MS",
-    "createEventPrizeUmi",
-    "getRpcUrl",
-    "loadSolanaDependencies"
-  ],
-  "eventPrizes/submissionRecovery.js": [
-    "inspectSubmittedWithdrawal",
-    "reconcileSubmittedAssetState",
-    "recoverSubmittedWithdrawal"
-  ],
-  "eventPrizes/submittedTransactions.js": [
-    "buildSubmittedTransaction",
-    "deserializePersistedSubmittedTransaction",
-    "getSubmittedTransactionSignature",
-    "isDefinitiveSubmittedTransactionFailure",
-    "sendAndConfirmSubmittedTransaction",
-    "waitForSubmittedTransactionStatus"
-  ],
-  "eventPrizes/withdrawalOrchestrator.js": [
-    "handleWithdrawEventPrize",
-    "validatePrizeAssignment"
-  ],
-  "eventPrizes/withdrawalRepository.js": [
-    "acquireWithdrawalClaim",
-    "discardDefinitiveSubmittedTransaction",
-    "markWithdrawalBlocked",
-    "persistSubmittedTransaction",
-    "releaseProcessingClaim"
-  ],
   "eventProfileGameProjectionCore.js": [
     "READ_RETRY_ATTEMPTS",
     "READ_RETRY_DELAY_MS",
     "createEventProfileGameProjectionCore"
   ],
+  "eventProgressRecords.js": ["retainEventProgressRecord"],
+  "eventProjectionOutboxRecords.js": [
+    "createEventProfileGameProjectionRequest",
+    "createEventTelegramProjectionRequest",
+    "retainEventProjectionOutbox"
+  ],
+  "eventReads.js": [],
+  "events.js": ["EventRuntimeError", "createEventRuntime"],
   "events/bracket.js": [
     "addEventPrizeAssignmentUpdates",
     "applyMatchResolution",
@@ -116,6 +162,65 @@
     "resolveRoundMatchesWithConcurrency",
     "setMatchSlotBlocked",
     "setMatchSlotParticipant"
+  ],
+  "events/documents.js": [
+    "cloneEventDocument",
+    "cloneEventMatch",
+    "cloneEventParticipants",
+    "cloneEventRounds",
+    "copyEventDocument",
+    "copyEventParticipant",
+    "copyEventParticipantToMatchSlot",
+    "copyEventParticipants",
+    "copyEventWinnerDisplayName",
+    "createEventDocument",
+    "createEventMatchDocument",
+    "createEventMatchInvite",
+    "createEventMatchesDocument",
+    "createEventParticipantDocument",
+    "createEventParticipantsDocument",
+    "createEventRoundDocument",
+    "createEventRoundsDocument",
+    "eventCurrentRoundIndex",
+    "eventMatchAt",
+    "eventMatchEntries",
+    "eventMatchEntryKind",
+    "eventMatchState",
+    "eventParticipantAt",
+    "eventParticipantEntries",
+    "eventParticipantIsAbsent",
+    "eventParticipantJoinedOrder",
+    "eventParticipantProjectionState",
+    "eventParticipantState",
+    "eventParticipants",
+    "eventPlacementMatches",
+    "eventPrizeAssignments",
+    "eventPrizeOwnerProfileIds",
+    "eventRoundAt",
+    "eventRoundMatches",
+    "eventRoundState",
+    "eventRounds",
+    "eventState",
+    "eventThirdPlaceMatch",
+    "patchEventDocument",
+    "patchEventMatch",
+    "patchEventRound",
+    "plainEventParticipantAt",
+    "plainEventParticipantEntries",
+    "plainEventParticipants",
+    "readEventDocument",
+    "readEventMatchDocument",
+    "readEventMatchesDocument",
+    "readEventParticipantDocument",
+    "readEventParticipantsDocument",
+    "readEventRoundDocument",
+    "readEventRoundsDocument",
+    "readPlainEventDocument",
+    "readPlainEventParticipantDocument",
+    "setEventMatch",
+    "setEventMatchSlotBlocked",
+    "setEventRound",
+    "withEventParticipant"
   ],
   "events/eventProjectionModel.js": [
     "NAVIGATION_PARTICIPANT_PREVIEW_LIMIT",
@@ -151,6 +256,7 @@
     "resolveLockKind",
     "withEventLease"
   ],
+  "events/model.js": [],
   "events/ownership.js": [
     "buildEventOwnershipQuery",
     "canonicalizeEventParticipants",
@@ -168,6 +274,13 @@
     "resolveRequesterParticipation"
   ],
   "events/participants.js": ["getEventParticipantIds"],
+  "events/requests.js": [
+    "eventCreateOptions",
+    "eventRequestId",
+    "eventRequestMatchKey",
+    "eventRequestPostponeMinutes",
+    "eventRequestStartsInMinutes"
+  ],
   "events/scheduling.js": [
     "EventSchedulingError",
     "assertScheduledStartWindow",
@@ -197,14 +310,34 @@
     "setMatchSlotBlocked",
     "setMatchSlotParticipant"
   ],
-  "events.js": ["EventRuntimeError", "createEventRuntime"],
-  "gameVariants.js": ["buildGameSeedForStoredVariant", "buildRandomGameSeed"],
+  "events/syncTransitions.js": [
+    "buildActiveEventSyncPlan",
+    "buildEndedEventSyncPlan"
+  ],
   "gameplay/matchReconstruction.js": [
     "buildOrderedMatchSubmissions",
     "buildOrderedMoveHistory"
   ],
+  "gameSessionChanges.js": [],
+  "gameVariants.js": ["buildGameSeedForStoredVariant", "buildRandomGameSeed"],
   "matchOutcome.js": ["resolveMatchWinner"],
   "monsRules.js": ["loadMonsRules", "movesFromFlatString"],
+  "profileGameProjectionRecords.js": [
+    "copyProjectionOwner",
+    "createEventProjection",
+    "createGameProjection",
+    "createProjectionProfile",
+    "projectionFreshness",
+    "projectionLastFingerprint",
+    "projectionMergeFreshness",
+    "projectionOpponentEmoji",
+    "projectionOpponentName",
+    "projectionOwnerLoginId",
+    "projectionOwnerRole",
+    "projectionTime",
+    "retainProfileGameProjection",
+    "retainProjectionProfile"
+  ],
   "profileGamesProjectionCore.js": [
     "READ_RETRY_ATTEMPTS",
     "READ_RETRY_DELAY_MS",
@@ -292,6 +425,16 @@
     "isToggleEventPrizeSelectionResponse",
     "profileEventPrizesPageEtag"
   ],
+  "shared/event-types.js": ["THIRD_PLACE_MATCH_KEY"],
+  "shared/event-views.js": [
+    "decodeEventMatchView",
+    "decodeEventParticipantView",
+    "decodeEventPrizeAssignmentView",
+    "decodeEventPrizeAssignmentsView",
+    "decodeEventRoundView",
+    "decodeEventView",
+    "normalizeEventPrizeId"
+  ],
   "shared/events.js": [
     "EVENT_BOOKMARK_HEADER",
     "EVENT_ETAG_HEADER",
@@ -311,6 +454,12 @@
     "buildEventMatchKey",
     "buildEventParticipantSnapshot",
     "buildEventSeedOrder",
+    "decodeEventMatchView",
+    "decodeEventParticipantView",
+    "decodeEventPrizeAssignmentView",
+    "decodeEventPrizeAssignmentsView",
+    "decodeEventRoundView",
+    "decodeEventView",
     "eventBookmarkEpoch",
     "eventSnapshotEtag",
     "getEventBracketSize",
@@ -333,6 +482,7 @@
     "isRemoveEventParticipantResponse",
     "isSyncEventStateRequest",
     "isSyncEventStateResponse",
+    "normalizeEventPrizeId",
     "parseEventMatchKey",
     "resolveEventTelegramAnnouncements"
   ],
@@ -391,6 +541,7 @@
     "computeHash32",
     "createSeededRandom",
     "isAutoInviteId",
+    "isCanonicalLoginUid",
     "isSafeRecordKey",
     "normalizeRecordKey",
     "pickHostColor",
@@ -404,6 +555,30 @@
     "isInviteMetadataMessage",
     "isInviteMetadataSnapshot",
     "isReadInviteMetadataResponse"
+  ],
+  "shared/invite-records.js": [
+    "createEventInviteDocument",
+    "createInviteFieldDocument",
+    "createManualInviteDocument",
+    "createMatchedAutomatchInviteDocument",
+    "createPendingAutomatchInviteDocument",
+    "inviteHistoricalParticipants",
+    "inviteIsEventOwned",
+    "inviteMatchesParticipants",
+    "inviteMutationParticipants",
+    "inviteOpponent",
+    "inviteProjectionState",
+    "inviteRatingEvent",
+    "inviteRatingWager",
+    "inviteRematchState",
+    "inviteSourceEventState",
+    "inviteTelegramFingerprint",
+    "inviteTimerEventId",
+    "inviteTrimmedParticipants",
+    "mergeInviteAutomatchOperation",
+    "presentationInviteView",
+    "readCanonicalInviteParticipants",
+    "readInviteDocument"
   ],
   "shared/invite-wagers.js": [
     "INVITE_WAGERS_MAX_MESSAGE_BYTES",
@@ -652,8 +827,35 @@
     "deleteTelegramMessage",
     "editTelegramMessage",
     "isKnownSafeTelegramSendError",
+    "retainTelegramDeleteInput",
+    "retainTelegramEditInput",
+    "retainTelegramMediaGroupInput",
+    "retainTelegramSendInput",
     "sendTelegramMediaGroup",
     "sendTelegramMessage"
+  ],
+  "telegram/deliveryCleanup.js": ["createTelegramCleanupDelivery"],
+  "telegram/deliveryCleanupRecords.js": [
+    "acquirePendingDeleteRecord",
+    "clearPendingDeleteRecord",
+    "orphanPendingDeleteRecord",
+    "recordCleanupRetryProof",
+    "recordCleanupRetryState"
+  ],
+  "telegram/deliveryControl.js": ["createTelegramDeliveryControl"],
+  "telegram/deliveryControlRecords.js": [
+    "clearRateLimitProofRecord",
+    "prepareDesiredGateRecord",
+    "settleApiGateRecord"
+  ],
+  "telegram/deliveryDesired.js": ["createTelegramDesiredDelivery"],
+  "telegram/deliveryDesiredRecords.js": [
+    "acquireDesiredRecord",
+    "clearMissingAppliedRecord",
+    "finishDesiredRecord",
+    "markAppliedStateUnknownRecord",
+    "recordDesiredRetryProof",
+    "recordDesiredRetryState"
   ],
   "telegram/deliveryEngine.js": [
     "TELEGRAM_DESTINATIONS",
@@ -684,7 +886,46 @@
     "omitRetryState",
     "resolveRetryDeadlineAtMs"
   ],
+  "telegram/deliveryRecovery.js": ["createTelegramDeliveryRecovery"],
+  "telegram/deliveryRecoveryRecords.js": [
+    "applyCleanupRetryProofRecord",
+    "applyDesiredRetryProofRecord",
+    "applyManualRecoveryRecord",
+    "applySafeRetryProofRecord",
+    "observeManualRecoveryResult",
+    "settleManualGateReleaseRecord"
+  ],
   "telegram/deliveryRetryCoordinator.js": ["createTelegramRetryCoordinator"],
+  "telegram/deliveryRetryTypes.js": [],
+  "telegram/deliverySend.js": ["createTelegramSendDelivery"],
+  "telegram/deliverySendRecords.js": [
+    "acknowledgeSendRecord",
+    "markSendInFlightRecord"
+  ],
+  "telegram/deliveryState.js": [
+    "DeliverySnapshot",
+    "PendingDeleteSnapshot",
+    "appendPendingDelete",
+    "buildApiGateOwner",
+    "buildPendingDeleteId",
+    "deliveryDocument",
+    "ensureCommitted",
+    "hashValue",
+    "normalizeString",
+    "omitKeys",
+    "pendingDeleteDocument",
+    "preserveSendEvidence",
+    "promotePendingDeleteQueue",
+    "readDelivery",
+    "readPendingDelete",
+    "resolvePendingDeleteId",
+    "retryDocument",
+    "validateDesiredForDelivery",
+    "writeCleanup",
+    "writeDelivery"
+  ],
+  "telegram/deliveryTypes.js": [],
+  "telegram/desiredRecords.js": ["acquiredDesiredView"],
   "telegram/desiredStateCore.js": [
     "TELEGRAM_DESTINATIONS",
     "TELEGRAM_MESSAGE_ROOT",
@@ -730,9 +971,25 @@
     "renderStartedMessage",
     "renderUpcomingMessage"
   ],
+  "telegram/eventProjectionRecords.js": [
+    "copyStartedMatchLines",
+    "createEventTelegramProjectionDocument",
+    "deferEventTelegramProjectionTexts",
+    "eventTelegramProjectionGeneration",
+    "eventTelegramProjectionNeedsResults",
+    "readEventTelegramProjectionDocument",
+    "retainEventTelegramEndedResults",
+    "retainStartedMatchLines",
+    "withEventTelegramProjectionGuard"
+  ],
+  "telegram/messageProjectionRecords.js": [
+    "adoptTelegramReminder",
+    "projectAutomatchMessage",
+    "projectEventMessage",
+    "replaceTelegramDesired"
+  ],
   "telegram/projectionCore.js": [
     "AUTOMATCH_PROJECTION_GUARD_VERSION",
-    "asObject",
     "buildAutomatchProjectionGuard",
     "buildAutomatchTelegramProjection",
     "evaluateAutomatchProjectionUpdate",
@@ -742,6 +999,7 @@
     "normalizeString",
     "renderMatchedAutomatchTelegramText",
     "resolveAutomatchTelegramLifecycle",
+    "retainAutomatchTelegramSource",
     "shouldProjectRatingTelegramUpdate"
   ],
   "telegram/queueBridge.js": [
@@ -750,7 +1008,54 @@
     "sendTelegramCommand",
     "signTelegramBridgeRequest"
   ],
+  "telegram/records.js": [
+    "AppliedMessageSnapshot",
+    "apiGateDocument",
+    "appliedDocument",
+    "clearTelegramApiGate",
+    "controlDocument",
+    "desiredDocument",
+    "messageAppliedDocument",
+    "messageDeliveryDocument",
+    "messageDesiredDocument",
+    "messageDesiredRevision",
+    "messageDocument",
+    "messageRecoveryResultDocument",
+    "omitTelegramMessageFields",
+    "readMessageApplied",
+    "readTelegramControlDocument",
+    "readTelegramMessageDocument",
+    "sendEvidenceDocument",
+    "telegramApiGateOwner",
+    "updateTelegramApplied",
+    "updateTelegramControl",
+    "updateTelegramMessage"
+  ],
   "telegram/repositoryCore.js": ["createTelegramRepository"],
+  "telegram/retryRecords.js": [
+    "buildTelegramRetrySchedule",
+    "captureCleanupWindowProof",
+    "captureDesiredWindowProof",
+    "captureSafeRetryProof",
+    "cleanupWindowProofInput",
+    "cleanupWindowProofState",
+    "deferredDesiredRetryInput",
+    "desiredSafeProofInput",
+    "desiredWindowProofInput",
+    "desiredWindowProofState",
+    "lockedDesiredRetryInput",
+    "messageRateLimitProof",
+    "messageSettlementOwnerInput",
+    "rateLimitBarrierInput",
+    "rateLimitProofOwner",
+    "rateLimitProofRetryAt",
+    "readBarrierProofInput",
+    "readRateLimitRetryState",
+    "resumedRateLimitRetryInput",
+    "retainedRateLimitProof",
+    "safeRetryProofIdentity",
+    "telegramRetryScheduleTime"
+  ],
   "telegram/sundayMonsReminder.js": [
     "SUNDAY_MONS_REMINDER_LEAD_MS",
     "buildSundayMonsReminder",
@@ -770,11 +1075,14 @@
     "TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND",
     "TELEGRAM_TASK_KINDS"
   ],
+  "telegram/values.js": ["isRecord", "readProperty"],
   "telegramDisplay.js": [
     "AUTOMATCH_WAITING_EMOJI_ID",
     "getDisplayNameFromAddress",
     "getTelegramEmojiTag",
     "resolveTelegramEmojiId"
   ],
-  "telegramEmojiData.js": ["customTelegramEmojis"]
+  "telegramEmojiData.js": ["customTelegramEmojis"],
+  "transactions.js": [],
+  "shared/api-contracts.js": []
 }

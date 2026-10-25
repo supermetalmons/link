@@ -1,10 +1,10 @@
-import type { EventMutation } from "../../../../runtime/eventCommands.js";
+import type { EventProjectionOutboxDocument } from "../../../../runtime/eventProjectionOutboxRecords.js";
+import type { EventPersistenceMutation as EventMutation } from "../eventPersistenceCommands.ts";
 import {
   EventD1Failure,
   type DecodedEventRow,
   type EventD1Connection,
   type EventMutationOptions,
-  type EventOutboxRecord,
   type EventRow,
   type ProgressOutboxSnapshot,
   type TelegramProjectionState,
@@ -27,7 +27,10 @@ export type EventMutationSnapshots = {
   events: ReadonlyMap<string, DecodedEventRow | null>;
   selections: ReadonlyMap<string, Record<string, string>>;
   progress: ReadonlyMap<string, ProgressOutboxSnapshot>;
-  profileGame: ReadonlyMap<string, EventOutboxRecord | null>;
+  profileGame: ReadonlyMap<
+    string,
+    EventProjectionOutboxDocument<"profile-game"> | null
+  >;
   telegram: ReadonlyMap<string, TelegramProjectionState | null>;
 };
 
@@ -119,7 +122,10 @@ export async function readEventMutationSnapshots(
   const events = new Map<string, DecodedEventRow | null>();
   const selections = new Map<string, Record<string, string>>();
   const progress = new Map<string, ProgressOutboxSnapshot>();
-  const profileGame = new Map<string, EventOutboxRecord | null>();
+  const profileGame = new Map<
+    string,
+    EventProjectionOutboxDocument<"profile-game"> | null
+  >();
   const telegram = new Map<string, TelegramProjectionState | null>();
   const reads: Array<{
     statement: D1PreparedStatement;
@@ -175,6 +181,7 @@ export async function readEventMutationSnapshots(
           eventId,
           decodeProjectionOutboxRow(
             rows[0] as { record_json: string } | undefined,
+            "profile-game",
           ),
         );
       },

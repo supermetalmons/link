@@ -1,3 +1,4 @@
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import { socketTestIdentity } from "./socketTestSession.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -94,7 +95,10 @@ function setup({
     readInviteMetadata: async (inviteId) => {
       calls.sources++;
       assert.equal(inviteId, snapshot.inviteId);
-      return { hostId: snapshot.hostId, guestId: snapshot.guestId };
+      return retainedInviteSourceFixture({
+        hostId: snapshot.hostId,
+        guestId: snapshot.guestId,
+      });
     },
     readProfileOwnershipSnapshot: async (query) => ({
       canonicalProfileIdByProfileId: new Map(),

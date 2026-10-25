@@ -1,3 +1,4 @@
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import type { MatchPresentation } from "@mons/shared/match-presentation";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -103,10 +104,12 @@ function setup(invite: unknown = paired, uid = "host-login") {
   };
   repository.readInviteMetadata = async (inviteId) => {
     calls.reads.push(`invites/${inviteId}`);
-    return (records.get(`invites/${inviteId}`) ?? null) as Record<
-      string,
-      unknown
-    > | null;
+    return retainedInviteSourceFixture(
+      (records.get(`invites/${inviteId}`) ?? null) as Record<
+        string,
+        unknown
+      > | null,
+    );
   };
   repository.readProfileOwnershipSnapshot = async (query) => ({
     canonicalProfileIdByProfileId: new Map(),

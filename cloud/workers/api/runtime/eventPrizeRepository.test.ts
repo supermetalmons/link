@@ -1,3 +1,4 @@
+import { createWithdrawalStorageFixture as createD1EventPrizeWithdrawalStore } from "../test/withdrawalStorageFixture.ts";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import type { EventPrizeAssignmentRecord } from "../../../runtime/eventReads.js";
@@ -14,7 +15,6 @@ import { createEventPrizeRepository } from "../src/eventPrizeRepository.ts";
 import { createD1ProfileOwnershipReader } from "../src/profileOwnershipD1.ts";
 import { createEventPrizeContext } from "../src/eventPrizeWithdrawal/context.ts";
 import { handleEventPrizeWithdrawalRoute } from "../src/eventPrizeWithdrawal/route.ts";
-import { createD1EventPrizeWithdrawalStore } from "../src/eventPrizeWithdrawalD1.ts";
 import { executeEventPrizeWithdrawal } from "../src/eventPrizeWithdrawal/runtime.ts";
 import { buildEventPrizeWithdrawalOperationId } from "../src/eventPrizeWithdrawal/contracts.ts";
 import { handleEventReadRoute } from "../src/eventReadRoute.ts";

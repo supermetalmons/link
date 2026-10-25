@@ -1,12 +1,7 @@
-import {
-  normalizeAuthMethod,
-  type AuthIntentResponse,
-} from "@mons/shared/auth";
+import type { ApiRequest, ApiResponse } from "@mons/shared/api-contracts";
+import { normalizeAuthMethod } from "@mons/shared/auth";
 import { base64url } from "jose";
-import {
-  normalizeServerXConsentSource,
-  type XRedirectStartResponse,
-} from "@mons/shared/x-redirect";
+import { normalizeServerXConsentSource } from "@mons/shared/x-redirect";
 import {
   createAuthProfileRepository,
   readAuthIdentityProfile,
@@ -53,7 +48,9 @@ import {
 import { authMutationsDisabled } from "./authPolicy.ts";
 import { secureAlphanumericId, secureRandomBytes } from "./authRandom.ts";
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
-import type { ProfileLookupResponse } from "@mons/shared/profiles";
+type AuthIntentResponse = ApiResponse<"POST /auth/intents">;
+type XRedirectStartResponse = ApiResponse<"POST /auth/x/flows">;
+type ProfileLookupResponse = ApiResponse<"GET /auth/identity">;
 
 const AUTH_INTENT_TTL_MS = 5 * 60 * 1_000;
 const CREATE_ID_ATTEMPTS = 3;
@@ -115,7 +112,8 @@ async function handleBeginIntent(
   dependencies: AuthRouteDependencies,
 ): Promise<AuthIntentResponse> {
   const body = await parseBody(request);
-  const method = normalizeAuthMethod(body.method);
+  const method: ApiRequest<"POST /auth/intents">["method"] | null =
+    normalizeAuthMethod(body.method);
   if (!method || Object.keys(body).length !== 1) {
     throw new AuthApiFailure(
       400,
@@ -164,7 +162,7 @@ async function handleBeginXFlow(
   dependencies: AuthRouteDependencies,
 ): Promise<XRedirectStartResponse> {
   const body = await parseBody(request);
-  const intentId =
+  const intentId: ApiRequest<"POST /auth/x/flows">["intentId"] =
     typeof body.intentId === "string" ? body.intentId.trim() : "";
   if (!AUTH_TOKEN_PATTERN.test(intentId)) {
     throw new AuthApiFailure(400, "invalid-argument", "intentId is required.");
@@ -207,8 +205,12 @@ async function handleBeginXFlow(
       ),
     );
     const codeChallenge = base64url.encode(challengeBytes);
-    const consentSource = normalizeServerXConsentSource(body.consentSource);
-    const returnUrl = safeXReturnUrl(
+    const consentSource: NonNullable<
+      ApiRequest<"POST /auth/x/flows">["consentSource"]
+    > = normalizeServerXConsentSource(body.consentSource);
+    const returnUrl: NonNullable<
+      ApiRequest<"POST /auth/x/flows">["returnUrl"]
+    > = safeXReturnUrl(
       typeof body.returnUrl === "string" ? body.returnUrl : "",
     );
     const expiresAtMs = Math.min(nowMs + X_FLOW_TTL_MS, intent.expiresAtMs);
@@ -251,8 +253,11 @@ export async function handleAuthRoute(
   let corsHeaders: Record<string, string> = { Vary: "Origin" };
   const now = dependencies.now || Date.now;
   const { measure, finish } = createRequestTiming({ now, repeated: "replace" });
-  const respond: typeof authJsonResponse = (body, status, headers) =>
-    finish(authJsonResponse(body, status, headers));
+  const respond: typeof authJsonResponse = (
+    body: unknown,
+    status: number,
+    headers: HeadersInit,
+  ) => finish(authJsonResponse(body, status, headers));
   try {
     corsHeaders = getAuthCorsHeaders(request);
     if (request.method === "OPTIONS") {
@@ -274,7 +279,7 @@ export async function handleAuthRoute(
       if (new URL(request.url).search) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
       }
-      return respond(
+      return respond<`GET ${typeof pathname}`, 200>(
         await measure("identity", () =>
           (
             dependencies.readIdentity ||
@@ -312,7 +317,7 @@ export async function handleAuthRoute(
         env,
         `auth-mutation:${operation}:${identity.uid}`,
       );
-      return respond(
+      return respond<`POST ${typeof pathname}`, 200>(
         await handleAuthMutation(request, identity, env, ctx, {
           ...dependencies.mutation,
           stateRepository:
@@ -323,14 +328,14 @@ export async function handleAuthRoute(
       );
     }
     if (pathname === "/auth/methods") {
-      return respond(
+      return respond<`GET ${typeof pathname}`, 200>(
         await repository.getLinkedAuthMethods(identity.uid),
         200,
         corsHeaders,
       );
     }
     if (pathname === "/auth/intents") {
-      return respond(
+      return respond<`POST ${typeof pathname}`, 200>(
         await handleBeginIntent(
           request,
           env,
@@ -344,7 +349,7 @@ export async function handleAuthRoute(
     }
     if (pathname === "/auth/profile/sync") {
       await enforceAuthRateLimit(env, `auth-profile-claim:${identity.uid}`);
-      return respond(
+      return respond<`POST ${typeof pathname}`, 200>(
         await measure("profile_sync", () =>
           syncProfile(identity, env, {
             ...dependencies.profileSync,
@@ -356,7 +361,7 @@ export async function handleAuthRoute(
       );
     }
     if (pathname === "/auth/x/flows") {
-      return respond(
+      return respond<`POST ${typeof pathname}`, 200>(
         await handleBeginXFlow(
           request,
           env,

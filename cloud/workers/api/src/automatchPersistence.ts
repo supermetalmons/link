@@ -1,3 +1,4 @@
+import type { AutomatchRecordValue } from "./automatchD1/types.ts";
 import { AuthApiFailure } from "./authErrors.ts";
 import {
   automatchAdmissionGuardStatements,
@@ -58,7 +59,7 @@ export class AutomatchPersistenceFrozen extends AuthApiFailure {
   }
 }
 
-export function createAutomatchPersistence(
+export function createAutomatchPersistenceCompatibility(
   db: D1Database,
   raw: MatchStatePort,
   {
@@ -168,13 +169,13 @@ export function createAutomatchPersistence(
   const recover = (key: string, signal?: AbortSignal) =>
     recoverResources([key], signal);
 
-  const readResource = async (
+  const readResource = async <Root extends AutomatchRoot>(
     key: string,
-    root: AutomatchRoot | "invite",
+    root: Root,
     recordKey: string,
     signal?: AbortSignal,
     receipt = false,
-  ): Promise<unknown> => {
+  ): Promise<AutomatchRecordValue<Root>> => {
     for (let attempt = 0; ; attempt++) {
       const snapshot = await readAutomatchResourceSnapshot(
         db,
@@ -541,6 +542,14 @@ export function createAutomatchPersistence(
       };
     },
   };
+}
+
+export function createAutomatchPersistence(
+  ...args: Parameters<typeof createAutomatchPersistenceCompatibility>
+) {
+  const { rawClient: _rawClient, ...persistence } =
+    createAutomatchPersistenceCompatibility(...args);
+  return persistence;
 }
 
 export type AutomatchPersistence = ReturnType<

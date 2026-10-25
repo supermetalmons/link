@@ -1,6 +1,11 @@
 // Generated from src/eventPrizes/withdrawalRepository.ts. Run npm run generate:runtime.
-import type { WithdrawalData, WithdrawalRecord } from "./types.js";
+import type { WithdrawalRecord } from "./types.js";
+import type { WithdrawalRecordStorage } from "./storage.js";
+import { type WithdrawalDocument } from "./records.js";
 import type { WithdrawalClaimInput } from "../eventPrizeWithdrawalState.js";
+export declare function createWithdrawalRecordCommands(
+  storage: WithdrawalRecordStorage,
+): WithdrawalRecord;
 declare const acquireWithdrawalClaim: ({
   withdrawalRecord,
   eventId,
@@ -16,13 +21,13 @@ declare const acquireWithdrawalClaim: ({
   withdrawalRecord: WithdrawalRecord;
 }) => Promise<
   | {
-      completed: WithdrawalData;
+      completed: WithdrawalDocument;
       leaseId?: never;
       withdrawal?: never;
     }
   | {
       leaseId: string;
-      withdrawal: WithdrawalData;
+      withdrawal: WithdrawalDocument;
       completed?: never;
     }
 >;
@@ -56,7 +61,7 @@ declare const persistSubmittedTransaction: ({
   signedTransactionBase64: string;
   blockhash: string;
   lastValidBlockHeight: number;
-}) => Promise<WithdrawalData>;
+}) => Promise<WithdrawalDocument>;
 declare const discardDefinitiveSubmittedTransaction: ({
   withdrawalRecord,
   leaseId,

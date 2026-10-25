@@ -1,3 +1,4 @@
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import type { ReadGameBootstrapResponse } from "@mons/shared/game-bootstrap";
 import {
   isStartAutomatchResponse,
@@ -131,7 +132,7 @@ test("enrichment reuses the authorized bootstrap reader without changing stored 
       assert.equal(dependencies?.repository, repository);
       return readAuthenticatedGameBootstrap(target, environment, {
         ...dependencies,
-        readAdmission: async () => source,
+        readAdmission: async () => retainedInviteSourceFixture(source),
         room: {
           readMetadata: async () => metadata,
           readMatches: async () => {

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
 import { bindProfileCosmeticStorage } from "./fixtures/profileCosmeticStorageHarness.mjs";
+import { decodeEnsProfile } from "../src/utils/ensResolver.ts";
 
 const path = new URL("../src/utils/playerMetadata.ts", import.meta.url);
 const source = ts.createSourceFile(
@@ -77,6 +78,7 @@ function harness({ watchOnly = false, unreadableCosmetic = null } = {}) {
     },
   );
   const dependencies = {
+    decodeEnsProfile,
     createPlayerMetadataSessionGuard: () => () => currentSession,
     usernamesForUids: {},
     ethAddressesForUids: {},
@@ -108,6 +110,7 @@ function harness({ watchOnly = false, unreadableCosmetic = null } = {}) {
     data,
     events,
     profiles,
+    ens: dependencies.ensForUids,
     hydrate: (profile = { username: "Player" }, own = true) =>
       hydrate(profile, "actor", own, () => events.completions++),
     finishProfile,
@@ -259,5 +262,81 @@ test("watch-only hydration persists own cosmetics without changing board appeara
   assert.deepEqual(h.events.displays, []);
   for (const key of Object.keys(storedCosmetics)) {
     assert.equal(h.data[key], undefined);
+  }
+});
+
+test("ENS metadata decodes valid provider names and optional avatars without publishing malformed or stale replies", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const [value, expected] of [
+      [
+        { name: "  player.eth  ", avatar: null },
+        { name: "  player.eth  ", avatar: null },
+      ],
+      [{ name: "player.eth" }, { name: "player.eth", avatar: undefined }],
+      [
+        { name: "player.eth", avatar: 7 },
+        { name: "player.eth", avatar: undefined },
+      ],
+      [{ name: "   ", avatar: "ignored" }, undefined],
+      [{ name: 7 }, undefined],
+      [null, undefined],
+    ]) {
+      globalThis.fetch = async () => ({ ok: true, json: async () => value });
+      const h = harness();
+      h.hydrate({ eth: "0xaddress", rating: 1500, nonce: 1 }, false);
+      await flush();
+      assert.deepEqual(h.ens.actor, expected);
+      assert.equal(h.events.completions, expected ? 2 : 1);
+    }
+    let finish;
+    globalThis.fetch = () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      });
+    const h = harness();
+    h.hydrate({ eth: "0xaddress", rating: 1500, nonce: 1 }, false);
+    h.invalidate();
+    finish({ ok: true, json: async () => ({ name: "late.eth" }) });
+    await flush();
+    assert.deepEqual(h.ens, {});
+    assert.equal(h.events.completions, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("ENS metadata observes eligibility, stored names, and avatar in their original order", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const [names, expected, expectedReads] of [
+      [["first", " ", "third"], undefined, ["name", "name"]],
+      [
+        ["first", "second", " third "],
+        { name: " third ", avatar: "avatar" },
+        ["name", "name", "name", "avatar"],
+      ],
+    ]) {
+      const reads = [];
+      let index = 0;
+      const value = {
+        get name() {
+          reads.push("name");
+          return names[index++];
+        },
+        get avatar() {
+          reads.push("avatar");
+          return "avatar";
+        },
+      };
+      globalThis.fetch = async () => ({ ok: true, json: async () => value });
+      const h = harness();
+      h.hydrate({ eth: "0xaddress", rating: 1500, nonce: 1 }, false);
+      await flush();
+      assert.deepEqual(h.ens.actor, expected);
+      assert.deepEqual(reads, expectedReads);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });

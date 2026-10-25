@@ -1,3 +1,4 @@
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { EventProgressOutboxRecord } from "../../../runtime/events.js";
@@ -17,7 +18,8 @@ const outbox: EventProgressOutboxRecord = {
 };
 
 const gameplayReads: RatingGameplayReader = {
-  readInviteMetadata: async () => ({ hostId: "player-1" }),
+  readInviteMetadata: async () =>
+    retainedInviteSourceFixture({ hostId: "player-1" }),
   readMatchRecord: async () => null,
   readMatchPair: async (input) => ({
     ...input,

@@ -2,10 +2,12 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.createTelegramDeliveryControl = createTelegramDeliveryControl;
-const deliveryPolicy_js_1 = require("./deliveryPolicy.js");
+const retryRecords_js_1 = require("./retryRecords.js");
+const records_js_1 = require("./records.js");
+const deliveryControlRecords_js_1 = require("./deliveryControlRecords.js");
+const records_js_2 = require("./records.js");
 const deliveryRetryCoordinator_js_1 = require("./deliveryRetryCoordinator.js");
 const deliveryState_js_1 = require("./deliveryState.js");
-const taskKinds_js_1 = require("./taskKinds.js");
 const values_js_1 = require("./values.js");
 function createTelegramDeliveryControl({
   repository,
@@ -26,72 +28,11 @@ function createTelegramDeliveryControl({
   };
   const transact = (messageKey, updater) =>
     repository.transactMessage(messageKey, (current) => {
-      const record = (0, deliveryState_js_1.asObject)(current);
+      const record = (0, records_js_2.messageDocument)(current);
       return updater(record);
     });
-  const scheduleExactRetry = async ({
-    messageKey,
-    revision,
-    taskKind,
-    retryState,
-    safeRejectedAttemptId = "",
-    pendingDeleteId = "",
-    retryProofLeaseOwner = "",
-    sourceGeneration = "",
-    proofTaskKind = "",
-    barrierProofOwner = "",
-    barrierRetryNotBeforeMs = 0,
-    scheduleTimeMs = 0,
-    apiGateReclaimOwner = "",
-    apiGateSettleOwner = "",
-  }) => {
-    const normalizedTaskKind =
-      (0, deliveryState_js_1.normalizeString)(taskKind) ||
-      taskKinds_js_1.TELEGRAM_DESIRED_TASK_KIND;
-    const retrySequence = (0, deliveryPolicy_js_1.normalizeRetrySequence)(
-      retryState.retrySequence,
-    );
-    const generation = [
-      normalizedTaskKind,
-      retrySequence,
-      (0, deliveryPolicy_js_1.normalizeTimestamp)(retryState.retryAtMs),
-      safeRejectedAttemptId || pendingDeleteId || revision,
-      (0, deliveryState_js_1.normalizeString)(retryProofLeaseOwner),
-      (0, deliveryState_js_1.normalizeString)(sourceGeneration),
-      (0, deliveryState_js_1.normalizeString)(proofTaskKind),
-      (0, deliveryState_js_1.normalizeString)(barrierProofOwner),
-      (0, deliveryPolicy_js_1.normalizeTimestamp)(barrierRetryNotBeforeMs),
-      (0, deliveryState_js_1.normalizeString)(apiGateReclaimOwner),
-      (0, deliveryState_js_1.normalizeString)(apiGateSettleOwner),
-    ].join(":");
-    return scheduleRetry({
-      messageKey,
-      revision,
-      taskKind: normalizedTaskKind,
-      retrySequence,
-      generation,
-      retryStartedAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
-        retryState.retryStartedAtMs,
-      ),
-      retryDeadlineAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
-        retryState.retryDeadlineAtMs,
-      ),
-      retryAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
-        retryState.retryAtMs,
-      ),
-      scheduleTimeMs:
-        (0, deliveryPolicy_js_1.normalizeTimestamp)(scheduleTimeMs) ||
-        (0, deliveryPolicy_js_1.normalizeTimestamp)(retryState.retryAtMs),
-      ...(safeRejectedAttemptId ? { safeRejectedAttemptId } : {}),
-      ...(pendingDeleteId ? { pendingDeleteId } : {}),
-      ...(retryProofLeaseOwner ? { retryProofLeaseOwner } : {}),
-      ...(proofTaskKind ? { proofTaskKind } : {}),
-      ...(barrierProofOwner ? { barrierProofOwner } : {}),
-      ...(barrierRetryNotBeforeMs ? { barrierRetryNotBeforeMs } : {}),
-      ...(apiGateReclaimOwner ? { apiGateReclaimOwner } : {}),
-      ...(apiGateSettleOwner ? { apiGateSettleOwner } : {}),
-    });
-  };
+  const scheduleExactRetry = async (input) =>
+    scheduleRetry((0, retryRecords_js_1.buildTelegramRetrySchedule)(input));
   const retryCoordinator = (0,
   deliveryRetryCoordinator_js_1.createTelegramRetryCoordinator)({
     now,
@@ -101,14 +42,9 @@ function createTelegramDeliveryControl({
       repository.extendRetryBarrierAndReleaseApiGate(proof),
     localRetryBarrier,
   });
-  const applyRateLimitBarrierProof = async ({
-    barrierProofOwner,
-    barrierRetryNotBeforeMs,
-  }) => {
-    const owner = (0, deliveryState_js_1.normalizeString)(barrierProofOwner);
-    const retryNotBeforeMs = (0, deliveryPolicy_js_1.normalizeTimestamp)(
-      barrierRetryNotBeforeMs,
-    );
+  const applyRateLimitBarrierProof = async (input) => {
+    const { owner, retryNotBeforeMs } = (0,
+    retryRecords_js_1.readBarrierProofInput)(input);
     if (!owner || !retryNotBeforeMs) {
       return { applied: false };
     }
@@ -126,47 +62,12 @@ function createTelegramDeliveryControl({
     if (!owner) {
       return;
     }
-    await transact(messageKey, (record) => {
-      const delivery = (0, deliveryState_js_1.readDelivery)(record.delivery);
-      const pendingDelete = (0, deliveryState_js_1.readPendingDelete)(
-        delivery.pendingDelete,
-      );
-      const clearsDesired =
-        (0, deliveryState_js_1.normalizeString)(
-          (0, values_js_1.readProperty)(delivery.apiGateProofRequired, "owner"),
-        ) === owner;
-      const clearsPending =
-        (0, deliveryState_js_1.normalizeString)(
-          (0, values_js_1.readProperty)(
-            pendingDelete.apiGateProofRequired,
-            "owner",
-          ),
-        ) === owner;
-      if (!clearsDesired && !clearsPending) {
-        return { commit: false, decision: "rate-limit-proof-marker-stale" };
-      }
-      return {
-        value: {
-          ...record,
-          delivery: {
-            ...(clearsDesired
-              ? (0, deliveryState_js_1.omitKeys)(delivery, [
-                  "apiGateProofRequired",
-                ])
-              : delivery.source),
-            ...(clearsPending
-              ? {
-                  pendingDelete: (0, deliveryState_js_1.omitKeys)(
-                    pendingDelete,
-                    ["apiGateProofRequired"],
-                  ),
-                }
-              : {}),
-          },
-        },
-        decision: "rate-limit-proof-marker-cleared",
-      };
-    });
+    await transact(messageKey, (record) =>
+      (0, deliveryControlRecords_js_1.clearRateLimitProofRecord)(
+        (0, records_js_2.messageDocument)(record),
+        { owner },
+      ),
+    );
   };
   const acquireApiGate = ({
     messageKey,
@@ -201,7 +102,9 @@ function createTelegramDeliveryControl({
   });
   const updateOwned = async (messageKey, ownerToken, updater) =>
     transact(messageKey, (record) => {
-      const delivery = (0, deliveryState_js_1.readDelivery)(record.delivery);
+      const delivery = (0, deliveryState_js_1.readDelivery)(
+        (0, records_js_1.messageDeliveryDocument)(record),
+      );
       if (
         (0, deliveryState_js_1.normalizeString)(delivery.leaseOwner) !==
         ownerToken
@@ -224,37 +127,22 @@ function createTelegramDeliveryControl({
       `direct:${revision}`;
     const preparedAtMs = now();
     const prepared = (0, deliveryState_js_1.ensureCommitted)(
-      await updateOwned(messageKey, ownerToken, (record, delivery) => {
-        const existingOwner = (0, deliveryState_js_1.normalizeString)(
-          delivery.apiGateOwner,
-        );
-        return {
-          ...record,
-          delivery: {
-            ...delivery.source,
-            apiGateOwner:
-              existingOwner ||
-              (0, deliveryState_js_1.buildApiGateOwner)(
-                messageKey,
-                "desired",
-                revision,
-                generation,
-              ),
-            apiGateGeneration:
-              (0, deliveryState_js_1.normalizeString)(
-                delivery.apiGateGeneration,
-              ) || generation,
-            apiGateStartedAtMs:
-              (0, deliveryPolicy_js_1.normalizeTimestamp)(
-                delivery.apiGateStartedAtMs,
-              ) || preparedAtMs,
+      await updateOwned(messageKey, ownerToken, (record, delivery) =>
+        (0, deliveryControlRecords_js_1.prepareDesiredGateRecord)(
+          (0, records_js_2.messageDocument)(record),
+          delivery,
+          {
+            generation,
+            messageKey,
+            preparedAtMs,
+            revision,
           },
-        };
-      }),
+        ),
+      ),
       "api-gate-identity-not-persisted",
     );
     const delivery = (0, deliveryState_js_1.readDelivery)(
-      prepared.value?.delivery,
+      (0, records_js_1.messageDeliveryDocument)(prepared.value),
     );
     const owner = (0, deliveryState_js_1.normalizeString)(
       delivery.apiGateOwner,
@@ -283,19 +171,12 @@ function createTelegramDeliveryControl({
       return null;
     }
     await repository.releaseApiGate(settleOwner);
-    const result = await transact(messageKey, (record) => {
-      const delivery = (0, deliveryState_js_1.readDelivery)(record.delivery);
-      if (delivery.settlementOwner(field) !== settleOwner) {
-        return { commit: false, decision: "api-gate-settle-stale" };
-      }
-      return {
-        value: {
-          ...record,
-          delivery: (0, deliveryState_js_1.omitKeys)(delivery, [field]),
-        },
-        decision: "api-gate-settled",
-      };
-    });
+    const result = await transact(messageKey, (record) =>
+      (0, deliveryControlRecords_js_1.settleApiGateRecord)(
+        (0, records_js_2.messageDocument)(record),
+        { field, settleOwner },
+      ),
+    );
     if (!result.committed && result.decision !== "api-gate-settle-stale") {
       (0, deliveryState_js_1.ensureCommitted)(
         result,

@@ -1,3 +1,14 @@
+import type { MatchCreationRecord } from "@mons/shared/match-protocol";
+import type {
+  AutomatchRecordMutation,
+  RetainedAutomatchMutationBatch,
+} from "./automatchD1/types.ts";
+import {
+  isEventOwnedInviteSource,
+  type InviteSourceMutation,
+  type RetainedInviteMutationBatch,
+} from "./inviteSourceD1.ts";
+import { readMatchCreationInput } from "./matchRecordCodec.ts";
 import {
   evaluateStateValueMarker,
   STATE_VALUE_FIELD,
@@ -77,10 +88,59 @@ export function encodeSessionChanges(
 export const GAME_SESSION_CREATION_FIELD = "sessionCreation";
 export const GAME_SESSION_TRANSITION_FIELD = "sessionTransition";
 type JsonRecord = Record<string, unknown>;
+declare const retainedSessionCreation: unique symbol;
 export type StoredSessionMatchCreation = {
+  readonly [retainedSessionCreation]: true;
+};
+
+type SessionCreationEvidence = {
   path: string;
-  value: JsonRecord;
+  value: unknown;
   marker: string;
+};
+
+export type GameSessionIntentWrite = {
+  version: 2;
+  inviteId: string;
+  inviteSourceEpoch: number;
+  inviteMutations: InviteSourceMutation[];
+  transitionId: string;
+  digest: string;
+  resources: string[];
+  mutations: AutomatchRecordMutation[];
+  creations: StoredSessionMatchCreation[];
+  createdAtMs: number;
+};
+
+declare const retainedSessionResources: unique symbol;
+type RetainedSessionResources = { readonly [retainedSessionResources]: true };
+declare const retainedSessionIntent: unique symbol;
+export type RetainedGameSessionIntent = {
+  readonly [retainedSessionIntent]: true;
+  version: 2;
+  inviteId: string;
+  inviteSourceEpoch: number;
+  transitionId: string;
+  resources: RetainedSessionResources;
+  mutations: RetainedAutomatchMutationBatch;
+  inviteMutations: RetainedInviteMutationBatch;
+  creations: StoredSessionMatchCreation[];
+};
+
+type SessionIntentEvidence = {
+  version?: unknown;
+  transitionId?: unknown;
+  inviteId?: unknown;
+  resources?: unknown;
+  mutations?: unknown;
+  creations?: unknown;
+  inviteSourceEpoch?: unknown;
+  inviteMutations?: unknown;
+};
+
+type InviteMutationEvidence = {
+  current?: { inviteId?: unknown; revision?: unknown; value?: unknown };
+  value?: unknown;
 };
 
 export class GameSessionTransitionFailure extends Error {
@@ -163,12 +223,12 @@ export function gameSessionOperationResource(operationId: string): string {
 export function sessionLayout(changes: readonly GameSessionChange[]): {
   inviteId: string;
   inviteUpdates: JsonRecord;
-  matchUpdates: { path: string; value: JsonRecord }[];
+  matchUpdates: { path: string; value: MatchCreationRecord }[];
   operationResources: string[];
 } {
   const inviteIds = new Set<string>();
   const inviteUpdates: JsonRecord = {};
-  const matchUpdates: { path: string; value: JsonRecord }[] = [];
+  const matchUpdates: { path: string; value: MatchCreationRecord }[] = [];
   const operationResources: string[] = [];
   let canonicalChanges = 0;
   const paths = Object.keys(encodeSessionChanges(changes));
@@ -268,28 +328,88 @@ export function sessionLayout(changes: readonly GameSessionChange[]): {
 export function decodeSessionMatchCreation(
   creation: StoredSessionMatchCreation,
 ): MatchStateCreation {
-  const [root, playerId, matches, matchId, extra] = pathParts(creation.path);
+  const retained: unknown = creation;
+  const evidence = retained as SessionCreationEvidence;
+  const [root, playerId, matches, matchId, extra] = pathParts(evidence.path);
   if (root !== "players" || matches !== "matches" || !matchId || extra)
     fail("invalid-match-discovery-path");
   return {
     playerId,
     matchId,
-    value: creation.value as MatchStateCreation["value"],
-    marker: creation.marker,
+    value: readMatchCreationInput(evidence.value),
+    marker: evidence.marker,
   };
 }
 
 export async function encodeSessionMatchCreations(
-  updates: readonly { path: string; value: JsonRecord }[],
+  updates: readonly { path: string; value: MatchCreationRecord }[],
   transitionId: string,
   contentDigest: string,
   createdAtMs: number,
 ): Promise<StoredSessionMatchCreation[]> {
   return Promise.all(
-    updates.map(async ({ path, value }) => ({
-      path,
-      value: resolveValue(value, null, createdAtMs) as JsonRecord,
-      marker: await digest({ transitionId, path, digest: contentDigest }),
-    })),
+    updates.map(async ({ path, value }) => {
+      const creation: unknown = {
+        path,
+        value: resolveValue(value, null, createdAtMs),
+        marker: await digest({ transitionId, path, digest: contentDigest }),
+      };
+      return creation as StoredSessionMatchCreation;
+    }),
   );
+}
+
+export function readGameSessionIntent(row: {
+  payload_json: string;
+  transition_id: string;
+  invite_id: string;
+}): RetainedGameSessionIntent {
+  const parsed: unknown = JSON.parse(row.payload_json);
+  const payload = parsed as SessionIntentEvidence;
+  if (
+    payload.version !== 2 ||
+    payload.transitionId !== row.transition_id ||
+    payload.inviteId !== row.invite_id ||
+    !Array.isArray(payload.resources) ||
+    !Array.isArray(payload.mutations) ||
+    !Array.isArray(payload.creations)
+  )
+    fail("invalid-intent");
+  if (
+    !Number.isSafeInteger(payload.inviteSourceEpoch) ||
+    (payload.inviteSourceEpoch as number) < 1 ||
+    !Array.isArray(payload.inviteMutations) ||
+    payload.inviteMutations.length !== 1 ||
+    payload.inviteMutations.some(
+      ({ current, value }: InviteMutationEvidence) =>
+        !current ||
+        current.inviteId !== payload.inviteId ||
+        !Number.isSafeInteger(current.revision) ||
+        (current.revision as number) < 0 ||
+        (current.value !== null && !record(current.value)) ||
+        !record(value) ||
+        isEventOwnedInviteSource(current.value) ||
+        isEventOwnedInviteSource(value),
+    )
+  )
+    fail("invalid-invite-source-intent");
+  return parsed as RetainedGameSessionIntent;
+}
+
+export function serializeGameSessionIntent(
+  payload: GameSessionIntentWrite,
+): string {
+  return canonical(payload);
+}
+
+declare const retainedSessionResourceKey: unique symbol;
+type RetainedSessionResourceKey = {
+  readonly [retainedSessionResourceKey]: true;
+};
+
+export function gameSessionIntentResources(
+  intent: RetainedGameSessionIntent,
+): RetainedSessionResourceKey[] {
+  const evidence: unknown = intent.resources;
+  return evidence as RetainedSessionResourceKey[];
 }

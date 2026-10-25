@@ -1,10 +1,16 @@
+import type {
+  ApiJsonBody,
+  ApiJsonStatus,
+  ApiQuery,
+  ApiResponse,
+} from "@mons/shared/api-contracts";
 import {
   isReadMatchSnapshotRequest,
   normalizeMatchSnapshot,
-  type ReadMatchSnapshotRequest,
-  type ReadMatchSnapshotResponse,
 } from "@mons/shared/game-sessions";
 import { readMatchStateRecord } from "./matchStateRouting.ts";
+type ReadMatchSnapshotRequest = ApiQuery<"GET /matches/snapshot">;
+type ReadMatchSnapshotResponse = ApiResponse<"GET /matches/snapshot">;
 
 type MatchSnapshotRouteDependencies = {
   readMatch?: (
@@ -25,7 +31,10 @@ function publicHeaders(): Record<string, string> {
   };
 }
 
-function json(body: unknown, status: number): Response {
+function json<Status extends ApiJsonStatus<"GET /matches/snapshot">>(
+  body: ApiJsonBody<"GET /matches/snapshot", NoInfer<Status>>,
+  status: Status,
+): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: publicHeaders(),
@@ -33,7 +42,7 @@ function json(body: unknown, status: number): Response {
 }
 
 function errorResponse(
-  status: number,
+  status: Exclude<ApiJsonStatus<"GET /matches/snapshot">, 200>,
   error: string,
   message: string,
 ): Response {

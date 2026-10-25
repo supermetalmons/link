@@ -1,3 +1,4 @@
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Game } from "mons-rules";
@@ -74,7 +75,9 @@ function timerHarness(
       steps.push("invite");
       onRead();
       if (readFailure) throw readFailure;
-      return invite as Record<string, unknown> | null;
+      return retainedInviteSourceFixture(
+        invite as Record<string, unknown> | null,
+      );
     },
     async readProfileOwnershipSnapshot(query) {
       steps.push("ownership");

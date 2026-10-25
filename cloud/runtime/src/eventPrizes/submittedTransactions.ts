@@ -1,13 +1,14 @@
+import type { WithdrawalDocument } from "./records.js";
+import {
+  withdrawalSubmissionStrings,
+  withdrawalLastValidBlockHeight,
+} from "./records.js";
 import type {
   Umi,
   TransactionBuilder,
   TransactionSignature,
 } from "@metaplex-foundation/umi";
-import type {
-  WithdrawalData,
-  WithdrawalRecord,
-  SubmittedTransactionStatus,
-} from "./types.js";
+import type { WithdrawalRecord, SubmittedTransactionStatus } from "./types.js";
 import type { SubmittedTransaction } from "./solanaTypes.js";
 import { EventPrizeWithdrawalError as HttpsError } from "./errors.js";
 import { persistSubmittedTransaction } from "./withdrawalRepository.js";
@@ -20,9 +21,6 @@ import {
   loadSolanaDependencies,
 } from "./solana.js";
 
-const normalizeString = (value: unknown): string =>
-  typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
 class DefinitiveSubmittedTransactionFailure extends Error {}
 
 const isDefinitiveSubmittedTransactionFailure = (
@@ -32,14 +30,13 @@ const isDefinitiveSubmittedTransactionFailure = (
 
 const deserializePersistedSubmittedTransaction = (
   umi: Umi,
-  withdrawal: WithdrawalData | null | undefined,
+  withdrawal: WithdrawalDocument | null | undefined,
 ): SubmittedTransaction | null => {
-  const encoded = normalizeString(withdrawal?.signedTransactionBase64);
-  const transactionSignature = normalizeString(
-    withdrawal?.transactionSignature,
-  );
-  const blockhash = normalizeString(withdrawal?.blockhash);
-  const lastValidBlockHeight = Number(withdrawal?.lastValidBlockHeight);
+  const evidence = withdrawalSubmissionStrings(withdrawal);
+  const encoded = evidence.signedTransactionBase64;
+  const transactionSignature = evidence.transactionSignature;
+  const blockhash = evidence.blockhash;
+  const lastValidBlockHeight = withdrawalLastValidBlockHeight(withdrawal);
   if (
     !encoded ||
     !transactionSignature ||
@@ -72,7 +69,9 @@ const buildSubmittedTransaction = async ({
   builder: TransactionBuilder;
   withdrawalRecord: WithdrawalRecord;
   leaseId: string;
-}): Promise<SubmittedTransaction & { persistedWithdrawal: WithdrawalData }> => {
+}): Promise<
+  SubmittedTransaction & { persistedWithdrawal: WithdrawalDocument }
+> => {
   const { base58 } = loadSolanaDependencies();
   const latestBlockhash = await umi.rpc.getLatestBlockhash({
     commitment: CONFIRMATION_COMMITMENT,

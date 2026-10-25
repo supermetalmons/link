@@ -1,10 +1,11 @@
+import { queueFor } from "./queueProducers.ts";
+import { confirmedTelegramReminderText } from "./telegramAnnouncementRecords.ts";
+import { adoptTelegramReminder } from "../../../runtime/telegram/messageProjectionRecords.js";
+import type { TelegramMessageDocument } from "../../../runtime/telegram/records.js";
 import { buildTelegramEditDesired } from "../../../runtime/telegram/desiredStateCore.js";
 import type { TelegramRepository } from "../../../runtime/telegram/deliveryEngine.js";
 import { isV2TelegramEvent } from "../../../runtime/telegram/eventProjectionCore.js";
-import {
-  getSundayMonsReminderLeadMs,
-  isSundayMonsReminderEvent,
-} from "../../../runtime/telegram/sundayMonsReminder.js";
+import { isSundayMonsReminderEvent } from "../../../runtime/telegram/sundayMonsReminder.js";
 import { readEventRuntimeControl } from "./eventD1.ts";
 import { createEventGameplayRepository } from "./eventRepository.ts";
 import { buildEventTelegramProjectionOutbox } from "./eventTelegramProjectionProducer.ts";
@@ -59,21 +60,12 @@ function confirmedReminder(
   ) {
     return null;
   }
-  const payload = receipt.payload;
-  if (
-    !payload ||
-    payload.chatId !== chatId.trim() ||
-    payload.parseMode !== "HTML" ||
-    payload.silent !== false ||
-    typeof payload.text !== "string" ||
-    Object.hasOwn(payload, "imageUrls") ||
-    Object.hasOwn(payload, "hasSpoiler")
-  ) {
-    return null;
-  }
-  if (!getSundayMonsReminderLeadMs(eventId, payload.text)) {
-    return null;
-  }
+  const payload = confirmedTelegramReminderText(
+    receipt.payload,
+    chatId,
+    eventId,
+  );
+  if (payload === null) return null;
   return {
     text: payload.text,
     messageId: receipt.messageIds[0],
@@ -91,7 +83,7 @@ export async function adoptSundayMonsReminderMessage({
   receipt: TelegramAnnouncementRecord | null;
   telegram: Pick<TelegramRepository, "getMessage" | "transactMessage">;
   chatId: string;
-}): Promise<unknown> {
+}): Promise<TelegramMessageDocument | null> {
   const confirmed = confirmedReminder(eventId, receipt, chatId);
   if (!confirmed) return null;
   const messageKey = `event:${eventId}:reminder`;
@@ -104,31 +96,9 @@ export async function adoptSundayMonsReminderMessage({
     ifMissing: "skip",
     sourceRevision: `event:${eventId}:reminder:v1`,
   });
-  const result = await telegram.transactMessage(messageKey, (current) => {
-    if (current !== null && current !== undefined) {
-      return { commit: false, decision: "existing-reminder" };
-    }
-    return {
-      value: {
-        desired,
-        applied: {
-          destination: "community",
-          chatId: chatId.trim(),
-          messageId: confirmed.messageId,
-          instanceKey: desired.instanceKey,
-          revision: desired.revision,
-          contentHash: desired.contentHash,
-          appliedAtMs: confirmed.appliedAtMs,
-        },
-        delivery: {
-          status: "delivered",
-          revision: desired.revision,
-          deliveredAtMs: confirmed.appliedAtMs,
-        },
-      },
-      decision: "reminder-adopted",
-    };
-  });
+  const result = await telegram.transactMessage(messageKey, (current) =>
+    adoptTelegramReminder(current, desired, chatId, confirmed),
+  );
   return result.value;
 }
 
@@ -190,7 +160,7 @@ export async function refreshSundayMonsReminder(
   try {
     await (
       dependencies.enqueue ||
-      ((value) => env.TELEGRAM_PROJECTION_QUEUE.send(value))
+      ((value) => queueFor(env, "TELEGRAM_PROJECTION_QUEUE").send(value))
     )(task);
   } catch {
     reason = "dispatch-deferred";

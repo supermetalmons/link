@@ -1,3 +1,4 @@
+import { retainEventProgressRecord } from "../../../runtime/eventProgressRecords.js";
 import type {
   EventProgressRecoverySnapshot,
   EventProgressRecoveryStore,
@@ -19,7 +20,7 @@ export function createEventProgressRecoveryTestStore(
     const checkpoint = checkpoints.get(outboxId);
     return {
       outboxId,
-      record,
+      record: retainEventProgressRecord("pending", record),
       recordJson,
       nextReconcileAtMs:
         checkpoint?.recordJson === recordJson

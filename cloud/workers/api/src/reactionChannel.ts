@@ -1,12 +1,25 @@
+import type { ApiTransportStatus } from "@mons/shared/api-contracts";
 import type { MatchPresentation } from "@mons/shared/match-presentation";
 import {
   REACTION_PROTOCOL_VERSION,
   REACTION_SOCKET_PROTOCOL,
   isInviteReaction,
   type InviteReaction,
+  type InviteRoomPresentationEvent,
   type InviteRoomReactionEvent,
-  type InviteRoomSnapshot,
 } from "@mons/shared/reactions";
+import {
+  decodeStoredReaction,
+  storedReactionUuid,
+  type StoredReactionDocument,
+  type StoredReactionSnapshot,
+} from "./reactionRecords.ts";
+import {
+  readSocketAttachment,
+  socketAttachmentChannel,
+  socketAttachmentMatches,
+  socketAttachmentSchemaVersion,
+} from "./socketAttachmentRecords.ts";
 import {
   selectRegisteredPresentations,
   type MatchPresentationRegistration,
@@ -29,7 +42,6 @@ import {
   spectatorIpSocketTag,
   type SocketRole,
 } from "./socketTags.ts";
-
 type ReactionChannelDependencies = {
   presentations: Pick<
     MatchPresentationStore,
@@ -52,7 +64,7 @@ type StoredReaction = {
 };
 
 function isReactionSocket(socket: WebSocket): boolean {
-  const channel = socket.deserializeAttachment()?.channel;
+  const channel = socketAttachmentChannel(readSocketAttachment(socket));
   return channel === undefined || channel === "reaction";
 }
 
@@ -70,19 +82,39 @@ export class ReactionChannel {
     const ip = request.headers.get("X-Mons-Reaction-IP") || "unknown";
     const protocol = request.headers.get("Sec-WebSocket-Protocol");
     if (protocol !== REACTION_SOCKET_PROTOCOL)
-      return new Response("Unsupported reaction protocol", { status: 400 });
+      return new Response("Unsupported reaction protocol", {
+        status: 400 satisfies ApiTransportStatus<
+          "GET /invites/:inviteId/reactions/socket",
+          "text"
+        >,
+      });
     let matchId: string | null = null;
     try {
       const encodedMatchId = request.headers.get("X-Mons-Presentation-Match");
       if (encodedMatchId !== null) matchId = decodeURIComponent(encodedMatchId);
     } catch {
-      return new Response("Invalid presentation match", { status: 400 });
+      return new Response("Invalid presentation match", {
+        status: 400 satisfies ApiTransportStatus<
+          "GET /invites/:inviteId/reactions/socket",
+          "text"
+        >,
+      });
     }
     if (!matchId || matchId !== matchId.trim() || !isSafeRecordKey(matchId)) {
-      return new Response("Invalid presentation match", { status: 400 });
+      return new Response("Invalid presentation match", {
+        status: 400 satisfies ApiTransportStatus<
+          "GET /invites/:inviteId/reactions/socket",
+          "text"
+        >,
+      });
     }
     if (request.headers.get("X-Mons-Presentation-Canonical") !== "1")
-      return new Response("Invalid presentation authority", { status: 400 });
+      return new Response("Invalid presentation authority", {
+        status: 400 satisfies ApiTransportStatus<
+          "GET /invites/:inviteId/reactions/socket",
+          "text"
+        >,
+      });
     let canonicalActors: string[];
     try {
       const value: unknown = JSON.parse(
@@ -96,20 +128,41 @@ export class ReactionChannel {
         value.length > 2 ||
         value.some((uid) => !isCanonicalLoginUid(uid))
       ) {
-        return new Response("Invalid presentation actors", { status: 400 });
+        return new Response("Invalid presentation actors", {
+          status: 400 satisfies ApiTransportStatus<
+            "GET /invites/:inviteId/reactions/socket",
+            "text"
+          >,
+        });
       }
       canonicalActors = value;
     } catch {
-      return new Response("Invalid presentation actors", { status: 400 });
+      return new Response("Invalid presentation actors", {
+        status: 400 satisfies ApiTransportStatus<
+          "GET /invites/:inviteId/reactions/socket",
+          "text"
+        >,
+      });
     }
     if (
       (role !== "host" && role !== "guest" && role !== "spectator") ||
       ip.length > 64
     ) {
-      return new Response("Invalid reaction admission", { status: 400 });
+      return new Response("Invalid reaction admission", {
+        status: 400 satisfies ApiTransportStatus<
+          "GET /invites/:inviteId/reactions/socket",
+          "text"
+        >,
+      });
     }
     const session = readSocketSession(request, role !== "spectator");
-    if (!session) return new Response("Session expired", { status: 401 });
+    if (!session)
+      return new Response("Session expired", {
+        status: 401 satisfies ApiTransportStatus<
+          "GET /invites/:inviteId/reactions/socket",
+          "text"
+        >,
+      });
     if (session.authenticated)
       await this.dependencies.scheduleAlarm(session.authExpiresAtMs);
     const inviteId = this.dependencies.pinnedInviteId();
@@ -145,7 +198,12 @@ export class ReactionChannel {
         throw new Error("match-presentation-unavailable");
     }
     if (!socketSessionCurrent(session))
-      return new Response("Session expired", { status: 401 });
+      return new Response("Session expired", {
+        status: 401 satisfies ApiTransportStatus<
+          "GET /invites/:inviteId/reactions/socket",
+          "text"
+        >,
+      });
     const allSockets = this.ctx.getWebSockets();
     const reactionSockets = allSockets.filter(isReactionSocket);
     const roleCount = (value: SocketRole) =>
@@ -169,19 +227,25 @@ export class ReactionChannel {
       )
     ) {
       return new Response("Reaction room is full", {
-        status: 429,
+        status: 429 satisfies ApiTransportStatus<
+          "GET /invites/:inviteId/reactions/socket",
+          "text"
+        >,
         headers: { "Retry-After": "60" },
       });
     }
-    const reactions = Object.fromEntries(
+    const reactions = Object.fromEntries<StoredReactionDocument>(
       this.ctx.storage.sql
         .exec<StoredReaction>(
           "SELECT sender_uid, reaction_json FROM latest_reactions ORDER BY sender_uid",
         )
         .toArray()
-        .map((row) => [row.sender_uid, JSON.parse(row.reaction_json)]),
+        .map((row) => [
+          row.sender_uid,
+          decodeStoredReaction(row.reaction_json),
+        ]),
     );
-    const snapshot: InviteRoomSnapshot = {
+    const snapshot: StoredReactionSnapshot = {
       schemaVersion: REACTION_PROTOCOL_VERSION,
       type: "snapshot",
       reactions,
@@ -230,8 +294,8 @@ export class ReactionChannel {
       )
       .toArray();
     if (stored) {
-      const previous: InviteReaction = JSON.parse(stored.reaction_json);
-      if (previous.uuid === normalized.uuid) {
+      const previous = decodeStoredReaction(stored.reaction_json);
+      if (storedReactionUuid(previous) === normalized.uuid) {
         return stored.reaction_json === serialized ? "duplicate" : "conflict";
       }
     } else if (
@@ -271,13 +335,13 @@ export class ReactionChannel {
       schemaVersion: 2,
       type: "presentation",
       presentation,
-    });
+    } satisfies InviteRoomPresentationEvent);
     for (const socket of this.ctx.getWebSockets()) {
-      const attachment = socket.deserializeAttachment();
+      const attachment = readSocketAttachment(socket);
       if (
         isReactionSocket(socket) &&
-        attachment?.schemaVersion === 2 &&
-        attachment.matchId === matchId
+        socketAttachmentSchemaVersion(attachment) === 2 &&
+        socketAttachmentMatches(attachment, matchId)
       )
         this.dependencies.socketSessions.send(socket, message);
     }

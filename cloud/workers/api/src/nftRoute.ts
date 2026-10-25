@@ -1,4 +1,4 @@
-import type { NftApiRequest } from "@mons/shared/nfts";
+import type { ApiRequest } from "@mons/shared/api-contracts";
 import { CORS_HEADERS, jsonResponse, parseRequestBody } from "./http.ts";
 import { fetchNftInventory } from "./inventory.ts";
 import {
@@ -7,6 +7,7 @@ import {
   ProviderFailure,
   type WorkerDependencies,
 } from "./provider.ts";
+type NftApiRequest = ApiRequest<"POST /nfts">;
 
 const RATE_LIMIT_RETRY_AFTER_SECONDS = 60;
 
@@ -66,7 +67,7 @@ export async function handleNftRoute(
   }
 
   try {
-    return jsonResponse(
+    return jsonResponse<"POST /nfts", 200>(
       await fetchNftInventory(requestBody, env, dependencies),
       200,
     );

@@ -1,4 +1,9 @@
 import {
+  retainProfileGameProjection,
+  type ProfileGameProjectionDocument,
+  type ProfileGameProjectionWrite,
+} from "../../../runtime/profileGameProjectionRecords.js";
+import {
   mapProfileGameProjection,
   type NavigationGamesCursor,
   type NavigationItem,
@@ -7,13 +12,34 @@ import {
 import type { ProjectionRecord } from "../../../runtime/profileGamesProjectionCore.js";
 
 type ProjectionWrite = {
-  type: "create" | "delete" | "merge" | "update";
   profileId: string;
   projectionId: string;
-  data?: Record<string, unknown>;
-  requireAbsent?: boolean;
-  expectedVersion?: number;
-};
+} & (
+  | {
+      type: "delete";
+      data?: never;
+      expectedVersion?: number;
+      requireAbsent?: never;
+    }
+  | {
+      type: "create";
+      data: ProfileGameProjectionDocument | ProfileGameProjectionWrite;
+      requireAbsent?: boolean;
+      expectedVersion?: never;
+    }
+  | {
+      type: "update";
+      data: ProfileGameProjectionDocument | ProfileGameProjectionWrite;
+      expectedVersion?: number;
+      requireAbsent?: never;
+    }
+  | {
+      type: "merge";
+      data: ProfileGameProjectionDocument | ProfileGameProjectionWrite;
+      expectedVersion?: never;
+      requireAbsent?: never;
+    }
+);
 
 type EventProfileGameProjectionFence = {
   eventId: string;
@@ -158,7 +184,7 @@ function normalizeProjectionJson(value: unknown, depth = 0): unknown {
 export function encodeProfileGameProjection(
   profileId: string,
   projectionId: string,
-  data: Record<string, unknown>,
+  data: ProfileGameProjectionDocument | ProfileGameProjectionWrite,
 ): ProjectionRow {
   const normalized = normalizeProjectionJson(data);
   const payload = toRecord(normalized);
@@ -385,7 +411,7 @@ function parseProjectionRecord(row: {
   version: number;
 }): ProjectionRecord {
   return {
-    data: parseProjectionPayload(row.payload_json),
+    data: retainProfileGameProjection(parseProjectionPayload(row.payload_json)),
     version: parseProjectionVersion(row.version),
   };
 }

@@ -1,4 +1,8 @@
 import {
+  createProjectionProfile,
+  type ProjectionProfileDocument,
+} from "../../../runtime/profileGameProjectionRecords.js";
+import {
   createEventProfileGameProjectionState,
   type EventProfileGameProjectionState,
 } from "./eventProfileGameProjectionState.ts";
@@ -95,7 +99,7 @@ type ProfileGameProjectionDependencies = MatchPresentationReadDependencies & {
 function toD1ProjectionWrite(
   write: ProjectionWrite | EventProjectionWrite,
 ): D1ProjectionWrite {
-  return {
+  const output: unknown = {
     type: write.type,
     profileId: write.profileId,
     projectionId:
@@ -107,13 +111,14 @@ function toD1ProjectionWrite(
       : {}),
     ...(write.type === "create" ? { requireAbsent: true } : {}),
   };
+  return output as D1ProjectionWrite;
 }
 
 function projectionProfileData(
   snapshot: CanonicalProfileOwnershipProfileSnapshot,
-): Record<string, unknown> {
+): ProjectionProfileDocument {
   const profile = snapshot.profile;
-  return {
+  return createProjectionProfile({
     eth: profile.eth || "",
     sol: profile.sol || "",
     username: profile.username || "",
@@ -122,7 +127,7 @@ function projectionProfileData(
       : snapshot.gameplayEmoji !== ""
         ? { emoji: snapshot.gameplayEmoji }
         : {}),
-  };
+  });
 }
 
 export async function readProjectionOwnershipSnapshot(

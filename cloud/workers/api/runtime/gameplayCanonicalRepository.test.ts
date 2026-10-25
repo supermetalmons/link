@@ -1,3 +1,8 @@
+import { retainedFixtureFields } from "../test/profileDataBoundaryFixture.ts";
+import { ratingPayloadFixture } from "../test/profileDataBoundaryFixture.ts";
+import { materializeProfileCompatibility as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
+import { profileLegacyFixture } from "../test/profileDataBoundaryFixture.ts";
+import { retainedInviteSourceFixture } from "../test/inviteDocumentFixture.ts";
 import type { CompletePlayerProfile } from "@mons/shared/profiles";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
@@ -17,7 +22,6 @@ import {
   CanonicalProfileConflict,
   CanonicalProfileCorruption,
   commitCanonicalPlan,
-  materializeCanonicalProfile,
   readCanonicalLoginOwner,
   readCanonicalProfile,
   readCanonicalWagerSettlement,
@@ -256,13 +260,13 @@ async function insertProjectionRating(
   const value = {
     operationId,
     ...fields,
-    payload: {
+    payload: ratingPayloadFixture({
       ...fields,
       retained: [null, { nested: "retained" }],
       eventProgressReason: null,
       profileGameProjectionReason: null,
       telegramProjectionReason: null,
-    },
+    }),
     ...overrides,
   };
   await commitCanonicalPlan(testEnv.PROFILE_DB, {
@@ -1249,7 +1253,7 @@ describe("canonical gameplay repositories", () => {
             targetProfileId: "d1-game-winner",
             mergedAtMs: 2_000,
             opId: "d1-game-merge",
-            sourceLegacyFields: {},
+            sourceLegacyFields: profileLegacyFixture({}),
           },
         },
       ],
@@ -2740,7 +2744,10 @@ describe("canonical gameplay repositories", () => {
         await insertProjectionRating(operationId, {
           inviteId: " projection-invite ",
           matchId: " projection-match ",
-          payload: { eventId: " \u2003projection-event\u00a0", archive },
+          payload: ratingPayloadFixture({
+            eventId: " \u2003projection-event\u00a0",
+            archive,
+          }),
           [`${field}State`]: state,
           [`${field}UpdatedAtMs`]: timestamp,
           [`${field}Version`]: version,
@@ -3195,7 +3202,7 @@ describe("canonical gameplay repositories", () => {
       for (const [index, variant] of variants.entries()) {
         const operationId = `projection-legacy-json-${prefix}-${index}`;
         const initial = await insertProjectionRating(operationId);
-        const payload = { ...initial.payload };
+        const payload = { ...retainedFixtureFields(initial.payload) };
         if (variant === "missing reason") delete payload[`${field}Reason`];
         if (variant === "missing timestamp fallback")
           delete payload.updatedAtMs;
@@ -3453,7 +3460,7 @@ describe("canonical gameplay repositories", () => {
     async (mode) => {
       const operationId = `projection-legacy-${mode}`;
       const initial = await insertProjectionRating(operationId);
-      const payload = { ...initial.payload };
+      const payload = { ...retainedFixtureFields(initial.payload) };
       delete payload.telegramProjectionState;
       if (mode === "invalid payload") delete payload.inviteId;
       await testEnv.PROFILE_DB.prepare(
@@ -3544,7 +3551,7 @@ describe("canonical gameplay repositories", () => {
           kind: "insert-rating-update",
           value: {
             operationId,
-            payload: {
+            payload: ratingPayloadFixture({
               status: "processing",
               inviteId: "d1-imported-rating-invite",
               matchId: "d1-imported-rating-match",
@@ -3557,7 +3564,7 @@ describe("canonical gameplay repositories", () => {
               eventProgressState: "pending",
               eventProgressUpdatedAtMs: 1_200,
               eventProgressVersion: 1,
-            },
+            }),
             status: "processing",
             inviteId: "d1-imported-rating-invite",
             matchId: "d1-imported-rating-match",
@@ -4275,10 +4282,12 @@ describe("canonical gameplay repositories", () => {
       d1: testEnv.PROFILE_GAMES_DB,
       state: {
         readInviteMetadata: async (inviteId) =>
-          (stateValues.get(`invites/${inviteId}`) ?? null) as Record<
-            string,
-            unknown
-          > | null,
+          retainedInviteSourceFixture(
+            (stateValues.get(`invites/${inviteId}`) ?? null) as Record<
+              string,
+              unknown
+            > | null,
+          ),
         readAutomatchEntry: async (inviteId) =>
           decodeAutomatchEntry(
             stateValues.get(`automatch/${inviteId}`) ?? null,

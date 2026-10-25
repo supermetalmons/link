@@ -1,3 +1,5 @@
+import type { EventProgressDocument } from "../../../runtime/eventProgressRecords.js";
+import type { EventProjectionOutboxDocument } from "../../../runtime/eventProjectionOutboxRecords.js";
 import {
   listDueEventProgressOutboxes,
   listDueEventProfileGameProjectionOutboxes,
@@ -9,15 +11,27 @@ export type EventOutboxReads = {
   listDueEventProgressOutboxes(
     beforeMs: number,
     limit?: number,
-  ): Promise<Array<{ outboxId: string; record: unknown }>>;
+  ): Promise<
+    Array<{ outboxId: string; record: EventProgressDocument<"pending"> }>
+  >;
   listDueEventProfileGameProjectionOutboxes(
     beforeMs: number,
     limit?: number,
-  ): Promise<Array<{ eventId: string; record: unknown }>>;
+  ): Promise<
+    Array<{
+      eventId: string;
+      record: EventProjectionOutboxDocument<"profile-game">;
+    }>
+  >;
   listDueEventTelegramProjectionOutboxes(
     beforeMs: number,
     limit?: number,
-  ): Promise<Array<{ eventId: string; record: unknown }>>;
+  ): Promise<
+    Array<{
+      eventId: string;
+      record: EventProjectionOutboxDocument<"telegram">;
+    }>
+  >;
 };
 
 export function createEventOutboxReadRepository(

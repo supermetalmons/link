@@ -1,3 +1,4 @@
+import type { QueueProducer } from "./queueProducers.ts";
 import { collectRecoveryItems } from "./recoveryRunner.ts";
 import {
   reportRecoveryItemFailure,
@@ -5,7 +6,7 @@ import {
 } from "./recoveryReporting.ts";
 
 export async function sendQueueTasks<T>(
-  queue: Pick<Queue<T>, "sendBatch">,
+  queue: Pick<QueueProducer<T>, "sendBatch">,
   tasks: readonly T[],
 ): Promise<void> {
   for (let index = 0; index < tasks.length; index += 100) {
@@ -35,7 +36,7 @@ export async function recoverAndEnqueueProjectionScan<
   onFailure,
 }: {
   entries: readonly ProjectionScanEntry<Candidate, Invalid>[];
-  queue: Pick<Queue<Task>, "sendBatch">;
+  queue: Pick<QueueProducer<Task>, "sendBatch">;
   concurrency?: number;
   quarantine: (entry: Invalid) => Promise<void>;
   processCandidate: (
@@ -152,7 +153,7 @@ export async function claimAndEnqueueProjectionTasks<Candidate, Task>({
   candidates: readonly Candidate[];
   claim: (candidate: Candidate) => Promise<boolean>;
   toTask: (candidate: Candidate) => Task;
-  queue: Pick<Queue<Task>, "sendBatch">;
+  queue: Pick<QueueProducer<Task>, "sendBatch">;
   initialTasks?: readonly Task[];
   fallbackErrorMessage: string;
   onClaimFailure?: RecoveryFailureReporter<Candidate>;

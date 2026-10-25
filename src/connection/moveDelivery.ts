@@ -86,7 +86,21 @@ export class MoveDeliveryError extends Error {
   }
 }
 
+type MoveScopeFields = { [Key in keyof MoveDeliveryScope]?: unknown };
+type StoredMoveFields = {
+  version?: unknown;
+  scope?: unknown;
+  confirmed?: unknown;
+  pending?: unknown;
+  gameVariant?: unknown;
+  finished?: unknown;
+};
+
 export function moveDeliveryStorageKey(scope: MoveDeliveryScope): string {
+  return storedMoveScopeKey(scope);
+}
+
+function storedMoveScopeKey(scope: MoveScopeFields): string {
   return `mons:pending-moves:v1:${JSON.stringify([
     scope.loginUid,
     scope.inviteId,
@@ -97,12 +111,33 @@ export function moveDeliveryStorageKey(scope: MoveDeliveryScope): string {
 
 function validState(value: unknown): value is MoveDeliveryState {
   if (!value || typeof value !== "object") return false;
-  const state = value as MoveDeliveryState;
+  const state = value as { fen?: unknown; flatMovesString?: unknown };
   return (
     typeof state.fen === "string" &&
     state.fen !== "" &&
     isMatchFenWithinLimit(state.fen) &&
     isMatchHistoryWithinLimits(state.flatMovesString)
+  );
+}
+
+function hasPendingMoveRecords(
+  value: StoredMoveFields,
+): value is StoredMoveFields & { pending: PendingMove[] } {
+  return (
+    Array.isArray(value.pending) &&
+    !value.pending.some((entry: unknown) => {
+      const move = entry as
+        { moveFen?: unknown; fen?: unknown } | null | undefined;
+      return (
+        !move ||
+        typeof move.moveFen !== "string" ||
+        !move.moveFen ||
+        move.moveFen.includes("-") ||
+        typeof move.fen !== "string" ||
+        !move.fen ||
+        !isMatchFenWithinLimit(move.fen)
+      );
+    })
   );
 }
 
@@ -771,23 +806,14 @@ export class MoveDelivery {
     try {
       const text = this.dependencies.storage?.getItem(this.key);
       if (!text) return;
-      const value = JSON.parse(text) as StoredMoves;
+      const parsed: unknown = JSON.parse(text);
+      const value = parsed as StoredMoveFields;
       if (
         value.version !== 1 ||
         !value.scope ||
-        moveDeliveryStorageKey(value.scope) !== this.key ||
+        storedMoveScopeKey(value.scope as MoveScopeFields) !== this.key ||
         !validState(value.confirmed) ||
-        !Array.isArray(value.pending) ||
-        value.pending.some(
-          (move) =>
-            !move ||
-            typeof move.moveFen !== "string" ||
-            !move.moveFen ||
-            move.moveFen.includes("-") ||
-            typeof move.fen !== "string" ||
-            !move.fen ||
-            !isMatchFenWithinLimit(move.fen),
-        )
+        !hasPendingMoveRecords(value)
       ) {
         throw new MoveDeliveryError("invalid-stored-moves");
       }

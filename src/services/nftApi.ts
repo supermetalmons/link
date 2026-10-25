@@ -1,10 +1,14 @@
-import {
-  isNftApiResponse,
-  type NftApiRequest,
-  type NftApiResponse,
-} from "@mons/shared/nfts";
+import type {
+  ApiHttpUrl,
+  ApiRequest,
+  ApiResponse,
+} from "@mons/shared/api-contracts";
+import { isNftApiResponse } from "@mons/shared/nfts";
+type NftApiRequest = ApiRequest<"POST /nfts">;
+type NftApiResponse = ApiResponse<"POST /nfts">;
 
-const NFT_API_URL = "https://api.mons.link/nfts";
+const NFT_API_URL =
+  "https://api.mons.link/nfts" satisfies ApiHttpUrl<"POST /nfts">;
 const NFT_API_ERROR_MESSAGE = "NFT inventory is unavailable.";
 const NFT_API_TIMEOUT_MS = 15_000;
 

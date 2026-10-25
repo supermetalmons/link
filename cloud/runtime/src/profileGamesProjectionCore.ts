@@ -1,3 +1,21 @@
+import {
+  createGameProjection,
+  projectionOwnerRole,
+  projectionOwnerLoginId,
+  projectionOpponentName,
+  projectionOpponentEmoji,
+  projectionFreshness,
+  projectionLastFingerprint,
+  projectionTime,
+  type ProfileGameProjectionDocument,
+  type ProjectionProfileDocument,
+} from "./profileGameProjectionRecords.js";
+import {
+  inviteProjectionState,
+  inviteRematchState,
+  inviteTrimmedParticipants,
+  type InviteDocument,
+} from "@mons/shared/invite-records";
 import type { MatchPresentationSnapshot } from "@mons/shared/match-presentation";
 import type { AutomatchEntryRead } from "./automatchRecords.js";
 
@@ -25,18 +43,27 @@ import {
   shouldProjectInvite,
 } from "./events/gameProjectionModel.js";
 export type ProjectionRecord = {
-  data: Record<string, unknown>;
+  data: ProfileGameProjectionDocument;
   version: number;
 };
 export type ProjectionWrite = {
-  type: "create" | "delete" | "merge" | "update";
   profileId: string;
   inviteId: string;
-  data?: Record<string, unknown>;
-  expectedVersion?: number;
-};
+} & (
+  | { type: "delete"; data?: never; expectedVersion?: number }
+  | {
+      type: "create" | "merge";
+      data: ProfileGameProjectionDocument;
+      expectedVersion?: never;
+    }
+  | {
+      type: "update";
+      data: ProfileGameProjectionDocument;
+      expectedVersion?: number;
+    }
+);
 export type ProjectionOwnershipSnapshot = {
-  profileDataById: ReadonlyMap<string, Record<string, unknown>>;
+  profileDataById: ReadonlyMap<string, ProjectionProfileDocument>;
   profileIdByLoginUid: ReadonlyMap<string, string | null>;
 };
 export type ProfileGamesProjectionRepository = {
@@ -46,7 +73,7 @@ export type ProfileGamesProjectionRepository = {
     inviteId: string,
   ): Promise<Map<string, ProjectionRecord>>;
   readAutomatchEntry(inviteId: string): Promise<AutomatchEntryRead>;
-  readInviteMetadata(inviteId: string): Promise<Record<string, unknown> | null>;
+  readInviteMetadata(inviteId: string): Promise<InviteDocument | null>;
   readMatchPresentation?(
     inviteId: string,
     matchId: string,
@@ -112,7 +139,7 @@ type Signature_readExistingProjectionRecords = (input: {
 }) => Promise<
   Array<{
     profileId: string;
-    data: Record<string, unknown>;
+    data: ProfileGameProjectionDocument;
     version: number;
   }>
 >;
@@ -224,25 +251,6 @@ const buildInviteProjectionOwnerPlan: Signature_buildInviteProjectionOwnerPlan =
     };
   };
 
-const getStoredProjectionOwnerRole = (
-  profileId: string,
-  data: Record<string, unknown> | null,
-) => {
-  const ownerRole = normalizeString(data && data.ownerRole);
-  if (ownerRole === "host" || ownerRole === "guest") {
-    return ownerRole;
-  }
-  const ownerProfileId =
-    normalizeString(data && data.ownerProfileId) || profileId;
-  if (ownerProfileId === normalizeString(data && data.hostProfileId)) {
-    return "host";
-  }
-  if (ownerProfileId === normalizeString(data && data.guestProfileId)) {
-    return "guest";
-  }
-  return null;
-};
-
 const findFreshestSourceProjectionData = ({
   existingRecords,
   ownerContext,
@@ -254,14 +262,14 @@ const findFreshestSourceProjectionData = ({
   ownerProfileId: string;
   requiresResolvedOpponentEmoji: boolean;
 }) => {
-  let freshest: Record<string, unknown> | null = null;
+  let freshest: ProfileGameProjectionDocument | null = null;
   let freshestMs = Number.NEGATIVE_INFINITY;
   for (const existing of existingRecords) {
     if (existing.profileId === ownerProfileId) {
       continue;
     }
     const data = existing.data;
-    const storedOwnerLoginId = normalizeString(data.ownerLoginId);
+    const storedOwnerLoginId = projectionOwnerLoginId(data);
     const ownerLoginId = normalizeString(ownerContext.ownerLoginId);
     if (
       storedOwnerLoginId &&
@@ -272,28 +280,17 @@ const findFreshestSourceProjectionData = ({
     }
     if (
       (!storedOwnerLoginId || !ownerLoginId) &&
-      getStoredProjectionOwnerRole(existing.profileId, data) !==
-        ownerContext.ownerRole
+      projectionOwnerRole(existing.profileId, data) !== ownerContext.ownerRole
     ) {
       continue;
     }
     if (
       requiresResolvedOpponentEmoji &&
-      getEmojiId(data.opponentEmoji ?? data.opponentEmojiId) === null
+      projectionOpponentEmoji(data) === null
     ) {
       continue;
     }
-    const freshnessMs = [
-      data.updatedAt,
-      data.lastEventAt,
-      data.listSortAt,
-      data.createdAt,
-    ].reduce<number>((current, value) => {
-      const millis = readTimestampMillis(value);
-      return Number.isFinite(millis)
-        ? Math.max(current, millis as number)
-        : current;
-    }, Number.NEGATIVE_INFINITY);
+    const freshnessMs = projectionFreshness(data);
     if (!freshest || freshnessMs > freshestMs) {
       freshest = data;
       freshestMs = freshnessMs;
@@ -440,8 +437,10 @@ const createProfileGamesProjectionCore: Signature_createProfileGamesProjectionCo
           retry(() => repository.readInviteMetadata(normalizedInviteId)),
           retry(() => repository.readAutomatchEntry(normalizedInviteId)),
         ]);
-        const hostLoginId = normalizeString(inviteData && inviteData.hostId);
-        const guestLoginId = normalizeString(inviteData && inviteData.guestId);
+        const participants = inviteTrimmedParticipants(inviteData);
+        const inviteProjection = inviteProjectionState(inviteData);
+        const hostLoginId = participants.hostId || null;
+        const guestLoginId = participants.guestId || null;
         const loginUids = Array.from(
           new Set(
             [hostLoginId, guestLoginId].filter((value): value is string =>
@@ -480,11 +479,11 @@ const createProfileGamesProjectionCore: Signature_createProfileGamesProjectionCo
           inviteId: normalizedInviteId,
           queueValue: automatchData.isTruthy,
           hasGuest: !!guestLoginId,
-          storedStateHint: inviteData ? inviteData.automatchStateHint : null,
+          storedStateHint: inviteProjection.automatchStateHint,
         });
         const latestMatchId = deriveLatestMatchId(
           normalizedInviteId,
-          inviteData,
+          inviteData ? inviteRematchState(inviteData) : null,
           options.latestMatchIdHint || null,
         );
         const latestMatchRatingCompleted =
@@ -585,12 +584,9 @@ const createProfileGamesProjectionCore: Signature_createProfileGamesProjectionCo
           sortBucket,
           isPendingAutomatch: status === "pending",
           automatchStateHint,
-          automatchCanceledAt:
-            typeof (inviteData && inviteData.automatchCanceledAt) === "number"
-              ? inviteData!.automatchCanceledAt
-              : null,
+          automatchCanceledAt: inviteProjection.automatchCanceledAt,
           latestMatchId,
-        };
+        } as const;
 
         for (const ownerProfileId of ownerProfileIds) {
           const ownerContext = getOwnerContext({
@@ -614,17 +610,9 @@ const createProfileGamesProjectionCore: Signature_createProfileGamesProjectionCo
           const opponentProfileSummary = ownerContext.opponentProfileId
             ? readProfileSummary(ownership, ownerContext.opponentProfileId)
             : null;
-          const existingOpponentName = normalizeString(
-            existingData
-              ? (existingData.opponentName ?? existingData.opponentDisplayName)
-              : null,
-          );
-          const sourceOpponentName = normalizeString(
-            sourceProjectionData
-              ? (sourceProjectionData.opponentName ??
-                  sourceProjectionData.opponentDisplayName)
-              : null,
-          );
+          const existingOpponentName = projectionOpponentName(existingData);
+          const sourceOpponentName =
+            projectionOpponentName(sourceProjectionData);
           const opponentName =
             opponentProfileSummary &&
             typeof opponentProfileSummary.name === "string"
@@ -652,17 +640,9 @@ const createProfileGamesProjectionCore: Signature_createProfileGamesProjectionCo
                 ? summary.emoji
                 : null;
           }
-          const existingOpponentEmoji = getEmojiId(
-            existingData
-              ? (existingData.opponentEmoji ?? existingData.opponentEmojiId)
-              : null,
-          );
-          const sourceOpponentEmoji = getEmojiId(
-            sourceProjectionData
-              ? (sourceProjectionData.opponentEmoji ??
-                  sourceProjectionData.opponentEmojiId)
-              : null,
-          );
+          const existingOpponentEmoji = projectionOpponentEmoji(existingData);
+          const sourceOpponentEmoji =
+            projectionOpponentEmoji(sourceProjectionData);
           const opponentEmoji =
             opponentEmojiFromProfile !== null
               ? opponentEmojiFromProfile
@@ -703,21 +683,18 @@ const createProfileGamesProjectionCore: Signature_createProfileGamesProjectionCo
           const nextFingerprint = fingerprintForProjection(
             projectionFingerprintPayload,
           );
-          const previousFingerprint =
-            existingData &&
-            typeof existingData.lastEventFingerprint === "string"
-              ? existingData.lastEventFingerprint
-              : null;
+          const previousFingerprint = projectionLastFingerprint(existingData);
           if (previousFingerprint === nextFingerprint) {
             skippedCount += 1;
             continue;
           }
 
           const canonicalListSortMs = existingData
-            ? readTimestampMillis(existingData.listSortAt)
+            ? projectionTime(existingData, "listSortAt")
             : null;
-          const sourceListSortMs = readTimestampMillis(
-            sourceProjectionData && sourceProjectionData.listSortAt,
+          const sourceListSortMs = projectionTime(
+            sourceProjectionData,
+            "listSortAt",
           );
           const existingListSortMs = Number.isFinite(canonicalListSortMs)
             ? canonicalListSortMs
@@ -733,16 +710,12 @@ const createProfileGamesProjectionCore: Signature_createProfileGamesProjectionCo
             existingListSortMs,
           });
           const existingCreatedAt =
-            readTimestampMillis(existingData && existingData.createdAt) ??
-            readTimestampMillis(
-              sourceProjectionData && sourceProjectionData.createdAt,
-            );
+            projectionTime(existingData, "createdAt") ??
+            projectionTime(sourceProjectionData, "createdAt");
           const existingEndedAt =
-            readTimestampMillis(existingData && existingData.endedAt) ??
-            readTimestampMillis(
-              sourceProjectionData && sourceProjectionData.endedAt,
-            );
-          const projectionData = {
+            projectionTime(existingData, "endedAt") ??
+            projectionTime(sourceProjectionData, "endedAt");
+          const projectionData = createGameProjection({
             ...commonProjection,
             ownerProfileId,
             ownerRole: ownerContext.ownerRole,
@@ -769,22 +742,29 @@ const createProfileGamesProjectionCore: Signature_createProfileGamesProjectionCo
             lastEventType: normalizeString(reason) || null,
             lastEventReason: normalizeString(reason) || null,
             lastEventAt: toTimestampMillis(nowMs),
-          };
+          });
           const type =
             options.preserveListSortAt === true
               ? existingRecord
                 ? "update"
                 : "create"
               : "merge";
-          writes.push({
-            type,
-            profileId: ownerProfileId,
-            inviteId: normalizedInviteId,
-            data: projectionData,
-            ...(type === "update"
-              ? { expectedVersion: existingRecord!.version }
-              : {}),
-          });
+          writes.push(
+            type === "update"
+              ? {
+                  type,
+                  profileId: ownerProfileId,
+                  inviteId: normalizedInviteId,
+                  data: projectionData,
+                  expectedVersion: existingRecord!.version,
+                }
+              : {
+                  type,
+                  profileId: ownerProfileId,
+                  inviteId: normalizedInviteId,
+                  data: projectionData,
+                },
+          );
           setCount += 1;
         }
 

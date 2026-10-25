@@ -1,5 +1,10 @@
+import type { QueueProducer } from "../queueProducers.ts";
+import { queueFor } from "../queueProducers.ts";
+import {
+  readAutomatchProfileRecoveryEntries,
+  type AutomatchProfileRecoveryCandidate,
+} from "../automatchProjectionRecords.ts";
 import { createGameplayRepository } from "../gameplayRepository.ts";
-import type { AutomatchOutboxClaimSnapshot } from "../automatchD1/types.ts";
 import { createRatingRepository } from "../ratingRepository.ts";
 import { createEventProgressOutboxWriter } from "../eventRepository.ts";
 import {
@@ -8,14 +13,9 @@ import {
   type EventProjectionRecoveryWriter,
 } from "../eventProjectionRecoveryD1.ts";
 import { isSafeRecordKey } from "../recordKeys.ts";
-import {
-  parseAutomatchProfileGameProjectionOutbox,
-  parseEventProfileGameProjectionOutbox,
-  salvageHistoricalMatchDescriptors,
-} from "../profileGameProjectionOutbox.ts";
+import { parseEventProfileGameProjectionOutbox } from "../profileGameProjectionOutbox.ts";
 import {
   PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
-  type AutomatchProfileGameProjectionTask,
   type EventProfileGameProjectionTask,
   type ProfileGameProjectionTask,
 } from "../profileGameProjectionTasks.ts";
@@ -49,19 +49,10 @@ import type {
   ProfileGameProjectionRecoveryDependencies,
   ProfileGameProjectionSweepResult,
 } from "./types.ts";
-
-type AutomatchSweepCandidate = {
-  lastQueuedAtMs: number;
-  task: AutomatchProfileGameProjectionTask;
-  snapshot?: AutomatchOutboxClaimSnapshot;
-};
-
-type AutomatchSweepEntry =
-  | { kind: "candidate"; value: AutomatchSweepCandidate }
-  | { inviteId: string; kind: "invalid" };
+export { salvageEventCleanupOwnerProfileIds } from "../eventProjectionRecoveryRecords.ts";
 
 type EventSweepCandidate = {
-  snapshot: EventProjectionRecoverySnapshot;
+  snapshot: EventProjectionRecoverySnapshot<"profile-game">;
   lastQueuedAtMs: number;
   task: EventProfileGameProjectionTask;
 };
@@ -70,39 +61,8 @@ type EventSweepEntry =
   | { kind: "candidate"; value: EventSweepCandidate }
   | { eventId: string; kind: "invalid" };
 
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-export function automatchSweepEntries(
-  value: unknown,
-  snapshots?: ReadonlyMap<string, AutomatchOutboxClaimSnapshot>,
-): AutomatchSweepEntry[] {
-  const records = toRecord(value) || {};
-  return Object.entries(records).map(([inviteId, raw]) => {
-    const outbox = parseAutomatchProfileGameProjectionOutbox(raw);
-    const snapshot = snapshots?.get(inviteId);
-    return outbox && isSafeRecordKey(inviteId)
-      ? {
-          kind: "candidate",
-          value: {
-            ...(snapshot ? { snapshot } : {}),
-            lastQueuedAtMs: outbox.lastQueuedAtMs,
-            task: {
-              kind: "automatch-profile-game-projection",
-              inviteId,
-              requestId: outbox.requestId,
-            },
-          },
-        }
-      : { inviteId, kind: "invalid" };
-  });
-}
-
 export function eventSweepEntries(
-  snapshots: readonly EventProjectionRecoverySnapshot[],
+  snapshots: readonly EventProjectionRecoverySnapshot<"profile-game">[],
 ): EventSweepEntry[] {
   const records = Object.fromEntries(
     snapshots.map((snapshot) => [snapshot.eventId, snapshot]),
@@ -128,7 +88,7 @@ export function eventSweepEntries(
 
 export async function claimAutomatchSweepCandidate(
   state: AutomatchRecoveryState,
-  candidate: AutomatchSweepCandidate,
+  candidate: AutomatchProfileRecoveryCandidate,
   nowMs: number,
 ): Promise<boolean> {
   return state.claimAutomatchProfileOutbox(
@@ -142,7 +102,7 @@ export async function claimAutomatchSweepCandidate(
 }
 
 export async function claimEventSweepCandidate(
-  writer: Pick<EventProjectionRecoveryWriter, "claim">,
+  writer: Pick<EventProjectionRecoveryWriter<"profile-game">, "claim">,
   candidate: EventSweepCandidate,
   nowMs: number,
 ): Promise<boolean> {
@@ -159,51 +119,19 @@ type InvalidEventSweepResult =
   | { kind: "removed" }
   | { kind: "repaired"; task: EventProfileGameProjectionTask };
 
-export function salvageEventCleanupOwnerProfileIds(value: unknown): string[] {
-  return Array.from(
-    new Set(
-      Object.entries(
-        toRecord(toRecord(value)?.cleanupOwnerProfileIds) || {},
-      ).flatMap(([profileId, included]) =>
-        included === true && isSafeRecordKey(profileId) ? [profileId] : [],
-      ),
-    ),
-  );
-}
-
 export async function repairInvalidEventSweepEntry(
-  writer: Pick<EventProjectionRecoveryWriter, "transact">,
+  writer: Pick<EventProjectionRecoveryWriter<"profile-game">, "repairInvalid">,
   eventId: string,
   nowMs: number,
   createRequestId: () => string,
 ): Promise<InvalidEventSweepResult> {
   const safeEventId = isSafeRecordKey(eventId);
   const requestId = safeEventId ? createRequestId() : "";
-  const result = await writer.transact(eventId, (current) => {
-    if (
-      current === null ||
-      current === undefined ||
-      (parseEventProfileGameProjectionOutbox(current) &&
-        isSafeRecordKey(eventId))
-    ) {
-      return { commit: false, decision: "changed" };
-    }
-    if (!safeEventId) {
-      return { value: null, decision: "removed-invalid" };
-    }
-    const cleanupOwnerProfileIds = salvageEventCleanupOwnerProfileIds(current);
-    return {
-      value: {
-        schemaVersion: PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
-        status: "pending",
-        requestId,
-        lastQueuedAtMs: nowMs,
-        cleanupOwnerProfileIds: Object.fromEntries(
-          cleanupOwnerProfileIds.map((profileId) => [profileId, true]),
-        ),
-      },
-      decision: "repaired-invalid",
-    };
+  const result = await writer.repairInvalid(eventId, {
+    eventId,
+    safeEventId,
+    requestId,
+    nowMs,
   });
   if (!result.committed) {
     return { kind: "changed" };
@@ -220,94 +148,21 @@ export async function repairInvalidEventSweepEntry(
     : { kind: "removed" };
 }
 
-type InvalidAutomatchSweepResult =
-  | { kind: "changed" }
-  | { kind: "removed" }
-  | { kind: "repaired"; task: AutomatchProfileGameProjectionTask };
-
-export async function repairInvalidAutomatchSweepEntry(
+export function repairInvalidAutomatchSweepEntry(
   state: AutomatchRecoveryState,
   inviteId: string,
   nowMs: number,
   createRequestId: () => string,
-): Promise<InvalidAutomatchSweepResult> {
-  const safeInviteId = isSafeRecordKey(inviteId);
-  const requestId = safeInviteId ? createRequestId() : "";
-  const result =
-    await state.projectionRecovery.transactRawAutomatchProfileOutbox(
-      inviteId,
-      (current) => {
-        const record = toRecord(current);
-        if (
-          current === null ||
-          current === undefined ||
-          (record &&
-            parseAutomatchProfileGameProjectionOutbox(current) &&
-            isSafeRecordKey(inviteId))
-        ) {
-          return { commit: false, decision: "changed" };
-        }
-        if (!safeInviteId) {
-          return { value: null, decision: "removed-invalid" };
-        }
-        const sourceUpdatedAtMs = record?.sourceUpdatedAtMs;
-        const historicalMatches = salvageHistoricalMatchDescriptors(current);
-        return {
-          value: {
-            schemaVersion: PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
-            status: "pending",
-            requestId,
-            reason:
-              typeof record?.reason === "string" && record.reason.trim()
-                ? record.reason.trim()
-                : "automatch-queue",
-            sourceUpdatedAtMs:
-              typeof sourceUpdatedAtMs === "number" &&
-              Number.isFinite(sourceUpdatedAtMs) &&
-              sourceUpdatedAtMs >= 0
-                ? Math.floor(sourceUpdatedAtMs)
-                : nowMs,
-            lastQueuedAtMs: nowMs,
-            ...(historicalMatches.length > 0
-              ? {
-                  historicalMatches: Object.fromEntries(
-                    historicalMatches.map((descriptor) => [
-                      descriptor.matchId,
-                      {
-                        finalizedAtMs: descriptor.finalizedAtMs,
-                        guestPlayerId: descriptor.guestPlayerId,
-                        hostPlayerId: descriptor.hostPlayerId,
-                        source: descriptor.source,
-                        ...(descriptor.retryNotBeforeMs === undefined
-                          ? {}
-                          : { retryNotBeforeMs: descriptor.retryNotBeforeMs }),
-                      },
-                    ]),
-                  ),
-                }
-              : {}),
-          },
-          decision: "repaired-invalid",
-        };
-      },
-    );
-  if (!result.committed) {
-    return { kind: "changed" };
-  }
-  return safeInviteId
-    ? {
-        kind: "repaired",
-        task: {
-          kind: "automatch-profile-game-projection",
-          inviteId,
-          requestId,
-        },
-      }
-    : { kind: "removed" };
+) {
+  return state.projectionRecovery.repairInvalidAutomatchProfileOutbox(
+    inviteId,
+    nowMs,
+    createRequestId,
+  );
 }
 
 export async function sendProfileGameProjectionTasks(
-  queue: Queue<ProfileGameProjectionTask>,
+  queue: Pick<QueueProducer<ProfileGameProjectionTask>, "sendBatch">,
   tasks: ProfileGameProjectionTask[],
 ): Promise<void> {
   return sendQueueTasks(queue, tasks);
@@ -341,7 +196,7 @@ export async function sweepRatingProfileGameProjections(
   for await (const { entries, itemOffset } of pages) {
     const result = await recoverAndEnqueueProjectionScan({
       entries,
-      queue: env.PROFILE_GAME_PROJECTION_QUEUE,
+      queue: queueFor(env, "PROFILE_GAME_PROJECTION_QUEUE"),
       concurrency: PROFILE_GAME_PROJECTION_SWEEP_CONCURRENCY,
       async quarantine(entry) {
         const quarantined = await rating.quarantineRatingRecoveryEntry(
@@ -431,7 +286,7 @@ export async function sweepAutomatchProfileGameProjections(
         PROFILE_GAME_PROJECTION_SWEEP_LIMIT,
         excludedIdentities,
       ),
-    (page) => automatchSweepEntries(page.entries, page.snapshots),
+    (page) => readAutomatchProfileRecoveryEntries(page.entries, page.snapshots),
   );
   const malformedPages = projectionRecoveryPages((excludedIdentities) =>
     state.projectionRecovery.listMalformedAutomatchProfileOutboxesPage(
@@ -455,7 +310,9 @@ export async function sweepAutomatchProfileGameProjections(
     const itemOffset = pageIndex * PROFILE_GAME_PROJECTION_SWEEP_LIMIT * 2;
     const entries = [
       ...(due.done ? [] : due.value.entries),
-      ...automatchSweepEntries(malformed.done ? null : malformed.value.entries),
+      ...readAutomatchProfileRecoveryEntries(
+        malformed.done ? null : malformed.value.entries,
+      ),
     ];
     const invalidInviteIds = entries.flatMap((entry) =>
       entry.kind === "invalid" ? [entry.inviteId] : [],
@@ -503,7 +360,7 @@ export async function sweepAutomatchProfileGameProjections(
       claim: (candidate) =>
         claimAutomatchSweepCandidate(state, candidate, nowMs),
       toTask: ({ task }) => task,
-      queue: env.PROFILE_GAME_PROJECTION_QUEUE,
+      queue: queueFor(env, "PROFILE_GAME_PROJECTION_QUEUE"),
       initialTasks: repairedTasks,
       fallbackErrorMessage: "profile-game-projection-claim-failed",
       onClaimFailure: ({ task }, error, itemIndex) =>
@@ -610,7 +467,7 @@ export async function sweepEventProfileGameProjections(
         claim: (candidate) =>
           claimEventSweepCandidate(writer, candidate, nowMs),
         toTask: ({ task }) => task,
-        queue: env.EVENT_PROFILE_GAME_PROJECTION_QUEUE,
+        queue: queueFor(env, "EVENT_PROFILE_GAME_PROJECTION_QUEUE"),
         initialTasks: repairedTasks,
         fallbackErrorMessage: "profile-game-projection-claim-failed",
         onClaimFailure: ({ task }, error, itemIndex) =>
@@ -671,7 +528,7 @@ export async function sweepProfileLinkProfileGameProjections(
   for await (const { entries, itemOffset } of pages) {
     const result = await recoverAndEnqueueProjectionScan({
       entries,
-      queue: env.PROFILE_GAME_PROJECTION_QUEUE,
+      queue: queueFor(env, "PROFILE_GAME_PROJECTION_QUEUE"),
       async quarantine(entry) {
         const quarantined = await jobs.quarantineInvalidEntry(entry, nowMs);
         if (quarantined) {
@@ -791,3 +648,5 @@ export async function handleProfileGameProjectionSweep(
     ratingEnqueued: enqueued.rating,
   });
 }
+
+export { readAutomatchProfileRecoveryEntries as automatchSweepEntries } from "../automatchProjectionRecords.ts";

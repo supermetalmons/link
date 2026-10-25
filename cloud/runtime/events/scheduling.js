@@ -167,8 +167,18 @@ const hasDateTimeScheduleRequest = (data) => {
   );
 };
 exports.hasDateTimeScheduleRequest = hasDateTimeScheduleRequest;
-const resolveRequestedScheduleTimezone = (data) => {
-  const scheduledTimezoneRaw = normalizeString(data && data.scheduledTimezone);
+function scheduleFields(value) {
+  const fields = value && typeof value === "object" ? value : {};
+  return {
+    scheduledDate: normalizeString(fields.scheduledDate),
+    scheduledTime: normalizeString(fields.scheduledTime),
+    scheduledTimezone: normalizeString(fields.scheduledTimezone),
+    localTimezoneIana: normalizeString(fields.localTimezoneIana),
+  };
+}
+const resolveRequestedScheduleTimezone = (input) => {
+  const data = scheduleFields(input);
+  const scheduledTimezoneRaw = data.scheduledTimezone;
   if (!scheduledTimezoneRaw) {
     throw new EventSchedulingError(
       "invalid-argument",
@@ -204,8 +214,9 @@ const resolveRequestedScheduleTimezone = (data) => {
   return resolvedTimezone;
 };
 exports.resolveRequestedScheduleTimezone = resolveRequestedScheduleTimezone;
-const resolveScheduledDateTimeStartAtMs = (data, nowMs = Date.now()) => {
-  const scheduledDate = normalizeString(data && data.scheduledDate);
+const resolveScheduledDateTimeStartAtMs = (input, nowMs = Date.now()) => {
+  const data = scheduleFields(input);
+  const scheduledDate = data.scheduledDate;
   if (!scheduledDate) {
     throw new EventSchedulingError(
       "invalid-argument",

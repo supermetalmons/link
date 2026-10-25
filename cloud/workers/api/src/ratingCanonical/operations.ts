@@ -36,6 +36,7 @@ import {
   number,
   ratingData,
   ratingValue,
+  ratingLeasePayload,
   mergedRatingValue,
   ratingProfileFromSnapshot,
 } from "./codec.ts";
@@ -125,19 +126,7 @@ export function createRatingOperations(
         ) {
           return { status: "busy", data };
         }
-        const fields = {
-          ...(snapshot?.payload || {}),
-          inviteId: input.inviteId,
-          matchId: input.matchId,
-          playerId: input.playerId,
-          opponentId: input.opponentId,
-          ownerUid: input.ownerUid,
-          ownerToken: input.ownerToken,
-          status: "processing",
-          startedAtMs: data?.startedAtMs || attemptNowMs,
-          updatedAtMs: attemptNowMs,
-          leaseExpiresAtMs: attemptNowMs + input.leaseMs,
-        };
+        const fields = ratingLeasePayload(snapshot, input, data, attemptNowMs);
         try {
           await commitCanonicalPlan(db, {
             expectations: [

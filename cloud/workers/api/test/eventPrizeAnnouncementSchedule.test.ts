@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { EventCommand } from "../../../runtime/eventCommands.js";
-import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
+import { decodeEventCompatibilityPlanFixture } from "./eventCompatibilityFixture.ts";
 import { commitPreparedEventMutation } from "../src/eventMutationCommit.ts";
 import {
   buildEventAnnouncementPlan,
@@ -165,7 +165,7 @@ test("event creation commits both announcement markers atomically before dispatc
 
   const pending = commitAnnouncementMutation(
     memory,
-    decodeEventUpdates({
+    decodeEventCompatibilityPlanFixture({
       [EVENT_PATH]: event,
       "invites/unrelated": { status: "active" },
     }),
@@ -209,7 +209,7 @@ test("failed event persistence cannot dispatch or leave a schedule without the e
   await assert.rejects(
     commitAnnouncementMutation(
       memory,
-      decodeEventUpdates({
+      decodeEventCompatibilityPlanFixture({
         [EVENT_PATH]: scheduledEvent({ startAtMs: 30_000_000 }),
       }),
       dependencies,
@@ -244,7 +244,7 @@ test("dispatch failure leaves the committed marker available for sweep recovery"
 
   await commitAnnouncementMutation(
     memory,
-    decodeEventUpdates({ [EVENT_PATH]: event }),
+    decodeEventCompatibilityPlanFixture({ [EVENT_PATH]: event }),
     dependencies,
   );
 
@@ -278,13 +278,15 @@ test("repeat scheduling preserves first queue time and the workflow identity", a
 
   await commitAnnouncementMutation(
     memory,
-    decodeEventUpdates({ [EVENT_PATH]: scheduledEvent() }),
+    decodeEventCompatibilityPlanFixture({ [EVENT_PATH]: scheduledEvent() }),
     dependencies,
   );
   nowMs += 5_000;
   await commitAnnouncementMutation(
     memory,
-    decodeEventUpdates({ [`${EVENT_PATH}/startAtMs`]: START_AT_MS }),
+    decodeEventCompatibilityPlanFixture({
+      [`${EVENT_PATH}/startAtMs`]: START_AT_MS,
+    }),
     dependencies,
   );
 
@@ -308,13 +310,13 @@ test("both notification kinds preserve their first scheduling proof on repeat wr
 
   await commitAnnouncementMutation(
     memory,
-    decodeEventUpdates({ [EVENT_PATH]: event }),
+    decodeEventCompatibilityPlanFixture({ [EVENT_PATH]: event }),
     dependencies,
   );
   nowMs += 60_000;
   await commitAnnouncementMutation(
     memory,
-    decodeEventUpdates({
+    decodeEventCompatibilityPlanFixture({
       [`${EVENT_PATH}/startAtMs`]: event.startAtMs,
     }),
     dependencies,
@@ -366,7 +368,7 @@ test("rediscovery preserves a persisted three-hour reminder without creating a f
       };
       await commitAnnouncementMutation(
         memory,
-        decodeEventUpdates({
+        decodeEventCompatibilityPlanFixture({
           [`${EVENT_PATH}/startAtMs`]: event.startAtMs,
         }),
         dependencies,
@@ -446,7 +448,7 @@ test("failure dispatching either kind leaves both markers and dispatches the oth
 
     await commitAnnouncementMutation(
       memory,
-      decodeEventUpdates({ [EVENT_PATH]: event }),
+      decodeEventCompatibilityPlanFixture({ [EVENT_PATH]: event }),
       dependencies,
     );
 
@@ -495,7 +497,7 @@ test("a Sunday Mons event without prizes schedules only its four-hour reminder",
 
   await commitAnnouncementMutation(
     memory,
-    decodeEventUpdates({ [`events/${eventId}`]: event }),
+    decodeEventCompatibilityPlanFixture({ [`events/${eventId}`]: event }),
     dependencies,
   );
 
@@ -585,7 +587,7 @@ test("missing the four-hour discovery cutoff still permits the independent prize
 
   await commitAnnouncementMutation(
     memory,
-    decodeEventUpdates({ [EVENT_PATH]: event }),
+    decodeEventCompatibilityPlanFixture({ [EVENT_PATH]: event }),
     dependencies,
   );
 
@@ -613,7 +615,7 @@ test("partial changes evaluate the event after all scheduling fields are applied
 
   await commitAnnouncementMutation(
     memory,
-    decodeEventUpdates({
+    decodeEventCompatibilityPlanFixture({
       [`${EVENT_PATH}/status`]: "scheduled",
       [`${EVENT_PATH}/isSundayMons`]: true,
       [`${EVENT_PATH}/startAtMs`]: START_AT_MS,
@@ -656,7 +658,7 @@ test("only scheduled strict Sunday Mons events with catalog prizes create marker
 
     await commitAnnouncementMutation(
       memory,
-      decodeEventUpdates(updates),
+      decodeEventCompatibilityPlanFixture(updates),
       dependencies,
     );
 
@@ -713,7 +715,7 @@ test("first discovery at the target is accepted but a millisecond late is skippe
 
   await commitAnnouncementMutation(
     memory,
-    decodeEventUpdates(updates),
+    decodeEventCompatibilityPlanFixture(updates),
     dependencies,
   );
 
@@ -732,12 +734,12 @@ test("postponement creates a distinct schedule without overwriting the earlier m
 
   await commitAnnouncementMutation(
     memory,
-    decodeEventUpdates({ [EVENT_PATH]: scheduledEvent() }),
+    decodeEventCompatibilityPlanFixture({ [EVENT_PATH]: scheduledEvent() }),
     dependencies,
   );
   await commitAnnouncementMutation(
     memory,
-    decodeEventUpdates({
+    decodeEventCompatibilityPlanFixture({
       [`${EVENT_PATH}/startAtMs`]: START_AT_MS + 7_200_000,
     }),
     dependencies,
@@ -786,7 +788,7 @@ test("gameplay updates and existing progress markers pass through unchanged", as
 
   await commitAnnouncementMutation(
     memory,
-    decodeEventUpdates(updates),
+    decodeEventCompatibilityPlanFixture(updates),
     dependencies,
   );
 

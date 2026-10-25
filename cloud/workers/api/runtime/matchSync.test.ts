@@ -1,3 +1,4 @@
+import { matchDocumentFixture } from "../test/matchRecordFixture.ts";
 import { socketTestSessionHeaders } from "../test/socketTestSession.ts";
 import { env } from "cloudflare:workers";
 import {
@@ -50,7 +51,7 @@ type Source = {
 
 const rooms: Room[] = [];
 const sockets: WebSocket[] = [];
-const match = {
+const match = matchDocumentFixture({
   version: 2,
   color: "white",
   emojiId: 1,
@@ -60,10 +61,10 @@ const match = {
   status: "",
   flatMovesString: "",
   timer: "",
-};
+});
 
-function setMatch(source: Source, key: string, value: MatchStateRecord) {
-  source.matches.set(key, value);
+function setMatch(source: Source, key: string, value: Record<string, unknown>) {
+  source.matches.set(key, matchDocumentFixture(value));
   const matchId = key.slice(key.indexOf("/") + 1);
   source.revisions.set(matchId, (source.revisions.get(matchId) ?? 0) + 1);
 }
@@ -136,14 +137,14 @@ async function fixture(paired = true) {
     matches: new Map([
       [
         `host-login/${inviteId}`,
-        { ...match, sessionCreation: { private: true } },
+        matchDocumentFixture({ ...match, sessionCreation: { private: true } }),
       ],
       ...(paired
         ? [
-            [`guest-login/${inviteId}`, { ...match, color: "black" }] as [
-              string,
-              MatchStateRecord,
-            ],
+            [
+              `guest-login/${inviteId}`,
+              matchDocumentFixture({ ...match, color: "black" }),
+            ] as [string, MatchStateRecord],
           ]
         : []),
     ]),
@@ -641,11 +642,14 @@ describe("live match snapshots", () => {
       const { room, inviteId, source } = await fixture();
       await room.readMatches(inviteId, inviteId);
       const reads = source.reads.length;
-      source.matches.set(`replacement-login/${inviteId}`, {
-        ...match,
-        color: role === "host" ? "white" : "black",
-        fen: "replacement",
-      });
+      source.matches.set(
+        `replacement-login/${inviteId}`,
+        matchDocumentFixture({
+          ...match,
+          color: role === "host" ? "white" : "black",
+          fen: "replacement",
+        }),
+      );
       await runInDurableObject(room, async (instance) => {
         const metadata = await instance.readMetadata(inviteId);
         if (metadata.status !== "ok")

@@ -1,5 +1,10 @@
 // Generated from src/telegram/deliveryRetryTypes.ts. Run npm run generate:runtime.
 import type { TelegramTaskKind } from "./taskIdentity.js";
+import type {
+  TelegramApiGateDocument,
+  TelegramRetryDocument,
+} from "./records.js";
+import type { TelegramRetryScheduleResult } from "./deliveryTypes.js";
 export type TelegramRetryState = {
   retryStartedAtMs: number;
   retryDeadlineAtMs: number;
@@ -29,7 +34,7 @@ export type TelegramBarrierProof = {
 export type TelegramBarrierProofResult = {
   applied: boolean;
   retryNotBeforeMs: number;
-  gate: Record<string, unknown>;
+  gate: TelegramApiGateDocument;
 };
 export type TelegramExactRetryInput = {
   messageKey: string;
@@ -65,7 +70,7 @@ export type TelegramRetryTarget =
       pendingDeleteId: string;
     };
 export type TelegramRetryInput = {
-  current: unknown;
+  current: TelegramRetryDocument;
   failure: TelegramRetryFailure;
   target: TelegramRetryTarget;
   messageKey: string;
@@ -78,7 +83,9 @@ export type TelegramRetryInput = {
 };
 export type TelegramRetryDependencies = {
   now(): number;
-  scheduleExactRetry(input: TelegramExactRetryInput): Promise<unknown>;
+  scheduleExactRetry(
+    input: TelegramExactRetryInput,
+  ): Promise<TelegramRetryScheduleResult>;
   releaseApiGate(owner: string): Promise<boolean>;
   extendRetryBarrierAndReleaseApiGate(
     proof: TelegramBarrierProof,

@@ -1,11 +1,19 @@
 // Generated from src/eventProfileGameProjectionCore.ts. Run npm run generate:runtime.
+import { type ProfileGameProjectionDocument } from "./profileGameProjectionRecords.js";
 import type { EventData } from "./events/model.js";
 export type EventProjectionWrite = {
-  type: "delete" | "merge";
   profileId: string;
   eventId: string;
-  data?: Record<string, unknown>;
-};
+} & (
+  | {
+      type: "delete";
+      data?: never;
+    }
+  | {
+      type: "merge";
+      data: ProfileGameProjectionDocument;
+    }
+);
 export type EventProjectionSourceFence = {
   eventId: string;
   generation: number;

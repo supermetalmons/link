@@ -1,16 +1,26 @@
+import type {
+  ApiPathRequest,
+  ApiPathResponse,
+  GameplayPath,
+} from "@mons/shared/api-contracts";
 import { AuthApiFailure } from "../authErrors.ts";
 import { readBoundedJson } from "../http.ts";
 import type { GameplayRequestContext } from "./runtime.ts";
-
-export type PreparedGameplayRoute = {
-  body: Record<string, unknown>;
-  execute(): Promise<unknown>;
+export type PreparedGameplayRoute<
+  Body = ApiPathRequest<"POST", GameplayPath>,
+  Result = ApiPathResponse<"POST", GameplayPath>,
+> = {
+  body: Body;
+  execute(): Promise<Result>;
 };
 
-export type BoundGameplayRoute = {
+export type BoundGameplayRoute<
+  Body = ApiPathRequest<"POST", GameplayPath>,
+  Result = ApiPathResponse<"POST", GameplayPath>,
+> = {
   maxBodyBytes?: number;
   beforeBody?: () => Promise<void>;
-  prepare(body: Record<string, unknown>): PreparedGameplayRoute;
+  prepare(body: Record<string, unknown>): PreparedGameplayRoute<Body, Result>;
 };
 
 type GameplayPostObserver = (
@@ -18,11 +28,16 @@ type GameplayPostObserver = (
   next: (env: Env) => Promise<Response>,
 ) => Promise<Response>;
 
-export type GameplayRoute = {
-  path: string;
+export type GameplayRoute<Path extends GameplayPath = GameplayPath> = {
+  path: Path;
   readOnly: boolean;
   observePost?: GameplayPostObserver;
-  bindRequest(context: GameplayRequestContext): BoundGameplayRoute;
+  bindRequest(
+    context: GameplayRequestContext,
+  ): BoundGameplayRoute<
+    ApiPathRequest<"POST", Path>,
+    ApiPathResponse<"POST", Path>
+  >;
 };
 
 type GameplayRequestRuntime<Runtime> = {
@@ -43,18 +58,22 @@ type GameplayRuntimeDefinition<Runtime> =
     };
 
 export function defineGameplayRoute<
-  Body extends Record<string, unknown>,
+  const Path extends GameplayPath,
+  Body extends Record<string, unknown> & ApiPathRequest<"POST", NoInfer<Path>>,
   Runtime,
 >(
   definition: {
-    path: string;
+    path: Path;
     readOnly: boolean;
     maxBodyBytes?: number;
     observePost?: GameplayPostObserver;
     parse(body: Record<string, unknown>): Body;
-    handle(body: Body, runtime: Runtime): Promise<unknown>;
+    handle(
+      body: Body,
+      runtime: Runtime,
+    ): Promise<ApiPathResponse<"POST", NoInfer<Path>>>;
   } & GameplayRuntimeDefinition<Runtime>,
-): GameplayRoute {
+): GameplayRoute<Path> {
   return {
     path: definition.path,
     readOnly: definition.readOnly,

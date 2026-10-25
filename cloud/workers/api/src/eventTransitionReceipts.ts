@@ -5,7 +5,6 @@ type ReceiptIdentity = {
   transitionId: string;
   eventId: string;
   expectedRevision: number;
-  [key: string]: unknown;
 };
 
 export type EventTransitionReceipt = ReceiptIdentity &
@@ -13,6 +12,11 @@ export type EventTransitionReceipt = ReceiptIdentity &
     | { schemaVersion: 1; payloadDigest?: never }
     | { schemaVersion: 2; payloadDigest: string }
   );
+
+declare const retainedEventReceipt: unique symbol;
+export type RetainedEventTransitionReceipt = EventTransitionReceipt & {
+  readonly [retainedEventReceipt]: true;
+};
 
 export type EventTransitionReceiptRow = {
   transition_id: string;
@@ -47,7 +51,7 @@ function safeKey(value: unknown): value is string {
 export function parseEventTransitionReceipt(
   value: unknown,
   expectedKey?: string,
-): EventTransitionReceipt {
+): RetainedEventTransitionReceipt {
   if (!value || typeof value !== "object" || Array.isArray(value))
     return fail();
   const record = value as Record<string, unknown>;
@@ -64,7 +68,8 @@ export function parseEventTransitionReceipt(
   )
     return fail();
   try {
-    return JSON.parse(canonicalJson(value)) as EventTransitionReceipt;
+    const retained: unknown = JSON.parse(canonicalJson(value));
+    return retained as RetainedEventTransitionReceipt;
   } catch {
     return fail();
   }

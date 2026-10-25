@@ -2,6 +2,8 @@
 
 Run commands from the repository root. See the [architecture and command map](../README.md) and [Cloudflare deployment guide](../scripts/deploy-cloudflare.md).
 
+The [data boundary inventory](data-boundaries.md) records persistence and transport contracts, compatibility requirements, and validation coverage.
+
 Routine compatible releases keep canonical writes and Queue delivery active. Prepare validated candidates, promote exact versions, and verify affected behavior. There is no overall release time limit and no verification-only wait or observation window longer than 60 seconds. Maintenance controls require a concrete schema, compatibility, lifecycle, or incident reason.
 
 ## Canonical data

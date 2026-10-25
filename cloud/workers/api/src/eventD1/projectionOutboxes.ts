@@ -162,9 +162,11 @@ async function mutateProjectionOutbox(
   return transaction.committed;
 }
 
-export function claimEventProjectionOutboxSnapshot(
+export function claimEventProjectionOutboxSnapshot<
+  Kind extends ProjectionOutboxKind,
+>(
   db: EventD1Connection,
-  snapshot: ProjectionOutboxSnapshot,
+  snapshot: ProjectionOutboxSnapshot<Kind>,
   requestId: string,
   expectedTimestamp: number,
   nowMs: number,

@@ -6,6 +6,8 @@ import {
   type MutationRecordRow,
   type AutomatchOutboxClaimSnapshot,
   type AutomatchOutboxRecoveryPage,
+  type AutomatchRecordValue,
+  type AutomatchOutboxRoot,
 } from "./types.ts";
 import { decodeSnapshot, requireKey, requireRoot } from "./codec.ts";
 import { readD1FirstRow } from "../d1Reads.ts";
@@ -19,10 +21,10 @@ const RECOVERY_ORDER_SQL = `recovery_sort_rank, recovery_sort_value,
   recovery_key_rank, recovery_key_integer, recovery_key_length,
   record_key COLLATE BINARY`;
 
-function decodeValues(
-  root: AutomatchRoot,
+function decodeValues<Root extends AutomatchRoot>(
+  root: Root,
   rows: readonly RecordRow[],
-): Record<string, unknown> | null {
+): Record<string, AutomatchRecordValue<Root>> | null {
   if (!rows.length) return null;
   return Object.fromEntries(
     rows.map((row) => {
@@ -58,11 +60,11 @@ function keyOrderSql(expression: string): string {
 }
 
 export function createAutomatchReads(db: D1Database) {
-  async function read(
-    root: AutomatchRoot,
+  async function read<Root extends AutomatchRoot>(
+    root: Root,
     key: string,
     signal?: AbortSignal,
-  ): Promise<AutomatchRecordSnapshot> {
+  ): Promise<AutomatchRecordSnapshot<Root>> {
     const { table, valueColumn, revisionColumn } = requireRoot(root);
     requireKey(key);
     signal?.throwIfAborted();
@@ -77,7 +79,11 @@ export function createAutomatchReads(db: D1Database) {
     signal?.throwIfAborted();
     return row
       ? decodeSnapshot(root, row)
-      : { root, key, value: null, revision: 0 };
+      : decodeSnapshot(root, {
+          record_key: key,
+          payload_json: null,
+          revision: 0,
+        });
   }
 
   async function readMutationRecords(
@@ -115,7 +121,12 @@ export function createAutomatchReads(db: D1Database) {
     signal?.throwIfAborted();
     return locations.map(({ root, key, index }) => {
       const row = results[index].results[0];
-      if (!row) return { root, key, value: null, revision: 0 };
+      if (!row)
+        return decodeSnapshot(root, {
+          record_key: key,
+          payload_json: null,
+          revision: 0,
+        });
       return decodeSnapshot(
         root,
         root === "gameplayMutationReceiptExpirations"
@@ -129,12 +140,12 @@ export function createAutomatchReads(db: D1Database) {
     });
   }
 
-  async function readValues(
-    root: AutomatchRoot,
+  async function readValues<Root extends AutomatchRoot>(
+    root: Root,
     sql: string,
     values: readonly (string | number)[],
     signal?: AbortSignal,
-  ): Promise<Record<string, unknown> | null> {
+  ): Promise<Record<string, AutomatchRecordValue<Root>> | null> {
     signal?.throwIfAborted();
     const rows = await db
       .withSession("first-primary")
@@ -145,13 +156,13 @@ export function createAutomatchReads(db: D1Database) {
     return decodeValues(root, rows.results);
   }
 
-  async function readRecoveryPage(
-    root: AutomatchOutboxClaimSnapshot["root"],
+  async function readRecoveryPage<Root extends AutomatchOutboxRoot>(
+    root: Root,
     sql: string,
     values: readonly (string | number)[],
     signal?: AbortSignal,
     retainSnapshots = false,
-  ): Promise<AutomatchOutboxRecoveryPage> {
+  ): Promise<AutomatchOutboxRecoveryPage<Root>> {
     signal?.throwIfAborted();
     const rows = await db
       .withSession("first-primary")
@@ -161,13 +172,16 @@ export function createAutomatchReads(db: D1Database) {
     signal?.throwIfAborted();
     const scannedIdentities = readRecoveryScanIdentities(rows.results);
     if (!retainSnapshots || rows.results.length === 0) {
-      return { entries: decodeValues(root, rows.results), scannedIdentities };
+      return {
+        entries: decodeValues(root, rows.results),
+        scannedIdentities,
+      } as AutomatchOutboxRecoveryPage<Root>;
     }
-    const snapshots = new Map<string, AutomatchOutboxClaimSnapshot>();
+    const snapshots = new Map<string, AutomatchOutboxClaimSnapshot<Root>>();
     const encoder = new TextEncoder();
     const entries = Object.fromEntries(
       rows.results.map((row, index) => {
-        const snapshot = { ...decodeSnapshot(root, row), root };
+        const snapshot = decodeSnapshot(root, row);
         const keyIdentity = `text:${Array.from(
           encoder.encode(snapshot.key),
           (byte) => byte.toString(16).padStart(2, "0"),
@@ -181,7 +195,11 @@ export function createAutomatchReads(db: D1Database) {
         return [snapshot.key, snapshot.value];
       }),
     );
-    return { entries, scannedIdentities, snapshots };
+    return {
+      entries,
+      scannedIdentities,
+      snapshots,
+    } as AutomatchOutboxRecoveryPage<Root>;
   }
 
   async function listAutomatchEntriesByLogin(
@@ -316,7 +334,7 @@ export function createAutomatchReads(db: D1Database) {
     loginUids: readonly string[],
     limitPerUid = 2,
     signal?: AbortSignal,
-  ): Promise<AutomatchRecordSnapshot[]> {
+  ): Promise<AutomatchRecordSnapshot<"automatch">[]> {
     const uids = [...new Set(loginUids)];
     if (
       uids.length > 512 ||

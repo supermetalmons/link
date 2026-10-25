@@ -1,5 +1,9 @@
+import type {
+  ApiEndpoint,
+  ApiJsonBody,
+  ApiJsonStatus,
+} from "@mons/shared/api-contracts";
 import { AuthApiFailure } from "./authErrors.ts";
-
 const ALLOWED_AUTH_ORIGINS = new Set([
   "https://mons.link",
   "https://www.mons.link",
@@ -66,6 +70,19 @@ export function authPreflightResponse(headers: HeadersInit): Response {
   });
 }
 
+export function authJsonResponse<
+  Key extends ApiEndpoint,
+  Status extends ApiJsonStatus<Key>,
+>(
+  body: ApiJsonBody<Key, NoInfer<Status>>,
+  status: Status,
+  headers: HeadersInit,
+): Response;
+export function authJsonResponse(
+  body: unknown,
+  status: number,
+  headers: HeadersInit,
+): Response;
 export function authJsonResponse(
   body: unknown,
   status: number,

@@ -1,3 +1,14 @@
+import type {
+  ApiQuery,
+  ApiHttpUrl,
+  ApiResponse,
+  ApiPathRequest,
+  ApiPathResponse,
+  GameplayPath,
+  EventControlPath,
+  EventParticipationPath,
+  EventMutationWireResponse,
+} from "@mons/shared/api-contracts";
 import {
   GAME_SESSION_OPERATION_ID_PATTERN,
   MAX_GAME_SESSION_RESPONSE_BYTES,
@@ -23,10 +34,6 @@ import {
   type EndRematchResponse,
   type EnsureMatchRequest,
   type EnsureMatchResponse,
-  type ReadHistoricalMatchRequest,
-  type ReadHistoricalMatchResponse,
-  type ReadMatchSnapshotRequest,
-  type ReadMatchSnapshotResponse,
   type JoinInviteRequest,
   type JoinInviteResponse,
   type ProposeRematchRequest,
@@ -104,7 +111,6 @@ import {
   type CreateEventResponse,
   type DisqualifyEventMatchWinnersRequest,
   type DisqualifyEventMatchWinnersResponse,
-  type EventSnapshotSeed,
   type JoinEventRequest,
   type JoinEventResponse,
   type LeaveEventRequest,
@@ -127,6 +133,10 @@ import {
   readBoundedJson,
   responseError,
 } from "./gameplayTransport";
+type ReadHistoricalMatchResponse = ApiResponse<"GET /matches/history">;
+type ReadHistoricalMatchRequest = ApiQuery<"GET /matches/history">;
+type ReadMatchSnapshotResponse = ApiResponse<"GET /matches/snapshot">;
+type ReadMatchSnapshotRequest = ApiQuery<"GET /matches/snapshot">;
 
 export { GameplayApiError } from "./gameplayTransport";
 export type {
@@ -167,6 +177,21 @@ const gameplayErrorPolicy: ApiErrorPolicy = {
   timeoutMessage: "Gameplay request timed out.",
 };
 
+type GameplayMutationPath = GameplayPath | EventParticipationPath;
+async function gameplayMutation<const Path extends GameplayMutationPath>(
+  path: Path | `${Path}?${string}`,
+  body: ApiPathRequest<"POST", NoInfer<Path>>,
+  tokenProvider: AuthTokenProvider,
+  validate: (value: unknown) => value is ApiPathResponse<"POST", NoInfer<Path>>,
+  timeoutMs?: number,
+  options?: { signal?: AbortSignal; maxResponseBytes?: number },
+): Promise<ApiPathResponse<"POST", Path>>;
+async function gameplayMutation<const Path extends EventControlPath>(
+  path: `${Path}?eventSnapshot=v1`,
+  body: ApiPathRequest<"POST", NoInfer<Path>>,
+  tokenProvider: AuthTokenProvider,
+  validate: typeof isRecord,
+): Promise<Record<string, unknown>>;
 async function gameplayMutation<T>(
   path: string,
   body: unknown,
@@ -257,9 +282,17 @@ export async function readMatchSnapshotViaApi(
   );
   const run = async (): Promise<ReadMatchSnapshotResponse> => {
     try {
-      const url = new URL(`${GAMEPLAY_API_ROOT}${MATCH_SNAPSHOT_PATH}`);
-      url.searchParams.set("playerId", request.playerId);
-      url.searchParams.set("matchId", request.matchId);
+      const url = new URL(
+        `${GAMEPLAY_API_ROOT}${MATCH_SNAPSHOT_PATH}` satisfies ApiHttpUrl<"GET /matches/snapshot">,
+      );
+      url.searchParams.set(
+        "playerId" satisfies keyof ApiQuery<"GET /matches/snapshot">,
+        request.playerId,
+      );
+      url.searchParams.set(
+        "matchId" satisfies keyof ApiQuery<"GET /matches/snapshot">,
+        request.matchId,
+      );
       const response = await fetch(url, {
         method: "GET",
         headers: { Accept: "application/json" },
@@ -314,9 +347,17 @@ export async function readHistoricalMatchPairViaApi(
     GAMEPLAY_API_TIMEOUT_MS,
   );
   try {
-    const url = new URL(`${GAMEPLAY_API_ROOT}/matches/history`);
-    url.searchParams.set("inviteId", request.inviteId);
-    url.searchParams.set("matchId", request.matchId);
+    const url = new URL(
+      `${GAMEPLAY_API_ROOT}/matches/history` satisfies ApiHttpUrl<"GET /matches/history">,
+    );
+    url.searchParams.set(
+      "inviteId" satisfies keyof ApiQuery<"GET /matches/history">,
+      request.inviteId,
+    );
+    url.searchParams.set(
+      "matchId" satisfies keyof ApiQuery<"GET /matches/history">,
+      request.matchId,
+    );
     const response = await fetch(url, {
       method: "GET",
       headers: { Accept: "application/json" },
@@ -346,14 +387,14 @@ export async function readHistoricalMatchPairViaApi(
   }
 }
 
-async function retryGameSessionMutation<T>(
-  path: string,
-  body: unknown,
+async function retryGameSessionMutation<const Path extends GameplayPath>(
+  path: Path | `${Path}?${string}`,
+  body: ApiPathRequest<"POST", NoInfer<Path>>,
   tokenProvider: AuthTokenProvider,
-  validate: (value: unknown) => value is T,
+  validate: (value: unknown) => value is ApiPathResponse<"POST", NoInfer<Path>>,
   retryUnavailable: boolean,
   maxResponseBytes?: number,
-): Promise<T> {
+): Promise<ApiPathResponse<"POST", Path>> {
   const deadlineAt = Date.now() + GAMEPLAY_API_TIMEOUT_MS;
   for (let attempt = 0; attempt < 3; attempt++) {
     const remainingMs = deadlineAt - Date.now();
@@ -628,16 +669,14 @@ export function leaveEventViaApi(
   );
 }
 
-export type EventMutationResponse<T> = T & {
-  eventSnapshot?: EventSnapshotSeed;
-};
+export type EventMutationResponse<T> = EventMutationWireResponse<T>;
 
-async function eventMutation<T extends { eventId: string }>(
-  path: string,
-  request: unknown,
+async function eventMutation<const Path extends EventControlPath>(
+  path: Path,
+  request: ApiPathRequest<"POST", NoInfer<Path>>,
   tokenProvider: AuthTokenProvider,
-  validate: (value: unknown) => value is T,
-): Promise<EventMutationResponse<T>> {
+  validate: (value: unknown) => value is ApiPathResponse<"POST", NoInfer<Path>>,
+): Promise<ApiPathResponse<"POST", Path>> {
   const payload = await gameplayMutation(
     `${path}?eventSnapshot=v1`,
     request,

@@ -1,5 +1,5 @@
 import * as crypto from "node:crypto";
-export type TelegramDesiredInput = {
+type DesiredInputEvidence = {
   destination?: unknown;
   instanceKey?: unknown;
   text?: unknown;
@@ -8,20 +8,48 @@ export type TelegramDesiredInput = {
   sourceRevision?: unknown;
   ifMissing?: unknown;
 };
-export type TelegramDesired = {
-  schemaVersion: number;
-  operation: "send" | "edit" | "delete";
+export type TelegramSendDesiredInput = {
+  destination: string;
+  instanceKey: string;
+  text: string;
+  sourceRevision: string | number;
+  parseMode?: "HTML" | null | "";
+  silent?: boolean;
+};
+export type TelegramEditDesiredInput = TelegramSendDesiredInput & {
+  ifMissing?: "send" | "skip";
+};
+export type TelegramDeleteDesiredInput = {
+  destination: string;
+  sourceRevision: string | number;
+};
+export type TelegramDesiredInput =
+  | TelegramSendDesiredInput
+  | TelegramEditDesiredInput
+  | TelegramDeleteDesiredInput;
+
+type DesiredIdentity = {
+  schemaVersion: 2;
   destination: "community" | "events";
   revision: string;
   sourceRevision: string;
-  contentHash?: string;
-  instanceKey?: string;
-  text?: string;
-  parseMode?: "HTML";
-  silent?: boolean;
-  disableWebPagePreview?: boolean;
-  ifMissing?: "send" | "skip";
 };
+type TextDesired = DesiredIdentity & {
+  contentHash: string;
+  instanceKey: string;
+  text: string;
+  parseMode?: "HTML";
+  silent: boolean;
+  disableWebPagePreview: true;
+};
+export type TelegramSendDesired = TextDesired & { operation: "send" };
+export type TelegramEditDesired = TextDesired & {
+  operation: "edit";
+  ifMissing: "send" | "skip";
+};
+export type TelegramDeleteDesired = DesiredIdentity & { operation: "delete" };
+export type TelegramDesired =
+  TelegramSendDesired | TelegramEditDesired | TelegramDeleteDesired;
 
 const TELEGRAM_MESSAGE_ROOT = "telegramMessages";
 const TELEGRAM_SCHEMA_VERSION = 2;
@@ -122,7 +150,11 @@ const normalizeParseMode = (parseMode: unknown) => {
   return parseMode;
 };
 
-const finalizeDesired = <T extends Omit<TelegramDesired, "revision">>(
+const finalizeDesired = <
+  T extends Omit<DesiredIdentity, "revision"> & {
+    operation: TelegramDesired["operation"];
+  },
+>(
   desired: T,
 ): T & { revision: string } => ({
   ...desired,
@@ -130,19 +162,19 @@ const finalizeDesired = <T extends Omit<TelegramDesired, "revision">>(
 });
 
 const buildTelegramSendDesired: (
-  input: TelegramDesiredInput,
-) => TelegramDesired = ({
+  input: TelegramSendDesiredInput,
+) => TelegramSendDesired = ({
   destination,
   instanceKey,
   text,
   parseMode = null,
   silent = false,
   sourceRevision,
-}) => {
+}: DesiredInputEvidence) => {
   const normalizedText = normalizeText(text);
   const normalizedParseMode = normalizeParseMode(parseMode);
   const normalizedDestination = normalizeDestination(destination);
-  const desired: Omit<TelegramDesired, "revision"> = {
+  const desired: Omit<TelegramSendDesired, "revision"> = {
     schemaVersion: TELEGRAM_SCHEMA_VERSION,
     operation: "send",
     destination: normalizedDestination,
@@ -166,8 +198,8 @@ const buildTelegramSendDesired: (
 };
 
 const buildTelegramEditDesired: (
-  input: TelegramDesiredInput,
-) => TelegramDesired = ({
+  input: TelegramEditDesiredInput,
+) => TelegramEditDesired = ({
   destination,
   instanceKey,
   text,
@@ -175,14 +207,14 @@ const buildTelegramEditDesired: (
   silent = false,
   ifMissing = "skip",
   sourceRevision,
-}) => {
+}: DesiredInputEvidence) => {
   const normalizedText = normalizeText(text);
   const normalizedParseMode = normalizeParseMode(parseMode);
   if (ifMissing !== "send" && ifMissing !== "skip") {
     throw new TypeError("ifMissing must be send or skip");
   }
   const normalizedDestination = normalizeDestination(destination);
-  const desired: Omit<TelegramDesired, "revision"> = {
+  const desired: Omit<TelegramEditDesired, "revision"> = {
     schemaVersion: TELEGRAM_SCHEMA_VERSION,
     operation: "edit",
     destination: normalizedDestination,
@@ -207,8 +239,11 @@ const buildTelegramEditDesired: (
 };
 
 const buildTelegramDeleteDesired: (
-  input: TelegramDesiredInput,
-) => TelegramDesired = ({ destination, sourceRevision }) =>
+  input: TelegramDeleteDesiredInput,
+) => TelegramDeleteDesired = ({
+  destination,
+  sourceRevision,
+}: DesiredInputEvidence) =>
   finalizeDesired({
     schemaVersion: TELEGRAM_SCHEMA_VERSION,
     operation: "delete",

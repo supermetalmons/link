@@ -1,3 +1,8 @@
+import {
+  inviteRatingEvent,
+  inviteProjectionState,
+  type InviteDocument,
+} from "@mons/shared/invite-records";
 import glicko2 from "glicko2";
 import type { HistoricalMatchPair } from "@mons/shared/game-sessions";
 import {
@@ -9,7 +14,6 @@ import {
 } from "@mons/shared/match-protocol";
 import {
   createRatingUpdater,
-  getRatingEventMetadata,
   type RatingUpdateRequest,
 } from "@mons/shared/ratings";
 import { MATCH_TIMER_TERMINAL } from "@mons/shared/timers";
@@ -176,7 +180,7 @@ function buildRatingPlan({
   result,
 }: {
   historicalMatchPair: HistoricalMatchPair;
-  invite: Record<string, unknown>;
+  invite: InviteDocument;
   matchId: string;
   nowMs: number;
   opponent: RatingProfile | null;
@@ -191,7 +195,7 @@ function buildRatingPlan({
   const canUpdateRatings = Boolean(
     player && opponent && player.profileId !== opponent.profileId,
   );
-  const eventMetadata = getRatingEventMetadata(invite);
+  const eventMetadata = inviteRatingEvent(invite);
   const shouldApplyRatingDelta =
     canUpdateRatings && !eventMetadata.isEventMatch;
   const game = selectScoreGame(playerMatch, opponentMatch);
@@ -287,7 +291,8 @@ function buildRatingPlan({
     nowMs < FEB_CHALLENGE_END_UTC;
   const telegramDeliveryVersion =
     !eventMetadata.isEventMatch &&
-    invite.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION
+    inviteProjectionState(invite).telegramDeliveryVersion ===
+      TELEGRAM_AUTOMATCH_VERSION
       ? TELEGRAM_AUTOMATCH_VERSION
       : null;
   return {

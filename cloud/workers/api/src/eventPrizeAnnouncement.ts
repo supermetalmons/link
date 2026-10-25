@@ -1,4 +1,12 @@
 import {
+  parseTelegramAnnouncementPayload,
+  isTelegramAlbumPayload,
+  retainTelegramAnnouncementAttempt,
+  type RetainedTelegramAnnouncementAttempt,
+  type TelegramAnnouncementPayload,
+  type TelegramAnnouncementOutcomeStatus,
+} from "./telegramAnnouncementRecords.ts";
+import {
   buildEventPrizeAnnouncement,
   EVENT_PRIZE_ANNOUNCEMENT_GRACE_MS,
 } from "../../../runtime/telegram/eventPrizeAnnouncement.js";
@@ -9,6 +17,7 @@ import {
 import {
   sendTelegramMediaGroup,
   sendTelegramMessage,
+  retainTelegramMediaGroupInput,
   TELEGRAM_HTTP_TIMEOUT_MS,
   type TelegramResult,
 } from "../../../runtime/telegram/client.js";
@@ -30,7 +39,31 @@ import {
   readTelegramStorageMode,
   type TelegramAnnouncementRecord,
   type TelegramAnnouncementRepository,
+  type TelegramAnnouncementAttempt,
 } from "./telegramD1.ts";
+
+function announcementAttempt(
+  input: Omit<TelegramAnnouncementAttempt, "kind" | "payload"> & {
+    kind: EventAnnouncementKind;
+    payload: TelegramAnnouncementPayload;
+  },
+): TelegramAnnouncementAttempt | RetainedTelegramAnnouncementAttempt {
+  if (input.kind === "prizes" && isTelegramAlbumPayload(input.payload)) {
+    return { ...input, kind: input.kind, payload: input.payload };
+  }
+  if (input.kind === "reminder" && !isTelegramAlbumPayload(input.payload)) {
+    return { ...input, kind: input.kind, payload: input.payload };
+  }
+  return retainTelegramAnnouncementAttempt(input);
+}
+
+function hasPrizeImages(
+  value:
+    | ReturnType<typeof buildEventPrizeAnnouncement>
+    | ReturnType<typeof buildSundayMonsReminder>,
+): value is ReturnType<typeof buildEventPrizeAnnouncement> {
+  return "imageUrls" in value;
+}
 
 export type EventPrizeAnnouncementDeliveryInput = {
   kind?: EventAnnouncementKind;
@@ -63,75 +96,8 @@ export type EventPrizeAnnouncementDeliveryDependencies = {
   sendMessage?: typeof sendTelegramMessage;
 };
 
-type AlbumPayload = {
-  chatId: string;
-  imageUrls: string[];
-  text: string;
-  parseMode: "HTML";
-  hasSpoiler: true;
-  silent: false;
-};
-
-type ReminderPayload = {
-  chatId: string;
-  text: string;
-  parseMode: "HTML";
-  silent: false;
-};
-
-type AnnouncementPayload = AlbumPayload | ReminderPayload;
-
-function parsePayload(
-  value: unknown,
-  kind: EventAnnouncementKind,
-): AnnouncementPayload | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const payload = value as Record<string, unknown>;
-  if (
-    typeof payload.chatId !== "string" ||
-    !payload.chatId.trim() ||
-    typeof payload.text !== "string" ||
-    !payload.text ||
-    payload.parseMode !== "HTML" ||
-    payload.silent !== false
-  ) {
-    return null;
-  }
-  if (kind === "reminder") {
-    if (
-      Object.hasOwn(payload, "imageUrls") ||
-      Object.hasOwn(payload, "hasSpoiler")
-    ) {
-      return null;
-    }
-    return {
-      chatId: payload.chatId,
-      text: payload.text,
-      parseMode: "HTML",
-      silent: false,
-    };
-  }
-  if (
-    payload.hasSpoiler !== true ||
-    !Array.isArray(payload.imageUrls) ||
-    payload.imageUrls.length < 2 ||
-    payload.imageUrls.length > 10 ||
-    !payload.imageUrls.every((url) => typeof url === "string" && url.trim())
-  ) {
-    return null;
-  }
-  return {
-    chatId: payload.chatId,
-    imageUrls: payload.imageUrls,
-    text: payload.text,
-    parseMode: "HTML",
-    hasSpoiler: true,
-    silent: false,
-  };
-}
-
 async function createPayloadDigest(
-  payload: AnnouncementPayload,
+  payload: TelegramAnnouncementPayload,
 ): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
@@ -248,7 +214,7 @@ export async function deliverEventPrizeAnnouncement(
   let reservedDigest: string | null = null;
   let sendStarted = false;
   const outcome = async (
-    status: string,
+    status: TelegramAnnouncementOutcomeStatus,
     errorCode?: string,
     retryAtMs?: number,
     messageIds?: number[],
@@ -303,8 +269,8 @@ export async function deliverEventPrizeAnnouncement(
           });
     const payload =
       existing?.startAtMs === input.startAtMs
-        ? parsePayload(existing.payload, kind)
-        : "imageUrls" in announcement
+        ? parseTelegramAnnouncementPayload(existing.payload, kind)
+        : hasPrizeImages(announcement)
           ? {
               chatId: env.TELEGRAM_EXTRA_CHAT_ID.trim(),
               imageUrls: announcement.imageUrls,
@@ -340,13 +306,13 @@ export async function deliverEventPrizeAnnouncement(
       requestId,
       payloadDigest,
       createdAtMs: now(),
-      attempt: {
+      attempt: announcementAttempt({
         ...input,
         kind,
         payload,
         attemptId,
         expectedAttemptId: existing?.attemptId || null,
-      },
+      }),
     });
     if (reservation !== "reserved") {
       return (
@@ -386,15 +352,29 @@ export async function deliverEventPrizeAnnouncement(
     let result: TelegramResult;
     try {
       sendStarted = true;
-      const send =
-        kind === "prizes"
-          ? dependencies.send || sendTelegramMediaGroup
-          : dependencies.sendMessage || sendTelegramMessage;
-      result = await send({
-        ...payload,
-        token: env.TELEGRAM_BOT_TOKEN.trim(),
-        timeoutMs: Math.min(TELEGRAM_HTTP_TIMEOUT_MS, remainingMs),
-      });
+      if (kind === "prizes") {
+        const send = dependencies.send || sendTelegramMediaGroup;
+        result = isTelegramAlbumPayload(payload)
+          ? await send({
+              ...payload,
+              token: env.TELEGRAM_BOT_TOKEN.trim(),
+              timeoutMs: Math.min(TELEGRAM_HTTP_TIMEOUT_MS, remainingMs),
+            })
+          : await send(
+              retainTelegramMediaGroupInput({
+                ...payload,
+                token: env.TELEGRAM_BOT_TOKEN.trim(),
+                timeoutMs: Math.min(TELEGRAM_HTTP_TIMEOUT_MS, remainingMs),
+              }),
+            );
+      } else {
+        const send = dependencies.sendMessage || sendTelegramMessage;
+        result = await send({
+          ...payload,
+          token: env.TELEGRAM_BOT_TOKEN.trim(),
+          timeoutMs: Math.min(TELEGRAM_HTTP_TIMEOUT_MS, remainingMs),
+        });
+      }
     } catch {
       await outcome("uncertain", "send-threw");
       return { status: "uncertain", reason: "send-threw" };

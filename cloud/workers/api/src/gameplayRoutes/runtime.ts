@@ -1,3 +1,4 @@
+import { queueFor } from "../queueProducers.ts";
 import type { AutomatchDependencies } from "../automatch.ts";
 import type { GameSessionMutationDependencies } from "../gameSessionMutations.ts";
 import {
@@ -95,14 +96,16 @@ export function createGameplayProjectionDispatch({
   ) => {
     if (!(await repository.automatchPersistence.writesEnabled())) return;
     ctx.waitUntil(
-      env.TELEGRAM_PROJECTION_QUEUE.send(task).catch(() => {
-        console.error(
-          JSON.stringify({
-            event: "telegram_projection_enqueue_failed",
-            kind: task.kind,
-          }),
-        );
-      }),
+      queueFor(env, "TELEGRAM_PROJECTION_QUEUE")
+        .send(task)
+        .catch(() => {
+          console.error(
+            JSON.stringify({
+              event: "telegram_projection_enqueue_failed",
+              kind: task.kind,
+            }),
+          );
+        }),
     );
   };
   const defaultEnqueueProfileGameProjection = async (
@@ -110,14 +113,16 @@ export function createGameplayProjectionDispatch({
   ) => {
     if (!(await repository.automatchPersistence.writesEnabled())) return;
     ctx.waitUntil(
-      env.PROFILE_GAME_PROJECTION_QUEUE.send(task).catch(() => {
-        console.error(
-          JSON.stringify({
-            event: "profile_game_projection_enqueue_failed",
-            kind: task.kind,
-          }),
-        );
-      }),
+      queueFor(env, "PROFILE_GAME_PROJECTION_QUEUE")
+        .send(task)
+        .catch(() => {
+          console.error(
+            JSON.stringify({
+              event: "profile_game_projection_enqueue_failed",
+              kind: task.kind,
+            }),
+          );
+        }),
     );
   };
   return {

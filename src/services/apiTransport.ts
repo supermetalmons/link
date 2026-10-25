@@ -1,3 +1,8 @@
+import type {
+  ApiEndpoint,
+  ApiHttpUrl,
+  ApiResponse,
+} from "@mons/shared/api-contracts";
 export type AuthTokenProvider = ((forceRefresh: boolean) => Promise<string>) & {
   readonly assertCurrentUser?: () => void;
 };
@@ -38,6 +43,10 @@ type SnapshotJsonRead<T> = {
   validate: (value: unknown) => value is T;
   createError: (code: string, status?: number, retryAfterMs?: number) => Error;
 };
+
+export type EndpointSnapshotJsonRead<
+  Key extends Extract<ApiEndpoint, `GET ${string}`>,
+> = Omit<SnapshotJsonRead<ApiResponse<Key>>, "url"> & { url: ApiHttpUrl<Key> };
 
 function cancelBody(response: Response): void {
   void response.body?.cancel().catch(() => undefined);

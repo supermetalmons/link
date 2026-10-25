@@ -1,3 +1,4 @@
+import type { InviteDocument } from "@mons/shared/invite-records";
 import {
   parseAutomatchRuntimeControlRow,
   prepareAutomatchRuntimeControlRead,
@@ -16,7 +17,7 @@ import {
 } from "./inviteSourceD1.ts";
 export function createInviteSourceReader(
   env: Pick<Env, "PROFILE_GAMES_DB">,
-): (inviteId: string) => Promise<unknown> {
+): (inviteId: string) => Promise<InviteDocument | null> {
   const db = env.PROFILE_GAMES_DB;
   return async (inviteId) => {
     const session = db.withSession("first-primary");

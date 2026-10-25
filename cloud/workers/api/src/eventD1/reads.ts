@@ -1,15 +1,25 @@
 import {
+  retainEventProgressRecord,
+  type EventProgressDocument,
+} from "../../../../runtime/eventProgressRecords.js";
+import {
+  retainEventProjectionOutbox,
+  type EventProjectionOutboxDocument,
+  type EventProjectionOutboxKind,
+} from "../../../../runtime/eventProjectionOutboxRecords.js";
+import { readEventTelegramProjectionDocument } from "../../../../runtime/telegram/eventProjectionRecords.js";
+import {
   type EventD1Connection,
   type DecodedEventRow,
   EventD1Failure,
   type EventRow,
   type ConditionalSnapshot,
   type StoredEventSnapshot,
+  type EventSnapshot,
   type AssignmentRow,
   type ProfilePrizeAssignmentSnapshot,
   type EventLeaseRecord,
   type EventSyncThrottleRecord,
-  type EventOutboxRecord,
   type ProgressOutboxSnapshot,
   type TelegramProjectionState,
 } from "./types.ts";
@@ -25,7 +35,6 @@ import {
 } from "./validation.ts";
 import type {
   EventJsonRecord,
-  EventSnapshot,
   ProfileEventPrizeSnapshot,
   EventPrizeAssignmentRecord,
   ProfileEventPrizePageQuery,
@@ -639,24 +648,26 @@ export async function readEventSyncThrottle(
 export async function readEventProgressDeadOutbox(
   db: EventD1Connection,
   outboxId: string,
-): Promise<EventOutboxRecord | null> {
+): Promise<EventProgressDocument<"dead"> | null> {
   const row = await db
     .prepare(
       "SELECT record_json FROM event_progress_outboxes WHERE outbox_id = ? AND status = 'dead'",
     )
     .bind(outboxId)
     .first<{ record_json: string }>();
-  return row ? (decodeJson(row.record_json) as EventOutboxRecord) : null;
+  return row
+    ? retainEventProgressRecord("dead", decodeJson(row.record_json))
+    : null;
 }
 
 export async function readEventProgressOutbox(
   db: EventD1Connection,
   outboxId: string,
-): Promise<EventOutboxRecord | null> {
+): Promise<EventProgressDocument<"pending"> | null> {
   const snapshot = await readEventProgressOutboxSnapshot(db, outboxId);
   return snapshot.recordJson === null
     ? null
-    : (decodeJson(snapshot.recordJson) as EventOutboxRecord);
+    : retainEventProgressRecord("pending", decodeJson(snapshot.recordJson));
 }
 
 export async function readEventProgressOutboxSnapshot(
@@ -692,7 +703,9 @@ export async function listDueEventProgressOutboxes(
   db: EventD1Connection,
   beforeMs: number,
   limit = 100,
-): Promise<Array<{ outboxId: string; record: EventOutboxRecord }>> {
+): Promise<
+  Array<{ outboxId: string; record: EventProgressDocument<"pending"> }>
+> {
   const rows = await db
     .prepare(
       `SELECT outbox_id, record_json FROM event_progress_outboxes
@@ -703,43 +716,37 @@ export async function listDueEventProgressOutboxes(
     .all<{ outbox_id: string; record_json: string }>();
   return rows.results.map((row) => ({
     outboxId: row.outbox_id,
-    record: decodeJson(row.record_json) as EventOutboxRecord,
+    record: retainEventProgressRecord("pending", decodeJson(row.record_json)),
   }));
 }
 
 export async function readEventProfileGameProjectionOutbox(
   db: EventD1Connection,
   eventId: string,
-): Promise<EventOutboxRecord | null> {
-  return readProjectionOutbox(
-    db,
-    "event_profile_game_projection_outboxes",
-    eventId,
-  );
+): Promise<EventProjectionOutboxDocument<"profile-game"> | null> {
+  return readProjectionOutbox(db, "profile-game", eventId);
 }
 
 export async function readEventTelegramProjectionOutbox(
   db: EventD1Connection,
   eventId: string,
-): Promise<EventOutboxRecord | null> {
-  return readProjectionOutbox(
-    db,
-    "event_telegram_projection_outboxes",
-    eventId,
-  );
+): Promise<EventProjectionOutboxDocument<"telegram"> | null> {
+  return readProjectionOutbox(db, "telegram", eventId);
 }
 
-async function readProjectionOutbox(
+async function readProjectionOutbox<Kind extends ProjectionOutboxKind>(
   db: EventD1Connection,
-  table:
-    | "event_profile_game_projection_outboxes"
-    | "event_telegram_projection_outboxes",
+  kind: Kind,
   eventId: string,
-): Promise<EventOutboxRecord | null> {
+): Promise<EventProjectionOutboxDocument<Kind> | null> {
+  const table =
+    kind === "profile-game"
+      ? "event_profile_game_projection_outboxes"
+      : "event_telegram_projection_outboxes";
   const row = await prepareProjectionOutboxRead(db, table, eventId).first<{
     record_json: string;
   }>();
-  return decodeProjectionOutboxRow(row);
+  return decodeProjectionOutboxRow(row, kind);
 }
 
 export function prepareProjectionOutboxRead(
@@ -757,17 +764,25 @@ export function prepareProjectionOutboxRead(
     .bind(exactKey(eventId));
 }
 
-export function decodeProjectionOutboxRow(
+export function decodeProjectionOutboxRow<Kind extends ProjectionOutboxKind>(
   row: { record_json: string } | null | undefined,
-): EventOutboxRecord | null {
-  return row ? (decodeJson(row.record_json) as EventOutboxRecord) : null;
+  kind: Kind,
+): EventProjectionOutboxDocument<Kind> | null {
+  return row
+    ? retainEventProjectionOutbox(kind, decodeJson(row.record_json))
+    : null;
 }
 
 export async function listDueEventProfileGameProjectionOutboxes(
   db: EventD1Connection,
   beforeMs: number,
   limit = 100,
-): Promise<Array<{ eventId: string; record: EventOutboxRecord }>> {
+): Promise<
+  Array<{
+    eventId: string;
+    record: EventProjectionOutboxDocument<"profile-game">;
+  }>
+> {
   const snapshots = await listDueProjectionOutboxSnapshots(
     db,
     "profile-game",
@@ -776,7 +791,7 @@ export async function listDueEventProfileGameProjectionOutboxes(
   );
   return snapshots.map(({ eventId, record }) => ({
     eventId,
-    record: record as EventOutboxRecord,
+    record,
   }));
 }
 
@@ -784,7 +799,9 @@ export async function listDueEventTelegramProjectionOutboxes(
   db: EventD1Connection,
   beforeMs: number,
   limit = 100,
-): Promise<Array<{ eventId: string; record: EventOutboxRecord }>> {
+): Promise<
+  Array<{ eventId: string; record: EventProjectionOutboxDocument<"telegram"> }>
+> {
   const snapshots = await listDueProjectionOutboxSnapshots(
     db,
     "telegram",
@@ -793,36 +810,43 @@ export async function listDueEventTelegramProjectionOutboxes(
   );
   return snapshots.map(({ eventId, record }) => ({
     eventId,
-    record: record as EventOutboxRecord,
+    record,
   }));
 }
 
-export type ProjectionOutboxKind = "profile-game" | "telegram";
+export type ProjectionOutboxKind = EventProjectionOutboxKind;
+export type ProjectionOutboxSnapshot<
+  Kind extends ProjectionOutboxKind = ProjectionOutboxKind,
+> = {
+  [Key in Kind]: {
+    readonly kind: Key;
+    readonly eventId: string;
+    readonly record: EventProjectionOutboxDocument<Key>;
+    readonly recordJson: string;
+  };
+}[Kind];
 
-export type ProjectionOutboxSnapshot = {
-  readonly kind: ProjectionOutboxKind;
-  readonly eventId: string;
-  readonly record: unknown;
-  readonly recordJson: string;
-};
-
-export async function listDueProjectionOutboxSnapshots(
+export async function listDueProjectionOutboxSnapshots<
+  Kind extends ProjectionOutboxKind,
+>(
   db: EventD1Connection,
-  kind: ProjectionOutboxKind,
+  kind: Kind,
   beforeMs: number,
   limit: number,
-): Promise<ProjectionOutboxSnapshot[]> {
+): Promise<ProjectionOutboxSnapshot<Kind>[]> {
   return (await listDueProjectionOutboxSnapshotsPage(db, kind, beforeMs, limit))
     .entries;
 }
 
-export async function listDueProjectionOutboxSnapshotsPage(
+export async function listDueProjectionOutboxSnapshotsPage<
+  Kind extends ProjectionOutboxKind,
+>(
   db: EventD1Connection,
-  kind: ProjectionOutboxKind,
+  kind: Kind,
   beforeMs: number,
   limit: number,
   excludedIdentities: readonly string[] = [],
-): Promise<RecoveryScanPage<ProjectionOutboxSnapshot[]>> {
+): Promise<RecoveryScanPage<ProjectionOutboxSnapshot<Kind>[]>> {
   const table =
     kind === "profile-game"
       ? "event_profile_game_projection_outboxes"
@@ -853,12 +877,15 @@ export async function listDueProjectionOutboxSnapshotsPage(
       recovery_scan_identity: string | null;
     }>();
   const scannedIdentities = readRecoveryScanIdentities(rows.results);
-  const entries = rows.results.map((row) => ({
-    kind,
-    eventId: row.event_id,
-    record: decodeJson(row.record_json),
-    recordJson: row.record_json,
-  }));
+  const entries = rows.results.map(
+    (row) =>
+      ({
+        kind,
+        eventId: row.event_id,
+        record: retainEventProjectionOutbox(kind, decodeJson(row.record_json)),
+        recordJson: row.record_json,
+      }) as ProjectionOutboxSnapshot<Kind>,
+  );
   return { entries, scannedIdentities };
 }
 
@@ -898,6 +925,6 @@ export function decodeTelegramProjectionStateRow(
   return {
     generation: safeInteger(row.generation),
     revision: safeInteger(row.revision, 1),
-    state,
+    state: readEventTelegramProjectionDocument(state),
   };
 }

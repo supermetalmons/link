@@ -1,9 +1,14 @@
+import { readTelegramAnnouncementPayloadDocument } from "../src/telegramAnnouncementRecords.ts";
+import { eventDocumentFixture } from "./eventCompatibilityFixture.ts";
 import type { EventLeaseRecord } from "../../../runtime/eventLeases.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildEventPrizeAnnouncement } from "../../../runtime/telegram/eventPrizeAnnouncement.js";
 import { buildSundayMonsReminder } from "../../../runtime/telegram/sundayMonsReminder.js";
-import type { TelegramResult } from "../../../runtime/telegram/client.js";
+import type {
+  TelegramMediaGroupResult,
+  TelegramSendResult,
+} from "../../../runtime/telegram/client.js";
 import {
   deliverEventPrizeAnnouncement,
   type EventPrizeAnnouncementDeliveryDependencies,
@@ -11,6 +16,7 @@ import {
 } from "../src/eventPrizeAnnouncement.ts";
 import type {
   TelegramAnnouncementRecord,
+  TelegramAnnouncementAttempt,
   TelegramAnnouncementRepository,
 } from "../src/telegramD1.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
@@ -24,7 +30,7 @@ const INPUT: EventPrizeAnnouncementDeliveryInput = {
   runAtMs: RUN_AT_MS,
   firstQueuedAtMs: RUN_AT_MS - 60_000,
 };
-const SUCCESS: TelegramResult = {
+const SUCCESS: TelegramMediaGroupResult = {
   ok: true,
   outcome: "sent",
   messageIds: [101, 102, 103],
@@ -36,6 +42,28 @@ const env = {
   TELEGRAM_EXTRA_CHAT_ID: " community-chat\n",
 } as Env;
 
+type StoredAnnouncementAttemptFixture = Pick<
+  TelegramAnnouncementAttempt,
+  | "eventId"
+  | "startAtMs"
+  | "runAtMs"
+  | "firstQueuedAtMs"
+  | "attemptId"
+  | "expectedAttemptId"
+> & {
+  kind?: TelegramAnnouncementRecord["kind"];
+  payload: unknown;
+};
+
+function storedAnnouncementAttemptFixture(
+  value: NonNullable<
+    Parameters<TelegramAnnouncementRepository["reserve"]>[0]["attempt"]
+  >,
+): StoredAnnouncementAttemptFixture {
+  const retained: unknown = value;
+  return retained as StoredAnnouncementAttemptFixture;
+}
+
 function memoryAnnouncementRepository() {
   const values = new Map<string, TelegramAnnouncementRecord>();
   const repository: TelegramAnnouncementRepository = {
@@ -46,9 +74,13 @@ function memoryAnnouncementRepository() {
         current &&
         (!input.attempt ||
           current.status !== "retryable" ||
-          current.eventId !== input.attempt.eventId ||
-          (current.kind ?? "prizes") !== (input.attempt.kind ?? "prizes") ||
-          current.attemptId !== input.attempt.expectedAttemptId ||
+          current.eventId !==
+            storedAnnouncementAttemptFixture(input.attempt).eventId ||
+          (current.kind ?? "prizes") !==
+            (storedAnnouncementAttemptFixture(input.attempt).kind ??
+              "prizes") ||
+          current.attemptId !==
+            storedAnnouncementAttemptFixture(input.attempt).expectedAttemptId ||
           !current.retryAtMs ||
           current.retryAtMs > input.createdAtMs)
       ) {
@@ -63,13 +95,20 @@ function memoryAnnouncementRepository() {
         updatedAtMs: input.createdAtMs,
         ...(input.attempt
           ? {
-              eventId: input.attempt.eventId,
-              kind: input.attempt.kind ?? "prizes",
-              startAtMs: input.attempt.startAtMs,
-              runAtMs: input.attempt.runAtMs,
-              firstQueuedAtMs: input.attempt.firstQueuedAtMs,
-              payload: input.attempt.payload,
-              attemptId: input.attempt.attemptId,
+              eventId: storedAnnouncementAttemptFixture(input.attempt).eventId,
+              kind:
+                storedAnnouncementAttemptFixture(input.attempt).kind ??
+                "prizes",
+              startAtMs: storedAnnouncementAttemptFixture(input.attempt)
+                .startAtMs,
+              runAtMs: storedAnnouncementAttemptFixture(input.attempt).runAtMs,
+              firstQueuedAtMs: storedAnnouncementAttemptFixture(input.attempt)
+                .firstQueuedAtMs,
+              payload: readTelegramAnnouncementPayloadDocument(
+                storedAnnouncementAttemptFixture(input.attempt).payload,
+              ),
+              attemptId: storedAnnouncementAttemptFixture(input.attempt)
+                .attemptId,
               attemptCount: (current?.attemptCount || 0) + 1,
               retryAtMs: null,
               errorCode: null,
@@ -120,7 +159,8 @@ function fixture(input = INPUT) {
     now: () => nowMs,
     controlsEnabled: async () => true,
     eventRepository: {
-      readEvent: async () => eventData,
+      readEvent: async () =>
+        eventData ? eventDocumentFixture(eventData) : null,
       transactEventLease: async (key, updater) => {
         const path = `eventLocks/${key.id}`;
         const current = (locks.get(path) ?? null) as EventLeaseRecord | null;
@@ -231,7 +271,12 @@ test("sends and persists Mi Note Cards Telegram JPGs across a safe retry", async
     retryAtMs: RUN_AT_MS + 12_000,
   });
   const previous = structuredClone(state.values.get(requestId)!);
-  assert.deepEqual(previous.payload?.imageUrls, imageUrls);
+  assert.deepEqual(
+    previous.payload == null
+      ? undefined
+      : Reflect.get(previous.payload, "imageUrls"),
+    imageUrls,
+  );
   state.setNow(RUN_AT_MS + 12_000);
   state.dependencies.send = async (input) => {
     state.sends.push(input);
@@ -440,7 +485,7 @@ test("uncertain, thrown and incomplete sends are permanent automatic duplicate b
     { ...SUCCESS, messageIds: [1] },
     { ...SUCCESS, messageIds: [1, 2, 0] },
     null,
-  ] satisfies Array<TelegramResult | null>) {
+  ] satisfies Array<TelegramMediaGroupResult | null>) {
     const state = fixture();
     let sends = 0;
     state.dependencies.send = async () => {
@@ -630,7 +675,10 @@ test("legacy three-hour delivery retains its timing, text, and single reminder r
   assert.equal(receipt.startAtMs, input.startAtMs);
   assert.equal(receipt.runAtMs, input.runAtMs);
   assert.equal(receipt.firstQueuedAtMs, input.firstQueuedAtMs);
-  assert.equal(receipt.payload?.text, state.reminderSends[0].text);
+  assert.equal(
+    receipt.payload == null ? undefined : Reflect.get(receipt.payload, "text"),
+    state.reminderSends[0].text,
+  );
   assert.equal((await state.deliver()).reason, "already-sent");
   assert.equal(state.reminderSends.length, 1);
   assert.equal(state.sends.length, 0);
@@ -683,7 +731,10 @@ test("reminder delivery renders the participants from its locked canonical event
   assert.match(String(state.reminderSends[0].text), /ivan/);
   assert.match(String(state.reminderSends[0].text), /Second &lt;player&gt;/);
   const receipt = state.values.get(`event:${input.eventId}:reminder:v1`)!;
-  assert.equal(receipt.payload?.text, expected.text);
+  assert.equal(
+    receipt.payload == null ? undefined : Reflect.get(receipt.payload, "text"),
+    expected.text,
+  );
 });
 
 test("reminder timing and strict Sunday eligibility are separate from prize eligibility", async () => {
@@ -774,7 +825,9 @@ test("safe text retries keep their own payload and require the returned single m
   assert.equal(state.values.get(key)?.attemptCount, 2);
   assert.equal(state.sends.length, 0);
   const missingId = fixture(input);
-  missingId.dependencies.sendMessage = async () => SUCCESS;
+  const missingMessageIdResult: unknown = SUCCESS;
+  missingId.dependencies.sendMessage = async () =>
+    missingMessageIdResult as TelegramSendResult;
   assert.equal((await missingId.deliver()).status, "uncertain");
   assert.equal((await missingId.deliver()).reason, "previous-send-unresolved");
 });
@@ -808,7 +861,7 @@ test("old prize payloads retain their exact digest and do not require a kind fie
     retryAtMs: RUN_AT_MS,
     attemptId: "old-attempt",
     attemptCount: 1,
-    payload,
+    payload: readTelegramAnnouncementPayloadDocument(payload),
     payloadDigest,
     messageIds: null,
   });

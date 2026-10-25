@@ -1,3 +1,7 @@
+import {
+  createPendingAutomatchInviteDocument,
+  createMatchedAutomatchInviteDocument,
+} from "@mons/shared/invite-records";
 import { createGameVariantHelpers } from "@mons/shared/game-variants";
 import {
   buildAutoInviteId,
@@ -192,7 +196,7 @@ export function buildPendingAutomatchPlan(
     {
       kind: "invite-merge",
       inviteId,
-      value: {
+      value: createPendingAutomatchInviteDocument({
         version: CONTROLLER_VERSION,
         hostId: requesterUid,
         hostColor,
@@ -204,7 +208,7 @@ export function buildPendingAutomatchPlan(
           [requesterUid]: request.operationId,
         },
         telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION,
-      },
+      }),
     },
     {
       kind: "telegram-source",
@@ -265,7 +269,7 @@ export function buildMatchedAutomatchPlan(
   );
   const usesTelegramDeliveryV2 =
     queued.data.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION;
-  const invite: Record<string, unknown> = {
+  const invite = createMatchedAutomatchInviteDocument({
     version: CONTROLLER_VERSION,
     hostId: existingUid,
     hostColor,
@@ -279,7 +283,7 @@ export function buildMatchedAutomatchPlan(
     ...(usesTelegramDeliveryV2
       ? { telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION }
       : {}),
-  };
+  });
   const match = buildFreshMatchRecord({
     color: hostColor === "white" ? "black" : "white",
     emojiId,

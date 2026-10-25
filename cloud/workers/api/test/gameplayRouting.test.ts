@@ -1,3 +1,5 @@
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
+import { matchDocumentFixture } from "./matchRecordFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { decodeAutomatchEntry } from "../../../runtime/automatchRecords.js";
@@ -276,11 +278,11 @@ function fixture(route: RouteCase) {
     readInviteMetadata: async (inviteId) => {
       assert.equal(inviteId, "invite");
       if (route.path === "/invites/role/read") effects.push("invite-role");
-      return {
+      return retainedInviteSourceFixture({
         hostId: uid,
         guestId:
           route.path === "/navigation/games/remove" ? null : "opponent-uid",
-      };
+      });
     },
     readProfileOwnershipSnapshot: async (query) => ({
       canonicalProfileIdByProfileId: new Map(
@@ -358,7 +360,10 @@ function fixture(route: RouteCase) {
     putEventProgressOutbox: unexpected,
     readInviteMetadata: async (inviteId) => {
       assert.equal(inviteId, "auto_invite");
-      return { hostId: uid, guestId: "opponent-uid" };
+      return retainedInviteSourceFixture({
+        hostId: uid,
+        guestId: "opponent-uid",
+      });
     },
     hasCompletedRatingUpdate: async (inviteId, matchId) => {
       assert.deepEqual([inviteId, matchId], ["auto_invite", "auto_invite"]);
@@ -945,7 +950,7 @@ for (const state of ["frozen", "draining", "unreadable"] as const) {
             ...f.dependencies.repository!,
             readGameSessionMutationReceipt: async () =>
               decodeGameSessionMutationReceipt(null),
-            readMatchRecord: async () => match,
+            readMatchRecord: async () => matchDocumentFixture(match),
             commitSessionChanges: async () => {
               committed = true;
             },

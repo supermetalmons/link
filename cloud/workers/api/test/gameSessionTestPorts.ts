@@ -1,3 +1,10 @@
+import {
+  retainedAutomatchReadFixture,
+  retainedAutomatchRecordsFixture,
+  retainedAutomatchPageFixture,
+} from "./automatchRecordFixture.ts";
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
+import { matchCreationWireValue } from "../src/matchRecordCodec.ts";
 import type {
   GameSessionPort,
   GameSessionChange,
@@ -151,7 +158,10 @@ export function matchTestPort(
               );
             }
             return {
-              value: { ...record.value, sessionCreation: record.marker },
+              value: {
+                ...Object(matchCreationWireValue(record.value)),
+                sessionCreation: record.marker,
+              },
               decision: "created",
             };
           },
@@ -170,40 +180,60 @@ export function rawGameplayTestPort(
   return {
     ...matchTestPort(state),
     readInviteMetadata: async (id, signal) =>
-      (await state.getPath(`invites/${id}`, undefined, signal)) as Record<
-        string,
-        unknown
-      > | null,
+      retainedInviteSourceFixture(
+        (await state.getPath(`invites/${id}`, undefined, signal)) as Record<
+          string,
+          unknown
+        > | null,
+      ),
     async readInviteMetadataMany(ids, signal) {
       return Promise.all(ids.map((id) => this.readInviteMetadata(id, signal)));
     },
     readAutomatchEntry: (id, signal) =>
-      state.getPath(`automatch/${id}`, undefined, signal),
+      retainedAutomatchReadFixture(
+        "automatch",
+        state.getPath(`automatch/${id}`, undefined, signal),
+      ),
     listAutomatchEntriesByLogin: async (uid, limit, signal) =>
-      (await state.getPath(
+      retainedAutomatchRecordsFixture(
         "automatch",
-        { orderBy: "uid", equalTo: uid, limitToFirst: limit },
-        signal,
-      )) as Record<string, unknown> | null,
+        (await state.getPath(
+          "automatch",
+          { orderBy: "uid", equalTo: uid, limitToFirst: limit },
+          signal,
+        )) as Record<string, unknown> | null,
+      ),
     readFirstAutomatchEntry: async (signal) =>
-      (await state.getPath(
+      retainedAutomatchRecordsFixture(
         "automatch",
-        { orderBy: "$key", limitToFirst: 1 },
-        signal,
-      )) as Record<string, unknown> | null,
+        (await state.getPath(
+          "automatch",
+          { orderBy: "$key", limitToFirst: 1 },
+          signal,
+        )) as Record<string, unknown> | null,
+      ),
     readMutationReceipt: (id, signal) =>
-      state.getPath(`gameplayMutationReceipts/${id}`, undefined, signal),
+      retainedAutomatchReadFixture(
+        "gameplayMutationReceipts",
+        state.getPath(`gameplayMutationReceipts/${id}`, undefined, signal),
+      ),
     commitSessionChanges: (changes, signal) =>
       state.patchRoot(encodeSessionChanges(changes), signal),
     readAutomatchTelegramSource: (id, signal) =>
-      state.getPath(`telegramAutomatches/${id}`, undefined, signal),
+      retainedAutomatchReadFixture(
+        "telegramAutomatches",
+        state.getPath(`telegramAutomatches/${id}`, undefined, signal),
+      ),
     transactAutomatchTelegramSource: (id, update, signal) =>
       state.transactPath(`telegramAutomatches/${id}`, update, signal),
     readAutomatchTelegramOutbox: (id, signal) =>
-      state.getPath(
-        `telegramProjectionOutbox/automatch/${id}`,
-        undefined,
-        signal,
+      retainedAutomatchReadFixture(
+        "telegramProjectionOutbox/automatch",
+        state.getPath(
+          `telegramProjectionOutbox/automatch/${id}`,
+          undefined,
+          signal,
+        ),
       ),
     transactAutomatchTelegramOutbox: (id, update, signal) =>
       state.transactPath(
@@ -259,36 +289,50 @@ export function rawGameplayTestPort(
       return result.committed;
     },
     listDueAutomatchTelegramOutboxes: async (now, limit, signal) =>
-      (await state.getPath(
+      retainedAutomatchRecordsFixture(
         "telegramProjectionOutbox/automatch",
-        { orderBy: "updatedAtMs", startAt: 0, endAt: now, limitToFirst: limit },
-        signal,
-      )) as Record<string, unknown> | null,
-    listDueAutomatchTelegramOutboxesPage: async (
-      now,
-      limit,
-      excludedIdentities = [],
-      signal,
-    ) =>
-      recoveryRecordPageFixture(
         (await state.getPath(
           "telegramProjectionOutbox/automatch",
           {
             orderBy: "updatedAtMs",
             startAt: 0,
             endAt: now,
-            limitToFirst: limit + excludedIdentities.length,
+            limitToFirst: limit,
           },
           signal,
         )) as Record<string, unknown> | null,
-        limit,
-        excludedIdentities,
+      ),
+    listDueAutomatchTelegramOutboxesPage: async (
+      now,
+      limit,
+      excludedIdentities = [],
+      signal,
+    ) =>
+      retainedAutomatchPageFixture(
+        "telegramProjectionOutbox/automatch",
+        recoveryRecordPageFixture(
+          (await state.getPath(
+            "telegramProjectionOutbox/automatch",
+            {
+              orderBy: "updatedAtMs",
+              startAt: 0,
+              endAt: now,
+              limitToFirst: limit + excludedIdentities.length,
+            },
+            signal,
+          )) as Record<string, unknown> | null,
+          limit,
+          excludedIdentities,
+        ),
       ),
     readAutomatchProfileOutbox: (id, signal) =>
-      state.getPath(
-        `profileGameProjectionOutbox/automatch/${id}`,
-        undefined,
-        signal,
+      retainedAutomatchReadFixture(
+        "profileGameProjectionOutbox/automatch",
+        state.getPath(
+          `profileGameProjectionOutbox/automatch/${id}`,
+          undefined,
+          signal,
+        ),
       ),
     transactAutomatchProfileOutbox: (id, update, signal) =>
       state.transactPath(
@@ -374,53 +418,65 @@ export function rawGameplayTestPort(
       return result.decision === "deferred" ? "deferred" : "projected";
     },
     listDueAutomatchProfileOutboxes: async (now, limit, signal) =>
-      (await state.getPath(
+      retainedAutomatchRecordsFixture(
         "profileGameProjectionOutbox/automatch",
-        { orderBy: "lastQueuedAtMs", endAt: now, limitToFirst: limit },
-        signal,
-      )) as Record<string, unknown> | null,
+        (await state.getPath(
+          "profileGameProjectionOutbox/automatch",
+          { orderBy: "lastQueuedAtMs", endAt: now, limitToFirst: limit },
+          signal,
+        )) as Record<string, unknown> | null,
+      ),
     listDueAutomatchProfileOutboxesPage: async (
       now,
       limit,
       excludedIdentities = [],
       signal,
     ) =>
-      recoveryRecordPageFixture(
-        (await state.getPath(
-          "profileGameProjectionOutbox/automatch",
-          {
-            orderBy: "lastQueuedAtMs",
-            endAt: now,
-            limitToFirst: limit + excludedIdentities.length,
-          },
-          signal,
-        )) as Record<string, unknown> | null,
-        limit,
-        excludedIdentities,
+      retainedAutomatchPageFixture(
+        "profileGameProjectionOutbox/automatch",
+        recoveryRecordPageFixture(
+          (await state.getPath(
+            "profileGameProjectionOutbox/automatch",
+            {
+              orderBy: "lastQueuedAtMs",
+              endAt: now,
+              limitToFirst: limit + excludedIdentities.length,
+            },
+            signal,
+          )) as Record<string, unknown> | null,
+          limit,
+          excludedIdentities,
+        ),
       ),
     listMalformedAutomatchProfileOutboxes: async (limit, signal) =>
-      (await state.getPath(
+      retainedAutomatchRecordsFixture(
         "profileGameProjectionOutbox/automatch",
-        { orderBy: "lastQueuedAtMs", startAt: "", limitToFirst: limit },
-        signal,
-      )) as Record<string, unknown> | null,
+        (await state.getPath(
+          "profileGameProjectionOutbox/automatch",
+          { orderBy: "lastQueuedAtMs", startAt: "", limitToFirst: limit },
+          signal,
+        )) as Record<string, unknown> | null,
+      ),
     listMalformedAutomatchProfileOutboxesPage: async (
       limit,
       excludedIdentities = [],
       signal,
     ) =>
-      recoveryRecordPageFixture(
-        (await state.getPath(
-          "profileGameProjectionOutbox/automatch",
-          {
-            orderBy: "lastQueuedAtMs",
-            startAt: "",
-            limitToFirst: limit + excludedIdentities.length,
-          },
-          signal,
-        )) as Record<string, unknown> | null,
-        limit,
-        excludedIdentities,
+      retainedAutomatchPageFixture(
+        "profileGameProjectionOutbox/automatch",
+        recoveryRecordPageFixture(
+          (await state.getPath(
+            "profileGameProjectionOutbox/automatch",
+            {
+              orderBy: "lastQueuedAtMs",
+              startAt: "",
+              limitToFirst: limit + excludedIdentities.length,
+            },
+            signal,
+          )) as Record<string, unknown> | null,
+          limit,
+          excludedIdentities,
+        ),
       ),
   };
 }

@@ -23,6 +23,16 @@ export interface ClaimMatchVictoryByTimerRequest {
 export interface ClaimMatchVictoryByTimerResponse {
   ok: true;
 }
+export type ClaimedTimerWrite = {
+  status: "claimed";
+  inviteId: string;
+  playerId: string;
+  opponentId: string;
+  timer: string;
+  turnNumber: number;
+  claimedAtMs: number;
+  expiresAtMs: null;
+};
 declare const MATCH_TIMER_DURATION_MS = 90000;
 declare const MATCH_TIMER_DURATION_SECONDS: 90;
 declare const MATCH_TIMER_TERMINAL = "gg";

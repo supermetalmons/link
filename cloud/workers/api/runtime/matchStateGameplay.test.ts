@@ -1,3 +1,5 @@
+import { unwrapMatchStateWireFixture } from "../test/matchRecordFixture.ts";
+import { commitEventCompatibilityFixture } from "../test/eventCompatibilityFixture.ts";
 import {
   normalizeMatchSnapshot,
   type ReadMatchSnapshotResponse,
@@ -26,7 +28,7 @@ import { readHistoricalMatch } from "../src/historicalMatchRoute.ts";
 import { parseNewMatchTimerStorage } from "../src/localMatchTimerStore.ts";
 import { handleMatchSnapshotRoute } from "../src/matchSnapshotRoute.ts";
 import { readMatchStateRoutes } from "../src/matchStateD1.ts";
-import { getMatchStateRpc, unwrapMatchStateRpc } from "../src/matchStateRpc.ts";
+import { getMatchStateRpc } from "../src/matchStateRpc.ts";
 import { resolveMatchTimerGame } from "../src/matchTimer.ts";
 import {
   commitCanonicalPlan,
@@ -536,7 +538,8 @@ describe("gameplay with canonical Durable Object storage", () => {
     const guest = `event-guest-${eventId}`;
     rooms.add(inviteId);
     const repository = createEventGameplayRepository(workerEnv);
-    await repository.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      repository,
       decodeEventUpdates({
         [`events/${eventId}`]: {
           schemaVersion: 2,
@@ -554,7 +557,8 @@ describe("gameplay with canonical Durable Object storage", () => {
       }),
     );
     const fen = new Game().toFen();
-    await repository.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      repository,
       decodeEventUpdates({
         [`events/${eventId}/status`]: "active",
         [`events/${eventId}/updatedAtMs`]: 200,
@@ -592,13 +596,14 @@ describe("gameplay with canonical Durable Object storage", () => {
     });
     expect(original.playerMatch).toMatchObject({ color: "white", fen });
     expect(original.opponentMatch).toMatchObject({ color: "black", fen });
-    await repository.commitEventPlan(
+    await commitEventCompatibilityFixture(
+      repository,
       decodeEventUpdates({
         [`events/${eventId}/updatedAtMs`]: 300,
         [`players/${host}/matches/${inviteId}/timer`]: MATCH_TIMER_TERMINAL,
       }),
     );
-    const finished = unwrapMatchStateRpc(
+    const finished = unwrapMatchStateWireFixture(
       await getMatchStateRpc(workerEnv, inviteId).readCanonicalMatchPair({
         inviteId,
         matchId: inviteId,

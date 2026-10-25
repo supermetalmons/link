@@ -1,5 +1,27 @@
 import { isSafeRecordKey } from "./ids.js";
 import { cropAddress } from "./profiles.js";
+import { THIRD_PLACE_MATCH_KEY } from "./event-types.js";
+export type {
+  EventStatus,
+  EventParticipantState,
+  EventMatchStatus,
+  EventRoundStatus,
+  EventParticipantView,
+  EventMatchView,
+  EventRoundView,
+  EventPrizeAssignmentView,
+  EventPrizeAssignmentsView,
+  EventView,
+} from "./event-types.js";
+export {
+  decodeEventParticipantView,
+  decodeEventMatchView,
+  decodeEventRoundView,
+  decodeEventPrizeAssignmentView,
+  decodeEventPrizeAssignmentsView,
+  decodeEventView,
+  normalizeEventPrizeId,
+} from "./event-views.js";
 
 export type MonsLinkAdminUsername = (typeof MONS_LINK_ADMIN_USERNAMES)[number];
 
@@ -40,11 +62,12 @@ export type DisqualifyEventMatchWinnersRequest = {
 
 export type SyncEventStateRequest = { eventId: string };
 
-export type EventApiRecord = Record<string, unknown> & {
+export type EventCompatibilityRecord = {
   eventId: string;
   status: string;
   isSundayMons?: boolean;
 };
+export type EventApiRecord = EventCompatibilityRecord;
 
 export type CreateEventResponse = {
   ok: true;
@@ -172,7 +195,6 @@ function isEventOwnedInvite(value: unknown): boolean {
 }
 
 const EVENT_SCHEMA_VERSION = 2;
-const THIRD_PLACE_MATCH_KEY = "third_place";
 const MIN_STARTS_IN_MINUTES = 1;
 const MAX_STARTS_IN_DAYS = 50;
 const MAX_STARTS_IN_MINUTES: 72000 = (MAX_STARTS_IN_DAYS * 24 * 60) as 72000;

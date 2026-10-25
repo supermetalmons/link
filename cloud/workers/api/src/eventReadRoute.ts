@@ -1,9 +1,13 @@
+import type {
+  ApiQuery,
+  ApiResponse,
+  ApiTransportStatus,
+} from "@mons/shared/api-contracts";
 import {
   EVENT_BOOKMARK_HEADER,
   EVENT_ETAG_HEADER,
   MAX_EVENT_READ_RESPONSE_BYTES,
   eventSnapshotEtag,
-  type EventSnapshotResponse,
 } from "@mons/shared/events";
 import {
   isProfileEventPrizesResponse,
@@ -39,7 +43,6 @@ import {
 } from "./eventBookmarks.ts";
 import { readEventSnapshotResponse } from "./eventSnapshotResponse.ts";
 import { readProfileEventPrizesPageResponse } from "./profileEventPrizePagination.ts";
-
 export const EVENT_SNAPSHOT_PATH = "/events/snapshot";
 export const PROFILE_EVENT_PRIZES_PATH = "/events/prizes";
 
@@ -94,7 +97,10 @@ function readHeaders(
 
 function notModified(headers: Record<string, string>): Response {
   return new Response(null, {
-    status: 304,
+    status: 304 satisfies ApiTransportStatus<
+      "GET /events/snapshot" | "GET /events/prizes",
+      "empty"
+    >,
     headers: { ...headers, "Cache-Control": "no-store" },
   });
 }
@@ -185,21 +191,25 @@ export async function handleEventReadRoute(
       ),
     );
     let result: ConditionalSnapshot<
-      EventSnapshotResponse | ProfileEventPrizesResponse
+      ApiResponse<"GET /events/snapshot" | "GET /events/prizes">
     >;
     let valueEtag: string;
     const conditionalHeader = request.headers.get("If-None-Match");
     const readStartedAt = Date.now();
     if (url.pathname === EVENT_SNAPSHOT_PATH) {
-      const eventId = safeKey(url.searchParams.get("eventId") || "");
+      const eventId: ApiQuery<"GET /events/snapshot">["eventId"] = safeKey(
+        url.searchParams.get(
+          "eventId" satisfies keyof ApiQuery<"GET /events/snapshot">,
+        ) || "",
+      );
       if (!eventId) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-event-id");
       }
-      result = await readEventSnapshotResponse(
+      result = (await readEventSnapshotResponse(
         session,
         eventId,
         knownRevision(conditionalHeader, "event-snapshot", eventId),
-      );
+      )) satisfies ConditionalSnapshot<ApiResponse<"GET /events/snapshot">>;
       valueEtag = etag(
         "event-snapshot",
         eventId,
@@ -210,7 +220,14 @@ export async function handleEventReadRoute(
         dependencies.repository ||
         createD1ProfileOwnershipReader(env.PROFILE_DB);
       const profileId = await callerProfileId(repository, identity);
-      if (url.searchParams.get("pagination") === "1") {
+      if (
+        url.searchParams.get(
+          "pagination" satisfies keyof ApiQuery<"GET /events/prizes">,
+        ) ===
+        ("1" satisfies NonNullable<
+          ApiQuery<"GET /events/prizes">["pagination"]
+        >)
+      ) {
         const page = await readProfileEventPrizesPageResponse(
           session,
           profileId,
@@ -218,10 +235,12 @@ export async function handleEventReadRoute(
           url.searchParams,
           conditionalHeader,
         );
-        result = page.result;
+        result = page.result satisfies ConditionalSnapshot<
+          ApiResponse<"GET /events/prizes">
+        >;
         valueEtag = page.etag;
       } else {
-        result = await readPrizeResponse(
+        result = (await readPrizeResponse(
           session,
           profileId,
           knownRevision(
@@ -229,7 +248,7 @@ export async function handleEventReadRoute(
             "profile-event-prizes",
             profileId || "none",
           ),
-        );
+        )) satisfies ConditionalSnapshot<ApiResponse<"GET /events/prizes">>;
         valueEtag = etag(
           "profile-event-prizes",
           profileId || "none",
@@ -249,7 +268,11 @@ export async function handleEventReadRoute(
     if (result.notModified) {
       return notModified(headers);
     }
-    return authJsonResponse(result.snapshot, 200, headers);
+    return authJsonResponse<"GET /events/snapshot" | "GET /events/prizes", 200>(
+      result.snapshot,
+      200,
+      headers,
+    );
   } catch (error) {
     const failure =
       error instanceof AuthApiFailure

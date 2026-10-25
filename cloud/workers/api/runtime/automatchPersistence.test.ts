@@ -1,3 +1,5 @@
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
+import { readMatchCreationInput } from "../src/matchRecordCodec.ts";
 import {
   matchTestPort,
   legacySessionClient,
@@ -6,7 +8,7 @@ import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createAutomatchPersistence } from "../src/automatchPersistence.ts";
+import { createAutomatchPersistenceCompatibility as createAutomatchPersistence } from "../src/automatchPersistence.ts";
 import { createGameSessionMutationLockStore } from "../src/gameplayCoordinationD1.ts";
 import type { StateRepository } from "../test/stateRepositoryTestTypes.ts";
 import { validateTelegramTransactionDecision } from "../src/telegramTransaction.ts";
@@ -396,7 +398,7 @@ describe("automatch persistence integration", () => {
           playerId: "host",
           matchId: "live",
           marker: "created",
-          value: { timer: "1;1000" },
+          value: readMatchCreationInput({ timer: "1;1000" }),
         },
       ],
     });
@@ -432,11 +434,10 @@ describe("automatch persistence integration", () => {
         runtime.client.patchRoot({ "automatch/invite-one": { uid: "host" } }),
       ).rejects.toThrow("backend-retired");
       await expect(
-        runtime.typedClient.projectionRecovery.transactRawAutomatchProfileOutbox(
+        runtime.typedClient.projectionRecovery.repairInvalidAutomatchProfileOutbox(
           "invite-one",
-          () => ({
-            value: null,
-          }),
+          100,
+          () => "repair",
         ),
       ).rejects.toThrow("backend-retired");
       await expect(runtime.writesEnabled()).rejects.toThrow("backend-retired");
@@ -470,7 +471,7 @@ describe("automatch persistence integration", () => {
         {
           kind: "invite-merge",
           inviteId: "invite-one",
-          value: { hostId: "host" },
+          value: inviteDocumentFixture({ hostId: "host" }),
         },
       ]),
     ).rejects.toThrow("invite-source-transition-required");

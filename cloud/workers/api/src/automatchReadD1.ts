@@ -1,3 +1,8 @@
+import type { AutomatchRecordValue } from "./automatchD1/types.ts";
+import {
+  readInviteDocument,
+  type InviteDocument,
+} from "@mons/shared/invite-records";
 import {
   AUTOMATCH_RECORD_TABLES,
   decodeSnapshot,
@@ -41,6 +46,26 @@ export function assertAutomatchBackend(
     );
 }
 
+type ResourceSnapshot<Value> = {
+  mode: ReturnType<typeof parseAutomatchRuntimeControlRow>;
+  pending: unknown;
+  value: Value;
+};
+
+export function readAutomatchResourceSnapshot<Root extends AutomatchRoot>(
+  db: D1Database,
+  resourceKey: string,
+  root: Root,
+  recordKey: string,
+  signal?: AbortSignal,
+): Promise<ResourceSnapshot<AutomatchRecordValue<Root>>>;
+export function readAutomatchResourceSnapshot(
+  db: D1Database,
+  resourceKey: string,
+  root: "invite",
+  recordKey: string,
+  signal?: AbortSignal,
+): Promise<ResourceSnapshot<InviteDocument | null>>;
 export async function readAutomatchResourceSnapshot(
   db: D1Database,
   resourceKey: string,
@@ -92,7 +117,7 @@ export async function readInviteMetadata(
   db: D1Database,
   inviteId: string,
   signal?: AbortSignal,
-): Promise<Record<string, unknown> | null> {
+): Promise<InviteDocument | null> {
   const snapshot = await readAutomatchResourceSnapshot(
     db,
     inviteId,
@@ -101,14 +126,14 @@ export async function readInviteMetadata(
     signal,
   );
   assertNoGameSessionResourceTransition(snapshot.pending);
-  return snapshot.value as Record<string, unknown> | null;
+  return readInviteDocument(snapshot.value);
 }
 
 export async function readInviteMetadataMany(
   db: D1Database,
   inviteIds: readonly string[],
   signal?: AbortSignal,
-): Promise<Array<Record<string, unknown> | null>> {
+): Promise<Array<InviteDocument | null>> {
   if (
     !Array.isArray(inviteIds) ||
     inviteIds.length > MAX_INVITE_METADATA_READS

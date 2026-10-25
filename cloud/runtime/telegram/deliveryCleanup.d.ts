@@ -4,7 +4,7 @@ import type { TelegramDeliveryControl } from "./deliveryControl.js";
 import type { TelegramDeliveryRecovery } from "./deliveryRecovery.js";
 import type { TelegramLocalRetryBarrier } from "./deliveryRetryTypes.js";
 import type {
-  TelegramEngineResult,
+  TelegramCleanupResult,
   TelegramReconcileInput,
   TelegramRepository,
 } from "./deliveryTypes.js";
@@ -51,5 +51,5 @@ export declare function createTelegramCleanupDelivery({
     apiGateReclaimOwner,
   }: TelegramReconcileInput & {
     requestedPendingDeleteId?: string;
-  }) => Promise<TelegramEngineResult>;
+  }) => Promise<TelegramCleanupResult>;
 };

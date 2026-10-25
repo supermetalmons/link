@@ -1,12 +1,12 @@
+import type {
+  ApiRequestValidator,
+  ApiResponse,
+} from "@mons/shared/api-contracts";
 import {
   isLeaderboardReadRequest,
   isProfileCustomizationUpdateRequest,
   isProfileLookupRequest,
   isResolveProfileIdRequest,
-  type LeaderboardReadResponse,
-  type ProfileCustomizationUpdateResponse,
-  type ProfileLookupResponse,
-  type ResolveProfileIdResponse,
 } from "@mons/shared/profiles";
 import { AuthApiFailure } from "./authErrors.ts";
 import { authJsonResponse } from "./authHttp.ts";
@@ -33,9 +33,13 @@ import {
   isAlphanumericUsername,
   isReservedExplicitUsername,
   isUsernameEditRequest,
-  type UsernameEditResponse,
 } from "@mons/shared/usernames";
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
+type LeaderboardReadResponse = ApiResponse<"POST /leaderboards/read">;
+type ProfileCustomizationUpdateResponse = ApiResponse<"POST /profiles/custom">;
+type ProfileLookupResponse = ApiResponse<"POST /profiles/lookup">;
+type ResolveProfileIdResponse = ApiResponse<"POST /profiles/canonical-id">;
+type UsernameEditResponse = ApiResponse<"POST /profiles/username">;
 
 export const PROFILE_PATHS = new Set([
   "/leaderboards/read",
@@ -110,7 +114,11 @@ export async function handleProfileRoute(
       const body = await parseBody(request);
 
       if (pathname === "/profiles/username") {
-        if (!isUsernameEditRequest(body)) {
+        if (
+          !(
+            isUsernameEditRequest satisfies ApiRequestValidator<`POST ${typeof pathname}`>
+          )(body)
+        ) {
           throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
         }
         const username = body.username.trim();
@@ -127,7 +135,11 @@ export async function handleProfileRoute(
             ok: false,
             validationError,
           };
-          return authJsonResponse(response, 200, corsHeaders);
+          return authJsonResponse<`POST ${typeof pathname}`, 200>(
+            response,
+            200,
+            corsHeaders,
+          );
         }
         const usernameRepository =
           dependencies.usernameRepository || createUsernameRepository(env);
@@ -136,7 +148,7 @@ export async function handleProfileRoute(
           username,
         );
         if (outcome === "taken") {
-          return authJsonResponse(
+          return authJsonResponse<`POST ${typeof pathname}`, 200>(
             {
               ok: false,
               validationError: "That name has been taken. Choose another.",
@@ -146,7 +158,7 @@ export async function handleProfileRoute(
           );
         }
         if (outcome === "cannot-clear") {
-          return authJsonResponse(
+          return authJsonResponse<`POST ${typeof pathname}`, 200>(
             {
               ok: false,
               validationError: "Can't be empty.",
@@ -155,7 +167,7 @@ export async function handleProfileRoute(
             corsHeaders,
           );
         }
-        return authJsonResponse(
+        return authJsonResponse<`POST ${typeof pathname}`, 200>(
           { ok: outcome === "updated" } satisfies UsernameEditResponse,
           200,
           corsHeaders,
@@ -163,7 +175,11 @@ export async function handleProfileRoute(
       }
 
       if (pathname === "/profiles/custom") {
-        if (!isProfileCustomizationUpdateRequest(body)) {
+        if (
+          !(
+            isProfileCustomizationUpdateRequest satisfies ApiRequestValidator<`POST ${typeof pathname}`>
+          )(body)
+        ) {
           throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
         }
         const signal =
@@ -194,7 +210,7 @@ export async function handleProfileRoute(
             "login-profile-conflict",
           );
         }
-        return authJsonResponse(
+        return authJsonResponse<`POST ${typeof pathname}`, 200>(
           { ok: true } satisfies ProfileCustomizationUpdateResponse,
           200,
           corsHeaders,
@@ -205,7 +221,11 @@ export async function handleProfileRoute(
         dependencies.repository || createProfileRepository(env);
 
       if (pathname === "/profiles/canonical-id") {
-        if (!isResolveProfileIdRequest(body)) {
+        if (
+          !(
+            isResolveProfileIdRequest satisfies ApiRequestValidator<`POST ${typeof pathname}`>
+          )(body)
+        ) {
           throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
         }
         const profileId = body.profileId.trim();
@@ -216,11 +236,19 @@ export async function handleProfileRoute(
           ok: true,
           profileId: await repository.resolveProfileId(profileId),
         };
-        return authJsonResponse(response, 200, corsHeaders);
+        return authJsonResponse<`POST ${typeof pathname}`, 200>(
+          response,
+          200,
+          corsHeaders,
+        );
       }
 
       if (pathname === "/profiles/lookup") {
-        if (!isProfileLookupRequest(body)) {
+        if (
+          !(
+            isProfileLookupRequest satisfies ApiRequestValidator<`POST ${typeof pathname}`>
+          )(body)
+        ) {
           throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
         }
         const id = body.id.trim();
@@ -232,18 +260,30 @@ export async function handleProfileRoute(
             ? await repository.getProfileByLoginId(id)
             : await repository.getProfileById(id);
         const response: ProfileLookupResponse = { ok: true, profile };
-        return authJsonResponse(response, 200, corsHeaders);
+        return authJsonResponse<`POST ${typeof pathname}`, 200>(
+          response,
+          200,
+          corsHeaders,
+        );
       }
 
       if (pathname === "/leaderboards/read") {
-        if (!isLeaderboardReadRequest(body)) {
+        if (
+          !(
+            isLeaderboardReadRequest satisfies ApiRequestValidator<`POST ${typeof pathname}`>
+          )(body)
+        ) {
           throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
         }
         const response: LeaderboardReadResponse = {
           ok: true,
           profiles: await repository.readLeaderboard(body.type),
         };
-        return authJsonResponse(response, 200, corsHeaders);
+        return authJsonResponse<`POST ${typeof pathname}`, 200>(
+          response,
+          200,
+          corsHeaders,
+        );
       }
 
       throw new AuthApiFailure(404, "not-found", "not-found");

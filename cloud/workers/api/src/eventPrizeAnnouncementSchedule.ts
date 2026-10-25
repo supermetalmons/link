@@ -1,3 +1,8 @@
+import {
+  readPlainEventDocument,
+  copyEventDocument,
+  patchEventDocument,
+} from "../../../runtime/events/documents.js";
 import type {
   EventCommand,
   EventCommitPlan,
@@ -33,12 +38,6 @@ type ScheduleDependencies = {
   logger?: Pick<Console, "error">;
   now?: () => number;
 };
-
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
 
 export async function buildEventAnnouncementPlan(
   eventId: string,
@@ -157,20 +156,31 @@ export async function prepareEventAnnouncementSchedule(
     const replacement = updates.findLast(
       (command) => command.kind === "event" && command.eventId === eventId,
     );
-    const event = toRecord(
+    const event = readPlainEventDocument(
       replacement?.kind === "event"
         ? replacement.value
         : await reads.readEvent(eventId),
     );
     if (!event) continue;
-    const nextEvent = { ...event };
+    const nextEvent = copyEventDocument(event, {});
     for (const command of updates)
       if (
         command.kind === "event-field" &&
         command.eventId === eventId &&
         SCHEDULE_FIELDS.has(command.field)
-      )
-        nextEvent[command.field] = command.value;
+      ) {
+        switch (command.field) {
+          case "status":
+            patchEventDocument(nextEvent, { status: command.value });
+            break;
+          case "startAtMs":
+            patchEventDocument(nextEvent, { startAtMs: command.value });
+            break;
+          case "isSundayMons":
+            patchEventDocument(nextEvent, { isSundayMons: command.value });
+            break;
+        }
+      }
     const discoveredAtMs = now();
     for (const kind of EVENT_ANNOUNCEMENT_KINDS) {
       const candidate = await buildEventAnnouncementPlan(

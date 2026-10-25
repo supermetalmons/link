@@ -1,9 +1,19 @@
 // Generated from src/events.ts. Run npm run generate:runtime.
+import type { EventSyncSkipReason } from "./shared/events.js";
+import type { WithdrawalDocument } from "./eventPrizes/records.js";
+import type { EventData } from "./events/model.js";
 import { type EventLockManager } from "./events/lockManagerCore.js";
 import type { EventRuntimeStore } from "./eventCommands.js";
 import type { EventMatchPairRequest } from "./events/bracket.js";
 import type { EventOwnershipSnapshot } from "./events/ownership.js";
-type EventSyncLog = Record<string, unknown> & {
+type EventSyncLog = {
+  mode?: string;
+  eventId?: string | null;
+  requesterUid?: string | null;
+  sourceKey?: string;
+  triggerReason?: string;
+  workflowInstanceId?: string;
+  targetMatchKey?: string | null;
   reason?: string | null;
   requesterProfileId?: string | null;
   skipped?: boolean;
@@ -22,7 +32,7 @@ export type EventRuntimeRequest = {
   auth: {
     uid: string;
   } | null;
-  data: Record<string, unknown>;
+  data: unknown;
 };
 export type EventProgressOutboxRecord = {
   schemaVersion: 1;
@@ -33,24 +43,52 @@ export type EventProgressOutboxRecord = {
   firstQueuedAtMs: number;
   lastQueuedAtMs: number;
 };
+export type EventRuntimeCreateResult = {
+  ok: true;
+  eventId: string;
+  event: EventData;
+};
+export type EventRuntimePostponeResult = EventRuntimeCreateResult & {
+  postponeByMinutes: number;
+  startAtMs: number;
+};
+export type EventRuntimeSyncResult =
+  | {
+      ok: true;
+      eventId: string;
+      didChange: boolean;
+      event: EventData | null;
+      skipped?: never;
+      reason?: never;
+    }
+  | {
+      ok: true;
+      eventId: string;
+      skipped: true;
+      reason: EventSyncSkipReason;
+      event?: EventData | null;
+      didChange?: never;
+    };
+export type EventRuntimeDisqualifyResult = EventRuntimeSyncResult & {
+  didDisqualify: boolean;
+  matchKey: string;
+};
 export type EventRuntime = {
-  createEvent(request: EventRuntimeRequest): Promise<Record<string, unknown>>;
+  createEvent(request: EventRuntimeRequest): Promise<EventRuntimeCreateResult>;
   disqualifyEventMatchWinners(
     request: EventRuntimeRequest,
-  ): Promise<Record<string, unknown>>;
+  ): Promise<EventRuntimeDisqualifyResult>;
   postponeEventStart(
     request: EventRuntimeRequest,
-  ): Promise<Record<string, unknown>>;
+  ): Promise<EventRuntimePostponeResult>;
   runEventSyncState(input: {
     eventId: string;
     requesterUid: string;
     enforceParticipantGate: boolean;
     enforceThrottle: boolean;
     syncLog: EventSyncLog;
-  }): Promise<Record<string, unknown>>;
-  syncEventState(
-    request: EventRuntimeRequest,
-  ): Promise<Record<string, unknown>>;
+  }): Promise<EventRuntimeSyncResult>;
+  syncEventState(request: EventRuntimeRequest): Promise<EventRuntimeSyncResult>;
 };
 type Signature_createEventRuntime = (dependencies: {
   readMatchPair: (input: EventMatchPairRequest) => Promise<[unknown, unknown]>;
@@ -80,7 +118,7 @@ type Signature_createEventRuntime = (dependencies: {
   }): Promise<EventOwnershipSnapshot>;
   readEventPrizeWithdrawals?: (
     eventId: string,
-  ) => Promise<Record<string, Record<string, unknown>>>;
+  ) => Promise<Record<string, WithdrawalDocument>>;
   now?: () => number;
   random?: () => number;
   sleep(milliseconds: number): Promise<void>;

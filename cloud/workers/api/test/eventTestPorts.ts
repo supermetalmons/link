@@ -1,3 +1,9 @@
+import type {
+  EventProgressDocument,
+  EventProgressRecordKind,
+} from "../../../runtime/eventProgressRecords.js";
+import type { LegacyEventProjectionTransactions } from "./eventProjectionRecoveryFixture.ts";
+import { readEventTelegramProjectionDocument } from "../../../runtime/telegram/eventProjectionRecords.js";
 import type { StateQuery } from "../test/stateRepositoryTestTypes.ts";
 import { encodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
 import type { EventStore } from "../src/eventStoreContracts.ts";
@@ -9,6 +15,17 @@ import type {
   TransactionDecision,
   TransactionResult,
 } from "../../../runtime/transactions.js";
+type EventProgressTransaction<Kind extends EventProgressRecordKind> = (
+  id: string,
+  updater: (
+    current: EventProgressDocument<Kind> | null,
+  ) => TransactionDecision<EventProgressDocument<Kind>>,
+  signal?: AbortSignal,
+) => Promise<TransactionResult<EventProgressDocument<Kind>>>;
+type LegacyEventProgressTransactions = {
+  transactEventProgressOutbox: EventProgressTransaction<"pending">;
+  transactEventProgressDeadOutbox: EventProgressTransaction<"dead">;
+};
 export type EventTestSource = {
   getStatePath?: (
     path: string,
@@ -57,7 +74,7 @@ export function eventTestLeasePath(key: EventLeaseKey): string {
 }
 export function attachEventTestPorts<T>(
   source: Partial<T> & EventTestSource,
-): T & EventStore {
+): T & EventStore & LegacyEventProjectionTransactions {
   const read = async (path: string, signal?: AbortSignal) => {
     if (source.getStatePath)
       return source.getStatePath(path, undefined, signal);
@@ -99,16 +116,14 @@ export function attachEventTestPorts<T>(
     | "readEventProfileGameProjectionOutbox"
     | "readEventTelegramProjectionOutbox"
     | "readEventTelegramProjectionState"
-    | "transactEventProgressOutbox"
-    | "transactEventProgressDeadOutbox"
-    | "transactEventProfileGameProjectionOutbox"
     | "claimEventProfileGameProjectionOutbox"
     | "acknowledgeEventProfileGameProjectionOutbox"
-    | "transactEventTelegramProjectionOutbox"
     | "claimEventTelegramProjectionOutbox"
     | "acknowledgeEventTelegramProjectionOutbox"
     | "transactEventTelegramProjectionState"
-  > = {
+  > &
+    LegacyEventProjectionTransactions &
+    LegacyEventProgressTransactions = {
     async commitEventPlan(plan, signal) {
       const updates = encodeEventUpdates(plan);
       if (source.patchStateRoot) return source.patchStateRoot(updates, signal);
@@ -155,7 +170,7 @@ export function attachEventTestPorts<T>(
         read(`eventTelegramProjectionGenerations/${id}`, signal),
       ]);
       return {
-        state: (state || {}) as Record<string, unknown>,
+        state: readEventTelegramProjectionDocument(state || {}),
         generation: typeof generation === "number" ? generation : 0,
         revision: 1,
       };
@@ -304,5 +319,6 @@ export function attachEventTestPorts<T>(
           ),
         ),
       );
-  return Object.assign(source, ports) as T & EventStore;
+  const connected: unknown = Object.assign(source, ports);
+  return connected as T & EventStore & LegacyEventProjectionTransactions;
 }

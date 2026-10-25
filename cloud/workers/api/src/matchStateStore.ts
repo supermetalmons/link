@@ -1,4 +1,34 @@
 import {
+  readStoredMatchJson,
+  storedMatchValue,
+  readMatchDocument,
+  matchesCreationMarker,
+  withMatchCreationMarker,
+  matchSurrenderState,
+  matchSurrenderHasFen,
+  writeSurrenderedMatch,
+  supersededMatchPosition,
+  writeMatchTimer,
+  writeRetainedMatchTerminalTimer,
+  matchTimerEquals,
+  type MatchDocument,
+  type RetainedMatchValue,
+} from "./matchRecordCodec.ts";
+import {
+  pendingTimerClaim,
+  readCommittedTimerClaim,
+  readRetainedTimerClaim,
+  readStoredTimerClaim,
+  timerClaimIdentityMatches,
+  timerClaimStatus,
+  type RetainedTimerClaim,
+  type TimerClaimDocument,
+} from "./matchClaimCodec.ts";
+import type {
+  MatchStateCreateWireRequest,
+  MatchStateEventEffectsWireRequest,
+} from "./matchStateWire.ts";
+import {
   isSubmitMoveRequest,
   isSurrenderMatchRequest,
   type SubmitMoveResponse,
@@ -18,6 +48,7 @@ import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 import type {
   MatchTimerStartCandidate,
   MatchTimerStartStore,
+  RetainedTimerCleanupInput,
 } from "./gameplayCoordinationD1.ts";
 import {
   LocalMatchTimerStore,
@@ -35,7 +66,6 @@ import {
   canonicalMatchStateJson,
   decideMatchStateMove,
   isCommittedMatchStateClaim,
-  matchStateRecord,
   normalizeCreatedMatchState,
 } from "./matchStateLogic.ts";
 import {
@@ -50,13 +80,10 @@ import { MAX_MATCH_STATE_RECORD_READS } from "./matchStateTypes.ts";
 import type {
   MatchStateAuthority,
   MatchStateClaimTimerRequest,
-  MatchStateCreateRequest,
   MatchStateCreateResult,
-  MatchStateEventEffectsRequest,
   MatchStateMoveRequest,
   MatchStatePair,
   MatchStatePairRequest,
-  MatchStateRecord,
   MatchStateRecordRequest,
   MatchStateRecordsRequest,
   MatchStateSource,
@@ -75,7 +102,10 @@ type SourceRow = {
 };
 
 export type MatchStateStoreOptions = {
-  timerStarts: Pick<MatchTimerStartStore, "getOrAdvance" | "deletePair">;
+  timerStarts: Pick<
+    MatchTimerStartStore,
+    "getOrAdvance" | "deletePair" | "deleteRetainedPair"
+  >;
   newMatchTimerStorage?: MatchTimerStorageMode;
   now?: () => number;
   scheduleAlarm?: (
@@ -188,7 +218,7 @@ export class MatchStateStore {
     }
   }
 
-  private record(matchId: string, playerId: string): MatchStateRecord | null {
+  private record(matchId: string, playerId: string): RetainedMatchValue {
     const [row] = this.storage.sql
       .exec<{ value_json: string }>(
         "SELECT value_json FROM match_state_records WHERE match_id = ? AND player_id = ?",
@@ -196,17 +226,17 @@ export class MatchStateStore {
         playerId,
       )
       .toArray();
-    return row ? JSON.parse(row.value_json) : null;
+    return storedMatchValue(readStoredMatchJson(row, "durable"));
   }
 
-  private claim(matchId: string): MatchStateRecord | null {
+  private claim(matchId: string): RetainedTimerClaim {
     const [row] = this.storage.sql
       .exec<{ value_json: string }>(
         "SELECT value_json FROM match_state_claims WHERE match_id = ?",
         matchId,
       )
       .toArray();
-    return row ? JSON.parse(row.value_json) : null;
+    return row ? readStoredTimerClaim(row.value_json) : null;
   }
 
   private revision(matchId: string): number {
@@ -232,7 +262,7 @@ export class MatchStateStore {
   private putRecord(
     matchId: string,
     playerId: string,
-    value: MatchStateRecord,
+    value: MatchDocument,
   ): void {
     this.storage.sql.exec(
       "INSERT INTO match_state_records(match_id, player_id, value_json) VALUES (?, ?, ?) ON CONFLICT(match_id, player_id) DO UPDATE SET value_json = excluded.value_json",
@@ -242,7 +272,7 @@ export class MatchStateStore {
     );
   }
 
-  private putClaim(matchId: string, value: MatchStateRecord): void {
+  private putClaim(matchId: string, value: TimerClaimDocument): void {
     this.storage.sql.exec(
       "INSERT INTO match_state_claims(match_id, value_json) VALUES (?, ?) ON CONFLICT(match_id) DO UPDATE SET value_json = excluded.value_json",
       matchId,
@@ -250,13 +280,13 @@ export class MatchStateStore {
     );
   }
 
-  readRecord(input: MatchStateRecordRequest): MatchStateRecord | null {
+  readRecord(input: MatchStateRecordRequest): RetainedMatchValue {
     this.authority(input);
     this.target(input);
     return this.record(input.matchId, input.playerId);
   }
 
-  readRecords(input: MatchStateRecordsRequest): Array<MatchStateRecord | null> {
+  readRecords(input: MatchStateRecordsRequest): RetainedMatchValue[] {
     if (
       !Array.isArray(input.requests) ||
       input.requests.length === 0 ||
@@ -284,7 +314,12 @@ export class MatchStateStore {
     );
     return input.requests.map(({ matchId, playerId }) => {
       const value = records.get(JSON.stringify([matchId, playerId]));
-      return value === undefined ? null : JSON.parse(value);
+      return storedMatchValue(
+        readStoredMatchJson(
+          value === undefined ? null : { value_json: value },
+          "durable",
+        ),
+      );
     });
   }
 
@@ -350,7 +385,7 @@ export class MatchStateStore {
     this.authority(input);
   }
 
-  private create(input: MatchStateCreateRequest): MatchStateCreateResult {
+  private create(input: MatchStateCreateWireRequest): MatchStateCreateResult {
     this.initializeCreation(input);
     const records: MatchStateCreateResult["records"] = [];
     const changed = new Set<string>();
@@ -358,7 +393,8 @@ export class MatchStateStore {
     for (const creation of input.records) {
       this.target({ ...input, ...creation });
       validKey(creation.marker);
-      if (!matchStateRecord(creation.value))
+      const creationDocument = readMatchDocument(creation.value);
+      if (!creationDocument)
         throw new TypeError("match-state-invalid-creation");
       if (!timerCohorts.has(creation.matchId)) {
         this.localTimers.initializeFresh(
@@ -369,7 +405,7 @@ export class MatchStateStore {
       }
       const current = this.record(creation.matchId, creation.playerId);
       if (current) {
-        if (current.sessionCreation !== creation.marker)
+        if (!matchesCreationMarker(current, creation.marker))
           fail("match-creation-conflict");
         records.push({
           matchId: creation.matchId,
@@ -379,10 +415,9 @@ export class MatchStateStore {
         });
         continue;
       }
-      const value = normalizeCreatedMatchState({
-        ...creation.value,
-        sessionCreation: creation.marker,
-      });
+      const value = normalizeCreatedMatchState(
+        withMatchCreationMarker(creationDocument, creation.marker),
+      );
       this.putRecord(creation.matchId, creation.playerId, value);
       records.push({
         matchId: creation.matchId,
@@ -396,7 +431,7 @@ export class MatchStateStore {
     return { records, changedMatchIds: [...changed] };
   }
 
-  createRecords(input: MatchStateCreateRequest): MatchStateCreateResult {
+  createRecords(input: MatchStateCreateWireRequest): MatchStateCreateResult {
     if (!Array.isArray(input.records) || input.records.length === 0) {
       throw new TypeError("match-state-empty-creation");
     }
@@ -408,13 +443,8 @@ export class MatchStateStore {
     kind: "move" | "surrender",
   ): void {
     const claim = this.claim(input.matchId);
-    if (
-      !claim ||
-      (claim.status === "pending" &&
-        typeof claim.expiresAtMs === "number" &&
-        claim.expiresAtMs <= this.now())
-    )
-      return;
+    const pending = pendingTimerClaim(claim);
+    if (!claim || (pending && pending.expiresAtMs <= this.now())) return;
     fail(
       kind === "move" && isCommittedMatchStateClaim(claim, input.inviteId)
         ? "match-move-finished"
@@ -450,8 +480,7 @@ export class MatchStateStore {
         ? {
             ...base,
             outcome: "superseded",
-            fen: String(decision.value.fen),
-            flatMovesString: String(decision.value.flatMovesString),
+            ...supersededMatchPosition(decision.value),
           }
         : { ...base, outcome: decision.outcome };
     });
@@ -467,16 +496,17 @@ export class MatchStateStore {
       this.authority(input);
       this.target(input);
       const current = this.record(input.matchId, input.playerId);
-      if (!current)
+      const state = matchSurrenderState(current);
+      if (!state.exists)
         throw new AuthApiFailure(404, "not-found", "match-not-found");
-      if (current.status !== "surrendered") {
+      if (!state.surrendered) {
         this.assertUnfenced(input, "surrender");
-        if (typeof current.fen !== "string" || current.fen === "")
-          fail("match-surrender-blocked");
-        this.putRecord(input.matchId, input.playerId, {
-          ...current,
-          status: "surrendered",
-        });
+        if (!matchSurrenderHasFen(current)) fail("match-surrender-blocked");
+        this.putRecord(
+          input.matchId,
+          input.playerId,
+          writeSurrenderedMatch(current),
+        );
         this.bump(input.matchId);
       }
       return {
@@ -503,7 +533,16 @@ export class MatchStateStore {
     if (!player || !opponent || player.color === opponent.color) {
       fail("something is wrong with the game state.");
     }
-    return { pair, player, opponent, game: this.resolveGame(player, opponent) };
+    return {
+      pair: {
+        ...pair,
+        playerMatch: readMatchDocument(pair.playerMatch)!,
+        opponentMatch: readMatchDocument(pair.opponentMatch)!,
+      },
+      player,
+      opponent,
+      game: this.resolveGame(player, opponent),
+    };
   }
 
   private timerPair(input: MatchStateStartTimerRequest): TimerPair {
@@ -641,6 +680,13 @@ export class MatchStateStore {
     );
   }
 
+  async cleanupRetainedTimerStarts(
+    input: RetainedTimerCleanupInput,
+  ): Promise<void> {
+    if (this.localTimers.modeForRetainedCleanup(input) === "local") return;
+    await this.options.timerStarts.deleteRetainedPair(input);
+  }
+
   async claimTimer(
     input: MatchStateClaimTimerRequest,
   ): Promise<ClaimMatchVictoryByTimerResponse> {
@@ -672,7 +718,7 @@ export class MatchStateStore {
   }
 
   applyEventEffects(
-    input: MatchStateEventEffectsRequest,
+    input: MatchStateEventEffectsWireRequest,
   ): MatchStateCreateResult {
     validKey(input.operationId);
     const payloadJson = canonicalMatchStateJson(input);
@@ -700,21 +746,24 @@ export class MatchStateStore {
         if (!record || !parseMatchTimerRecord(record)) {
           fail("match-state-event-match-missing");
         }
-        if (record.timer !== MATCH_TIMER_TERMINAL) {
-          this.putRecord(effect.matchId, effect.playerId, {
-            ...record,
-            timer: MATCH_TIMER_TERMINAL,
-          });
+        if (!matchTimerEquals(record, MATCH_TIMER_TERMINAL)) {
+          this.putRecord(
+            effect.matchId,
+            effect.playerId,
+            writeMatchTimer(readMatchDocument(record)!, MATCH_TIMER_TERMINAL),
+          );
           if (!changed.has(effect.matchId)) this.bump(effect.matchId);
           changed.add(effect.matchId);
         }
       }
       for (const effect of input.claims || []) {
         this.target({ ...input, ...effect });
+        const claim = readRetainedTimerClaim(effect.claim);
+        const committed = readCommittedTimerClaim(claim, input.inviteId);
         if (
-          !isCommittedMatchStateClaim(effect.claim, input.inviteId) ||
-          effect.claim.playerId !== effect.playerId ||
-          effect.claim.opponentId !== effect.opponentId
+          !committed ||
+          committed.playerId !== effect.playerId ||
+          committed.opponentId !== effect.opponentId
         )
           fail("match-state-invalid-event-claim");
         const record = this.record(effect.matchId, effect.playerId);
@@ -722,17 +771,21 @@ export class MatchStateStore {
           fail("match-state-event-match-missing");
         const existing = this.claim(effect.matchId);
         if (
-          existing?.status === "claimed" &&
-          (existing.playerId !== effect.playerId ||
-            existing.opponentId !== effect.opponentId ||
-            existing.inviteId !== input.inviteId)
+          timerClaimStatus(existing) === "claimed" &&
+          !timerClaimIdentityMatches(
+            existing,
+            effect.playerId,
+            effect.opponentId,
+            input.inviteId,
+          )
         )
           fail("match-state-event-claim-conflict");
-        this.putRecord(effect.matchId, effect.playerId, {
-          ...record,
-          timer: MATCH_TIMER_TERMINAL,
-        });
-        this.putClaim(effect.matchId, effect.claim);
+        this.putRecord(
+          effect.matchId,
+          effect.playerId,
+          writeRetainedMatchTerminalTimer(record),
+        );
+        this.putClaim(effect.matchId, committed.document);
         if (!changed.has(effect.matchId)) this.bump(effect.matchId);
         changed.add(effect.matchId);
       }

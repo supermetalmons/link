@@ -1,3 +1,4 @@
+import { timerStartStoreFixture } from "../test/matchClaimFixture.ts";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -30,14 +31,14 @@ function observedStore(storage: DurableObjectStorage) {
     },
   });
   const store = new MatchStateStore(measured, {
-    timerStarts: {
+    timerStarts: timerStartStoreFixture({
       getOrAdvance: () => {
         throw new Error("unexpected-timer-write");
       },
       deletePair: () => {
         throw new Error("unexpected-timer-write");
       },
-    },
+    }),
   });
   calls.length = 0;
   return { store, calls };

@@ -1,3 +1,8 @@
+import {
+  transactProfileProjectionFixture as transactEventProfileGameProjectionOutbox,
+  transactTelegramProjectionFixture as transactEventTelegramProjectionOutbox,
+} from "./eventProjectionTransactionFixture.ts";
+import { projectionSnapshotRecordFixture } from "../test/eventProjectionRecoveryFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -10,8 +15,6 @@ import {
   EventD1Conflict,
   EventWritesDisabled,
   releaseEventWriteAdmission,
-  transactEventProfileGameProjectionOutbox,
-  transactEventTelegramProjectionOutbox,
   type EventD1Connection,
 } from "../src/eventD1.ts";
 import { observeD1FailureDatabase } from "./d1FailureTestUtils.ts";
@@ -477,7 +480,9 @@ describe("native event projection outbox mutations", () => {
           expect(
             await claimEventProjectionOutboxSnapshot(
               observed.database,
-              { ...snapshot, record: { requestId: "untrusted-copy" } },
+              projectionSnapshotRecordFixture(snapshot, {
+                requestId: "untrusted-copy",
+              }),
               "request",
               100,
               200,

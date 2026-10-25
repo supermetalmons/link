@@ -1,3 +1,4 @@
+import * as projectionTransactions from "../src/eventD1/transactions.ts";
 import * as d1 from "../src/eventD1.ts";
 import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
 import { isEventMutation } from "../../../runtime/eventCommands.js";
@@ -107,19 +108,21 @@ export async function transactEventOwnedPath(
       options,
     );
   if (root === "profileGameProjectionOutbox" && id === "event")
-    return d1.transactEventProfileGameProjectionOutbox(
+    return projectionTransactions.transactEventProfileGameProjectionOutbox(
       db,
       parts[0],
       updater as Parameters<
-        typeof d1.transactEventProfileGameProjectionOutbox
+        typeof projectionTransactions.transactEventProfileGameProjectionOutbox
       >[2],
       options,
     );
   if (root === "telegramProjectionOutbox" && id === "event")
-    return d1.transactEventTelegramProjectionOutbox(
+    return projectionTransactions.transactEventTelegramProjectionOutbox(
       db,
       parts[0],
-      updater as Parameters<typeof d1.transactEventTelegramProjectionOutbox>[2],
+      updater as Parameters<
+        typeof projectionTransactions.transactEventTelegramProjectionOutbox
+      >[2],
       options,
     );
   if (root === "eventTelegramProjectionGenerations")

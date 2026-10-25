@@ -1,3 +1,4 @@
+import type { ApiQuery, ApiParameters } from "@mons/shared/api-contracts";
 import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
 import {
   authJsonResponse,
@@ -16,7 +17,6 @@ import {
   type SessionIdentity,
   type WorkerExecutionContext,
 } from "./sessionAuth.ts";
-
 const GAME_BOOTSTRAP_ROUTE_PATTERN = /^\/invites\/([^/]+)\/bootstrap$/;
 
 export type GameBootstrapRouteDependencies = GameBootstrapDependencies & {
@@ -33,7 +33,11 @@ export function isGameBootstrapPath(pathname: string): boolean {
   return GAME_BOOTSTRAP_ROUTE_PATTERN.test(pathname);
 }
 
-function readRoute(request: Request) {
+function readRoute(
+  request: Request,
+): ApiParameters<"GET /invites/:inviteId/bootstrap"> & {
+  preferApproved: boolean;
+} {
   const url = new URL(request.url);
   const match = GAME_BOOTSTRAP_ROUTE_PATTERN.exec(url.pathname);
   let inviteId = "";
@@ -42,13 +46,29 @@ function readRoute(request: Request) {
   } catch {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-invite-id");
   }
-  const selection = url.searchParams.get("selection") ?? "current";
+  const selection =
+    url.searchParams.get(
+      "selection" satisfies keyof ApiQuery<"GET /invites/:inviteId/bootstrap">,
+    ) ??
+    ("current" satisfies NonNullable<
+      ApiQuery<"GET /invites/:inviteId/bootstrap">["selection"]
+    >);
   if (
     !isSafeRecordKey(inviteId) ||
     inviteId !== inviteId.trim() ||
     url.searchParams.size > 1 ||
-    (url.searchParams.size === 1 && !url.searchParams.has("selection")) ||
-    (selection !== "current" && selection !== "approved")
+    (url.searchParams.size === 1 &&
+      !url.searchParams.has(
+        "selection" satisfies keyof ApiQuery<"GET /invites/:inviteId/bootstrap">,
+      )) ||
+    (selection !==
+      ("current" satisfies NonNullable<
+        ApiQuery<"GET /invites/:inviteId/bootstrap">["selection"]
+      >) &&
+      selection !==
+        ("approved" satisfies NonNullable<
+          ApiQuery<"GET /invites/:inviteId/bootstrap">["selection"]
+        >))
   ) {
     throw new AuthApiFailure(
       400,
@@ -56,7 +76,14 @@ function readRoute(request: Request) {
       "invalid-bootstrap-request",
     );
   }
-  return { inviteId, preferApproved: selection === "approved" };
+  return {
+    inviteId,
+    preferApproved:
+      selection ===
+      ("approved" satisfies NonNullable<
+        ApiQuery<"GET /invites/:inviteId/bootstrap">["selection"]
+      >),
+  };
 }
 
 export async function handleGameBootstrapRoute(
@@ -99,14 +126,26 @@ export async function handleGameBootstrapRoute(
     const body = await readAuthenticatedGameBootstrap(
       {
         inviteId,
-        selection: preferApproved ? "approved" : "current",
+        selection: preferApproved
+          ? ("approved" satisfies NonNullable<
+              ApiQuery<"GET /invites/:inviteId/bootstrap">["selection"]
+            >)
+          : ("current" satisfies NonNullable<
+              ApiQuery<"GET /invites/:inviteId/bootstrap">["selection"]
+            >),
         identity,
         signal: request.signal,
       },
       env,
       { ...dependencies, measure },
     );
-    return finish(authJsonResponse(body, 200, corsHeaders));
+    return finish(
+      authJsonResponse<"GET /invites/:inviteId/bootstrap", 200>(
+        body,
+        200,
+        corsHeaders,
+      ),
+    );
   } catch (error) {
     if (error instanceof GameBootstrapRateLimitFailure)
       corsHeaders["Retry-After"] = String(error.retryAfterMs / 1000);

@@ -1,3 +1,7 @@
+import {
+  inviteRatingWager,
+  type InviteDocument,
+} from "@mons/shared/invite-records";
 import { MATCH_TIMER_TERMINAL } from "@mons/shared/timers";
 import {
   getDisplayNameFromAddress,
@@ -18,19 +22,8 @@ const matchStatusTelegramEmojiIds = {
   whiteFlag: "5228702136862282659",
 };
 
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function wagerSuffix(invite: Record<string, unknown>, matchId: string): string {
-  const wagers = toRecord(invite.wagers);
-  const wager = toRecord(wagers?.[matchId]);
-  const agreed = toRecord(wager?.agreed);
-  const material =
-    typeof agreed?.material === "string" ? agreed.material.trim() : "";
-  const count = Number(agreed?.count);
+function wagerSuffix(invite: InviteDocument, matchId: string): string {
+  const { material, count } = inviteRatingWager(invite, matchId);
   const emojiId = materialTelegramEmojiIds[material] || "";
   const icon = getTelegramEmojiTag(emojiId);
   if (!icon || !Number.isFinite(count) || count <= 0) {
@@ -100,7 +93,7 @@ export function buildRatingMessage({
   shouldApplyRatingDelta: boolean;
   playerMatch: { status: string; timer: string };
   opponentMatch: { status: string; timer: string };
-  invite: Record<string, unknown>;
+  invite: InviteDocument;
   matchId: string;
 }): string {
   let suffix = ` (${winnerScore} - ${loserScore})`;

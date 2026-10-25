@@ -1,3 +1,6 @@
+import { readMatchDocument, type MatchDocument } from "./matchRecordCodec.ts";
+import { normalizeRecordKey } from "@mons/shared/ids";
+import { inviteSourceEventState } from "@mons/shared/invite-records";
 import {
   STATE_EFFECTS_FIELD,
   STATE_VALUE_FIELD,
@@ -8,11 +11,32 @@ import {
   MATCH_TIMER_TERMINAL,
 } from "@mons/shared/timers";
 import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
-import { canonicalJson, sha256Hex } from "./canonicalJson.ts";
+import {
+  canonicalJson,
+  canonicalEventRepositoryJson,
+  sha256Hex,
+} from "./canonicalJson.ts";
 import { normalizeInviteSource } from "./inviteSourceD1.ts";
-import { decodeEventUpdates } from "./eventCompatibilityCodec.ts";
-import type { EventEffect } from "../../../runtime/eventCommands.js";
-import type { EventTransitionIntent } from "./eventD1.ts";
+import {
+  decodeEventUpdates,
+  decodeCanonicalEventUpdates,
+  encodeEventUpdates,
+} from "./eventCompatibilityCodec.ts";
+import type { EventPersistenceCommand } from "./eventPersistenceCommands.ts";
+import type {
+  EventTransitionIntent,
+  EventTransitionDraftInput,
+  EventIntentEffects,
+  EventIntentUpdates,
+} from "./eventD1/types.ts";
+import type {
+  EventEffect,
+  EventMutation,
+} from "../../../runtime/eventCommands.js";
+import type {
+  InviteSourceMutation,
+  RetainedInviteMutationBatch,
+} from "./inviteSourceD1.ts";
 import type { LoginMatchDiscoveryInput } from "./loginMatchDiscoveryD1.ts";
 type V2Intent = Extract<EventTransitionIntent, { schemaVersion: 2 }>;
 type JsonRecord = Record<string, unknown>;
@@ -63,7 +87,7 @@ export function eventInviteSourceUpdates(
   );
 }
 
-export function digestInput(intent: Omit<V2Intent, "payloadDigest">) {
+function digestInput(intent: Omit<V2Intent, "payloadDigest">) {
   return {
     transitionId: intent.transitionId,
     eventId: intent.eventId,
@@ -76,30 +100,129 @@ export function digestInput(intent: Omit<V2Intent, "payloadDigest">) {
   };
 }
 
+type InviteMutationEvidence = {
+  current: { inviteId: string; revision: number; value: unknown };
+  value: unknown;
+};
+
+function inviteMutationEvidence(
+  value: RetainedInviteMutationBatch,
+): InviteMutationEvidence[] {
+  const retained: unknown = value;
+  return retained as InviteMutationEvidence[];
+}
+
+function effectEvidence(value: EventIntentEffects): JsonRecord {
+  const retained: unknown = value;
+  return retained as JsonRecord;
+}
+
+export function encodeEventIntentUpdates(
+  commands: readonly EventMutation[],
+): EventIntentUpdates {
+  const value: unknown = encodeEventUpdates(commands);
+  return value as EventIntentUpdates;
+}
+
+export function encodeEventIntentEffects(
+  commands: readonly EventEffect[],
+): EventIntentEffects {
+  const value: unknown = encodeEventUpdates(commands);
+  return value as EventIntentEffects;
+}
+
+export function createEventTransitionDraft(
+  input: EventTransitionDraftInput,
+): Extract<EventTransitionIntent, { schemaVersion: 1 }> {
+  const value: unknown = input;
+  return value as Extract<EventTransitionIntent, { schemaVersion: 1 }>;
+}
+
+export function eventIntentCanonicalChanges(intent: EventTransitionIntent) {
+  const value: unknown = intent.canonicalUpdates;
+  return decodeCanonicalEventUpdates(value as JsonRecord);
+}
+
+export function eventIntentInviteChanges(
+  intent: Extract<EventTransitionIntent, { schemaVersion: 1 }>,
+) {
+  return decodeEventUpdates(
+    effectEvidence(intent[STATE_EFFECTS_FIELD]),
+  ).flatMap((command) =>
+    command.kind === "invite"
+      ? [{ inviteId: command.inviteId, value: command.value }]
+      : [],
+  );
+}
+
+export function eventIntentPayloadDigest(
+  intent: Omit<V2Intent, "payloadDigest">,
+): Promise<string> {
+  return digest(digestInput(intent));
+}
+
+export function prepareEventIntentEnvelope(
+  intent: Extract<EventTransitionIntent, { schemaVersion: 1 }>,
+  sourceEpoch: number,
+  inviteMutations: InviteSourceMutation[],
+): Omit<V2Intent, "payloadDigest"> {
+  const retainedMutations: unknown = inviteMutations;
+  const next: Omit<V2Intent, "payloadDigest"> = {
+    ...intent,
+    schemaVersion: 2,
+    sourceEpoch,
+    inviteMutations: retainedMutations as RetainedInviteMutationBatch,
+    [STATE_EFFECTS_FIELD]: preparedEventEffects(
+      intent[STATE_EFFECTS_FIELD],
+      intent.createdAtMs,
+    ),
+  };
+  return next;
+}
+
+export function completeEventIntentEnvelope(
+  next: Omit<V2Intent, "payloadDigest">,
+  payloadDigest: string,
+): V2Intent {
+  const prepared = { ...next, payloadDigest };
+  effectLayout(prepared);
+  return prepared;
+}
+
 export function effectLayout(intent: V2Intent): {
   creations: {
     playerId: string;
     matchId: string;
-    value: JsonRecord;
+    value: MatchDocument;
     markerPath: string;
   }[];
-  otherEffects: Exclude<EventEffect, { kind: "invite" | "match-creation" }>[];
+  otherEffects: Extract<
+    EventPersistenceCommand,
+    {
+      kind:
+        | "match-terminal-timer"
+        | "match-timer-start-cleanup"
+        | "match-timer-claim";
+    }
+  >[];
   discovery: LoginMatchDiscoveryInput[];
 } {
-  const creations: [string, JsonRecord][] = [];
+  const creations: [string, MatchDocument][] = [];
   const otherEffects: JsonRecord = {};
   const discovery: LoginMatchDiscoveryInput[] = [];
   const sources = new Map(
-    intent.inviteMutations.map((mutation) => [
+    inviteMutationEvidence(intent.inviteMutations).map((mutation) => [
       mutation.current.inviteId,
       mutation,
     ]),
   );
-  const paths = Object.keys(intent[STATE_EFFECTS_FIELD]);
+  const paths = Object.keys(effectEvidence(intent[STATE_EFFECTS_FIELD]));
   if (paths.length > MAX_EVENT_PARTICIPANTS * 4) {
     throw new Error("event-transition-too-many-effects");
   }
-  for (const [path, value] of Object.entries(intent[STATE_EFFECTS_FIELD])) {
+  for (const [path, value] of Object.entries(
+    effectEvidence(intent[STATE_EFFECTS_FIELD]),
+  )) {
     const parts = path.split("/");
     if (
       parts.some((part) => !isSafeRecordKey(part)) ||
@@ -111,21 +234,28 @@ export function effectLayout(intent: V2Intent): {
     }
     if (parts[0] === "players" && parts[2] === "matches") {
       if (parts.length === 4) {
-        const source = sources.get(parts[3]);
+        const sourceMutation = sources.get(parts[3]);
+        const source = sourceMutation
+          ? inviteSourceEventState(
+              sourceMutation.value as Parameters<
+                typeof inviteSourceEventState
+              >[0],
+            )
+          : null;
         if (
           !record(value) ||
           Object.hasOwn(value, "sessionCreation") ||
           !source ||
           !isCanonicalLoginUid(parts[1]) ||
-          source.value.eventId !== intent.eventId ||
-          !isCanonicalLoginUid(source.value.hostId) ||
-          !isCanonicalLoginUid(source.value.guestId) ||
-          source.value.hostId === source.value.guestId ||
-          ![source.value.hostId, source.value.guestId].includes(parts[1])
+          source.eventId !== intent.eventId ||
+          !isCanonicalLoginUid(source.hostId) ||
+          !isCanonicalLoginUid(source.guestId) ||
+          source.hostId === source.guestId ||
+          ![source.hostId, source.guestId].includes(parts[1])
         ) {
           throw new Error("event-transition-invalid-match-creation");
         }
-        creations.push([path, value]);
+        creations.push([path, readMatchDocument(value)!]);
         discovery.push({
           loginUid: parts[1],
           matchId: parts[3],
@@ -157,7 +287,7 @@ export function effectLayout(intent: V2Intent): {
       otherEffects[path] = value;
     }
   }
-  for (const mutation of intent.inviteMutations) {
+  for (const mutation of inviteMutationEvidence(intent.inviteMutations)) {
     if (
       canonical(normalizeInviteSource(mutation.value)) !==
         canonical(mutation.value) ||
@@ -168,11 +298,20 @@ export function effectLayout(intent: V2Intent): {
       throw new Error("event-transition-invalid-invite-source");
     }
     const { inviteId } = mutation.current;
-    if (mutation.value.eventId !== intent.eventId) {
+    const invite = inviteSourceEventState(
+      mutation.value as Parameters<typeof inviteSourceEventState>[0],
+    );
+    if (invite.eventId !== intent.eventId) {
       throw new Error("event-transition-invite-owner-conflict");
     }
     if (mutation.current.value !== null) {
-      if (mutation.current.value.eventId !== intent.eventId) {
+      if (
+        inviteSourceEventState(
+          mutation.current.value as Parameters<
+            typeof inviteSourceEventState
+          >[0],
+        ).eventId !== intent.eventId
+      ) {
         throw new Error("event-transition-invite-owner-conflict");
       }
       if (creations.some(([path]) => path.split("/")[3] === inviteId)) {
@@ -181,14 +320,10 @@ export function effectLayout(intent: V2Intent): {
     }
     if (
       mutation.current.value === null &&
-      (!isCanonicalLoginUid(mutation.value.hostId) ||
-        !isCanonicalLoginUid(mutation.value.guestId) ||
-        !paths.includes(
-          `players/${mutation.value.hostId}/matches/${inviteId}`,
-        ) ||
-        !paths.includes(
-          `players/${mutation.value.guestId}/matches/${inviteId}`,
-        ))
+      (!isCanonicalLoginUid(invite.hostId) ||
+        !isCanonicalLoginUid(invite.guestId) ||
+        !paths.includes(`players/${invite.hostId}/matches/${inviteId}`) ||
+        !paths.includes(`players/${invite.guestId}/matches/${inviteId}`))
     ) {
       throw new Error("event-transition-invite-matches-missing");
     }
@@ -201,9 +336,14 @@ export function effectLayout(intent: V2Intent): {
     otherEffects: decodeEventUpdates(otherEffects).filter(
       (
         command,
-      ): command is Exclude<
-        EventEffect,
-        { kind: "invite" | "match-creation" }
+      ): command is Extract<
+        EventPersistenceCommand,
+        {
+          kind:
+            | "match-terminal-timer"
+            | "match-timer-start-cleanup"
+            | "match-timer-claim";
+        }
       > =>
         command.kind === "match-terminal-timer" ||
         command.kind === "match-timer-start-cleanup" ||
@@ -214,12 +354,80 @@ export function effectLayout(intent: V2Intent): {
 }
 
 export function preparedEventEffects(
-  effects: Readonly<Record<string, unknown>>,
+  effects: EventIntentEffects,
   nowMs: number,
-): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(effects)
+): EventIntentEffects {
+  const value: unknown = Object.fromEntries(
+    Object.entries(effectEvidence(effects))
       .filter(([path]) => !path.startsWith("invites/"))
       .map(([path, value]) => [path, resolveTimestamps(value, nowMs)]),
   );
+  return value as EventIntentEffects;
+}
+
+export function sameTransitionIntent(
+  left: EventTransitionIntent,
+  right: EventTransitionIntent,
+): boolean {
+  return (
+    left.transitionId === right.transitionId &&
+    left.schemaVersion === right.schemaVersion &&
+    left.eventId === right.eventId &&
+    left.expectedRevision === right.expectedRevision &&
+    canonicalEventRepositoryJson(left.canonicalUpdates) ===
+      canonicalEventRepositoryJson(right.canonicalUpdates) &&
+    canonicalEventRepositoryJson(left[STATE_EFFECTS_FIELD]) ===
+      canonicalEventRepositoryJson(right[STATE_EFFECTS_FIELD]) &&
+    (left.schemaVersion !== 2 ||
+      (right.schemaVersion === 2 &&
+        left.payloadDigest === right.payloadDigest &&
+        left.sourceEpoch === right.sourceEpoch &&
+        canonicalEventRepositoryJson(left.inviteMutations) ===
+          canonicalEventRepositoryJson(right.inviteMutations)))
+  );
+}
+
+export function eventIntentMatchesPlan(
+  existing: EventTransitionIntent,
+  canonicalUpdates: EventIntentUpdates,
+  stateEffects: EventIntentEffects,
+  eventId: string,
+  revision: number,
+): boolean {
+  return !(
+    canonicalEventRepositoryJson(existing.canonicalUpdates) !==
+      canonicalEventRepositoryJson(canonicalUpdates) ||
+    (existing.schemaVersion === 1 &&
+      canonicalEventRepositoryJson(existing[STATE_EFFECTS_FIELD]) !==
+        canonicalEventRepositoryJson(stateEffects)) ||
+    existing.eventId !== eventId ||
+    existing.expectedRevision !== revision
+  );
+}
+
+export function eventIntentNotificationTargets(intent: V2Intent) {
+  const effects = decodeEventUpdates(
+    effectEvidence(intent[STATE_EFFECTS_FIELD]),
+  );
+  const metadataInviteIds = new Set(
+    inviteMutationEvidence(intent.inviteMutations)
+      .map(({ current }) => current.inviteId)
+      .filter((inviteId) => normalizeRecordKey(inviteId) === inviteId),
+  );
+  const matchInviteIds = [
+    ...new Set(
+      effects.flatMap((command) =>
+        command.kind === "match-timer-claim" &&
+        record(command.value) &&
+        typeof command.value.inviteId === "string"
+          ? [command.value.inviteId]
+          : [],
+      ),
+    ),
+  ].filter(
+    (inviteId) =>
+      normalizeRecordKey(inviteId) === inviteId &&
+      !metadataInviteIds.has(inviteId),
+  );
+  return { metadataInviteIds, matchInviteIds, effects };
 }

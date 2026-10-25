@@ -1,3 +1,4 @@
+import type { ApiQuery } from "@mons/shared/api-contracts";
 import {
   isSessionBootstrap,
   isSessionBootstrapTarget,
@@ -29,8 +30,11 @@ import {
   readOptionalEventSnapshotSeed,
   type EventSnapshotSeedDependencies,
 } from "./eventSnapshotResponse.ts";
-
 export const GAME_BOOTSTRAP_ENRICHMENT_TIMEOUT_MS = 10_000;
+type SessionQuery = ApiQuery<
+  "POST /auth/session/anonymous" | "POST /auth/session/refresh"
+>;
+
 type Timer = ReturnType<typeof setTimeout> | number;
 
 export type SessionIdentityBootstrapDependencies = {
@@ -44,19 +48,22 @@ export function readSessionIdentityBootstrapRequested(
   request: Request,
 ): boolean {
   const url = new URL(request.url);
-  if (!url.searchParams.has("bootstrapIdentity")) return false;
+  if (!url.searchParams.has("bootstrapIdentity" satisfies keyof SessionQuery))
+    return false;
   if (
     (url.pathname !== SESSION_ANONYMOUS_PATH &&
       url.pathname !== SESSION_REFRESH_PATH) ||
-    url.searchParams.getAll("bootstrapIdentity").length !== 1 ||
-    url.searchParams.get("bootstrapIdentity") !== "1" ||
+    url.searchParams.getAll("bootstrapIdentity" satisfies keyof SessionQuery)
+      .length !== 1 ||
+    url.searchParams.get("bootstrapIdentity" satisfies keyof SessionQuery) !==
+      ("1" satisfies NonNullable<SessionQuery["bootstrapIdentity"]>) ||
     [...url.searchParams.keys()].some(
       (key) =>
         ![
-          "bootstrapIdentity",
-          "bootstrapInviteId",
-          "bootstrapSelection",
-          "bootstrapEventId",
+          "bootstrapIdentity" satisfies keyof SessionQuery,
+          "bootstrapInviteId" satisfies keyof SessionQuery,
+          "bootstrapSelection" satisfies keyof SessionQuery,
+          "bootstrapEventId" satisfies keyof SessionQuery,
         ].includes(key),
     )
   ) {
@@ -144,14 +151,19 @@ export function readSessionBootstrapTarget(
 ): SessionBootstrapTarget | SessionEventBootstrapTarget | null {
   const url = new URL(request.url);
   const params = url.searchParams;
-  if (params.has("bootstrapEventId")) {
-    const target = { eventId: params.get("bootstrapEventId") };
+  if (params.has("bootstrapEventId" satisfies keyof SessionQuery)) {
+    const target = {
+      eventId: params.get("bootstrapEventId" satisfies keyof SessionQuery),
+    };
     if (
       (url.pathname !== SESSION_ANONYMOUS_PATH &&
         url.pathname !== SESSION_REFRESH_PATH) ||
-      params.getAll("bootstrapEventId").length !== 1 ||
+      params.getAll("bootstrapEventId" satisfies keyof SessionQuery).length !==
+        1 ||
       [...params.keys()].some(
-        (key) => key !== "bootstrapEventId" && key !== "bootstrapIdentity",
+        (key) =>
+          key !== ("bootstrapEventId" satisfies keyof SessionQuery) &&
+          key !== ("bootstrapIdentity" satisfies keyof SessionQuery),
       ) ||
       !isSessionEventBootstrapTarget(target)
     )
@@ -160,24 +172,33 @@ export function readSessionBootstrapTarget(
         "invalid-argument",
         "invalid-bootstrap-request",
       );
-    return target;
+    return target satisfies {
+      eventId: NonNullable<SessionQuery["bootstrapEventId"]>;
+    };
   }
-  if (!params.has("bootstrapInviteId") && !params.has("bootstrapSelection"))
+  if (
+    !params.has("bootstrapInviteId" satisfies keyof SessionQuery) &&
+    !params.has("bootstrapSelection" satisfies keyof SessionQuery)
+  )
     return null;
   const target = {
-    inviteId: params.get("bootstrapInviteId"),
-    selection: params.get("bootstrapSelection") ?? "current",
+    inviteId: params.get("bootstrapInviteId" satisfies keyof SessionQuery),
+    selection:
+      params.get("bootstrapSelection" satisfies keyof SessionQuery) ??
+      ("current" satisfies NonNullable<SessionQuery["bootstrapSelection"]>),
   };
   if (
     (url.pathname !== SESSION_ANONYMOUS_PATH &&
       url.pathname !== SESSION_REFRESH_PATH) ||
-    params.getAll("bootstrapInviteId").length !== 1 ||
-    params.getAll("bootstrapSelection").length > 1 ||
+    params.getAll("bootstrapInviteId" satisfies keyof SessionQuery).length !==
+      1 ||
+    params.getAll("bootstrapSelection" satisfies keyof SessionQuery).length >
+      1 ||
     [...params.keys()].some(
       (key) =>
-        key !== "bootstrapInviteId" &&
-        key !== "bootstrapSelection" &&
-        key !== "bootstrapIdentity",
+        key !== ("bootstrapInviteId" satisfies keyof SessionQuery) &&
+        key !== ("bootstrapSelection" satisfies keyof SessionQuery) &&
+        key !== ("bootstrapIdentity" satisfies keyof SessionQuery),
     ) ||
     !isSessionBootstrapTarget(target)
   )
@@ -186,7 +207,10 @@ export function readSessionBootstrapTarget(
       "invalid-argument",
       "invalid-bootstrap-request",
     );
-  return target;
+  return target satisfies {
+    inviteId: NonNullable<SessionQuery["bootstrapInviteId"]>;
+    selection: NonNullable<SessionQuery["bootstrapSelection"]>;
+  };
 }
 
 export async function readSessionEventBootstrap(

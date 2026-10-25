@@ -1,6 +1,23 @@
+import {
+  eventState,
+  eventRounds,
+  eventParticipants,
+  eventThirdPlaceMatch,
+  eventCurrentRoundIndex,
+  eventRoundAt,
+  eventRoundMatches,
+  eventParticipantAt,
+  createEventRoundsDocument,
+  createEventParticipantsDocument,
+  cloneEventRounds,
+  cloneEventParticipants,
+  cloneEventMatch,
+  patchEventDocument,
+  copyEventWinnerDisplayName,
+} from "./documents.js";
 import { isEventPrizeEvent } from "@mons/shared/event-prizes";
 import { eventField, type EventCommitPlan } from "../eventCommands.js";
-import type { EventPrizeAssignmentRecord, EventStatus } from "../eventReads.js";
+import type { EventPrizeAssignmentRecord } from "../eventReads.js";
 import type { EventBracketRuntime } from "./bracket.js";
 import type { EventData, EventMatch, EventRounds } from "./model.js";
 import type { EventOwnershipSnapshot } from "./ownership.js";
@@ -43,11 +60,6 @@ const normalizeString = (value: unknown) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 const normalizeStringOrNull = (value: unknown) =>
   normalizeString(value) || null;
-const toFiniteInteger = (value: unknown, fallback = 0) => {
-  const numeric = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(numeric) ? Math.floor(numeric) : fallback;
-};
-const cloneValue = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 
 async function resolveEventMatches(
   rounds: EventRounds,
@@ -64,13 +76,10 @@ async function resolveEventMatches(
   let thirdPlaceMatchChanged = false;
   const sortedRoundIndexes = getSortedRoundIndexes(rounds);
   for (const roundIndex of sortedRoundIndexes) {
-    const round = rounds[String(roundIndex)];
-    if (!round || !round.matches || typeof round.matches !== "object") {
-      continue;
-    }
-    const resolvedEntries = await resolveRoundMatchesWithConcurrency(
-      round.matches,
-    );
+    const round = eventRoundAt(rounds, String(roundIndex));
+    const matches = eventRoundMatches(round);
+    if (!matches) continue;
+    const resolvedEntries = await resolveRoundMatchesWithConcurrency(matches);
     for (const entry of resolvedEntries) {
       const { matchRecord, resolved } = entry;
       if (!resolved) {
@@ -121,8 +130,8 @@ export async function buildActiveEventSyncPlan(
     string,
     EventPrizeAssignmentRecord
   > | null = null;
-  const normalizedOriginalCurrentRoundIndex = toFiniteInteger(
-    event.currentRoundIndex,
+  const normalizedOriginalCurrentRoundIndex = eventCurrentRoundIndex(
+    event,
     NaN,
   );
   const originalCurrentRoundIndex = Number.isFinite(
@@ -130,28 +139,31 @@ export async function buildActiveEventSyncPlan(
   )
     ? normalizedOriginalCurrentRoundIndex
     : null;
-  const originalStatus = normalizeString(event.status) || "active";
+  const originalState = eventState(event);
+  const originalStatus = normalizeString(originalState.status) || "active";
   const originalEndedAtMs =
-    typeof event.endedAtMs === "number" ? Math.floor(event.endedAtMs) : null;
-  const originalWinnerProfileId = normalizeStringOrNull(event.winnerProfileId);
+    typeof originalState.endedAtMs === "number"
+      ? Math.floor(originalState.endedAtMs)
+      : null;
+  const originalWinnerProfileId = normalizeStringOrNull(
+    eventState(event).winnerProfileId,
+  );
   const originalWinnerDisplayName = normalizeStringOrNull(
-    event.winnerDisplayName,
+    eventState(event).winnerDisplayName,
   );
-  const rounds = cloneValue(
-    event.rounds && typeof event.rounds === "object" ? event.rounds : {},
+  const rounds = cloneEventRounds(
+    eventRounds(event) || createEventRoundsDocument(),
   );
-  let participants = cloneValue(
-    event.participants && typeof event.participants === "object"
-      ? event.participants
-      : {},
+  let participants = cloneEventParticipants(
+    eventParticipants(event) || createEventParticipantsDocument(),
   );
   const supportsThirdPlaceMatch = hasThirdPlaceMatchField(event);
-  let thirdPlaceMatch =
-    supportsThirdPlaceMatch &&
-    event.thirdPlaceMatch &&
-    typeof event.thirdPlaceMatch === "object"
-      ? cloneValue(event.thirdPlaceMatch)
-      : null;
+  const storedThirdPlaceMatch = supportsThirdPlaceMatch
+    ? eventThirdPlaceMatch(event)
+    : null;
+  let thirdPlaceMatch = storedThirdPlaceMatch
+    ? cloneEventMatch(storedThirdPlaceMatch)
+    : null;
   const inviteUpdates: EventCommitPlan = [];
   let participantsChanged = false;
   let { roundsChanged, thirdPlaceMatchChanged } = await resolveEventMatches(
@@ -215,7 +227,7 @@ export async function buildActiveEventSyncPlan(
     earliestUnresolvedRoundIndex !== null
       ? earliestUnresolvedRoundIndex
       : finalRoundIndex;
-  event.currentRoundIndex = nextCurrentRoundIndex;
+  patchEventDocument(event, { currentRoundIndex: nextCurrentRoundIndex });
 
   const participantStateResult = rebuildParticipantStatesFromRounds({
     participantsById: participants,
@@ -230,18 +242,19 @@ export async function buildActiveEventSyncPlan(
 
   if (eventShouldEnd) {
     const winnerParticipant =
-      (winnerProfileId && participants[winnerProfileId]) || null;
-    event.status = "ended";
-    if (typeof event.endedAtMs !== "number") {
-      event.endedAtMs = nowMs;
+      (winnerProfileId && eventParticipantAt(participants, winnerProfileId)) ||
+      null;
+    patchEventDocument(event, { status: "ended" });
+    let endedAtMs = eventState(event).endedAtMs;
+    if (typeof endedAtMs !== "number") {
+      endedAtMs = nowMs;
+      patchEventDocument(event, { endedAtMs });
     }
-    event.winnerProfileId = winnerProfileId;
-    event.winnerDisplayName = winnerParticipant
-      ? winnerParticipant.displayName
-      : null;
+    patchEventDocument(event, { winnerProfileId: winnerProfileId });
+    copyEventWinnerDisplayName(event, winnerParticipant);
     if (isEventPrizeEvent(eventId)) {
-      if (typeof event.prizeSelectionsLockedAtMs !== "number") {
-        event.prizeSelectionsLockedAtMs = nowMs;
+      if (typeof eventState(event).prizeSelectionsLockedAtMs !== "number") {
+        patchEventDocument(event, { prizeSelectionsLockedAtMs: nowMs });
         updates.push(eventField(eventId, "prizeSelectionsLockedAtMs", nowMs));
       }
       const prizeAssignmentResult = await resolveEventPrizeAssignments({
@@ -250,14 +263,16 @@ export async function buildActiveEventSyncPlan(
         rounds,
         participantsById: participants,
         thirdPlaceMatch,
-        assignedAtMs: event.endedAtMs,
+        assignedAtMs: endedAtMs,
         ownershipSnapshot,
         prizeSelections,
       });
       if (Object.keys(prizeAssignmentResult.assignments).length > 0) {
         eventPrizeAssignmentsForProjectionCleanup =
           prizeAssignmentResult.assignments;
-        event.prizeAssignments = prizeAssignmentResult.assignments;
+        patchEventDocument(event, {
+          prizeAssignments: prizeAssignmentResult.assignments,
+        });
         await addEventPrizeAssignmentUpdates({
           updates,
           eventId,
@@ -267,16 +282,17 @@ export async function buildActiveEventSyncPlan(
       }
     }
   } else {
-    event.status = "active";
-    event.endedAtMs = null;
-    event.winnerProfileId = null;
-    event.winnerDisplayName = null;
+    patchEventDocument(event, { status: "active" });
+    patchEventDocument(event, { endedAtMs: null });
+    patchEventDocument(event, { winnerProfileId: null });
+    patchEventDocument(event, { winnerDisplayName: null });
   }
 
   let eventChanged = false;
+  const nextState = eventState(event);
   const normalizedCurrentRoundIndex =
-    typeof event.currentRoundIndex === "number"
-      ? Math.floor(event.currentRoundIndex)
+    typeof nextState.currentRoundIndex === "number"
+      ? Math.floor(nextState.currentRoundIndex)
       : null;
   if (normalizedCurrentRoundIndex !== originalCurrentRoundIndex) {
     updates.push(
@@ -285,23 +301,23 @@ export async function buildActiveEventSyncPlan(
     eventChanged = true;
   }
 
-  const normalizedStatus = normalizeString(event.status) || "active";
+  const normalizedStatus = eventShouldEnd ? "ended" : "active";
   if (normalizedStatus !== originalStatus) {
-    updates.push(
-      eventField(eventId, "status", normalizedStatus as EventStatus),
-    );
+    updates.push(eventField(eventId, "status", normalizedStatus));
     eventChanged = true;
   }
 
   const normalizedEndedAtMs =
-    typeof event.endedAtMs === "number" ? Math.floor(event.endedAtMs) : null;
+    typeof nextState.endedAtMs === "number"
+      ? Math.floor(nextState.endedAtMs)
+      : null;
   if (normalizedEndedAtMs !== originalEndedAtMs) {
     updates.push(eventField(eventId, "endedAtMs", normalizedEndedAtMs));
     eventChanged = true;
   }
 
   const normalizedWinnerProfileId = normalizeStringOrNull(
-    event.winnerProfileId,
+    eventState(event).winnerProfileId,
   );
   if (normalizedWinnerProfileId !== originalWinnerProfileId) {
     updates.push(
@@ -311,7 +327,7 @@ export async function buildActiveEventSyncPlan(
   }
 
   const normalizedWinnerDisplayName = normalizeStringOrNull(
-    event.winnerDisplayName,
+    eventState(event).winnerDisplayName,
   );
   if (normalizedWinnerDisplayName !== originalWinnerDisplayName) {
     updates.push(
@@ -373,16 +389,16 @@ export async function buildEndedEventSyncPlan(
     string,
     EventPrizeAssignmentRecord
   > | null = null;
-  const rounds = cloneValue(
-    event.rounds && typeof event.rounds === "object" ? event.rounds : {},
+  const rounds = cloneEventRounds(
+    eventRounds(event) || createEventRoundsDocument(),
   );
   const supportsThirdPlaceMatch = hasThirdPlaceMatchField(event);
-  let thirdPlaceMatch =
-    supportsThirdPlaceMatch &&
-    event.thirdPlaceMatch &&
-    typeof event.thirdPlaceMatch === "object"
-      ? cloneValue(event.thirdPlaceMatch)
-      : null;
+  const storedThirdPlaceMatch = supportsThirdPlaceMatch
+    ? eventThirdPlaceMatch(event)
+    : null;
+  let thirdPlaceMatch = storedThirdPlaceMatch
+    ? cloneEventMatch(storedThirdPlaceMatch)
+    : null;
   let prizeStateChanged = false;
   let { roundsChanged, thirdPlaceMatchChanged } = await resolveEventMatches(
     rounds,
@@ -397,9 +413,7 @@ export async function buildEndedEventSyncPlan(
       rounds,
       nowMs,
       participantsById:
-        event.participants && typeof event.participants === "object"
-          ? event.participants
-          : {},
+        eventParticipants(event) || createEventParticipantsDocument(),
       inviteUpdates: [],
       thirdPlaceMatch,
       allowInviteCreation: false,
@@ -411,12 +425,13 @@ export async function buildEndedEventSyncPlan(
   }
 
   if (isEventPrizeEvent(eventId)) {
-    if (typeof event.prizeSelectionsLockedAtMs !== "number") {
+    const state = eventState(event);
+    if (typeof state.prizeSelectionsLockedAtMs !== "number") {
       updates.push(
         eventField(
           eventId,
           "prizeSelectionsLockedAtMs",
-          typeof event.endedAtMs === "number" ? event.endedAtMs : nowMs,
+          typeof state.endedAtMs === "number" ? state.endedAtMs : nowMs,
         ),
       );
       prizeStateChanged = true;
@@ -426,12 +441,10 @@ export async function buildEndedEventSyncPlan(
       event,
       rounds,
       participantsById:
-        event.participants && typeof event.participants === "object"
-          ? event.participants
-          : {},
+        eventParticipants(event) || createEventParticipantsDocument(),
       thirdPlaceMatch,
       assignedAtMs:
-        typeof event.endedAtMs === "number" ? event.endedAtMs : nowMs,
+        typeof state.endedAtMs === "number" ? state.endedAtMs : nowMs,
       ownershipSnapshot,
       prizeSelections,
     });

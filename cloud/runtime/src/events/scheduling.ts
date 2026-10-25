@@ -18,11 +18,9 @@ type Signature_parseScheduledTimeParts = (value: unknown) => {
   hour: number;
   minute: number;
 } | null;
-type Signature_resolveRequestedScheduleTimezone = (
-  request: Record<string, unknown>,
-) => string;
+type Signature_resolveRequestedScheduleTimezone = (request: unknown) => string;
 type Signature_resolveScheduledDateTimeStartAtMs = (
-  request: Record<string, unknown>,
+  request: unknown,
   nowMs?: number,
 ) => number;
 
@@ -192,11 +190,23 @@ const hasDateTimeScheduleRequest: Signature_hasDateTimeScheduleRequest = (
   );
 };
 
+function scheduleFields(value: unknown) {
+  const fields =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {};
+  return {
+    scheduledDate: normalizeString(fields.scheduledDate),
+    scheduledTime: normalizeString(fields.scheduledTime),
+    scheduledTimezone: normalizeString(fields.scheduledTimezone),
+    localTimezoneIana: normalizeString(fields.localTimezoneIana),
+  };
+}
+
 const resolveRequestedScheduleTimezone: Signature_resolveRequestedScheduleTimezone =
-  (data) => {
-    const scheduledTimezoneRaw = normalizeString(
-      data && data.scheduledTimezone,
-    );
+  (input) => {
+    const data = scheduleFields(input);
+    const scheduledTimezoneRaw = data.scheduledTimezone;
     if (!scheduledTimezoneRaw) {
       throw new EventSchedulingError(
         "invalid-argument",
@@ -231,8 +241,9 @@ const resolveRequestedScheduleTimezone: Signature_resolveRequestedScheduleTimezo
   };
 
 const resolveScheduledDateTimeStartAtMs: Signature_resolveScheduledDateTimeStartAtMs =
-  (data, nowMs = Date.now()) => {
-    const scheduledDate = normalizeString(data && data.scheduledDate);
+  (input, nowMs = Date.now()) => {
+    const data = scheduleFields(input);
+    const scheduledDate = data.scheduledDate;
     if (!scheduledDate) {
       throw new EventSchedulingError(
         "invalid-argument",

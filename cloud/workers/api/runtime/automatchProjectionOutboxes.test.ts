@@ -1,3 +1,7 @@
+import {
+  retainedAutomatchSnapshotFixture,
+  retainedAutomatchClaimFixture,
+} from "../test/automatchRecordFixture.ts";
 import { env } from "cloudflare:workers";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -38,12 +42,12 @@ function telegramOutbox(extra: Record<string, unknown> = {}) {
   };
 }
 
-function claimSnapshot(
-  root: AutomatchOutboxClaimSnapshot["root"],
+function claimSnapshot<Root extends AutomatchOutboxClaimSnapshot["root"]>(
+  root: Root,
   value: unknown,
   revision = 1,
-): AutomatchOutboxClaimSnapshot {
-  return { root, key: "invite", value, revision };
+): AutomatchOutboxClaimSnapshot<Root> {
+  return retainedAutomatchSnapshotFixture(root, "invite", value, revision);
 }
 
 function historical(retryNotBeforeMs?: number) {
@@ -406,7 +410,10 @@ describe("native automatch projection outboxes", () => {
           100,
           200,
           undefined,
-          snapshot,
+          retainedAutomatchClaimFixture(
+            "profileGameProjectionOutbox/automatch",
+            snapshot,
+          ),
         ),
       ).toBe(true);
       expect(observed.reads).toHaveLength(1);

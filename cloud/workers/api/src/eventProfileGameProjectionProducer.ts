@@ -1,3 +1,9 @@
+import { queueFor } from "./queueProducers.ts";
+import {
+  readPlainEventDocument,
+  plainEventParticipants,
+  createEventParticipantsDocument,
+} from "../../../runtime/events/documents.js";
 import type {
   EventCommand,
   EventCommitPlan,
@@ -26,12 +32,6 @@ type ProducerDependencies = {
   logger?: Pick<Console, "error">;
   now?: () => number;
 };
-
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
 
 export function eventIdsFromProfileGameProjectionUpdates(
   updates: readonly EventCommand[],
@@ -63,7 +63,7 @@ export async function prepareEventProfileGameProjection(
   const enqueue =
     dependencies.enqueue ||
     ((task: EventProfileGameProjectionTask) =>
-      env.EVENT_PROFILE_GAME_PROJECTION_QUEUE.send(task));
+      queueFor(env, "EVENT_PROFILE_GAME_PROJECTION_QUEUE").send(task));
   const logger = dependencies.logger || console;
   const now = dependencies.now || Date.now;
   const eventIds = eventIdsFromProfileGameProjectionUpdates(updates);
@@ -79,8 +79,10 @@ export async function prepareEventProfileGameProjection(
   }));
   const commands: EventCommitPlan = [];
   for (let index = 0; index < tasks.length; index += 1) {
-    const event = toRecord(previousEvents[index]);
-    const participants = toRecord(event?.participants) || {};
+    const event = readPlainEventDocument(previousEvents[index]);
+    const participants =
+      (event && plainEventParticipants(event)) ||
+      createEventParticipantsDocument();
     const eventId = tasks[index].eventId;
     commands.push(
       {

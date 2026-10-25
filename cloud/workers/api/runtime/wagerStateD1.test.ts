@@ -1,3 +1,4 @@
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
 import type { D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { beforeAll, describe, expect, it, vi } from "vitest";
@@ -354,12 +355,12 @@ describe("canonical wager state", () => {
       await writer.sendProposal(key("composed"), proposal());
       const states = await writer.readInviteWagerState("composed");
       const composed = composeInviteWagerSource(
-        {
+        inviteDocumentFixture({
           hostId: "host",
           guestId: "guest",
           wagers: { legacy: { agreed: { count: 99 } } },
           matchesWagerResolutions: { legacy: true },
-        },
+        }),
         states,
         false,
       );

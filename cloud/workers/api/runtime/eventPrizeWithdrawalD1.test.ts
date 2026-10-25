@@ -1,14 +1,20 @@
+import { createWithdrawalStorageFixture as createD1EventPrizeWithdrawalStore } from "../test/withdrawalStorageFixture.ts";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import {
   createD1EventPrizeWithdrawalReader,
-  createD1EventPrizeWithdrawalStore,
+  createD1EventPrizeWithdrawalStore as createWithdrawalCommands,
   EventPrizeWithdrawalD1Failure,
   MAX_TRANSACTION_ATTEMPTS,
   readEventPrizeWithdrawalStorageControl,
   readEventPrizeWithdrawalStorageMode,
 } from "../src/eventPrizeWithdrawalD1.ts";
+import { buildWithdrawalCompletion } from "../../../runtime/eventPrizeWithdrawalState.js";
+import {
+  withdrawalStatus,
+  writeCompletedWithdrawal,
+} from "../../../runtime/eventPrizes/records.js";
 import { createEventPrizeRuntimeDependencies } from "../src/eventPrizeWithdrawal.ts";
 import { createEventPrizeContext } from "../src/eventPrizeWithdrawal/context.ts";
 
@@ -438,6 +444,168 @@ describe("event prize withdrawal D1 repository", () => {
     expect(MAX_TRANSACTION_ATTEMPTS).toBe(12);
   });
 
+  it("routes public commands through the existing CAS write and abort behavior", async () => {
+    const raw = createD1EventPrizeWithdrawalStore(
+      testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
+    );
+    await raw
+      .record(eventId, prizeId)
+      .transaction(() => ({ value: processing(100) }));
+    let metadataClockCalls = 0;
+    const commands = createWithdrawalCommands(
+      testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
+      {
+        now: () => {
+          metadataClockCalls++;
+          return 200;
+        },
+      },
+    ).record(eventId, prizeId);
+    const version = () =>
+      testEnv.EVENT_PRIZE_WITHDRAWALS_DB.prepare(
+        "SELECT version FROM event_prize_withdrawals WHERE event_id = ? AND prize_id = ?",
+      )
+        .bind(eventId, prizeId)
+        .first<number>("version");
+    for (const [expectedVersion, execute] of [
+      [2, () => commands.releaseProcessing("stale")],
+      [3, () => commands.block({ leaseId: "stale", observedOwner: "other" })],
+      [
+        4,
+        () =>
+          commands.persistSubmission({
+            leaseId: "stale",
+            transactionSignature: "signature",
+            signedTransactionBase64: "AQID",
+            blockhash: "hash",
+            lastValidBlockHeight: 123,
+          }),
+      ],
+    ] as const) {
+      await expect(execute()).resolves.toMatchObject({
+        committed: true,
+        value: processing(100),
+      });
+      expect(await version()).toBe(expectedVersion);
+    }
+    await expect(
+      commands.discardSubmission({
+        leaseId: "stale",
+        transactionSignature: "signature",
+      }),
+    ).resolves.toMatchObject({ committed: false, decision: "stale" });
+    expect(await version()).toBe(4);
+    expect(await commands.read()).toEqual(processing(100));
+    expect(metadataClockCalls).toBe(0);
+  });
+
+  it("preserves storage-compatible legacy statuses until a public claim replaces them", async () => {
+    const source = {
+      eventId,
+      prizeId,
+      assetAddress: "asset",
+      profileId: "profile",
+      requesterUid: "uid",
+      recipientAddress: "recipient",
+      status: ["submitted"],
+      updatedAtMs: "100",
+      futureEvidence: { retained: true },
+    };
+    const raw = createD1EventPrizeWithdrawalStore(
+      testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
+    );
+    await raw.replaceRecords([{ eventId, prizeId, value: source }]);
+    const store = createWithdrawalCommands(testEnv.EVENT_PRIZE_WITHDRAWALS_DB);
+    const observed = await store.get(eventId, prizeId);
+    expect(observed).toEqual(source);
+    expect(withdrawalStatus(observed)).toBeNull();
+    await expect(
+      store.record(eventId, prizeId).claim({
+        eventId,
+        prizeId,
+        assetAddress: "asset",
+        profileId: "profile",
+        place: 1,
+        recipientAddress: "recipient",
+        requesterUid: "uid",
+        leaseId: "claim",
+      }),
+    ).resolves.toMatchObject({ committed: true });
+    const stored = await raw.get(eventId, prizeId);
+    expect(stored?.status).toBe("processing");
+    expect(stored?.leaseId).toBe("claim");
+    expect(Object.hasOwn(stored!, "futureEvidence")).toBe(false);
+  });
+
+  it("public completion replaces submission evidence without adding a lease guard", async () => {
+    const raw = createD1EventPrizeWithdrawalStore(
+      testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
+    );
+    const submitted = {
+      eventId,
+      prizeId,
+      status: "submitted",
+      profileId: "original-profile",
+      entitledProfileId: " original-profile ",
+      requesterUid: " uid ",
+      place: "2",
+      startedAtMs: "12.9",
+      submittedAtMs: "0",
+      updatedAtMs: 100,
+      signedTransactionBase64: "AQID",
+      futureEvidence: { retained: true },
+    };
+    await raw.replaceRecords([{ eventId, prizeId, value: submitted }]);
+    const store = createWithdrawalCommands(testEnv.EVENT_PRIZE_WITHDRAWALS_DB);
+    const observed = await store.get(eventId, prizeId);
+    if (!observed) throw new Error("missing-test-withdrawal");
+    const completed = buildWithdrawalCompletion({
+      withdrawal: observed,
+      profileId: "canonical-profile",
+      eventId,
+      prizeId,
+      assetAddress: "asset",
+      recipientAddress: "recipient",
+      transactionSignature: "confirmed-signature",
+      completedAtMs: 300,
+    });
+    await raw.record(eventId, prizeId).transaction((current) => ({
+      value: {
+        ...current,
+        leaseId: "changed-after-observation",
+        updatedAtMs: 200,
+      },
+    }));
+    await store.replaceCompleted([{ eventId, prizeId, value: completed }]);
+    const row = await testEnv.EVENT_PRIZE_WITHDRAWALS_DB.prepare(
+      "SELECT record_json, version, updated_at_ms FROM event_prize_withdrawals WHERE event_id = ? AND prize_id = ?",
+    )
+      .bind(eventId, prizeId)
+      .first<{ record_json: string; version: number; updated_at_ms: number }>();
+    expect(row).toEqual({
+      record_json: JSON.stringify(completed),
+      version: 3,
+      updated_at_ms: 300,
+    });
+    expect(await raw.get(eventId, prizeId)).toEqual({
+      eventId,
+      prizeId,
+      assetAddress: "asset",
+      assetStandard: "core",
+      profileId: "canonical-profile",
+      entitledProfileId: "original-profile",
+      place: 2,
+      recipientAddress: "recipient",
+      requesterUid: "uid",
+      status: "completed",
+      transactionSignature: "confirmed-signature",
+      startedAtMs: 12.9,
+      submittedAtMs: 300,
+      completedAtMs: 300,
+      updatedAtMs: 300,
+    });
+  });
+
   it("reads event reconciliation state from the canonical store", async () => {
     await testEnv.EVENT_PRIZE_WITHDRAWALS_DB.prepare(
       `UPDATE event_prize_withdrawal_runtime_control
@@ -484,9 +652,15 @@ describe("event prize withdrawal D1 repository", () => {
       repository,
     });
     expect("createEventPrizeUmi" in runtime).toBe(false);
-    await runtime.withdrawals
+    const persisted = createD1EventPrizeWithdrawalStore(
+      testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
+    );
+    await persisted
       .record(eventId, prizeId)
       .transaction(() => ({ value: processing(500) }));
+    expect(await runtime.withdrawals.record(eventId, prizeId).read()).toEqual(
+      processing(500),
+    );
     expect(await runtime.readWithdrawal(eventId, prizeId)).toEqual(
       processing(500),
     );
@@ -496,29 +670,48 @@ describe("event prize withdrawal D1 repository", () => {
       processing(500),
     );
     await expect(
-      runtime.withdrawals.record(eventId, prizeId).transaction((current) => ({
-        value: {
-          ...(current as Record<string, unknown>),
-          updatedAtMs: 550,
-        },
-      })),
+      runtime.withdrawals.record(eventId, prizeId).persistSubmission({
+        leaseId: "lease-1",
+        transactionSignature: "signature",
+        signedTransactionBase64: "AQID",
+        blockhash: "hash",
+        lastValidBlockHeight: 123,
+      }),
     ).resolves.toMatchObject({ committed: true });
+    expect(await persisted.get(eventId, prizeId)).toMatchObject({
+      status: "submitted",
+      transactionSignature: "signature",
+      signedTransactionBase64: "AQID",
+    });
     expect(sourceWrites).toBe(0);
-    await runtime.withdrawals.replaceRecords([
+    const completed = writeCompletedWithdrawal({
+      eventId,
+      prizeId,
+      assetAddress: "asset",
+      assetStandard: "core",
+      profileId: "profile",
+      entitledProfileId: "profile",
+      place: 1,
+      recipientAddress: "recipient",
+      requesterUid: "uid",
+      status: "completed",
+      transactionSignature: "signature",
+      startedAtMs: 500,
+      submittedAtMs: 550,
+      completedAtMs: 600,
+      updatedAtMs: 600,
+    });
+    await runtime.withdrawals.replaceCompleted([
       {
         eventId,
         prizeId,
-        value: {
-          eventId,
-          prizeId,
-          status: "completed",
-          updatedAtMs: 600,
-        },
+        value: completed,
       },
     ]);
     expect(await runtime.readWithdrawal(eventId, prizeId)).toMatchObject({
       status: "completed",
     });
+    expect(await persisted.get(eventId, prizeId)).toEqual(completed);
     expect(sourceValues.has(path)).toBe(false);
     expect(sourceWrites).toBe(0);
     const execution = await createEventPrizeRuntimeDependencies(testEnv, {

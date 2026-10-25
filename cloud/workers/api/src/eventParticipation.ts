@@ -1,4 +1,12 @@
 import {
+  eventState,
+  plainEventParticipants,
+  plainEventParticipantAt,
+  eventParticipantIsAbsent,
+  readPlainEventDocument,
+  cloneEventDocument,
+} from "../../../runtime/events/documents.js";
+import {
   getEventField,
   mergeEventPlans,
 } from "../../../runtime/eventCommands.js";
@@ -52,7 +60,6 @@ import {
   participantCount,
   planJoin,
   resolveRemovalContext,
-  toRecord,
   type EventDueTransition,
   type EventRecord,
 } from "./eventParticipationPolicy.ts";
@@ -101,8 +108,8 @@ function secureRandom(): number {
   return values[0] / 0x1_0000_0000;
 }
 
-function cloneEvent(value: Record<string, unknown>): EventRecord {
-  return structuredClone(value);
+function cloneEvent(value: EventRecord): EventRecord {
+  return cloneEventDocument(value, "structured");
 }
 
 async function loadOwnershipSnapshot(
@@ -125,7 +132,7 @@ async function readEvent(
 }
 
 function requireEvent(value: EventRecord | null): EventRecord {
-  const event = toRecord(value);
+  const event = readPlainEventDocument(value);
   if (!event) {
     throw new AuthApiFailure(404, "not-found", "Event not found.");
   }
@@ -154,7 +161,9 @@ async function readParticipationSnapshot(
 }
 
 function getPrizeSelectionProfileIds(value: unknown): string[] {
-  return Object.keys(toRecord(value) || {});
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? Object.keys(value)
+    : [];
 }
 
 function createDefaultLockManager(
@@ -257,8 +266,9 @@ async function persistDueTransition(
     repository,
     signal,
     [
-      ({ event }) => (event?.status ?? null) === expectedStatus,
-      ({ event }) => (event?.updatedAtMs ?? null) === expectedUpdatedAtMs,
+      ({ event }) => (eventState(event).status ?? null) === expectedStatus,
+      ({ event }) =>
+        (eventState(event).updatedAtMs ?? null) === expectedUpdatedAtMs,
     ],
   );
 }
@@ -277,14 +287,19 @@ async function persistJoin(
   const checks: ReconciliationCheck[] = [
     ({ event }) =>
       isSameParticipant(
-        toRecord(event?.participants)?.[participant.profileId] ?? null,
+        plainEventParticipantAt(
+          event ? plainEventParticipants(event) : null,
+          participant.profileId,
+        ),
         participant,
       ),
-    ({ event }) => (event?.updatedAtMs ?? null) === expectedUpdatedAtMs,
+    ({ event }) =>
+      (eventState(event).updatedAtMs ?? null) === expectedUpdatedAtMs,
   ];
   if (expectedTransitionStatus !== undefined) {
     checks.push(
-      ({ event }) => (event?.status ?? null) === expectedTransitionStatus,
+      ({ event }) =>
+        (eventState(event).status ?? null) === expectedTransitionStatus,
     );
   }
   await patchWithReconciliation(eventId, updates, repository, signal, checks);
@@ -309,11 +324,14 @@ async function persistRemoval(
     signal,
     [
       ({ event }) =>
-        (toRecord(event?.participants)?.[participantProfileId] ?? null) ===
-        null,
+        eventParticipantIsAbsent(
+          event ? plainEventParticipants(event) : null,
+          participantProfileId,
+        ),
       ({ prizeSelections }) =>
         (prizeSelections[participantProfileId] ?? null) === null,
-      ({ event }) => (event?.updatedAtMs ?? null) === expectedUpdatedAtMs,
+      ({ event }) =>
+        (eventState(event).updatedAtMs ?? null) === expectedUpdatedAtMs,
     ],
     options,
   );
@@ -462,8 +480,9 @@ export async function joinEvent(
         );
       }
       const settleNowMs = now();
+      const eventStartAtMs = eventState(event).startAtMs;
       const isDueAtSettle =
-        typeof event.startAtMs === "number" && settleNowMs >= event.startAtMs;
+        typeof eventStartAtMs === "number" && settleNowMs >= eventStartAtMs;
       if (isDueAtSettle) {
         prizeSelections = eventPrizeSelections;
       }
@@ -565,7 +584,7 @@ async function removeEventParticipation(
         signal,
       );
       const directCreator =
-        identity.uid === normalizeString(event.createdByLoginUid);
+        identity.uid === normalizeString(eventState(event).createdByLoginUid);
       let ownershipSnapshot: EventOwnershipSnapshot | null = null;
       if (!directCreator) {
         ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
@@ -581,17 +600,14 @@ async function removeEventParticipation(
       });
       const { participantProfileId } = removal;
       const nowMs = now();
-      if (
-        typeof event.startAtMs !== "number" ||
-        !Number.isFinite(event.startAtMs)
-      ) {
+      const startAtMs = eventState(event).startAtMs;
+      if (typeof startAtMs !== "number" || !Number.isFinite(startAtMs)) {
         throw new AuthApiFailure(
           409,
           "failed-precondition",
           "This event cannot be updated right now.",
         );
       }
-      const startAtMs = event.startAtMs;
       const persistDueTransitionIfNeeded = async (
         dueNowMs: number,
       ): Promise<boolean> => {
@@ -643,8 +659,10 @@ async function removeEventParticipation(
           repository,
           signal,
         );
-        if (latest.event.status === "scheduled") {
-          const latestStartAtMs = requireTimestamp(latest.event.startAtMs);
+        if (eventState(latest.event).status === "scheduled") {
+          const latestStartAtMs = requireTimestamp(
+            eventState(latest.event).startAtMs,
+          );
           const dueNowMs =
             latestStartAtMs === startAtMs
               ? Math.max(now(), latestStartAtMs)
@@ -705,17 +723,17 @@ export async function toggleEventPrizeSelection(
     busyMessage,
     async (assertOwned) => {
       const event = await readEvent(eventId, repository, signal);
-      if (event.status !== "scheduled" && event.status !== "active") {
+      if (
+        eventState(event).status !== "scheduled" &&
+        eventState(event).status !== "active"
+      ) {
         throw new AuthApiFailure(
           409,
           "failed-precondition",
           "Prize selection is closed for this event.",
         );
       }
-      if (
-        event.prizeSelectionsLockedAtMs !== undefined &&
-        event.prizeSelectionsLockedAtMs !== null
-      ) {
+      if (eventState(event).hasPrizeSelectionLock) {
         throw new AuthApiFailure(
           409,
           "failed-precondition",
@@ -723,12 +741,12 @@ export async function toggleEventPrizeSelection(
         );
       }
       const startAtMs =
-        event.status === "scheduled"
-          ? requireTimestamp(event.startAtMs)
-          : event.startAtMs;
+        eventState(event).status === "scheduled"
+          ? requireTimestamp(eventState(event).startAtMs)
+          : eventState(event).startAtMs;
       if (
         !isEventPrizeRevealOpen(
-          event.status,
+          eventState(event).status,
           startAtMs,
           (dependencies.now ?? Date.now)(),
         )

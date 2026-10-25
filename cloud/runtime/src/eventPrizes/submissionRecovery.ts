@@ -1,5 +1,5 @@
+import type { WithdrawalDocument } from "./records.js";
 import type { Umi } from "@metaplex-foundation/umi";
-import type { WithdrawalData } from "./types.js";
 import type {
   SubmittedTransaction,
   SubmittedInspection,
@@ -23,7 +23,7 @@ import {
 
 type SubmittedRecoveryInput = {
   umi: Umi;
-  withdrawal: WithdrawalData;
+  withdrawal: WithdrawalDocument;
   assetOwner: string;
   recipientAddress: string;
   inspection?: SubmittedInspection | null;
@@ -53,7 +53,7 @@ const inspectSubmittedWithdrawal = async ({
   withdrawal,
 }: {
   umi: Umi;
-  withdrawal: WithdrawalData;
+  withdrawal: WithdrawalDocument;
 }): Promise<SubmittedInspection> => {
   const submitted = deserializePersistedSubmittedTransaction(umi, withdrawal);
   if (!submitted) {

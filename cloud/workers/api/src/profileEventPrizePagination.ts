@@ -1,3 +1,4 @@
+import type { ApiQuery } from "@mons/shared/api-contracts";
 import { Buffer } from "node:buffer";
 import {
   MAX_PROFILE_EVENT_PRIZES_CURSOR_LENGTH,
@@ -12,7 +13,6 @@ import { readEventRuntimeControl } from "./eventD1/coordination.ts";
 import { readProfileEventPrizePage } from "./eventD1/reads.ts";
 import { exactKey, isRecord } from "./eventD1/validation.ts";
 import type { ConditionalSnapshot } from "./eventD1/types.ts";
-
 type PrizePageCursor = {
   version: 1;
   profileId: string;
@@ -21,11 +21,15 @@ type PrizePageCursor = {
   afterEventId: string;
 };
 
-function encodeCursor(cursor: PrizePageCursor): string {
+function encodeCursor(
+  cursor: PrizePageCursor,
+): NonNullable<ApiQuery<"GET /events/prizes">["cursor"]> {
   return Buffer.from(JSON.stringify(cursor)).toString("base64url");
 }
 
-function decodeCursor(value: string | null): PrizePageCursor | null {
+function decodeCursor(
+  value: NonNullable<ApiQuery<"GET /events/prizes">["cursor"]> | null,
+): PrizePageCursor | null {
   if (value === null) return null;
   try {
     if (
@@ -146,12 +150,17 @@ export async function readProfileEventPrizesPageResponse(
   etag: string;
 }> {
   if (
-    parameters.getAll("pagination").length !== 1 ||
-    parameters.getAll("cursor").length > 1
+    parameters.getAll(
+      "pagination" satisfies keyof ApiQuery<"GET /events/prizes">,
+    ).length !== 1 ||
+    parameters.getAll("cursor" satisfies keyof ApiQuery<"GET /events/prizes">)
+      .length > 1
   ) {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-prize-page");
   }
-  const cursor = decodeCursor(parameters.get("cursor"));
+  const cursor = decodeCursor(
+    parameters.get("cursor" satisfies keyof ApiQuery<"GET /events/prizes">),
+  );
   if (cursor && (cursor.profileId !== profileId || cursor.epoch !== epoch))
     snapshotChanged();
   const knownRevision = cursor

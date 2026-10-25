@@ -2,11 +2,12 @@ import type {
   PlayerMiningData,
   PlayerProfile,
 } from "../connection/connectionModels";
+import type { EnsProfile } from "./ensResolver";
 
 export const usernamesForUids: Record<string, string> = {};
 export const ethAddressesForUids: Record<string, string> = {};
 export const solAddressesForUids: Record<string, string> = {};
-export const ensForUids: Record<string, { name: string; avatar: string }> = {};
+export const ensForUids: Record<string, EnsProfile> = {};
 export const profilesForUids: Record<string, PlayerProfile> = {};
 
 export type PendingOwnProfileMiningState = {

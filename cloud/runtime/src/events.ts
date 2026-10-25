@@ -1,3 +1,29 @@
+import {
+  eventRequestId,
+  eventRequestMatchKey,
+  eventRequestPostponeMinutes,
+  eventRequestStartsInMinutes,
+  eventCreateOptions,
+} from "./events/requests.js";
+import type { EventSyncSkipReason } from "./shared/events.js";
+import type { WithdrawalDocument } from "./eventPrizes/records.js";
+import {
+  eventState,
+  eventRounds,
+  eventThirdPlaceMatch,
+  eventRoundAt,
+  eventRoundMatches,
+  eventMatchAt,
+  eventMatchEntries,
+  eventMatchState,
+  readEventDocument,
+  cloneEventDocument,
+  createEventDocument,
+  createEventParticipantsDocument,
+  createEventParticipantDocument,
+  createEventRoundsDocument,
+  patchEventDocument,
+} from "./events/documents.js";
 import type { EventData, EventMatch } from "./events/model.js";
 import type { EventOwnershipProfile } from "./events/ownership.js";
 import {
@@ -45,7 +71,14 @@ import {
   requesterOwnsProfileReference,
   resolveRequesterParticipation,
 } from "./events/ownership.js";
-type EventSyncLog = Record<string, unknown> & {
+type EventSyncLog = {
+  mode?: string;
+  eventId?: string | null;
+  requesterUid?: string | null;
+  sourceKey?: string;
+  triggerReason?: string;
+  workflowInstanceId?: string;
+  targetMatchKey?: string | null;
   reason?: string | null;
   requesterProfileId?: string | null;
   skipped?: boolean;
@@ -64,7 +97,7 @@ export type EventRuntimeRequest = {
   auth: {
     uid: string;
   } | null;
-  data: Record<string, unknown>;
+  data: unknown;
 };
 export type EventProgressOutboxRecord = {
   schemaVersion: 1;
@@ -75,24 +108,52 @@ export type EventProgressOutboxRecord = {
   firstQueuedAtMs: number;
   lastQueuedAtMs: number;
 };
+export type EventRuntimeCreateResult = {
+  ok: true;
+  eventId: string;
+  event: EventData;
+};
+export type EventRuntimePostponeResult = EventRuntimeCreateResult & {
+  postponeByMinutes: number;
+  startAtMs: number;
+};
+export type EventRuntimeSyncResult =
+  | {
+      ok: true;
+      eventId: string;
+      didChange: boolean;
+      event: EventData | null;
+      skipped?: never;
+      reason?: never;
+    }
+  | {
+      ok: true;
+      eventId: string;
+      skipped: true;
+      reason: EventSyncSkipReason;
+      event?: EventData | null;
+      didChange?: never;
+    };
+export type EventRuntimeDisqualifyResult = EventRuntimeSyncResult & {
+  didDisqualify: boolean;
+  matchKey: string;
+};
 export type EventRuntime = {
-  createEvent(request: EventRuntimeRequest): Promise<Record<string, unknown>>;
+  createEvent(request: EventRuntimeRequest): Promise<EventRuntimeCreateResult>;
   disqualifyEventMatchWinners(
     request: EventRuntimeRequest,
-  ): Promise<Record<string, unknown>>;
+  ): Promise<EventRuntimeDisqualifyResult>;
   postponeEventStart(
     request: EventRuntimeRequest,
-  ): Promise<Record<string, unknown>>;
+  ): Promise<EventRuntimePostponeResult>;
   runEventSyncState(input: {
     eventId: string;
     requesterUid: string;
     enforceParticipantGate: boolean;
     enforceThrottle: boolean;
     syncLog: EventSyncLog;
-  }): Promise<Record<string, unknown>>;
-  syncEventState(
-    request: EventRuntimeRequest,
-  ): Promise<Record<string, unknown>>;
+  }): Promise<EventRuntimeSyncResult>;
+  syncEventState(request: EventRuntimeRequest): Promise<EventRuntimeSyncResult>;
 };
 type Signature_createEventRuntime = (dependencies: {
   readMatchPair: (input: EventMatchPairRequest) => Promise<[unknown, unknown]>;
@@ -119,7 +180,7 @@ type Signature_createEventRuntime = (dependencies: {
   }): Promise<EventOwnershipSnapshot>;
   readEventPrizeWithdrawals?: (
     eventId: string,
-  ) => Promise<Record<string, Record<string, unknown>>>;
+  ) => Promise<Record<string, WithdrawalDocument>>;
   now?: () => number;
   random?: () => number;
   sleep(milliseconds: number): Promise<void>;
@@ -179,16 +240,6 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
     normalizeString(value).toLowerCase();
   const getNowMs = dependencies.now || Date.now;
   const sleep = dependencies.sleep;
-
-  const toFiniteInteger = (value: unknown, fallback = 0) => {
-    const numeric = typeof value === "number" ? value : Number(value);
-    if (!Number.isFinite(numeric)) {
-      return fallback;
-    }
-    return Math.floor(numeric);
-  };
-
-  const cloneValue = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 
   const getPrizeSelectionProfileIds = (value: unknown) =>
     value && typeof value === "object" && !Array.isArray(value)
@@ -272,7 +323,7 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
     if (!creatorParticipant) {
       throw new HttpsError("unavailable", "event-service-unavailable");
     }
-    return {
+    return createEventDocument({
       schemaVersion: EVENT_SCHEMA_VERSION,
       eventId,
       status: "scheduled",
@@ -294,11 +345,12 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
       roundCount: 0,
       supportsThirdPlaceMatch: true,
       thirdPlaceMatch: null,
-      participants: {
-        [creatorParticipant.profileId]: creatorParticipant,
-      },
-      rounds: {},
-    };
+      participants: createEventParticipantsDocument({
+        [creatorParticipant.profileId]:
+          createEventParticipantDocument(creatorParticipant),
+      }),
+      rounds: createEventRoundsDocument(),
+    });
   };
 
   const tryAcquireEventSyncThrottle = async (
@@ -330,7 +382,7 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
     };
   };
 
-  const logSyncEventStateResult = (payload: Record<string, unknown>) => {
+  const logSyncEventStateResult = (payload: EventSyncLog) => {
     try {
       console.log(JSON.stringify({ event: "event_sync_result", ...payload }));
     } catch (error) {
@@ -371,7 +423,7 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
     }
 
     const ownershipSnapshot = await loadOwnershipSnapshot(
-      {},
+      readEventDocument({})!,
       { loginUids: [request.auth.uid] },
     );
     const creatorProfile = ensurePilotEventCreator(
@@ -379,29 +431,21 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
       ownershipSnapshot,
     );
     const createdAtMs = getNowMs();
-    const requestData =
-      request.data && typeof request.data === "object" ? request.data : {};
-    if (
-      Object.hasOwn(requestData, "isSundayMons") &&
-      typeof requestData.isSundayMons !== "boolean"
-    ) {
+    const options = eventCreateOptions(request.data);
+    if (!options.validSundayMons) {
       throw new HttpsError(
         "invalid-argument",
         "Sunday Mons must be a boolean.",
       );
     }
-    const telegramAnnouncements =
-      resolveEventTelegramAnnouncements(requestData);
+    const telegramAnnouncements = options.telegramAnnouncements;
     let startAtMs = 0;
 
-    if (hasDateTimeScheduleRequest(requestData)) {
-      startAtMs = resolveScheduledDateTimeStartAtMs(requestData, createdAtMs);
+    if (hasDateTimeScheduleRequest(request.data)) {
+      startAtMs = resolveScheduledDateTimeStartAtMs(request.data, createdAtMs);
       assertScheduledStartWindow(startAtMs, createdAtMs);
     } else {
-      const rawStartsInMinutes = toFiniteInteger(
-        requestData.startsInMinutes,
-        0,
-      );
+      const rawStartsInMinutes = eventRequestStartsInMinutes(request.data);
       if (rawStartsInMinutes < MIN_STARTS_IN_MINUTES) {
         throw new HttpsError(
           "invalid-argument",
@@ -422,7 +466,7 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
       creatorUid: request.auth.uid,
       startAtMs,
       createdAtMs,
-      isSundayMons: requestData.isSundayMons === true,
+      isSundayMons: options.isSundayMons,
       telegramAnnouncements,
     });
 
@@ -478,14 +522,11 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
     }
 
     const requesterUid = request.auth.uid;
-    const eventId = normalizeString(request.data && request.data.eventId);
+    const eventId = eventRequestId(request.data);
     if (!eventId) {
       throw new HttpsError("invalid-argument", "eventId is required.");
     }
-    const postponeByMinutes = toFiniteInteger(
-      request.data && request.data.postponeByMinutes,
-      0,
-    );
+    const postponeByMinutes = eventRequestPostponeMinutes(request.data);
     if (
       !(EVENT_POSTPONE_OPTIONS_MINUTES as readonly number[]).includes(
         postponeByMinutes,
@@ -521,22 +562,23 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
       if (!(eventValue !== null && eventValue !== undefined)) {
         throw new HttpsError("not-found", "Event not found.");
       }
-      const event = cloneValue<EventData>(eventValue || {});
-      const creatorLoginUid = normalizeString(event.createdByLoginUid);
-      const creatorProfileId = normalizeString(event.createdByProfileId);
+      const event = cloneEventDocument(readEventDocument(eventValue)!);
+      const currentEvent = eventState(event);
+      const creatorLoginUid = normalizeString(currentEvent.createdByLoginUid);
+      const creatorProfileId = normalizeString(currentEvent.createdByProfileId);
       const nowMs = getNowMs();
       const prizeSelections =
         isEventPrizeEvent(eventId) &&
-        normalizeString(event.status) === "scheduled" &&
-        typeof event.startAtMs === "number" &&
-        nowMs >= event.startAtMs
-          ? cloneValue(snapshot!.prizeSelections)
+        normalizeString(currentEvent.status) === "scheduled" &&
+        typeof currentEvent.startAtMs === "number" &&
+        nowMs >= currentEvent.startAtMs
+          ? { ...snapshot!.prizeSelections }
           : undefined;
       const directCreator = requesterUid === creatorLoginUid;
       const dueParticipantCount = getEventParticipantIds(event).length;
       const ownershipSnapshot =
         directCreator &&
-        (nowMs < (event.startAtMs as number) || dueParticipantCount < 2)
+        (nowMs < (currentEvent.startAtMs as number) || dueParticipantCount < 2)
           ? null
           : await loadOwnershipSnapshot(event, {
               loginUids: [requesterUid],
@@ -555,22 +597,22 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
           "Only the event creator can postpone this event.",
         );
       }
-      if (normalizeString(event.status) !== "scheduled") {
+      if (normalizeString(currentEvent.status) !== "scheduled") {
         throw new HttpsError(
           "failed-precondition",
           "Only scheduled events can be postponed.",
         );
       }
       if (
-        typeof event.startAtMs !== "number" ||
-        !Number.isFinite(event.startAtMs)
+        typeof currentEvent.startAtMs !== "number" ||
+        !Number.isFinite(currentEvent.startAtMs)
       ) {
         throw new HttpsError(
           "failed-precondition",
           "This event cannot be postponed right now.",
         );
       }
-      if (nowMs >= event.startAtMs) {
+      if (nowMs >= currentEvent.startAtMs) {
         const dueTransition = await buildScheduledEventDueUpdates({
           eventId,
           event,
@@ -595,7 +637,7 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
       }
 
       const nextStartAtMs =
-        Math.floor(event.startAtMs) + postponeByMinutes * 60 * 1000;
+        Math.floor(currentEvent.startAtMs) + postponeByMinutes * 60 * 1000;
       assertScheduledStartWindow(nextStartAtMs, nowMs);
       const sourceKey = `start:${eventId}:${nextStartAtMs}`;
       let progress;
@@ -630,8 +672,10 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
         );
       }
 
-      event.startAtMs = nextStartAtMs;
-      event.updatedAtMs = nowMs;
+      patchEventDocument(event, {
+        startAtMs: nextStartAtMs,
+        updatedAtMs: nowMs,
+      });
       await state.commitEventPlan([
         eventField(eventId, "startAtMs", nextStartAtMs),
         eventField(eventId, "updatedAtMs", nowMs),
@@ -655,10 +699,8 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
   const disqualifyEventMatchWinners: EventRuntime["disqualifyEventMatchWinners"] =
     async (request) => {
       const startedAtMs = getNowMs();
-      const eventId = normalizeString(request.data && request.data.eventId);
-      const matchKeyInput = normalizeString(
-        request.data && request.data.matchKey,
-      );
+      const eventId = eventRequestId(request.data);
+      const matchKeyInput = eventRequestMatchKey(request.data);
       const syncLog = createSyncLog({
         eventId: eventId || null,
         requesterUid: request && request.auth ? request.auth.uid : null,
@@ -707,12 +749,12 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
             if (!(eventValue !== null && eventValue !== undefined)) {
               throw new HttpsError("not-found", "Event not found.");
             }
-            const event = cloneValue<EventData>(eventValue || {});
+            const event = cloneEventDocument(readEventDocument(eventValue)!);
             const ownershipSnapshot = await loadOwnershipSnapshot(event, {
               loginUids: [requesterUid],
             });
             ensurePilotEventCreator(requesterUid, ownershipSnapshot);
-            if (normalizeString(event.status) !== "active") {
+            if (normalizeString(eventState(event).status) !== "active") {
               throw new HttpsError(
                 "failed-precondition",
                 "Only active events can be updated.",
@@ -725,7 +767,7 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
               "value"
             > | null = null;
             if (isThirdPlaceTarget) {
-              const thirdPlaceMatchCandidate = event.thirdPlaceMatch;
+              const thirdPlaceMatchCandidate = eventThirdPlaceMatch(event);
               if (
                 thirdPlaceMatchCandidate &&
                 typeof thirdPlaceMatchCandidate === "object"
@@ -740,14 +782,14 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
                 };
               }
             } else {
-              const round =
-                event.rounds && typeof event.rounds === "object"
-                  ? event.rounds[String(parsedMatchKey!.roundIndex)]
-                  : null;
+              const round = eventRoundAt(
+                eventRounds(event),
+                String(parsedMatchKey!.roundIndex),
+              );
               if (
                 !round ||
-                !round.matches ||
-                typeof round.matches !== "object"
+                !eventRoundMatches(round) ||
+                typeof eventRoundMatches(round) !== "object"
               ) {
                 throw new HttpsError(
                   "failed-precondition",
@@ -755,15 +797,21 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
                 );
               }
 
-              targetMatch = round.matches[resolvedMatchKey];
+              targetMatch = eventMatchAt(
+                eventRoundMatches(round),
+                resolvedMatchKey,
+              );
               if (!targetMatch || typeof targetMatch !== "object") {
                 const fallbackEntry =
-                  Object.entries(round.matches).find(([candidateMatchKey]) => {
-                    const parsedCandidate = parseMatchKey(candidateMatchKey);
-                    return (
-                      parsedCandidate?.matchIndex === parsedMatchKey!.matchIndex
-                    );
-                  }) || null;
+                  eventMatchEntries(eventRoundMatches(round)).find(
+                    ([candidateMatchKey]) => {
+                      const parsedCandidate = parseMatchKey(candidateMatchKey);
+                      return (
+                        parsedCandidate?.matchIndex ===
+                        parsedMatchKey!.matchIndex
+                      );
+                    },
+                  ) || null;
                 if (fallbackEntry) {
                   [resolvedMatchKey, targetMatch] = fallbackEntry;
                 }
@@ -784,8 +832,9 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
             }
 
             if (
-              normalizeString(targetMatch.status) !== "pending" ||
-              !normalizeString(targetMatch.inviteId)
+              normalizeString(eventMatchState(targetMatch).status) !==
+                "pending" ||
+              !normalizeString(eventMatchState(targetMatch).inviteId)
             ) {
               throw new HttpsError(
                 "failed-precondition",
@@ -793,8 +842,8 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
               );
             }
             if (
-              !normalizeString(targetMatch.hostProfileId) ||
-              !normalizeString(targetMatch.guestProfileId)
+              !normalizeString(eventMatchState(targetMatch).hostProfileId) ||
+              !normalizeString(eventMatchState(targetMatch).guestProfileId)
             ) {
               throw new HttpsError(
                 "failed-precondition",
@@ -820,7 +869,7 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
           },
         );
 
-        let syncResult = null;
+        let syncResult!: EventRuntimeSyncResult;
         for (let attempt = 0; attempt < 4; attempt += 1) {
           syncLog.skipped = false;
           syncLog.reason = null;
@@ -858,9 +907,9 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
     event,
   }: {
     eventId: string;
-    reason: string;
-    event?: Record<string, unknown> | null;
-  }) => ({
+    reason: EventSyncSkipReason;
+    event?: EventData | null;
+  }): EventRuntimeSyncResult => ({
     ok: true,
     eventId,
     skipped: true,
@@ -906,30 +955,31 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
         if (!(lockedEventValue !== null && lockedEventValue !== undefined)) {
           throw new HttpsError("not-found", "Event not found.");
         }
-        let event = cloneValue<EventData>(lockedEventValue || {});
+        let event = cloneEventDocument(readEventDocument(lockedEventValue)!);
+        const currentEvent = eventState(event);
         const nowMs = getNowMs();
         let prizeSelections;
         if (
           isEventPrizeEvent(eventId) &&
-          (event.status === "active" ||
-            event.status === "ended" ||
-            (event.status === "scheduled" &&
-              typeof event.startAtMs === "number" &&
-              nowMs >= event.startAtMs))
+          (currentEvent.status === "active" ||
+            currentEvent.status === "ended" ||
+            (currentEvent.status === "scheduled" &&
+              typeof currentEvent.startAtMs === "number" &&
+              nowMs >= currentEvent.startAtMs))
         ) {
-          prizeSelections = cloneValue(snapshot!.prizeSelections);
+          prizeSelections = { ...snapshot!.prizeSelections };
         }
         const directParticipation = enforceParticipantGate
           ? directRequesterParticipation(event, requesterUid)
           : null;
         const scheduledEventIsDue =
-          event.status === "scheduled" &&
-          typeof event.startAtMs === "number" &&
-          nowMs >= event.startAtMs;
+          currentEvent.status === "scheduled" &&
+          typeof currentEvent.startAtMs === "number" &&
+          nowMs >= currentEvent.startAtMs;
         const needsOwnershipSnapshot =
-          event.status === "active" ||
+          currentEvent.status === "active" ||
           (scheduledEventIsDue && getEventParticipantIds(event).length >= 2) ||
-          (event.status === "ended" && isEventPrizeEvent(eventId)) ||
+          (currentEvent.status === "ended" && isEventPrizeEvent(eventId)) ||
           (enforceParticipantGate && !directParticipation?.isParticipant);
         const ownershipSnapshot = needsOwnershipSnapshot
           ? await loadOwnershipSnapshot(event, {
@@ -974,7 +1024,7 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
           EventPrizeAssignmentRecord
         > | null = null;
 
-        if (event.status === "scheduled") {
+        if (eventState(event).status === "scheduled") {
           const dueTransition = await buildScheduledEventDueUpdates({
             eventId,
             event,
@@ -984,9 +1034,12 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
           });
           updates.push(...dueTransition.updates);
           didChange = dueTransition.didChange;
-        } else if (event.status === "active" || event.status === "ended") {
+        } else if (
+          eventState(event).status === "active" ||
+          eventState(event).status === "ended"
+        ) {
           const transition = await (
-            event.status === "active"
+            eventState(event).status === "active"
               ? buildActiveEventSyncPlan
               : buildEndedEventSyncPlan
           )(
@@ -1032,7 +1085,7 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
         const projectionCleanupRequest =
           getCompletedEventPrizeProjectionCleanupRequest({
             eventId,
-            eventStatus: event.status,
+            eventStatus: eventState(event).status,
             assignments: eventPrizeAssignmentsForProjectionCleanup,
           });
         if (projectionCleanupRequest) {
@@ -1071,7 +1124,7 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
 
   const syncEventState: EventRuntime["syncEventState"] = async (request) => {
     const startedAtMs = getNowMs();
-    const eventId = normalizeString(request.data && request.data.eventId);
+    const eventId = eventRequestId(request.data);
     const syncLog = createSyncLog({
       eventId: eventId || null,
       requesterUid: request && request.auth ? request.auth.uid : null,

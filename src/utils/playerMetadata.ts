@@ -4,6 +4,7 @@ import glicko2 from "glicko2";
 import { createRatingUpdater } from "@mons/shared/ratings";
 import { storage } from "./storage";
 import { createProfileCosmeticWrites } from "./profileCosmeticStorage";
+import { decodeEnsProfile } from "./ensResolver";
 import {
   ensForUids,
   ethAddressesForUids,
@@ -130,14 +131,15 @@ export function updatePlayerMetadataWithProfile(
         }
         return null;
       })
-      .then((data) => {
+      .then((data: unknown) => {
         if (!sessionGuard()) {
           return;
         }
-        if (data && data.name && data.name.trim() !== "") {
+        const ens = decodeEnsProfile(data);
+        if (ens) {
           ensForUids[loginId] = {
-            name: data.name,
-            avatar: data.avatar,
+            name: ens.name,
+            avatar: ens.avatar,
           };
           onSuccess();
         }
@@ -177,10 +179,8 @@ export function updatePlayerMetadataWithProfile(
           storage.setUsername(profile.username ?? "");
           storage.setPlayerRating(profile.rating ?? 1500);
           storage.setPlayerNonce(profile.nonce ?? -1);
-          if ((profile as any).totalManaPoints !== undefined) {
-            storage.setPlayerTotalManaPoints(
-              (profile as any).totalManaPoints ?? 0,
-            );
+          if (profile.totalManaPoints !== undefined) {
+            storage.setPlayerTotalManaPoints(profile.totalManaPoints ?? 0);
           }
 
           createProfileCosmeticWrites(profile).forEach((field, index) => {

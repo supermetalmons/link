@@ -1,3 +1,4 @@
+import { queueFor } from "../queueProducers.ts";
 import {
   WAGER_FROZEN_READ_PATH,
   isWagerFrozenReadRequest,
@@ -244,7 +245,7 @@ export const wagerRoutes = [
           scheduleRetry:
             runtime.dependencies.wagerOutcome?.scheduleRetry ||
             (async (task) => {
-              await runtime.env.WAGER_SETTLEMENT_QUEUE.send(task, {
+              await queueFor(runtime.env, "WAGER_SETTLEMENT_QUEUE").send(task, {
                 delaySeconds: WAGER_SETTLEMENT_INITIAL_RETRY_DELAY_SECONDS,
               });
             }),

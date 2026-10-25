@@ -1,3 +1,4 @@
+import type { ApiRequestValidator } from "@mons/shared/api-contracts";
 import {
   isEventPrizeWithdrawalRequest,
   isEventPrizeWithdrawalStatusRequest,
@@ -33,7 +34,6 @@ import {
   getEventPrizeWithdrawalStatus,
   startEventPrizeWithdrawal,
 } from "./admission.ts";
-
 export const EVENT_PRIZE_WITHDRAWAL_PATH = "/events/prizes/withdrawals";
 export const EVENT_PRIZE_WITHDRAWAL_STATUS_PATH =
   "/events/prizes/withdrawals/status";
@@ -87,7 +87,11 @@ export async function handleEventPrizeWithdrawalRoute(
       dependencies.workflow || env.EVENT_PRIZE_WITHDRAWAL_WORKFLOW;
 
     if (pathname === EVENT_PRIZE_WITHDRAWAL_PATH) {
-      if (!isEventPrizeWithdrawalRequest(body)) {
+      if (
+        !(
+          isEventPrizeWithdrawalRequest satisfies ApiRequestValidator<`POST ${typeof pathname}`>
+        )(body)
+      ) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
       }
       const result = await startEventPrizeWithdrawal(
@@ -96,7 +100,7 @@ export async function handleEventPrizeWithdrawalRoute(
         context,
         workflow,
       );
-      return authJsonResponse(
+      return authJsonResponse<`POST ${typeof pathname}`, 200 | 202>(
         result,
         result.status === "completed" ? 200 : 202,
         corsHeaders,
@@ -104,7 +108,11 @@ export async function handleEventPrizeWithdrawalRoute(
     }
 
     if (pathname === EVENT_PRIZE_WITHDRAWAL_STATUS_PATH) {
-      if (!isEventPrizeWithdrawalStatusRequest(body)) {
+      if (
+        !(
+          isEventPrizeWithdrawalStatusRequest satisfies ApiRequestValidator<`POST ${typeof pathname}`>
+        )(body)
+      ) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
       }
       const result = await getEventPrizeWithdrawalStatus(
@@ -113,7 +121,7 @@ export async function handleEventPrizeWithdrawalRoute(
         context,
         workflow,
       );
-      return authJsonResponse(
+      return authJsonResponse<`POST ${typeof pathname}`, 200 | 202>(
         result,
         result.status === "completed" ? 200 : 202,
         corsHeaders,

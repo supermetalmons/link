@@ -1,3 +1,4 @@
+import { inviteRecordFixture } from "../test/inviteDocumentFixture.ts";
 import type { D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -405,9 +406,15 @@ describe("gameplay invite metadata reads", () => {
       );
       expect(values).toEqual([second, null, source, second]);
       expect(values[0]).not.toBe(values[3]);
-      expect(values[0]!.customMetadata).not.toBe(values[3]!.customMetadata);
-      (values[0]!.customMetadata as { retained: boolean }).retained = false;
-      expect(values[3]!.customMetadata).toEqual({ retained: true });
+      expect(inviteRecordFixture(values[0]!).customMetadata).not.toBe(
+        inviteRecordFixture(values[3]!).customMetadata,
+      );
+      (
+        inviteRecordFixture(values[0]!).customMetadata as { retained: boolean }
+      ).retained = false;
+      expect(inviteRecordFixture(values[3]!).customMetadata).toEqual({
+        retained: true,
+      });
       expect(observed.constraints).toEqual(["first-primary"]);
       expect(observed.batchSizes).toEqual([3]);
       expect(observed.queries).toHaveLength(3);

@@ -44,6 +44,7 @@ import {
   EventPrizeSelections,
   EventPrizeWithdrawalResponse,
   ProfileEventPrizes,
+  RemoveWaitingNavigationGameResult,
 } from "./connectionModels";
 import { storage, type PendingAutomatchOperation } from "../utils/storage";
 import { withAutomatchOperationLock } from "./automatchOperationLock";
@@ -148,6 +149,7 @@ import {
   getNavigationSortBucket,
   type NavigationGamesCursor,
   type StartAutomatchResponse,
+  type CancelAutomatchResponse,
 } from "@mons/shared/navigation";
 import { isAutoInviteId } from "@mons/shared/ids";
 import {
@@ -178,6 +180,7 @@ import type {
   StartMatchTimerResponse,
 } from "@mons/shared/timers";
 import { isPlayerProfile } from "@mons/shared/profiles";
+import type { UsernameEditResponse } from "@mons/shared/usernames";
 import type {
   WagerOutcomeResolveResponse,
   WagerProposalAcceptResponse,
@@ -1240,7 +1243,7 @@ class Connection {
     return this.profileClient.getLeaderboard(type);
   }
 
-  public editUsername(username: string): Promise<any> {
+  public editUsername(username: string): Promise<UsernameEditResponse> {
     return this.profileClient.editUsername(username);
   }
 
@@ -2247,7 +2250,7 @@ class Connection {
     }
   }
 
-  public async cancelAutomatch(): Promise<any> {
+  public async cancelAutomatch(): Promise<CancelAutomatchResponse> {
     try {
       await this.ensureAuthenticated();
       const user = this.auth.currentUser;
@@ -2272,7 +2275,9 @@ class Connection {
     }
   }
 
-  public async removeWaitingNavigationGame(inviteId: string): Promise<any> {
+  public async removeWaitingNavigationGame(
+    inviteId: string,
+  ): Promise<RemoveWaitingNavigationGameResult> {
     const normalizedInviteId =
       typeof inviteId === "string" ? inviteId.trim() : "";
     if (!normalizedInviteId) {

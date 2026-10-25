@@ -1,4 +1,9 @@
 // Generated from src/telegram/deliveryControl.ts. Run npm run generate:runtime.
+import {
+  type TelegramBarrierInput,
+  type RetainedTelegramBarrierInput,
+  type RetainedTelegramOwner,
+} from "./retryRecords.js";
 import type {
   TelegramBarrierProofResult,
   TelegramLocalRetryBarrier,
@@ -14,6 +19,7 @@ import type {
   TelegramRepository,
   TelegramRetryScheduler,
 } from "./deliveryTypes.js";
+import type { TelegramApiOperation } from "./records.js";
 export declare function createTelegramDeliveryControl({
   repository,
   logger,
@@ -36,43 +42,28 @@ export declare function createTelegramDeliveryControl({
     messageKey: string,
     updater: MessageMutation,
   ) => Promise<
-    import("../transactions.js").TransactionResult<Record<string, unknown>>
+    import("../transactions.js").TransactionResult<
+      import("./records.js").TelegramMessageDocument
+    >
   >;
-  scheduleExactRetry: ({
-    messageKey,
-    revision,
-    taskKind,
-    retryState,
-    safeRejectedAttemptId,
-    pendingDeleteId,
-    retryProofLeaseOwner,
-    sourceGeneration,
-    proofTaskKind,
-    barrierProofOwner,
-    barrierRetryNotBeforeMs,
-    scheduleTimeMs,
-    apiGateReclaimOwner,
-    apiGateSettleOwner,
-  }: ExactRetryInput) => Promise<Record<string, unknown>>;
+  scheduleExactRetry: (
+    input: ExactRetryInput,
+  ) => Promise<import("./deliveryTypes.js").TelegramRetryScheduleResult>;
   retryCoordinator: {
     finish(
       input: import("./deliveryRetryTypes.js").TelegramRetryInput,
     ): Promise<import("./deliveryRetryTypes.js").TelegramRetryResult>;
   };
-  applyRateLimitBarrierProof: ({
-    barrierProofOwner,
-    barrierRetryNotBeforeMs,
-  }: {
-    barrierProofOwner?: unknown;
-    barrierRetryNotBeforeMs?: unknown;
-  }) => Promise<
+  applyRateLimitBarrierProof: (
+    input: TelegramBarrierInput | RetainedTelegramBarrierInput,
+  ) => Promise<
     Partial<TelegramBarrierProofResult> & {
       applied: boolean;
     }
   >;
   clearAppliedRateLimitProofMarker: (
     messageKey: string,
-    ownerInput: unknown,
+    ownerInput: string | RetainedTelegramOwner | undefined,
   ) => Promise<void>;
   acquireApiGate: ({
     messageKey,
@@ -86,7 +77,7 @@ export declare function createTelegramDeliveryControl({
   }: {
     messageKey: string;
     revision: string;
-    operation: string;
+    operation: TelegramApiOperation;
     owner: string;
     attemptId?: string;
     pendingDeleteId?: string;
@@ -102,7 +93,9 @@ export declare function createTelegramDeliveryControl({
     ownerToken: string,
     updater: OwnedMutation,
   ) => Promise<
-    import("../transactions.js").TransactionResult<Record<string, unknown>>
+    import("../transactions.js").TransactionResult<
+      import("./records.js").TelegramMessageDocument
+    >
   >;
   prepareDesiredApiGateIdentity: ({
     messageKey,
@@ -128,9 +121,11 @@ export declare function createTelegramDeliveryControl({
   }: {
     messageKey: string;
     field: "apiGateSettleOwner" | "pendingDeleteApiGateSettleOwner";
-    owner: unknown;
+    owner: string | RetainedTelegramOwner | undefined;
   }) => Promise<
-    | import("../transactions.js").TransactionResult<Record<string, unknown>>
+    | import("../transactions.js").TransactionResult<
+        import("./records.js").TelegramMessageDocument
+      >
     | null
   >;
 };

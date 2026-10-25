@@ -1,5 +1,4 @@
 import * as eventD1 from "./eventD1.ts";
-import { normalizeRecordKey } from "@mons/shared/ids";
 import {
   canonicalEventRepositoryJson as canonicalJson,
   sha256Hex,
@@ -9,10 +8,15 @@ import type { EventCommand } from "../../../runtime/eventCommands.js";
 import type { EventCommitOptions, EventStore } from "./eventStoreContracts.ts";
 import type { MatchStatePort } from "./repositoryContracts.ts";
 import {
-  encodeEventUpdates,
-  decodeEventUpdates,
-  decodeCanonicalEventUpdates,
-} from "./eventCompatibilityCodec.ts";
+  createEventTransitionDraft,
+  encodeEventIntentUpdates,
+  encodeEventIntentEffects,
+  eventIntentCanonicalChanges,
+  eventIntentMatchesPlan,
+  eventIntentNotificationTargets,
+  sameTransitionIntent,
+} from "./eventTransitionCodec.ts";
+import type { EventIntentEffects } from "./eventD1/types.ts";
 import { STATE_EFFECTS_FIELD } from "./stateCompatibility.ts";
 import { withEventWriteAdmission } from "./eventWriteAdmission.ts";
 import {
@@ -69,34 +73,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 async function transitionId(
   eventId: string,
   revision: number,
-  stateEffects: Record<string, unknown>,
+  stateEffects: EventIntentEffects,
 ): Promise<string> {
   const digest = await sha256Hex(
     `${eventId}\n${revision}\n${canonicalJson(stateEffects)}`,
   );
   return `et_${digest}`;
-}
-
-function sameTransitionIntent(
-  left: EventTransitionIntent,
-  right: EventTransitionIntent,
-): boolean {
-  return (
-    left.transitionId === right.transitionId &&
-    left.schemaVersion === right.schemaVersion &&
-    left.eventId === right.eventId &&
-    left.expectedRevision === right.expectedRevision &&
-    canonicalJson(left.canonicalUpdates) ===
-      canonicalJson(right.canonicalUpdates) &&
-    canonicalJson(left[STATE_EFFECTS_FIELD]) ===
-      canonicalJson(right[STATE_EFFECTS_FIELD]) &&
-    (left.schemaVersion !== 2 ||
-      (right.schemaVersion === 2 &&
-        left.payloadDigest === right.payloadDigest &&
-        left.sourceEpoch === right.sourceEpoch &&
-        canonicalJson(left.inviteMutations) ===
-          canonicalJson(right.inviteMutations)))
-  );
 }
 
 async function withInviteEffectsAdmission<T>(
@@ -214,9 +196,7 @@ async function applyIntent(
     if (currentIntent.schemaVersion !== 2) {
       throw new Error("event-transition-legacy-source-disabled");
     }
-    const canonicalChanges = decodeCanonicalEventUpdates(
-      currentIntent.canonicalUpdates,
-    );
+    const canonicalChanges = eventIntentCanonicalChanges(currentIntent);
     const effectsStartedAt = Date.now();
     await withInviteEffectsAdmission(discoveryDb, async () => {
       await applyInviteEventEffects(
@@ -287,8 +267,9 @@ async function commitD1EventPlan(
         "eventId" in change
           ? [change.eventId]
           : change.kind === "progress-outbox" &&
-              typeof change.value?.eventId === "string"
-            ? [change.value.eventId]
+              typeof (change.value as { eventId?: unknown } | null)?.eventId ===
+                "string"
+            ? [(change.value as { eventId: string }).eventId]
             : [],
       ),
     ),
@@ -300,11 +281,11 @@ async function commitD1EventPlan(
     const revision = (await readEventSnapshot(db, eventId)).revision;
     if (revision < 1)
       throw new Error("event-match-creation-requires-transition");
-    const canonicalUpdates = encodeEventUpdates(canonical);
-    const stateEffects = encodeEventUpdates(effects);
+    const canonicalUpdates = encodeEventIntentUpdates(canonical);
+    const stateEffects = encodeEventIntentEffects(effects);
     const id = await transitionId(eventId, revision, stateEffects);
     const nowMs = Date.now();
-    const intent: Extract<EventTransitionIntent, { schemaVersion: 1 }> = {
+    const intent = createEventTransitionDraft({
       schemaVersion: 1,
       transitionId: id,
       eventId,
@@ -313,17 +294,17 @@ async function commitD1EventPlan(
       [STATE_EFFECTS_FIELD]: stateEffects,
       createdAtMs: nowMs,
       updatedAtMs: nowMs,
-    };
+    });
     const existing = await readEventTransitionIntent(db, id);
     if (
       existing &&
-      (canonicalJson(existing.canonicalUpdates) !==
-        canonicalJson(canonicalUpdates) ||
-        (existing.schemaVersion === 1 &&
-          canonicalJson(existing[STATE_EFFECTS_FIELD]) !==
-            canonicalJson(stateEffects)) ||
-        existing.eventId !== eventId ||
-        existing.expectedRevision !== revision)
+      !eventIntentMatchesPlan(
+        existing,
+        canonicalUpdates,
+        stateEffects,
+        eventId,
+        revision,
+      )
     )
       throw new Error("event-transition-identity-conflict");
     const activeIntent =
@@ -347,27 +328,8 @@ async function notifyEventInviteEffects(
   intent: EventTransitionIntent,
 ): Promise<void> {
   if (intent.schemaVersion !== 2) return;
-  const effects = decodeEventUpdates(intent[STATE_EFFECTS_FIELD]);
-  const metadataInviteIds = new Set(
-    intent.inviteMutations
-      .map(({ current }) => current.inviteId)
-      .filter((inviteId) => normalizeRecordKey(inviteId) === inviteId),
-  );
-  const matchInviteIds = [
-    ...new Set(
-      effects.flatMap((command) =>
-        command.kind === "match-timer-claim" &&
-        isRecord(command.value) &&
-        typeof command.value.inviteId === "string"
-          ? [command.value.inviteId]
-          : [],
-      ),
-    ),
-  ].filter(
-    (inviteId) =>
-      normalizeRecordKey(inviteId) === inviteId &&
-      !metadataInviteIds.has(inviteId),
-  );
+  const { effects, metadataInviteIds, matchInviteIds } =
+    eventIntentNotificationTargets(intent);
   await Promise.all([
     notifyInviteSourceChanged(env, {
       metadataInviteIds: [...metadataInviteIds],

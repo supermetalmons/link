@@ -1,10 +1,11 @@
+import { legacyAuthStartFixture } from "../test/profileDataBoundaryFixture.ts";
+import { materializeProfileCompatibility as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
   CanonicalProfileCorruption,
   commitCanonicalPlan,
-  materializeCanonicalProfile,
   readCanonicalProfile,
   readCanonicalProfileAggregate,
   readCanonicalMergeTarget,
@@ -480,7 +481,7 @@ describe("scoped canonical profile topology", () => {
         mutations: [
           {
             kind: "insert-auth-operation",
-            value: {
+            value: legacyAuthStartFixture({
               operationId,
               kind: "verify",
               method: "x",
@@ -492,7 +493,7 @@ describe("scoped canonical profile topology", () => {
               errorMessage: null,
               startedAtMs: 1_000,
               updatedAtMs: 1_000,
-            },
+            }),
           },
         ],
       };

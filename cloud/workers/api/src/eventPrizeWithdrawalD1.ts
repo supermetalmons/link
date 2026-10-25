@@ -4,33 +4,29 @@ import type {
 } from "./repositoryContracts.ts";
 import { runOptimisticTransaction } from "./optimisticTransaction.ts";
 import { createVersionedJsonRowStore } from "./versionedJsonD1.ts";
+import {
+  readStoredWithdrawalDocument,
+  storedWithdrawalMatchesIdentity,
+  withdrawalStorageUpdatedAtMs,
+  type WithdrawalDocument,
+} from "../../../runtime/eventPrizes/records.js";
+import type {
+  WithdrawalRecord,
+  WithdrawalStore,
+} from "../../../runtime/eventPrizes/types.js";
+import type { WithdrawalStorage } from "../../../runtime/eventPrizes/storage.js";
+import { createWithdrawalRecordCommands } from "../../../runtime/eventPrizes/withdrawalRepository.js";
 const MAX_TRANSACTION_ATTEMPTS = 12;
 
 export type EventPrizeWithdrawalStorageMode = "d1" | "frozen";
 
-export type EventPrizeWithdrawalRecord = {
-  read(): Promise<Record<string, unknown> | null>;
-  transaction(
-    updater: (
-      current: Record<string, unknown> | null,
-    ) => TransactionDecision<Record<string, unknown>>,
-  ): Promise<TransactionResult<Record<string, unknown>>>;
-};
+export type EventPrizeWithdrawalRecord = WithdrawalRecord;
 export type EventPrizeWithdrawalReplacement = {
   eventId: string;
   prizeId: string;
-  value: Record<string, unknown> | null;
+  value: WithdrawalDocument | null;
 };
-export type EventPrizeWithdrawalStore = {
-  get(
-    eventId: string,
-    prizeId: string,
-  ): Promise<Record<string, unknown> | null>;
-  record(eventId: string, prizeId: string): EventPrizeWithdrawalRecord;
-  replaceRecords(
-    records: readonly EventPrizeWithdrawalReplacement[],
-  ): Promise<void>;
-};
+export type EventPrizeWithdrawalStore = WithdrawalStore;
 
 export type EventPrizeWithdrawalStorageControl = {
   previousStorageMode: "d1" | null;
@@ -39,7 +35,7 @@ export type EventPrizeWithdrawalStorageControl = {
 
 export type EventPrizeWithdrawalEventReader = (
   eventId: string,
-) => Promise<Record<string, Record<string, unknown>>>;
+) => Promise<Record<string, WithdrawalDocument>>;
 
 export class EventPrizeWithdrawalD1Failure extends Error {
   constructor(
@@ -48,12 +44,6 @@ export class EventPrizeWithdrawalD1Failure extends Error {
   ) {
     super(message, options);
   }
-}
-
-function record(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
 }
 
 function cleanKey(value: string): string {
@@ -73,15 +63,11 @@ function normalizeRecord(
   eventId: string,
   prizeId: string,
   value: unknown,
-): Record<string, unknown> {
-  const withdrawal = record(value);
+): WithdrawalDocument {
+  const withdrawal = readStoredWithdrawalDocument(value);
   if (
     !withdrawal ||
-    withdrawal.eventId !== eventId ||
-    withdrawal.prizeId !== prizeId ||
-    !["blocked", "completed", "processing", "submitted"].includes(
-      String(withdrawal.status),
-    )
+    !storedWithdrawalMatchesIdentity(withdrawal, eventId, prizeId)
   ) {
     throw new EventPrizeWithdrawalD1Failure(
       "invalid-event-prize-withdrawal-record",
@@ -110,7 +96,7 @@ function decodeRecord(
   eventId: string,
   prizeId: string,
   value: unknown,
-): Record<string, unknown> {
+): WithdrawalDocument {
   if (typeof value !== "string") {
     throw new EventPrizeWithdrawalD1Failure();
   }
@@ -123,11 +109,8 @@ function decodeRecord(
   return normalizeRecord(eventId, prizeId, parsed);
 }
 
-function updatedAtMs(
-  value: Record<string, unknown>,
-  now: () => number,
-): number {
-  const stored = Number(value.updatedAtMs);
+function updatedAtMs(value: WithdrawalDocument, now: () => number): number {
+  const stored = withdrawalStorageUpdatedAtMs(value);
   const candidate = Number.isSafeInteger(stored) && stored > 0 ? stored : now();
   if (!Number.isSafeInteger(candidate) || candidate < 1) {
     throw new EventPrizeWithdrawalD1Failure();
@@ -139,7 +122,7 @@ async function readRow(
   db: D1Database,
   eventId: string,
   prizeId: string,
-): Promise<{ record: Record<string, unknown>; version: number } | null> {
+): Promise<{ record: WithdrawalDocument; version: number } | null> {
   try {
     const row = await createVersionedJsonRowStore(db, {
       table: "event_prize_withdrawals",
@@ -162,10 +145,10 @@ async function transactRow(
   eventId: string,
   prizeId: string,
   updater: (
-    current: Record<string, unknown> | null,
-  ) => TransactionDecision<Record<string, unknown>>,
+    current: WithdrawalDocument | null,
+  ) => TransactionDecision<WithdrawalDocument>,
   now: () => number,
-): Promise<TransactionResult<Record<string, unknown>>> {
+): Promise<TransactionResult<WithdrawalDocument>> {
   const rows = createVersionedJsonRowStore(db, {
     table: "event_prize_withdrawals",
     key: [eventId, prizeId],
@@ -280,10 +263,10 @@ export function createD1EventPrizeWithdrawalReader(
   };
 }
 
-export function createD1EventPrizeWithdrawalStore(
+export function createD1EventPrizeWithdrawalStorage(
   db: D1Database,
   { now = Date.now }: { now?: () => number } = {},
-): EventPrizeWithdrawalStore {
+): WithdrawalStorage {
   const replaceRecords = async (
     records: readonly EventPrizeWithdrawalReplacement[],
   ) => {
@@ -353,7 +336,7 @@ export function createD1EventPrizeWithdrawalStore(
       }
       return {
         read() {
-          return createD1EventPrizeWithdrawalStore(db, { now }).get(
+          return createD1EventPrizeWithdrawalStorage(db, { now }).get(
             normalizedEventId,
             normalizedPrizeId,
           );
@@ -370,6 +353,19 @@ export function createD1EventPrizeWithdrawalStore(
       };
     },
     replaceRecords,
+  };
+}
+
+export function createD1EventPrizeWithdrawalStore(
+  db: D1Database,
+  options: { now?: () => number } = {},
+): EventPrizeWithdrawalStore {
+  const storage = createD1EventPrizeWithdrawalStorage(db, options);
+  return {
+    get: storage.get,
+    record: (eventId, prizeId) =>
+      createWithdrawalRecordCommands(storage.record(eventId, prizeId)),
+    replaceCompleted: (records) => storage.replaceRecords(records),
   };
 }
 

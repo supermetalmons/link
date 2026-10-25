@@ -1,3 +1,4 @@
+import { retainedAutomatchMutationFixture } from "../test/automatchRecordFixture.ts";
 import {
   AUTOMATCH_ROOTS,
   parseAutomatchPath,
@@ -179,7 +180,9 @@ describe("D1 automatch state", () => {
     });
     expect(await store.list("automatch")).toEqual([]);
     expect(
-      await store.commit([{ current: absent, value: { uid: "stale" } }]),
+      await store.commit([
+        retainedAutomatchMutationFixture(absent, { uid: "stale" }),
+      ]),
     ).toBe(false);
     await store.patchRoot({ "automatch/invite": { uid: "new-host" } });
     expect((await store.read("automatch", "invite")).revision).toBe(3);
@@ -214,7 +217,9 @@ describe("D1 automatch state", () => {
     expect(deleted).toMatchObject({ value: null, revision: 3 });
     for (const current of [absent, beforeDelete]) {
       expect(
-        await store.commit([{ current, value: { requestId: "stale" } }]),
+        await store.commit([
+          retainedAutomatchMutationFixture(current, { requestId: "stale" }),
+        ]),
       ).toBe(false);
     }
     await store.transactAutomatchTelegramOutbox("invite", (current) => {
@@ -236,10 +241,10 @@ describe("D1 automatch state", () => {
     });
     expect(
       await store.commit([
-        {
-          current: receipt,
-          value: { kind: "invite-create", completedAtMs: 10 },
-        },
+        retainedAutomatchMutationFixture(receipt, {
+          kind: "invite-create",
+          completedAtMs: 10,
+        }),
       ]),
     ).toBe(true);
     await store.patchRoot({ "gameplayMutationReceipts/operation": null });

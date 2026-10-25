@@ -1,7 +1,7 @@
+import type { RetainedMatchValue } from "./matchRecordCodec.ts";
 import type {
   MatchStateCreation,
   MatchStateEventEffectsRequest,
-  MatchStateJson,
   MatchStatePair,
   MatchStatePairRequest,
 } from "./matchStateTypes.ts";
@@ -15,11 +15,11 @@ export type MatchStatePort = {
   readMatchRecord(
     input: { playerId: string; matchId: string },
     signal?: AbortSignal,
-  ): Promise<MatchStateJson>;
+  ): Promise<RetainedMatchValue>;
   readMatchRecords(
     inputs: readonly { playerId: string; matchId: string }[],
     signal?: AbortSignal,
-  ): Promise<MatchStateJson[]>;
+  ): Promise<RetainedMatchValue[]>;
   readMatchPair(
     input: Omit<MatchStatePairRequest, "epoch">,
     signal?: AbortSignal,

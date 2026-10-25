@@ -1,3 +1,7 @@
+import {
+  readInviteDocument,
+  type InviteDocument,
+} from "@mons/shared/invite-records";
 import { RETIRED_STATE_BACKEND } from "./stateCompatibility.ts";
 import {
   evaluateStateValueMarker,
@@ -32,19 +36,34 @@ export type InviteSourceAdmission = Pick<
 
 export type InviteSourceSnapshot = {
   inviteId: string;
-  value: Record<string, unknown> | null;
+  value: InviteDocument | null;
   revision: number;
 };
 
 export type InviteSourceChange = {
   inviteId: string;
-  value: Record<string, unknown>;
+  value: InviteDocument;
   operationIds?: Record<string, string>;
 };
 
+export type InviteSourcePersistenceChange = Omit<
+  InviteSourceChange,
+  "value"
+> & { value: unknown };
+
 export type InviteSourceMutation = {
   current: InviteSourceSnapshot;
-  value: Record<string, unknown>;
+  value: InviteDocument;
+};
+
+type InviteMutationEvidence = {
+  current: { inviteId: string; value: unknown; revision: number };
+  value: unknown;
+};
+
+declare const retainedInviteMutations: unique symbol;
+export type RetainedInviteMutationBatch = {
+  readonly [retainedInviteMutations]: true;
 };
 
 type ControlRow = {
@@ -86,7 +105,7 @@ export function isEventOwnedInviteSource(value: unknown): boolean {
   );
 }
 
-export function normalizeInviteSource(value: unknown): Record<string, unknown> {
+export function normalizeInviteSource(value: unknown): InviteDocument {
   if (!record(value)) throw new TypeError("invalid-invite-source-json");
   const active = new Set<object>();
   const copy = (entry: unknown, depth: number): unknown => {
@@ -119,14 +138,16 @@ export function normalizeInviteSource(value: unknown): Record<string, unknown> {
     active.delete(entry);
     return result;
   };
-  return Object.fromEntries(
-    Object.entries(value)
-      .filter(([key]) => !RETIRED_FIELDS.has(key))
-      .map(([key, child]) => {
-        requireId(key);
-        return [key, copy(child, 1)];
-      }),
-  );
+  return readInviteDocument(
+    Object.fromEntries(
+      Object.entries(value)
+        .filter(([key]) => !RETIRED_FIELDS.has(key))
+        .map(([key, child]) => {
+          requireId(key);
+          return [key, copy(child, 1)];
+        }),
+    ),
+  )!;
 }
 
 export function prepareInviteSourceControlRead(
@@ -538,8 +559,8 @@ export function createInviteSourceD1Store(
     );
   }
 
-  const buildRevisionGuardStatements = (
-    mutations: readonly InviteSourceMutation[],
+  const revisionGuards = (
+    mutations: readonly InviteMutationEvidence[],
   ): D1PreparedStatement[] =>
     mutations.map(({ current }) => {
       requireId(current.inviteId);
@@ -556,18 +577,18 @@ export function createInviteSourceD1Store(
         .bind(current.inviteId, current.revision);
     });
 
-  const buildCommitStatements = (
-    mutations: readonly InviteSourceMutation[],
+  const commitStatements = (
+    mutations: readonly InviteMutationEvidence[],
     nowMs = now(),
   ): D1PreparedStatement[] => {
     if (!integer(nowMs)) throw new TypeError("invalid-invite-source-timestamp");
     return [
       ...writeGuards(),
-      ...buildRevisionGuardStatements(mutations),
+      ...revisionGuards(mutations),
       ...mutations.map(({ current, value }) => {
         const normalized = normalizeInviteSource(value);
         if (
-          Object.keys(value).some((key) => RETIRED_FIELDS.has(key)) ||
+          Object.keys(value as object).some((key) => RETIRED_FIELDS.has(key)) ||
           !Number.isSafeInteger(current.revision + 1)
         )
           throw new TypeError("invalid-invite-source-mutation");
@@ -589,16 +610,39 @@ export function createInviteSourceD1Store(
 
   return {
     read,
-    buildRevisionGuardStatements,
-    buildCommitStatements,
+    buildRevisionGuardStatements(mutations: readonly InviteSourceMutation[]) {
+      return revisionGuards(mutations);
+    },
+    buildCommitStatements(
+      mutations: readonly InviteSourceMutation[],
+      nowMs = now(),
+    ) {
+      return commitStatements(mutations, nowMs);
+    },
+    buildRetainedRevisionGuardStatements(
+      mutations: RetainedInviteMutationBatch,
+    ) {
+      const evidence: unknown = mutations;
+      return revisionGuards(evidence as readonly InviteMutationEvidence[]);
+    },
+    buildRetainedCommitStatements(
+      mutations: RetainedInviteMutationBatch,
+      nowMs: number,
+    ) {
+      const evidence: unknown = mutations;
+      return commitStatements(
+        evidence as readonly InviteMutationEvidence[],
+        nowMs,
+      );
+    },
     async prepareChanges(
-      changes: readonly InviteSourceChange[],
+      changes: readonly InviteSourcePersistenceChange[],
       nowMs = now(),
       signal?: AbortSignal,
     ): Promise<InviteSourceMutation[]> {
       if (!integer(nowMs))
         throw new TypeError("invalid-invite-source-timestamp");
-      const grouped = new Map<string, InviteSourceChange[]>();
+      const grouped = new Map<string, InviteSourcePersistenceChange[]>();
       for (const change of changes) {
         requireId(change.inviteId);
         if (!record(change.value))
@@ -620,9 +664,14 @@ export function createInviteSourceD1Store(
         signal,
       );
       return snapshots.map((current, index) => {
-        const next = structuredClone(current.value || {});
+        const next = structuredClone(current.value || {}) as Record<
+          string,
+          unknown
+        >;
         for (const change of groups[index]) {
-          for (const [key, value] of Object.entries(change.value)) {
+          for (const [key, value] of Object.entries(
+            change.value as Record<string, unknown>,
+          )) {
             requireId(key);
             setNested(
               next,

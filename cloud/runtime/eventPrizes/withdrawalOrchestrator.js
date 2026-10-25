@@ -2,6 +2,8 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.validatePrizeAssignment = exports.handleWithdrawEventPrize = void 0;
+const records_js_1 = require("./records.js");
+const requests_js_1 = require("./requests.js");
 const errors_js_1 = require("./errors.js");
 const assignmentValidation_js_1 = require("./assignmentValidation.js");
 Object.defineProperty(exports, "validatePrizeAssignment", {
@@ -22,11 +24,13 @@ const normalizeString = (value) =>
 const buildCompletedResponse = (withdrawal) => ({
   ok: true,
   status: "completed",
-  eventId: normalizeString(withdrawal.eventId),
-  prizeId: normalizeString(withdrawal.prizeId),
-  assetAddress: normalizeString(withdrawal.assetAddress),
-  recipientAddress: normalizeString(withdrawal.recipientAddress),
-  transactionSignature: normalizeString(withdrawal.transactionSignature),
+  eventId: (0, records_js_1.withdrawalIdentity)(withdrawal).eventId,
+  prizeId: (0, records_js_1.withdrawalIdentity)(withdrawal).prizeId,
+  assetAddress: (0, records_js_1.withdrawalIdentity)(withdrawal).assetAddress,
+  recipientAddress: (0, records_js_1.withdrawalRecipientAddress)(withdrawal),
+  transactionSignature: (0, records_js_1.withdrawalSubmissionStrings)(
+    withdrawal,
+  ).transactionSignature,
 });
 const handleWithdrawEventPrize = async (request, dependencies) => {
   if (!request.auth) {
@@ -35,10 +39,9 @@ const handleWithdrawEventPrize = async (request, dependencies) => {
       "The function must be called while authenticated.",
     );
   }
-  const requestData =
-    request.data && typeof request.data === "object" ? request.data : {};
-  const eventId = normalizeString(requestData.eventId);
-  const prizeId = normalizeString(requestData.prizeId);
+  const requestData = (0, requests_js_1.readWithdrawalRequest)(request.data);
+  const eventId = requestData.eventId;
+  const prizeId = requestData.prizeId;
   if (!eventId || !prizeId) {
     throw new errors_js_1.EventPrizeWithdrawalError(
       "invalid-argument",
@@ -98,7 +101,9 @@ const handleWithdrawEventPrize = async (request, dependencies) => {
   }
   const withdrawalRecord = withdrawals.record(eventId, prizeId);
   const existingWithdrawal = await withdrawalRecord.read();
-  const existingProfileId = normalizeString(existingWithdrawal?.profileId);
+  const existingProfileId = (0, records_js_1.withdrawalOwnership)(
+    existingWithdrawal,
+  ).profileId;
   let canonicalRecordProfileId = existingProfileId;
   let existingRecordOwnedByRequest = (0,
   eventPrizeWithdrawalState_js_1.isWithdrawalRecordOwnedByRequest)(
@@ -131,7 +136,7 @@ const handleWithdrawEventPrize = async (request, dependencies) => {
   ) {
     const completedRecipientAddress = (0,
     eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(
-      existingWithdrawal.recipientAddress,
+      (0, records_js_1.withdrawalRecipientAddress)(existingWithdrawal),
     );
     if (
       !existingRecordOwnedByRequest ||
@@ -157,7 +162,7 @@ const handleWithdrawEventPrize = async (request, dependencies) => {
     return buildCompletedResponse(existingWithdrawal);
   }
   const submittedRecordCanResume =
-    existingWithdrawal?.status === "submitted" &&
+    (0, records_js_1.withdrawalStatus)(existingWithdrawal) === "submitted" &&
     (0, eventPrizeWithdrawalState_js_1.isWithdrawalRecordForPrize)(
       existingWithdrawal,
       eventId,
@@ -167,11 +172,11 @@ const handleWithdrawEventPrize = async (request, dependencies) => {
     existingRecordOwnedByRequest &&
     Boolean(
       (0, eventPrizeWithdrawalState_js_1.normalizeSolanaAddress)(
-        existingWithdrawal.recipientAddress,
+        (0, records_js_1.withdrawalRecipientAddress)(existingWithdrawal),
       ),
     ) &&
-    [1, 2, 3].includes(Number(existingWithdrawal.place));
-  let place = Number(existingWithdrawal?.place);
+    [1, 2, 3].includes((0, records_js_1.withdrawalPlace)(existingWithdrawal));
+  let place = (0, records_js_1.withdrawalPlace)(existingWithdrawal);
   if (!submittedRecordCanResume) {
     const assignment = await dependencies.readProfileEventPrizeAssignment(
       profileId,
@@ -241,7 +246,7 @@ const handleWithdrawEventPrize = async (request, dependencies) => {
   try {
     const umi = createEventPrizeUmi(prize.standard);
     let submittedInspection = null;
-    if (withdrawal.status === "submitted") {
+    if ((0, records_js_1.withdrawalStatus)(withdrawal) === "submitted") {
       submittedInspection = await (0,
       submissionRecovery_js_1.inspectSubmittedWithdrawal)({
         umi,
@@ -258,10 +263,11 @@ const handleWithdrawEventPrize = async (request, dependencies) => {
       umi,
       prize,
       recipientAddress,
-      needsTransferBuilder: withdrawal.status !== "submitted",
+      needsTransferBuilder:
+        (0, records_js_1.withdrawalStatus)(withdrawal) !== "submitted",
     });
     let assetOwner;
-    if (withdrawal.status === "submitted") {
+    if ((0, records_js_1.withdrawalStatus)(withdrawal) === "submitted") {
       const resolution = await (0,
       submissionRecovery_js_1.reconcileSubmittedAssetState)({
         umi,

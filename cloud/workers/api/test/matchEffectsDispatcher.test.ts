@@ -1,3 +1,9 @@
+import {
+  matchEffectFixture,
+  matchEffectIdFixture,
+  matchEffectKeyFixture,
+} from "./matchClaimFixture.ts";
+import type { MatchEffectTarget } from "../src/matchEffectCodec.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MatchEffectsDispatcher } from "../src/matchEffectsDispatcher.ts";
@@ -5,23 +11,26 @@ import type { MatchStateEffect } from "../src/matchStateTypes.ts";
 
 function fixture(count = 1) {
   let now = 100;
-  const pending = new Map<string, MatchStateEffect>();
+  const pending = new Map<string, ReturnType<typeof matchEffectFixture>>();
   for (let index = 0; index < count; index++) {
     const effectId = `timer:invite:match-${index}`;
-    pending.set(effectId, {
+    pending.set(
       effectId,
-      inviteId: "invite",
-      matchId: `match-${index}`,
-      playerId: "host",
-      opponentId: "guest",
-      epoch: 2,
-      claimedAtMs: 50,
-      eventId: "event",
-      sourceKey: effectId,
-      reason: "timer-claimed",
-      nextAtMs: now,
-      attempts: 0,
-    });
+      matchEffectFixture({
+        effectId,
+        inviteId: "invite",
+        matchId: `match-${index}`,
+        playerId: "host",
+        opponentId: "guest",
+        epoch: 2,
+        claimedAtMs: 50,
+        eventId: "event",
+        sourceKey: effectId,
+        reason: "timer-claimed",
+        nextAtMs: now,
+        attempts: 0,
+      }),
+    );
   }
   const completed: string[] = [];
   const delivered: string[] = [];
@@ -32,11 +41,13 @@ function fixture(count = 1) {
         .filter((effect) => effect.nextAtMs <= atMs)
         .slice(0, limit);
     },
-    completeEffect(effectId: string) {
+    completeEffect(target: MatchEffectTarget) {
+      const effectId = matchEffectKeyFixture(target);
       completed.push(effectId);
       pending.delete(effectId);
     },
-    async retryEffect(effectId: string, atMs: number) {
+    async retryEffect(target: MatchEffectTarget, atMs: number) {
+      const effectId = matchEffectKeyFixture(target);
       const current = pending.get(effectId)!;
       pending.set(effectId, {
         ...current,
@@ -52,7 +63,7 @@ function fixture(count = 1) {
   };
   const dependencies = {
     async deliver(effect: MatchStateEffect) {
-      delivered.push(effect.effectId);
+      delivered.push(matchEffectIdFixture(effect));
     },
     async scheduleAlarm(atMs: number) {
       alarms.push(atMs);
@@ -77,7 +88,7 @@ test("overlapping drains share delivery and complete only after it succeeds", as
   const f = fixture();
   const release = Promise.withResolvers<void>();
   f.dependencies.deliver = async (effect) => {
-    f.delivered.push(effect.effectId);
+    f.delivered.push(matchEffectIdFixture(effect));
     await release.promise;
   };
   const first = f.dispatcher.dispatch();
@@ -101,8 +112,8 @@ test("a failed effect retries in sixty seconds without starving the next effect"
   const f = fixture(2);
   const firstId = [...f.pending.keys()][0];
   f.dependencies.deliver = async (effect) => {
-    f.delivered.push(effect.effectId);
-    if (effect.effectId === firstId) {
+    f.delivered.push(matchEffectIdFixture(effect));
+    if (matchEffectIdFixture(effect) === firstId) {
       f.setNow(500);
       throw new Error("delivery-unavailable", {
         cause: Object.assign(new Error("database-unavailable"), {
@@ -140,7 +151,7 @@ test("failed retry persistence leaves the effect pending and releases the drain"
   const f = fixture(2);
   const failure = new Error("retry-persistence-unavailable");
   f.dependencies.deliver = async (effect) => {
-    f.delivered.push(effect.effectId);
+    f.delivered.push(matchEffectIdFixture(effect));
     throw new Error("delivery-unavailable");
   };
   f.effects.retryEffect = async () => {
@@ -155,7 +166,7 @@ test("failed retry persistence leaves the effect pending and releases the drain"
   assert.deepEqual(f.alarms, []);
 
   f.dependencies.deliver = async (effect) => {
-    f.delivered.push(effect.effectId);
+    f.delivered.push(matchEffectIdFixture(effect));
   };
   await f.dispatcher.dispatch();
   assert.equal(f.pending.size, 0);
@@ -168,7 +179,7 @@ test("drains at most twenty effects sequentially and schedules remaining work", 
   f.dependencies.deliver = async (effect) => {
     assert.equal(delivering, false);
     delivering = true;
-    f.delivered.push(effect.effectId);
+    f.delivered.push(matchEffectIdFixture(effect));
     await Promise.resolve();
     delivering = false;
   };

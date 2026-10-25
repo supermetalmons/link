@@ -1,3 +1,5 @@
+import { queueFor } from "./queueProducers.ts";
+import { telegramRetryScheduleTime } from "../../../runtime/telegram/retryRecords.js";
 import {
   createTelegramDeliveryEngine,
   createTelegramLocalRetryBarrier,
@@ -7,7 +9,6 @@ import {
 } from "../../../runtime/telegram/deliveryEngine.js";
 import {
   buildTelegramDeliveryTaskId,
-  normalizeOptionalTimestamp,
   normalizeTaskPayload,
   type TelegramTaskPayload,
 } from "../../../runtime/telegram/taskIdentity.js";
@@ -64,9 +65,9 @@ function createRetryScheduler(
   now: () => number,
 ): TelegramRetryScheduler {
   return async (input) => {
-    const scheduleTimeMs = normalizeOptionalTimestamp(input.scheduleTimeMs);
+    const scheduleTimeMs = telegramRetryScheduleTime(input);
     const payload = normalizeTaskPayload(input);
-    await env.TELEGRAM_DELIVERY_QUEUE.send(payload, {
+    await queueFor(env, "TELEGRAM_DELIVERY_QUEUE").send(payload, {
       delaySeconds: logicalDelaySeconds(scheduleTimeMs, now()),
     });
     return {
@@ -107,7 +108,7 @@ export async function handleTelegramQueueMessage(
       return;
     }
     try {
-      await env.WAGER_SETTLEMENT_QUEUE.send(task);
+      await queueFor(env, "WAGER_SETTLEMENT_QUEUE").send(task);
       ackQueueMessage(message, {
         entry: {
           event: "wager_settlement_queue_forwarded",

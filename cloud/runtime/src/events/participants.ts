@@ -1,14 +1,9 @@
-const getEventParticipantIds = (
-  event: { participants?: unknown } | null | undefined,
-) => {
-  const participants =
-    event && event.participants && typeof event.participants === "object"
-      ? (event.participants as Record<string, unknown>)
-      : {};
-  return Object.keys(participants).filter(
-    (profileId) =>
-      participants[profileId] && typeof participants[profileId] === "object",
+import type { EventDocument } from "./documents.js";
+import { eventParticipants, eventParticipantEntries } from "./documents.js";
+
+const getEventParticipantIds = (event: EventDocument | null | undefined) =>
+  eventParticipantEntries(eventParticipants(event)).map(
+    ([profileId]) => profileId,
   );
-};
 
 export { getEventParticipantIds };

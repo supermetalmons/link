@@ -1,3 +1,4 @@
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import { eventSnapshotEtag, type EventSnapshotSeed } from "@mons/shared/events";
 import {
   buildSessionRefreshToken,
@@ -90,7 +91,7 @@ function setup(source: Record<string, unknown> = {}) {
     repository,
     readAdmission: async () => {
       calls.admission++;
-      return raw;
+      return retainedInviteSourceFixture(raw);
     },
     room: {
       readMetadata: async () => metadata,
@@ -361,7 +362,7 @@ test("missing, invalid, denied, failed and rate-limited game reads retain sessio
     const h = setup();
     h.bootstrap.readAdmission = async () => {
       if (source instanceof Error) throw source;
-      return source;
+      return retainedInviteSourceFixture(source);
     };
     const body = await composed(await h.read());
     assert.deepEqual(body.gameBootstrap.result, { ok: false, status });
@@ -441,7 +442,7 @@ test("a bounded enrichment timeout preserves the session and blocks late room wo
   h.bootstrap.readAdmission = async (_id, incomingSignal) => {
     signal = incomingSignal;
     return new Promise((yes) => {
-      resolve = yes;
+      resolve = (value) => yes(retainedInviteSourceFixture(value));
     });
   };
   const pending = h.read();
@@ -464,7 +465,7 @@ test("deadline checks reject a late source before delayed timers fire", async ()
   h.bootstrap.now = () => now;
   h.bootstrap.readAdmission = async () => {
     now = GAME_BOOTSTRAP_ENRICHMENT_TIMEOUT_MS;
-    return h.raw;
+    return retainedInviteSourceFixture(h.raw);
   };
   const body = await composed(await h.read());
   assert.deepEqual(body.gameBootstrap.result, { ok: false, status: 503 });
@@ -476,7 +477,7 @@ test("request cancellation stops enrichment while retaining the established sess
   const controller = new AbortController();
   h.bootstrap.readAdmission = async () => {
     controller.abort();
-    return h.raw;
+    return retainedInviteSourceFixture(h.raw);
   };
   const body = await composed(
     await h.read(h.request("refresh", undefined, controller.signal)),

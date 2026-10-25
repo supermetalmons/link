@@ -1,8 +1,13 @@
+import { timerStartStoreFixture } from "../test/matchClaimFixture.ts";
+import {
+  matchRecordFixture,
+  unwrapMatchStateWireFixture,
+} from "../test/matchRecordFixture.ts";
 import { env } from "cloudflare:workers";
 import { runInDurableObject, type D1Migration } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { buildMatchStateRouteStatements } from "../src/matchStateD1.ts";
-import { getMatchStateRpc, unwrapMatchStateRpc } from "../src/matchStateRpc.ts";
+import { getMatchStateRpc } from "../src/matchStateRpc.ts";
 import { createMatchStateSource } from "../src/matchStateSource.ts";
 import { MatchStateStore } from "../src/matchStateStore.ts";
 import {
@@ -50,7 +55,7 @@ async function roomFixture() {
       value: { color: "black", fen: "rematch-position" },
     },
   ];
-  const created = unwrapMatchStateRpc(
+  const created = unwrapMatchStateWireFixture(
     await rpc.createCanonicalMatch({ inviteId, epoch: 2, records }),
   );
   const targets = records.map(({ matchId, playerId }) => ({
@@ -178,14 +183,14 @@ function observedStore(storage: DurableObjectStorage) {
     },
   });
   const store = new MatchStateStore(measuredStorage, {
-    timerStarts: {
+    timerStarts: timerStartStoreFixture({
       getOrAdvance: () => {
         throw new Error("unexpected-timer-write");
       },
       deletePair: () => {
         throw new Error("unexpected-timer-write");
       },
-    },
+    }),
   });
   calls.length = 0;
   return { store, calls };
@@ -247,7 +252,7 @@ describe("routed match record batches", () => {
     );
     const missing = { matchId: fixture.inviteId, playerId: "missing-login" };
     expect(
-      unwrapMatchStateRpc(
+      unwrapMatchStateWireFixture(
         await fixture.rpc.readCanonicalMatchRecords({
           inviteId: fixture.inviteId,
           epoch: 2,
@@ -261,7 +266,7 @@ describe("routed match record batches", () => {
       ),
     ).toEqual([fixture.values[1], fixture.values[0], null, fixture.values[1]]);
     expect(
-      unwrapMatchStateRpc(
+      unwrapMatchStateWireFixture(
         await fixture.rpc.readCanonicalMatchRecords({
           inviteId: fixture.inviteId,
           epoch: 2,
@@ -321,7 +326,7 @@ describe("routed match record batches", () => {
         );
       },
     );
-    const records = unwrapMatchStateRpc(
+    const records = unwrapMatchStateWireFixture(
       await fixture.rpc.readCanonicalMatchRecords({
         inviteId: fixture.inviteId,
         epoch: 2,
@@ -330,7 +335,9 @@ describe("routed match record batches", () => {
     );
     expect(records).toEqual([value, value]);
     expect(records[0]).not.toBe(records[1]);
-    expect(records[0]?.nested).not.toBe(records[1]?.nested);
+    expect(matchRecordFixture(records[0])?.nested).not.toBe(
+      matchRecordFixture(records[1])?.nested,
+    );
   });
 
   it("rejects malformed and oversized RPC batches and preserves authority checks", async () => {

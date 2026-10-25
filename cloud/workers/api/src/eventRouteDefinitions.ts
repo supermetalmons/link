@@ -1,3 +1,9 @@
+import type {
+  ApiPathRequest,
+  ApiPathResponse,
+  EventPath,
+  EventControlPath,
+} from "@mons/shared/api-contracts";
 import {
   isToggleEventPrizeSelectionRequest,
   type ToggleEventPrizeSelectionRequest,
@@ -36,7 +42,6 @@ import {
 } from "./eventParticipation.ts";
 import type { EventGameplayRepository } from "./eventRepository.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
-
 export type EventRequestBody =
   | CreateEventRequest
   | DisqualifyEventMatchWinnersRequest
@@ -57,20 +62,28 @@ type EventRouteContext = {
 
 export type PreparedEventRoute = {
   body: EventRequestBody;
-  execute(context: EventRouteContext): Promise<unknown>;
+  execute(
+    context: EventRouteContext,
+  ): Promise<ApiPathResponse<"POST", EventPath>>;
 };
 
 export type EventRoute = {
-  path: string;
+  path: EventPath;
   kind: "participation" | "control";
   prepare(body: unknown): PreparedEventRoute;
 };
 
-function defineEventRoute<Body extends EventRequestBody>(definition: {
-  path: string;
-  kind: EventRoute["kind"];
+function defineEventRoute<
+  const Path extends EventPath,
+  Body extends EventRequestBody & ApiPathRequest<"POST", NoInfer<Path>>,
+>(definition: {
+  path: Path;
+  kind: Path extends EventControlPath ? "control" : "participation";
   parse(body: unknown): Body;
-  handle(body: Body, context: EventRouteContext): Promise<unknown>;
+  handle(
+    body: Body,
+    context: EventRouteContext,
+  ): Promise<ApiPathResponse<"POST", NoInfer<Path>>>;
 }): EventRoute {
   return {
     path: definition.path,

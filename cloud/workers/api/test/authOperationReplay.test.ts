@@ -1,3 +1,7 @@
+import {
+  authMetadataFixture,
+  authResultFixture,
+} from "./profileDataBoundaryFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -42,8 +46,8 @@ function operation(
     method: input.method,
     loginUid: input.uid,
     status: "success",
-    meta: createVerifyOperationMeta(input),
-    result,
+    meta: authMetadataFixture(createVerifyOperationMeta(input)),
+    result: authResultFixture(result),
     errorCode: null,
     errorMessage: null,
     startedAtMs: 1_000,
@@ -140,11 +144,17 @@ test("keeps completed and incomplete verification eligible through the exact rep
 test("malformed completed results cannot replay but incomplete verification remains recoverable", () => {
   for (const invalidResult of [null, {}, { ok: true, profileId: "profile" }]) {
     assert.equal(
-      verifyReplayState(operation({ result: invalidResult }), 1_000),
+      verifyReplayState(
+        operation({ result: authResultFixture(invalidResult) }),
+        1_000,
+      ),
       null,
     );
     for (const status of ["started", "failed"] as const) {
-      const stored = operation({ status, result: invalidResult });
+      const stored = operation({
+        status,
+        result: authResultFixture(invalidResult),
+      });
       assert.equal(verifyReplayState(stored, 1_000), "incomplete");
       assert.equal(
         verifyReplayState({ ...stored, kind: "unlink" }, 1_000),

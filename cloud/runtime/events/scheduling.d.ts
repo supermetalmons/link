@@ -13,11 +13,9 @@ type Signature_parseScheduledTimeParts = (value: unknown) => {
   hour: number;
   minute: number;
 } | null;
-type Signature_resolveRequestedScheduleTimezone = (
-  request: Record<string, unknown>,
-) => string;
+type Signature_resolveRequestedScheduleTimezone = (request: unknown) => string;
 type Signature_resolveScheduledDateTimeStartAtMs = (
-  request: Record<string, unknown>,
+  request: unknown,
   nowMs?: number,
 ) => number;
 declare class EventSchedulingError extends Error {

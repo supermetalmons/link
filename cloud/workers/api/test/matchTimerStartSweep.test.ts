@@ -1,3 +1,4 @@
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import type { MatchStateRecord } from "../src/matchStateTypes.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -43,18 +44,22 @@ function repository(
     readMatchRecords: async (inputs) =>
       Promise.all(inputs.map((input) => readMatchRecord(input))),
     readInviteMetadata: async (inviteId) =>
-      (records[`invites/${inviteId}`] ?? null) as Record<
-        string,
-        unknown
-      > | null,
-    readInviteMetadataMany: async (inviteIds) =>
-      inviteIds.map(
-        (inviteId) =>
-          (records[`invites/${inviteId}`] ?? null) as Record<
-            string,
-            unknown
-          > | null,
+      retainedInviteSourceFixture(
+        (records[`invites/${inviteId}`] ?? null) as Record<
+          string,
+          unknown
+        > | null,
       ),
+    readInviteMetadataMany: async (inviteIds) =>
+      inviteIds
+        .map(
+          (inviteId) =>
+            (records[`invites/${inviteId}`] ?? null) as Record<
+              string,
+              unknown
+            > | null,
+        )
+        .map(retainedInviteSourceFixture),
   };
 }
 
@@ -286,13 +291,15 @@ test("backfills one bounded legacy invite match without guessing ambiguous oppon
       readMatchRecords: async () => assert.fail("unexpected-match-batch"),
       readInviteMetadataMany: async (inviteIds) => {
         inviteBatches.push([...inviteIds]);
-        return inviteIds.map((inviteId) => {
-          paths.push(`invites/${inviteId}`);
-          return (records[`invites/${inviteId}`] ?? null) as Record<
-            string,
-            unknown
-          > | null;
-        });
+        return inviteIds
+          .map((inviteId) => {
+            paths.push(`invites/${inviteId}`);
+            return (records[`invites/${inviteId}`] ?? null) as Record<
+              string,
+              unknown
+            > | null;
+          })
+          .map(retainedInviteSourceFixture);
       },
       readMatchRecord: async ({ playerId, matchId }) => {
         const path = `players/${playerId}/matches/${matchId}`;

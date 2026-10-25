@@ -36,7 +36,7 @@ test("receipt serialization preserves canonical bytes, digest and deep cloning",
   assert.equal(serializeEventTransitionReceipt(reordered), expected);
   const parsed = parseEventTransitionReceipt(value);
   assert.notStrictEqual(parsed, value);
-  assert.notStrictEqual(parsed.extra, value.extra);
+  assert.notStrictEqual(Reflect.get(parsed, "extra"), value.extra);
   assert.deepEqual(parsed, JSON.parse(expected));
 });
 
@@ -61,10 +61,13 @@ test("receipts retain dense-array traversal and plain-object validation", () => 
     },
   });
   for (const extra of [nullPrototype, hiddenToJson]) {
-    assert.deepEqual(parseEventTransitionReceipt({ ...receipt, extra }).extra, {
-      a: 1,
-      z: 2,
-    });
+    assert.deepEqual(
+      Reflect.get(parseEventTransitionReceipt({ ...receipt, extra }), "extra"),
+      {
+        a: 1,
+        z: 2,
+      },
+    );
   }
   const customIterator = Object.defineProperty([1], Symbol.iterator, {
     value: function* () {
@@ -72,7 +75,10 @@ test("receipts retain dense-array traversal and plain-object validation", () => 
     },
   });
   assert.deepEqual(
-    parseEventTransitionReceipt({ ...receipt, extra: customIterator }).extra,
+    Reflect.get(
+      parseEventTransitionReceipt({ ...receipt, extra: customIterator }),
+      "extra",
+    ),
     [2],
   );
 });

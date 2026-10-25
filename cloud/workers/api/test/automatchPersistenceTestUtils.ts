@@ -1,10 +1,7 @@
 import { decodeAutomatchEntries } from "../../../runtime/automatchRecords.js";
 import type { AutomatchPersistence } from "../src/automatchPersistence.ts";
 import type { StateRepository } from "../test/stateRepositoryTestTypes.ts";
-import {
-  gameplayTestPort,
-  rawGameplayTestPort,
-} from "./gameSessionTestPorts.ts";
+import { gameplayTestPort } from "./gameSessionTestPorts.ts";
 
 export function createAutomatchQueueLookup(
   readState?: StateRepository["getPath"],
@@ -38,11 +35,6 @@ export function createAutomatchPersistenceStub(
     throw new Error("unexpected-persistence-operation");
   };
   return {
-    rawClient: rawGameplayTestPort({
-      getPath: unavailable,
-      patchRoot: unavailable,
-      transactPath: unavailable,
-    }),
     client: gameplayTestPort({
       getPath: unavailable,
       patchRoot: unavailable,

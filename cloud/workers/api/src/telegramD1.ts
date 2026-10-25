@@ -1,3 +1,11 @@
+import {
+  readTelegramAnnouncementPayloadDocument,
+  type TelegramAnnouncementPayloadDocument,
+  type TelegramAlbumPayload,
+  type TelegramReminderPayload,
+  type TelegramAnnouncementOutcomeStatus,
+  type RetainedTelegramAnnouncementAttempt,
+} from "./telegramAnnouncementRecords.ts";
 import type { TelegramRepository } from "../../../runtime/telegram/deliveryEngine.js";
 import {
   createTelegramRepository,
@@ -12,6 +20,10 @@ import { validateTelegramTransactionDecision } from "./telegramTransaction.ts";
 import type { EventAnnouncementKind } from "./eventAnnouncementKinds.ts";
 import { runOptimisticTransaction } from "./optimisticTransaction.ts";
 import { createVersionedJsonRowStore } from "./versionedJsonD1.ts";
+import {
+  controlDocument,
+  type TelegramControlDocument,
+} from "../../../runtime/telegram/records.js";
 
 const MAX_D1_TRANSACTION_ATTEMPTS = 25;
 
@@ -28,22 +40,29 @@ export type TelegramAnnouncementRecord = {
   startAtMs?: number | null;
   runAtMs?: number | null;
   firstQueuedAtMs?: number | null;
-  payload?: Record<string, unknown> | null;
+  payload?: TelegramAnnouncementPayloadDocument | null;
   attemptId?: string | null;
   attemptCount?: number | null;
   retryAtMs?: number | null;
   errorCode?: string | null;
 };
 
-export type TelegramAnnouncementAttempt = {
-  kind?: EventAnnouncementKind;
+type TelegramAnnouncementAttemptFields = {
   eventId: string;
   startAtMs: number;
   runAtMs: number;
   firstQueuedAtMs: number;
-  payload: Record<string, unknown>;
   attemptId: string;
   expectedAttemptId: string | null;
+};
+export type TelegramAnnouncementAttempt = TelegramAnnouncementAttemptFields &
+  (
+    | { kind?: "prizes"; payload: TelegramAlbumPayload }
+    | { kind: "reminder"; payload: TelegramReminderPayload }
+  );
+type AnnouncementAttemptEvidence = TelegramAnnouncementAttemptFields & {
+  kind?: unknown;
+  payload: unknown;
 };
 
 export type TelegramAnnouncementRepository = {
@@ -52,13 +71,13 @@ export type TelegramAnnouncementRepository = {
     createdAtMs: number;
     payloadDigest: string;
     requestId: string;
-    attempt?: TelegramAnnouncementAttempt;
+    attempt?: TelegramAnnouncementAttempt | RetainedTelegramAnnouncementAttempt;
   }): Promise<"reserved" | TelegramAnnouncementRecord>;
   storeOutcome(input: {
     messageIds?: number[];
     payloadDigest: string;
     requestId: string;
-    status: string;
+    status: TelegramAnnouncementOutcomeStatus;
     updatedAtMs: number;
     attemptId?: string;
     retryAtMs?: number;
@@ -108,40 +127,44 @@ function encodeJsonRecord(value: unknown): string {
   }
 }
 
-async function readRow(
+function retainedRecord<Value extends object>(value: unknown): Value | null {
+  const retained: unknown = asRecord(value);
+  return retained as Value | null;
+}
+
+async function readRow<Value extends object>(
   db: D1Database,
   table: "telegram_delivery_control" | "telegram_messages",
   key: string | number,
-): Promise<{ record: Record<string, unknown>; version: number } | null> {
+): Promise<{ record: Value; version: number } | null> {
   const row = await createVersionedJsonRowStore(db, {
     table,
     key: [key],
   }).read();
   if (!row) return null;
+  const record: unknown = parseJsonRecord(row.record_json);
   return {
-    record: parseJsonRecord(row.record_json),
+    record: record as Value,
     version: safeInteger(row.version),
   };
 }
 
-async function transactRow(
+async function transactRow<Value extends object>(
   db: D1Database,
   input: {
     key: string | number;
     now: () => number;
     table: "telegram_delivery_control" | "telegram_messages";
-    updater: (
-      current: TelegramStoredRecord | null,
-    ) => TransactionDecision<TelegramStoredRecord>;
+    updater: (current: Value | null) => TransactionDecision<Value>;
   },
-): Promise<TransactionResult<TelegramStoredRecord>> {
+): Promise<TransactionResult<Value>> {
   const rows = createVersionedJsonRowStore(db, {
     table: input.table,
     key: [input.key],
   });
   return runOptimisticTransaction({
     maxAttempts: MAX_D1_TRANSACTION_ATTEMPTS,
-    read: () => readRow(db, input.table, input.key),
+    read: () => readRow<Value>(db, input.table, input.key),
     getValue: (current) => current?.record ?? null,
     decide(current) {
       const decision = validateTelegramTransactionDecision(
@@ -163,14 +186,14 @@ async function transactRow(
       const encoded = encodeJsonRecord(next);
       if (!current) {
         const changes = await rows.insertIfAbsent(encoded, updatedAtMs);
-        return { applied: changes === 1, value: asRecord(next) };
+        return { applied: changes === 1, value: retainedRecord<Value>(next) };
       }
       const changes = await rows.updateIfVersion(
         current.version,
         encoded,
         updatedAtMs,
       );
-      return { applied: changes === 1, value: asRecord(next) };
+      return { applied: changes === 1, value: retainedRecord<Value>(next) };
     },
     conflictError: () => new TelegramD1Failure(),
   });
@@ -183,7 +206,10 @@ export function createD1TelegramRepository(
   return createTelegramRepository({
     async readMessage(messageKey) {
       const key = validateTelegramMessageKey(messageKey);
-      return (await readRow(db, "telegram_messages", key))?.record ?? null;
+      return (
+        (await readRow<TelegramStoredRecord>(db, "telegram_messages", key))
+          ?.record ?? null
+      );
     },
     transactMessage(messageKey, updater) {
       return transactRow(db, {
@@ -194,7 +220,15 @@ export function createD1TelegramRepository(
       });
     },
     async readControl() {
-      return (await readRow(db, "telegram_delivery_control", 1))?.record ?? {};
+      return (
+        (
+          await readRow<TelegramControlDocument>(
+            db,
+            "telegram_delivery_control",
+            1,
+          )
+        )?.record ?? controlDocument({})
+      );
     },
     transactControl(updater) {
       return transactRow(db, {
@@ -256,7 +290,11 @@ function decodeAnnouncement(row: AnnouncementRow): TelegramAnnouncementRecord {
     runAtMs: row.run_at_ms,
     firstQueuedAtMs: row.first_queued_at_ms,
     payload:
-      row.payload_json === null ? null : parseJsonRecord(row.payload_json),
+      row.payload_json === null
+        ? null
+        : readTelegramAnnouncementPayloadDocument(
+            parseJsonRecord(row.payload_json),
+          )!,
     attemptId: row.attempt_id,
     attemptCount: row.attempt_count,
     retryAtMs: row.retry_at_ms,
@@ -291,7 +329,8 @@ export function createD1TelegramAnnouncementRepository(
     async reserve(input) {
       try {
         if (input.attempt) {
-          const attempt = input.attempt;
+          const retained: unknown = input.attempt;
+          const attempt = retained as AnnouncementAttemptEvidence;
           const result = await db
             .prepare(
               `INSERT INTO telegram_event_prize_announcements (

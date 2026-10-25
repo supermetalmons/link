@@ -1,3 +1,4 @@
+import { inviteDocumentFixture } from "./inviteDocumentFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { prepareEventTelegramProjection } from "../src/eventTelegramProjectionProducer.ts";
@@ -28,7 +29,11 @@ test("event preparation emits exact outboxes and generations for sorted unique e
         field: "updatedAtMs",
         value: 123,
       },
-      { kind: "invite", inviteId: "invite-1", value: { status: "active" } },
+      {
+        kind: "invite",
+        inviteId: "invite-1",
+        value: inviteDocumentFixture({ status: "active" }),
+      },
     ],
     {
       createRequestId: () => `request-${++requestIndex}`,
@@ -95,7 +100,13 @@ test("event preparation emits exact outboxes and generations for sorted unique e
 test("non-event commands prepare no telegram projection work", () => {
   const prepared = prepareEventTelegramProjection(
     TELEGRAM_TEST_ENV,
-    [{ kind: "invite", inviteId: "invite-1", value: { status: "active" } }],
+    [
+      {
+        kind: "invite",
+        inviteId: "invite-1",
+        value: inviteDocumentFixture({ status: "active" }),
+      },
+    ],
     {
       createRequestId: () => assert.fail("unexpected request id"),
       now: () => assert.fail("unexpected clock read"),

@@ -1,4 +1,9 @@
 import {
+  retainEventProgressRecord,
+  type EventProgressDocument,
+  type EventProgressDeadLetter,
+} from "../../../runtime/eventProgressRecords.js";
+import {
   EventD1Failure,
   type EventD1Connection,
   type EventWriteAdmission,
@@ -19,7 +24,7 @@ import {
 
 export type EventProgressRecoverySnapshot = {
   outboxId: string;
-  record: unknown;
+  record: EventProgressDocument<"pending">;
   recordJson: string;
   nextReconcileAtMs: number;
 };
@@ -53,7 +58,7 @@ type RecoveryRow = {
 function snapshot(row: RecoveryRow): EventProgressRecoverySnapshot {
   return {
     outboxId: row.outbox_id,
-    record: decodeJson(row.record_json),
+    record: retainEventProgressRecord("pending", decodeJson(row.record_json)),
     recordJson: row.record_json,
     nextReconcileAtMs: safeInteger(row.next_reconcile_at_ms),
   };
@@ -178,13 +183,13 @@ export function createEventProgressRecoveryStore(
       if (!outboxId) throw new EventD1Failure("invalid-event-path");
       const timestamp = safeInteger(deadAtMs);
       const eventId = isRecord(current.record)
-        ? exactKey(current.record.eventId)
+        ? exactKey((current.record as { eventId?: unknown }).eventId)
         : "";
       const deadRecord = encodeJson({
         deadAtMs: timestamp,
         originalRecord: current.record === undefined ? null : current.record,
         reason: "invalid-event-progress-outbox",
-      });
+      } satisfies EventProgressDeadLetter);
       const results = await db.batch([
         eventWriteAdmissionGuard(db, admission),
         db

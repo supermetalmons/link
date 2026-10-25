@@ -1,15 +1,25 @@
+import type {
+  ApiSocketUrl,
+  ApiRoutePath,
+  ApiResponse,
+} from "@mons/shared/api-contracts";
 import { normalizeRecordKey } from "@mons/shared/ids";
 import {
   INVITE_METADATA_MAX_MESSAGE_BYTES,
   INVITE_METADATA_SOCKET_PROTOCOL,
   isReadInviteMetadataResponse,
-  type ReadInviteMetadataResponse,
 } from "@mons/shared/invite-metadata";
 import {
   REACTION_AUTH_PROTOCOL_PREFIX,
   isReactionSocketToken,
 } from "@mons/shared/reactions";
-import { readSnapshotJson, type AuthTokenProvider } from "./apiTransport";
+import {
+  readSnapshotJson,
+  type AuthTokenProvider,
+  type EndpointSnapshotJsonRead,
+} from "./apiTransport";
+type ReadInviteMetadataResponse =
+  ApiResponse<"GET /invites/:inviteId/metadata">;
 
 const INVITE_METADATA_API_ROOT = "https://api.mons.link";
 export const INVITE_METADATA_REQUEST_TIMEOUT_MS = 10_000;
@@ -28,14 +38,18 @@ export class InviteMetadataApiError extends Error {
   }
 }
 
-function metadataPath(inviteId: string): string {
+function metadataPath(
+  inviteId: string,
+): ApiRoutePath<"GET /invites/:inviteId/metadata"> {
   if (!inviteId || normalizeRecordKey(inviteId) !== inviteId) {
     throw new InviteMetadataApiError("invalid-invite");
   }
   return `/invites/${encodeURIComponent(inviteId)}/metadata`;
 }
 
-export function getInviteMetadataSocketUrl(inviteId: string): string {
+export function getInviteMetadataSocketUrl(
+  inviteId: string,
+): ApiSocketUrl<"GET /invites/:inviteId/metadata/socket"> {
   return `${INVITE_METADATA_API_ROOT.replace("https:", "wss:")}${metadataPath(inviteId)}/socket`;
 }
 
@@ -66,5 +80,5 @@ export async function readInviteMetadataViaApi(
       payload.snapshot.inviteId === inviteId,
     createError: (code, status, retryAfterMs) =>
       new InviteMetadataApiError(code, status, retryAfterMs),
-  });
+  } satisfies EndpointSnapshotJsonRead<"GET /invites/:inviteId/metadata">);
 }

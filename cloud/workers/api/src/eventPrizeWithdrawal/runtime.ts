@@ -9,6 +9,11 @@ import {
 import { EventPrizeWithdrawalError } from "../../../../runtime/eventPrizes/errors.js";
 import { createEventPrizeUmi as createConfiguredEventPrizeUmi } from "../../../../runtime/eventPrizes/solana.js";
 import { handleWithdrawEventPrize } from "../../../../runtime/eventPrizes/withdrawalOrchestrator.js";
+import {
+  withdrawalOwnership,
+  withdrawalRecipientAddress,
+  withdrawalExecutionStatus,
+} from "../../../../runtime/eventPrizes/records.js";
 import type { WithdrawalRuntimeDependencies } from "../../../../runtime/eventPrizes/solanaTypes.js";
 import {
   getCanonicalProfileId,
@@ -16,8 +21,6 @@ import {
 } from "../profileOwnership.ts";
 import {
   buildCompletedResponse,
-  cleanString,
-  toRecord,
   type EventPrizeWithdrawalWorkflowParams,
 } from "./contracts.ts";
 import {
@@ -61,15 +64,15 @@ export async function resolveEventPrizeWithdrawalExecutionParams(
     params.prizeId,
   );
   const prize = getEventPrizeDefinition(params.eventId, params.prizeId);
-  const recordProfileId = cleanString(withdrawal?.profileId);
+  const recordProfileId = withdrawalOwnership(withdrawal).profileId;
   const recordRecipientAddress = normalizeSolanaAddress(
-    withdrawal?.recipientAddress,
+    withdrawalRecipientAddress(withdrawal),
   );
-  const recordRequesterUid = cleanString(withdrawal?.requesterUid);
+  const recordRequesterUid = withdrawalOwnership(withdrawal).requesterUid;
   const admittedRecipientAddress = normalizeSolanaAddress(
     params.recipientAddress,
   );
-  const status = cleanString(withdrawal?.status);
+  const status = withdrawalExecutionStatus(withdrawal);
   if (
     !withdrawal ||
     !prize ||
@@ -154,12 +157,11 @@ export async function executeEventPrizeWithdrawal(
     },
     executionRuntime,
   );
-  const completed = toRecord(result);
-  if (!completed) {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
     throw new EventPrizeWithdrawalError(
       "internal",
       "Prize withdrawal result is unavailable.",
     );
   }
-  return buildCompletedResponse(params.operationId, completed);
+  return buildCompletedResponse(params.operationId, result);
 }

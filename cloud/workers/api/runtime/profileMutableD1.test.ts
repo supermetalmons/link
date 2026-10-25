@@ -1,10 +1,10 @@
+import { materializeProfileCompatibility as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   CanonicalProfileConflict,
   commitCanonicalPlan,
-  materializeCanonicalProfile,
   type CanonicalCommitPlan,
   type CanonicalProfileSnapshot,
 } from "../src/profileCanonicalD1.ts";

@@ -11,13 +11,21 @@ exports.shouldProjectRatingTelegramUpdate =
   exports.evaluateAutomatchProjectionUpdate =
   exports.buildAutomatchTelegramProjection =
   exports.buildAutomatchProjectionGuard =
-  exports.asObject =
   exports.AUTOMATCH_PROJECTION_GUARD_VERSION =
     void 0;
+exports.retainAutomatchTelegramSource = retainAutomatchTelegramSource;
+const invite_records_1 = require("@mons/shared/invite-records");
 const values_js_1 = require("./values.js");
 const node_crypto_1 = require("node:crypto");
 const rematches_js_1 = require("../shared/rematches.js");
 const automatchSource_js_1 = require("./automatchSource.js");
+function retainAutomatchTelegramSource(value) {
+  return value;
+}
+function sourceEvidence(value) {
+  const retained = value;
+  return retained;
+}
 const AUTOMATCH_PROJECTION_GUARD_VERSION = 1;
 exports.AUTOMATCH_PROJECTION_GUARD_VERSION = AUTOMATCH_PROJECTION_GUARD_VERSION;
 const normalizeString = (value) =>
@@ -29,15 +37,15 @@ const normalizeGeneration = (value) =>
     : 0;
 const asObject = (value) =>
   value && typeof value === "object" && !Array.isArray(value) ? value : {};
-exports.asObject = asObject;
-const resolveAutomatchTelegramLifecycle = (source, inviteData) => {
+const resolveAutomatchTelegramLifecycle = (sourceDocument, inviteData) => {
+  const source = sourceEvidence(sourceDocument);
   if (
     !source ||
     source.version !== automatchSource_js_1.TELEGRAM_AUTOMATCH_VERSION
   ) {
     return null;
   }
-  if (normalizeString(inviteData && inviteData.guestId)) {
+  if ((0, invite_records_1.inviteTrimmedParticipants)(inviteData).guestId) {
     return "matched";
   }
   if (
@@ -50,7 +58,8 @@ const resolveAutomatchTelegramLifecycle = (source, inviteData) => {
   return null;
 };
 exports.resolveAutomatchTelegramLifecycle = resolveAutomatchTelegramLifecycle;
-const getAutomatchResultFragments = (inviteId, source) => {
+const getAutomatchResultFragments = (inviteId, sourceDocument) => {
+  const source = sourceEvidence(sourceDocument);
   const results =
     source && source.results && typeof source.results === "object"
       ? source.results
@@ -156,12 +165,13 @@ const buildAutomatchProjectionGuard = (projection) => ({
   resultDigests: asObject(projection.resultDigests),
 });
 exports.buildAutomatchProjectionGuard = buildAutomatchProjectionGuard;
-const renderMatchedAutomatchTelegramText = (inviteId, source) => {
+const renderMatchedAutomatchTelegramText = (inviteId, sourceDocument) => {
+  const source = sourceEvidence(sourceDocument);
   const matchedText = normalizeString(source && source.matchedText);
   if (!matchedText) {
     return "";
   }
-  const fragments = getAutomatchResultFragments(inviteId, source);
+  const fragments = getAutomatchResultFragments(inviteId, sourceDocument);
   if (fragments.length === 0) {
     return matchedText;
   }
@@ -185,12 +195,20 @@ const buildSourceRevision = ({
       }),
     )
     .digest("hex");
-const buildAutomatchTelegramProjection = ({ inviteId, source, inviteData }) => {
+const buildAutomatchTelegramProjection = ({
+  inviteId,
+  source: sourceDocument,
+  inviteData,
+}) => {
+  const source = sourceEvidence(sourceDocument);
   const normalizedInviteId = normalizeString(inviteId);
   if (!normalizedInviteId) {
     return null;
   }
-  const lifecycle = resolveAutomatchTelegramLifecycle(source, inviteData);
+  const lifecycle = resolveAutomatchTelegramLifecycle(
+    sourceDocument,
+    inviteData,
+  );
   if (!lifecycle || !source) {
     return null;
   }
@@ -209,10 +227,16 @@ const buildAutomatchTelegramProjection = ({ inviteId, source, inviteData }) => {
     text = normalizeString(source.canceledText);
     ifMissing = "skip";
   } else {
-    resultFragments = getAutomatchResultFragments(normalizedInviteId, source);
+    resultFragments = getAutomatchResultFragments(
+      normalizedInviteId,
+      sourceDocument,
+    );
     operation = resultFragments.length > 0 ? "edit" : "send";
     instanceKey = normalizeString(source.matchedInstanceKey);
-    text = renderMatchedAutomatchTelegramText(normalizedInviteId, source);
+    text = renderMatchedAutomatchTelegramText(
+      normalizedInviteId,
+      sourceDocument,
+    );
     ifMissing = resultFragments.length > 0 ? "send" : undefined;
   }
   if (!instanceKey || !text) {
@@ -294,7 +318,7 @@ const mergeRatingResultFragment = (source, ratingUpdate) => {
   return {
     changed: true,
     reason: "inserted",
-    source: {
+    source: retainAutomatchTelegramSource({
       ...record,
       results: {
         ...existingResults,
@@ -305,7 +329,7 @@ const mergeRatingResultFragment = (source, ratingUpdate) => {
           ? currentUpdatedAtMs
           : Math.max(currentUpdatedAtMs, completedAtMs),
       generation: currentGeneration + 1,
-    },
+    }),
   };
 };
 exports.mergeRatingResultFragment = mergeRatingResultFragment;

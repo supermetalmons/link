@@ -1,3 +1,4 @@
+import { retainedAutomatchMutationFixture } from "./automatchRecordFixture.ts";
 import {
   createAutomatchD1Store,
   AUTOMATCH_RECORD_TABLES,
@@ -366,7 +367,7 @@ export function createLegacyAutomatchD1Store(
       [...groups.values()].map(async (group) => {
         const first = group[0].owned;
         const current = await read(first.root, first.key!, signal);
-        let value = current.value;
+        let value: unknown = current.value;
         for (const entry of group) {
           value = setNested(
             value,
@@ -378,7 +379,7 @@ export function createLegacyAutomatchD1Store(
             ),
           );
         }
-        return { current, value };
+        return retainedAutomatchMutationFixture(current, value);
       }),
     );
   }
@@ -415,7 +416,12 @@ export function createLegacyAutomatchD1Store(
       const next = resolveAutomatchServerValues(decision.value, value, nowMs);
       if (
         await commit(
-          [{ current, value: setNested(current.value, owned.nested, next) }],
+          [
+            retainedAutomatchMutationFixture(
+              current,
+              setNested(current.value, owned.nested, next),
+            ),
+          ],
           signal,
         )
       ) {

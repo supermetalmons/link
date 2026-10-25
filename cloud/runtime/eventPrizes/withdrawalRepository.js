@@ -63,11 +63,88 @@ exports.releaseProcessingClaim =
   exports.discardDefinitiveSubmittedTransaction =
   exports.acquireWithdrawalClaim =
     void 0;
+exports.createWithdrawalRecordCommands = createWithdrawalRecordCommands;
+const records_js_1 = require("./records.js");
 const crypto = __importStar(require("node:crypto"));
 const errors_js_1 = require("./errors.js");
 const eventPrizeWithdrawalState_js_1 = require("../eventPrizeWithdrawalState.js");
-const normalizeString = (value) =>
-  typeof value === "string" && value.trim() !== "" ? value.trim() : "";
+function createWithdrawalRecordCommands(storage) {
+  return {
+    read: () => storage.read(),
+    claim(input) {
+      return storage.transaction((current) => {
+        const decision = (0,
+        eventPrizeWithdrawalState_js_1.decideWithdrawalClaim)({
+          ...input,
+          current,
+          nowMs: Date.now(),
+        });
+        return {
+          value:
+            decision.kind === "acquired" ? decision.value : (current ?? null),
+        };
+      });
+    },
+    releaseProcessing(leaseId) {
+      return storage.transaction((current) =>
+        (0, records_js_1.withdrawalStatus)(current) === "processing" &&
+        (0, records_js_1.withdrawalLeaseId)(current) === leaseId
+          ? { value: null }
+          : { value: current ?? null },
+      );
+    },
+    block({ leaseId, observedOwner }) {
+      return storage.transaction((current) => {
+        if (
+          !current ||
+          (0, records_js_1.withdrawalStatus)(current) === "completed" ||
+          (0, records_js_1.withdrawalLeaseId)(current) !== leaseId
+        ) {
+          return { value: current ?? null };
+        }
+        return {
+          value: (0, records_js_1.writeBlockedWithdrawal)(
+            current,
+            observedOwner,
+            Date.now(),
+          ),
+        };
+      });
+    },
+    persistSubmission({ leaseId, ...evidence }) {
+      return storage.transaction((current) => {
+        if (
+          !current ||
+          (0, records_js_1.withdrawalStatus)(current) === "completed" ||
+          (0, records_js_1.withdrawalLeaseId)(current) !== leaseId
+        ) {
+          return { value: current ?? null };
+        }
+        return {
+          value: (0, records_js_1.writeSubmittedWithdrawal)(
+            current,
+            evidence,
+            (0, records_js_1.withdrawalSubmittedAtForPersistence)(
+              current,
+              Date.now,
+            ),
+            Date.now(),
+          ),
+        };
+      });
+    },
+    discardSubmission({ leaseId, transactionSignature }) {
+      return storage.transaction((current) =>
+        (0, records_js_1.withdrawalStatus)(current) === "submitted" &&
+        (0, records_js_1.withdrawalLeaseId)(current) === leaseId &&
+        (0, records_js_1.withdrawalSubmissionStrings)(current)
+          .transactionSignature === transactionSignature
+          ? { value: null, decision: "discarded" }
+          : { commit: false, decision: "stale" },
+      );
+    },
+  };
+}
 const acquireWithdrawalClaim = async ({
   withdrawalRecord,
   eventId,
@@ -97,18 +174,24 @@ const acquireWithdrawalClaim = async ({
       nowMs: Date.now(),
     });
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const result = await withdrawalRecord.transaction((current) => {
-      const decision = decide(current);
-      return {
-        value:
-          decision.kind === "acquired" ? decision.value : (current ?? null),
-      };
+    const result = await withdrawalRecord.claim({
+      eventId,
+      prizeId,
+      assetAddress,
+      profileId,
+      place,
+      recipientAddress,
+      requesterUid,
+      canonicalRecordProfileId,
+      canonicalRecordSourceProfileId,
+      leaseId,
     });
     const withdrawal = result.value;
     if (
       result.committed &&
-      normalizeString(withdrawal?.leaseId) === leaseId &&
-      ["processing", "submitted"].includes(withdrawal?.status) &&
+      (0, records_js_1.withdrawalLeaseId)(withdrawal) === leaseId &&
+      ((0, records_js_1.withdrawalStatus)(withdrawal) === "processing" ||
+        (0, records_js_1.withdrawalStatus)(withdrawal) === "submitted") &&
       (0, eventPrizeWithdrawalState_js_1.isWithdrawalRecordForPrize)(
         withdrawal,
         eventId,
@@ -155,15 +238,7 @@ const acquireWithdrawalClaim = async ({
 };
 exports.acquireWithdrawalClaim = acquireWithdrawalClaim;
 const releaseProcessingClaim = async ({ withdrawalRecord, leaseId }) => {
-  await withdrawalRecord.transaction((current) => {
-    if (
-      current?.status === "processing" &&
-      normalizeString(current.leaseId) === leaseId
-    ) {
-      return { value: null };
-    }
-    return { value: current ?? null };
-  });
+  await withdrawalRecord.releaseProcessing(leaseId);
 };
 exports.releaseProcessingClaim = releaseProcessingClaim;
 const markWithdrawalBlocked = async ({
@@ -171,25 +246,7 @@ const markWithdrawalBlocked = async ({
   leaseId,
   observedOwner,
 }) => {
-  await withdrawalRecord.transaction((current) => {
-    if (
-      !current ||
-      current.status === "completed" ||
-      normalizeString(current.leaseId) !== leaseId
-    ) {
-      return { value: current ?? null };
-    }
-    return {
-      value: {
-        ...current,
-        status: "blocked",
-        observedOwner,
-        updatedAtMs: Date.now(),
-        leaseId: null,
-        leaseExpiresAtMs: null,
-      },
-    };
-  });
+  await withdrawalRecord.block({ leaseId, observedOwner });
 };
 exports.markWithdrawalBlocked = markWithdrawalBlocked;
 const persistSubmittedTransaction = async ({
@@ -200,40 +257,26 @@ const persistSubmittedTransaction = async ({
   blockhash,
   lastValidBlockHeight,
 }) => {
-  const result = await withdrawalRecord.transaction((current) => {
-    if (
-      !current ||
-      current.status === "completed" ||
-      normalizeString(current.leaseId) !== leaseId
-    ) {
-      return { value: current ?? null };
-    }
-    return {
-      value: {
-        ...current,
-        status: "submitted",
-        transactionSignature,
-        signedTransactionBase64,
-        blockhash,
-        lastValidBlockHeight,
-        submittedAtMs:
-          Number.isFinite(current.submittedAtMs) && current.submittedAtMs > 0
-            ? Math.floor(current.submittedAtMs)
-            : Date.now(),
-        updatedAtMs: Date.now(),
-      },
-    };
+  const result = await withdrawalRecord.persistSubmission({
+    leaseId,
+    transactionSignature,
+    signedTransactionBase64,
+    blockhash,
+    lastValidBlockHeight,
   });
   const persisted = result.value;
   if (
     !result.committed ||
-    persisted?.status !== "submitted" ||
-    normalizeString(persisted.leaseId) !== leaseId ||
-    normalizeString(persisted.transactionSignature) !== transactionSignature ||
-    normalizeString(persisted.signedTransactionBase64) !==
-      signedTransactionBase64 ||
-    normalizeString(persisted.blockhash) !== blockhash ||
-    Number(persisted.lastValidBlockHeight) !== lastValidBlockHeight
+    (0, records_js_1.withdrawalStatus)(persisted) !== "submitted" ||
+    (0, records_js_1.withdrawalLeaseId)(persisted) !== leaseId ||
+    (0, records_js_1.withdrawalSubmissionStrings)(persisted)
+      .transactionSignature !== transactionSignature ||
+    (0, records_js_1.withdrawalSubmissionStrings)(persisted)
+      .signedTransactionBase64 !== signedTransactionBase64 ||
+    (0, records_js_1.withdrawalSubmissionStrings)(persisted).blockhash !==
+      blockhash ||
+    (0, records_js_1.withdrawalLastValidBlockHeight)(persisted) !==
+      lastValidBlockHeight
   ) {
     throw new errors_js_1.EventPrizeWithdrawalError(
       "aborted",
@@ -248,13 +291,10 @@ const discardDefinitiveSubmittedTransaction = async ({
   leaseId,
   transactionSignature,
 }) => {
-  const result = await withdrawalRecord.transaction((current) =>
-    current?.status === "submitted" &&
-    normalizeString(current.leaseId) === leaseId &&
-    normalizeString(current.transactionSignature) === transactionSignature
-      ? { value: null, decision: "discarded" }
-      : { commit: false, decision: "stale" },
-  );
+  const result = await withdrawalRecord.discardSubmission({
+    leaseId,
+    transactionSignature,
+  });
   if (
     !result.committed ||
     result.decision !== "discarded" ||

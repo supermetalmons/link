@@ -3,6 +3,7 @@ import {
   parseEventProgressOutbox,
   type EventProgressPlan,
   type EventProgressWorkflowParams,
+  type RetainedEventProgressPlan,
 } from "./eventProgressCodec.ts";
 import type {
   EventProgressRecoverySnapshot,
@@ -32,12 +33,24 @@ export async function withEventProgressDispatchAdmission(
   return withEventWriteAdmission(db, { kind: "dispatch" }, work);
 }
 
+type EventProgressTransportParams =
+  EventProgressWorkflowParams | RetainedEventProgressPlan["params"];
+type EventProgressTransportPlan = Pick<
+  EventProgressPlan | RetainedEventProgressPlan,
+  "workflowId" | "params"
+>;
+function retainedProgressWorkflow(
+  workflow: Pick<Workflow<EventProgressWorkflowParams>, "createBatch">,
+): Pick<Workflow<EventProgressTransportParams>, "createBatch"> {
+  return workflow;
+}
+
 async function ensureEventProgressWorkflowInstance(
-  workflow: Workflow<EventProgressWorkflowParams>,
-  plan: EventProgressPlan,
+  workflow: Pick<Workflow<EventProgressWorkflowParams>, "createBatch" | "get">,
+  plan: EventProgressTransportPlan,
 ): Promise<WorkflowInstance | undefined> {
   try {
-    const [instance] = await workflow.createBatch([
+    const [instance] = await retainedProgressWorkflow(workflow).createBatch([
       {
         id: plan.workflowId,
         params: plan.params,
@@ -54,9 +67,9 @@ async function ensureEventProgressWorkflowInstance(
   }
 }
 
-export async function ensureEventProgressWorkflow(
+async function ensureEventProgressPlan(
   env: Pick<Env, "EVENT_DB" | "EVENT_PROGRESS_WORKFLOW" | "PROFILE_GAMES_DB">,
-  plan: EventProgressPlan,
+  plan: EventProgressTransportPlan,
 ): Promise<void> {
   await requireActiveDurableMatchState(env.PROFILE_GAMES_DB);
   await withEventProgressDispatchAdmission(env.EVENT_DB, async () => {
@@ -65,6 +78,20 @@ export async function ensureEventProgressWorkflow(
       plan,
     );
   });
+}
+
+export function ensureEventProgressWorkflow(
+  env: Pick<Env, "EVENT_DB" | "EVENT_PROGRESS_WORKFLOW" | "PROFILE_GAMES_DB">,
+  plan: EventProgressPlan,
+): Promise<void> {
+  return ensureEventProgressPlan(env, plan);
+}
+
+export function ensureRetainedEventProgressWorkflow(
+  env: Pick<Env, "EVENT_DB" | "EVENT_PROGRESS_WORKFLOW" | "PROFILE_GAMES_DB">,
+  plan: RetainedEventProgressPlan,
+): Promise<void> {
+  return ensureEventProgressPlan(env, plan);
 }
 
 export async function removeOutbox(

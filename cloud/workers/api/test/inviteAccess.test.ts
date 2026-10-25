@@ -1,3 +1,5 @@
+import { inviteDocumentFixture } from "./inviteDocumentFixture.ts";
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AuthApiFailure } from "../src/authErrors.ts";
@@ -77,7 +79,7 @@ test("direct participants retain access without reading profile ownership", asyn
     async readInviteMetadata(inviteId: string) {
       inviteReads++;
       assert.equal(inviteId, request.inviteId);
-      return paired;
+      return retainedInviteSourceFixture(paired);
     },
     async readProfileOwnershipSnapshot(): Promise<ProfileOwnershipSnapshot> {
       ownershipReads++;
@@ -97,13 +99,17 @@ test("direct participants retain access without reading profile ownership", asyn
       await resolveInviteRoleFromSnapshot(
         identity,
         request,
-        paired,
+        inviteDocumentFixture(paired),
         repository,
       ),
       expected,
     );
     assert.deepEqual(
-      await resolveInviteParticipant(identity, paired, repository),
+      await resolveInviteParticipant(
+        identity,
+        inviteDocumentFixture(paired),
+        repository,
+      ),
       {
         actorUid,
         opponentUid: role === "host" ? paired.guestId : paired.hostId,
@@ -126,7 +132,7 @@ test("linked participants return the original actor and the single ownership sna
     });
     const result = await resolveInviteParticipant(
       { uid: "linked-login" },
-      paired,
+      inviteDocumentFixture(paired),
       reader,
     );
 
@@ -157,10 +163,14 @@ test("direct guest identity wins over shared ownership while linked identities p
     const read = await resolveInviteRoleFromSnapshot(
       { uid },
       request,
-      paired,
+      inviteDocumentFixture(paired),
       reader,
     );
-    const participant = await resolveInviteParticipant({ uid }, paired, reader);
+    const participant = await resolveInviteParticipant(
+      { uid },
+      inviteDocumentFixture(paired),
+      reader,
+    );
     assert.equal(read.role, role);
     assert.equal(read.actorUid, `${role}-login`);
     assert.equal(participant.role, role);
@@ -180,13 +190,13 @@ test("unrelated and unlinked identities may watch but cannot mutate as participa
     const read = await resolveInviteRoleFromSnapshot(
       identity,
       request,
-      paired,
+      inviteDocumentFixture(paired),
       reader,
     );
     assert.equal(read.role, "watch");
     assert.equal(read.actorUid, null);
     await assert.rejects(
-      resolveInviteParticipant(identity, paired, reader),
+      resolveInviteParticipant(identity, inviteDocumentFixture(paired), reader),
       failure(403, "permission-denied"),
     );
   }
@@ -202,7 +212,7 @@ test("pending reads omit absent guests and treat any own password property as pr
   const result = await resolveInviteRoleFromSnapshot(
     { uid: "linked-login" },
     request,
-    pending,
+    inviteDocumentFixture(pending),
     reader,
   );
   assert.equal(result.role, "host");
@@ -215,7 +225,7 @@ test("pending reads omit absent guests and treat any own password property as pr
   const open = await resolveInviteRoleFromSnapshot(
     identity,
     request,
-    pending,
+    inviteDocumentFixture(pending),
     reader,
   );
   assert.equal(open.role, "watch");
@@ -223,13 +233,17 @@ test("pending reads omit absent guests and treat any own password property as pr
     resolveInviteRoleFromSnapshot(
       identity,
       request,
-      { ...pending, password: undefined },
+      inviteDocumentFixture({ ...pending, password: undefined }),
       reader,
     ),
     failure(403, "permission-denied"),
   );
   await assert.rejects(
-    resolveInviteParticipant({ uid: paired.hostId }, pending, reader),
+    resolveInviteParticipant(
+      { uid: paired.hostId },
+      inviteDocumentFixture(pending),
+      reader,
+    ),
     failure(409, "missing-opponent"),
   );
 });
@@ -243,12 +257,17 @@ test("read validation stays stricter than participant record-key validation with
   ]) {
     const identity = { uid: invite.hostId };
     await assert.rejects(
-      resolveInviteRoleFromSnapshot(identity, request, invite, reader),
+      resolveInviteRoleFromSnapshot(
+        identity,
+        request,
+        inviteDocumentFixture(invite),
+        reader,
+      ),
       failure(409, "invite-invalid"),
     );
     const participant = await resolveInviteParticipant(
       identity,
-      invite,
+      inviteDocumentFixture(invite),
       reader,
     );
     assert.equal(participant.actorUid, invite.hostId);
@@ -276,7 +295,7 @@ test("role reads ignore unrelated malformed metadata and preserve pending source
     await resolveInviteRoleFromSnapshot(
       { uid: paired.hostId },
       request,
-      source,
+      inviteDocumentFixture(source),
       reader,
     ),
     {
@@ -312,11 +331,16 @@ test("ownership failures never degrade into spectator access or permission error
   for (const reader of readers) {
     const identity = { uid: "linked-login" };
     await assert.rejects(
-      resolveInviteRoleFromSnapshot(identity, request, paired, reader),
+      resolveInviteRoleFromSnapshot(
+        identity,
+        request,
+        inviteDocumentFixture(paired),
+        reader,
+      ),
       failure(503, "profile-ownership-unavailable"),
     );
     await assert.rejects(
-      resolveInviteParticipant(identity, paired, reader),
+      resolveInviteParticipant(identity, inviteDocumentFixture(paired), reader),
       failure(503, "profile-ownership-unavailable"),
     );
   }

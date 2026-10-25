@@ -1,7 +1,21 @@
-import type {
-  WithdrawalData,
-  WithdrawalCompletionInput,
-} from "./eventPrizes/types.js";
+import type { WithdrawalCompletionInput } from "./eventPrizes/types.js";
+import {
+  readWithdrawalDocument,
+  withdrawalOwnership,
+  withdrawalRecipientAddress,
+  withdrawalLeaseId,
+  withdrawalLeaseExpiresAtMs,
+  withdrawalStatus,
+  withdrawalPlace,
+  withdrawalStartedAtForClaim,
+  withdrawalStartedAtForCompletion,
+  withdrawalSubmittedAtForCompletion,
+  writeProcessingWithdrawal,
+  writeReacquiredSubmittedWithdrawal,
+  writeCompletedWithdrawal,
+  type WithdrawalDocument,
+  type WithdrawalClaimFields,
+} from "./eventPrizes/records.js";
 
 import {
   filterProjectableEventPrizeAssignments,
@@ -62,7 +76,7 @@ const decodeAdminSecretKey = (value: unknown): Uint8Array | null => {
 };
 
 const isWithdrawalRecordOwnedByRequest = (
-  value: unknown,
+  value: WithdrawalDocument | null | undefined,
   profileId: unknown,
   requesterUid: unknown,
   canonicalRecordProfileId?: unknown,
@@ -79,7 +93,7 @@ const isWithdrawalRecordOwnedByRequest = (
   const normalizedCanonicalRecordSourceProfileId = normalizeString(
     canonicalRecordSourceProfileId,
   );
-  const recordProfileId = normalizeString((value as WithdrawalData).profileId);
+  const recordProfileId = withdrawalOwnership(value).profileId;
   return (
     (normalizedProfileId &&
       (recordProfileId === normalizedProfileId ||
@@ -87,8 +101,7 @@ const isWithdrawalRecordOwnedByRequest = (
           recordProfileId === normalizedCanonicalRecordSourceProfileId &&
           normalizedCanonicalRecordProfileId === normalizedProfileId))) ||
     (normalizedRequesterUid &&
-      normalizeString((value as WithdrawalData).requesterUid) ===
-        normalizedRequesterUid)
+      withdrawalOwnership(value).requesterUid === normalizedRequesterUid)
   );
 };
 
@@ -96,12 +109,15 @@ const getWithdrawalProjectionProfileIds = ({
   withdrawal,
   profileIds,
 }: {
-  withdrawal: WithdrawalData | null | undefined;
+  withdrawal: WithdrawalDocument | null | undefined;
   profileIds?: unknown;
 }) =>
   Array.from(
     new Set(
-      [withdrawal?.entitledProfileId, withdrawal?.profileId]
+      [
+        withdrawalOwnership(withdrawal).entitledProfileId,
+        withdrawalOwnership(withdrawal).profileId,
+      ]
         .concat(Array.isArray(profileIds) ? profileIds : [])
         .map(normalizeString)
         .filter(Boolean),
@@ -119,31 +135,34 @@ const buildWithdrawalCompletion = ({
   completedAtMs,
 }: WithdrawalCompletionInput & { completedAtMs: number }) => {
   const entitledProfileId =
-    normalizeString(withdrawal.entitledProfileId) ||
-    normalizeString(withdrawal.profileId) ||
+    withdrawalOwnership(withdrawal).entitledProfileId ||
+    withdrawalOwnership(withdrawal).profileId ||
     profileId;
-  const completed = {
+  const completed = writeCompletedWithdrawal({
     eventId,
     prizeId,
     assetAddress,
     assetStandard: getEventPrizeAssetStandard(eventId, prizeId),
     profileId,
     entitledProfileId,
-    place: Number(withdrawal.place),
+    place: withdrawalPlace(withdrawal),
     recipientAddress,
-    requesterUid: normalizeString(withdrawal.requesterUid),
+    requesterUid: withdrawalOwnership(withdrawal).requesterUid,
     status: "completed" as const,
     transactionSignature,
-    startedAtMs: Number(withdrawal.startedAtMs) || completedAtMs,
-    submittedAtMs: Number(withdrawal.submittedAtMs) || completedAtMs,
+    startedAtMs: withdrawalStartedAtForCompletion(withdrawal, completedAtMs),
+    submittedAtMs: withdrawalSubmittedAtForCompletion(
+      withdrawal,
+      completedAtMs,
+    ),
     completedAtMs,
     updatedAtMs: completedAtMs,
-  };
+  });
   return completed;
 };
 
 export type WithdrawalClaimInput = {
-  current: unknown;
+  current: WithdrawalDocument | null;
   eventId: string;
   prizeId: string;
   assetAddress: string;
@@ -165,7 +184,7 @@ export type WithdrawalClaimDecision = {
     | "destination-mismatch"
     | "busy"
     | "acquired";
-  value: WithdrawalData;
+  value: WithdrawalDocument;
 };
 
 const decideWithdrawalClaim = ({
@@ -182,13 +201,12 @@ const decideWithdrawalClaim = ({
   leaseId,
   nowMs,
 }: WithdrawalClaimInput): WithdrawalClaimDecision => {
-  const existing = (
-    current && typeof current === "object" ? current : {}
-  ) as WithdrawalData;
-  const existingProfileId = normalizeString(existing.profileId);
-  const existingRecipientAddress = normalizeString(existing.recipientAddress);
-  const existingLeaseId = normalizeString(existing.leaseId);
-  const leaseExpiresAtMs = Number(existing.leaseExpiresAtMs) || 0;
+  const existing =
+    readWithdrawalDocument(current) || readWithdrawalDocument({})!;
+  const existingProfileId = withdrawalOwnership(existing).profileId;
+  const existingRecipientAddress = withdrawalRecipientAddress(existing);
+  const existingLeaseId = withdrawalLeaseId(existing);
+  const leaseExpiresAtMs = withdrawalLeaseExpiresAtMs(existing);
   const recordMatchesPrize = isWithdrawalRecordForPrize(
     existing,
     eventId,
@@ -203,17 +221,17 @@ const decideWithdrawalClaim = ({
     canonicalRecordSourceProfileId,
   );
 
-  if (existing.status === "completed") {
+  if (withdrawalStatus(existing) === "completed") {
     return recordMatchesPrize && recordOwnedByRequest
       ? { kind: "completed", value: existing }
       : { kind: "forbidden", value: existing };
   }
-  if (existing.status === "blocked") {
+  if (withdrawalStatus(existing) === "blocked") {
     return recordMatchesPrize && recordOwnedByRequest
       ? { kind: "blocked", value: existing }
       : { kind: "forbidden", value: existing };
   }
-  if (existing.status === "submitted") {
+  if (withdrawalStatus(existing) === "submitted") {
     if (!recordMatchesPrize || !recordOwnedByRequest) {
       return { kind: "forbidden", value: existing };
     }
@@ -221,7 +239,7 @@ const decideWithdrawalClaim = ({
       return { kind: "destination-mismatch", value: existing };
     }
   } else if (
-    existing.status === "processing" &&
+    withdrawalStatus(existing) === "processing" &&
     leaseExpiresAtMs > nowMs &&
     existingLeaseId &&
     existingLeaseId !== leaseId
@@ -235,32 +253,32 @@ const decideWithdrawalClaim = ({
     }
   }
 
-  const preserveSubmitted = existing.status === "submitted";
+  const preserveSubmitted = withdrawalStatus(existing) === "submitted";
   const assetStandard = getEventPrizeAssetStandard(eventId, prizeId);
+  const claimed: WithdrawalClaimFields = {
+    eventId,
+    prizeId,
+    assetAddress,
+    assetStandard,
+    entitledProfileId: preserveSubmitted
+      ? withdrawalOwnership(existing).entitledProfileId || existingProfileId
+      : profileId,
+    profileId,
+    place,
+    recipientAddress,
+    requesterUid,
+    leaseId,
+    leaseExpiresAtMs: nowMs + WITHDRAWAL_LEASE_MS,
+    startedAtMs: preserveSubmitted
+      ? withdrawalStartedAtForClaim(existing, nowMs)
+      : nowMs,
+    updatedAtMs: nowMs,
+  };
   return {
     kind: "acquired",
-    value: {
-      ...(preserveSubmitted ? existing : {}),
-      eventId,
-      prizeId,
-      assetAddress,
-      ...(assetStandard ? { assetStandard } : {}),
-      entitledProfileId: preserveSubmitted
-        ? normalizeString(existing.entitledProfileId) || existingProfileId
-        : profileId,
-      profileId,
-      place,
-      recipientAddress,
-      requesterUid,
-      status: preserveSubmitted ? "submitted" : "processing",
-      leaseId,
-      leaseExpiresAtMs: nowMs + WITHDRAWAL_LEASE_MS,
-      startedAtMs:
-        preserveSubmitted && Number.isFinite(existing.startedAtMs)
-          ? Math.floor(existing.startedAtMs as number)
-          : nowMs,
-      updatedAtMs: nowMs,
-    },
+    value: preserveSubmitted
+      ? writeReacquiredSubmittedWithdrawal(existing, claimed)
+      : writeProcessingWithdrawal(claimed),
   };
 };
 

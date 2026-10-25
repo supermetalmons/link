@@ -1,3 +1,4 @@
+import { eventDocumentFixture } from "./eventCompatibilityFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { EventCommand } from "../../../runtime/eventCommands.js";
@@ -47,7 +48,7 @@ function fixture({
     assert.equal(eventId, EVENT_ID);
     beforeRead?.(++reads, signal);
     signal?.throwIfAborted();
-    return structuredClone(event);
+    return eventDocumentFixture(structuredClone(event));
   };
   repository.commitEventPlan = async (plan, signal) => {
     signal?.throwIfAborted();

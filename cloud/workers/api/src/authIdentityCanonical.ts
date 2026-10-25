@@ -1,3 +1,4 @@
+import { successfulAuthOperation } from "./authIdentityCanonical/operationRecords.ts";
 import {
   AUTH_COOLDOWN_REASONS,
   AUTH_METHODS,
@@ -41,7 +42,6 @@ import {
   commitCanonicalPlan,
   readCanonicalAuthMethod,
   readCanonicalAuthOperation,
-  type CanonicalAuthOperationValue,
   type CanonicalCooldownValue,
   type CanonicalMethodRevocationValue,
 } from "./profileCanonicalD1.ts";
@@ -53,7 +53,6 @@ import {
   profileResponse,
   profileValue,
   profileWithoutMethod,
-  record,
   recoveryValue,
 } from "./authIdentityCanonical/policy.ts";
 import { createCanonicalIdentityProfiles } from "./authIdentityCanonical/profiles.ts";
@@ -434,14 +433,11 @@ export function createCanonicalAuthIdentityService(
             normalizedValue: existing.normalizedValue,
             scope: getAuthCooldownScope(AUTH_COOLDOWN_REASONS.method),
           };
-          const operationValue: CanonicalAuthOperationValue = {
-            ...operation,
-            status: "success",
-            result: record(response),
-            errorCode: null,
-            errorMessage: null,
-            updatedAtMs: timestamp,
-          };
+          const operationValue = successfulAuthOperation(
+            operation,
+            response,
+            () => timestamp,
+          );
           try {
             await commitCanonicalPlan(db, {
               expectations: [

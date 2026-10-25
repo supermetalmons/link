@@ -8,6 +8,7 @@ declare const INVITE_ID_RANDOM_LENGTH = 11;
 declare const MAX_RECORD_KEY_BYTES = 768;
 declare function normalizeRecordKey(value: unknown): string | null;
 declare function isSafeRecordKey(value: unknown): value is string;
+export declare function isCanonicalLoginUid(value: unknown): value is string;
 declare function randomAlphanumeric(
   length: number,
   random?: RandomSource,

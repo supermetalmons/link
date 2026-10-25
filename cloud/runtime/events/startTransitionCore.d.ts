@@ -1,9 +1,13 @@
 // Generated from src/events/startTransitionCore.ts. Run npm run generate:runtime.
+import {
+  setEventMatchSlotBlocked,
+  copyEventParticipantToMatchSlot,
+} from "./documents.js";
 import type { EventCommitPlan } from "../eventCommands.js";
 import type { EventOwnershipSnapshot } from "./ownership.js";
 import type {
   EventData,
-  EventParticipant,
+  EventParticipants,
   EventMatch,
   EventRounds,
   MatchResolution,
@@ -23,7 +27,7 @@ export type EventStartTransitionDependencies = {
 export type FixedBracketInput = {
   eventId: string;
   participantIds: string[];
-  participantsById: Record<string, EventParticipant>;
+  participantsById: EventParticipants;
   nowMs: number;
   enableThirdPlace?: boolean;
   random?: () => number;
@@ -74,16 +78,8 @@ declare const createEmptyEventMatch: (matchKey: string) => EventMatch;
 declare const hasThirdPlaceMatchField: (
   event: EventData | null | undefined,
 ) => boolean;
-declare const setMatchSlotBlocked: (
-  match: EventMatch,
-  slot: "host" | "guest",
-  blocked: boolean,
-) => boolean;
-declare const setMatchSlotParticipant: (
-  match: EventMatch,
-  slot: "host" | "guest",
-  participant: EventParticipant | null,
-) => boolean;
+declare const setMatchSlotBlocked: typeof setEventMatchSlotBlocked;
+declare const setMatchSlotParticipant: typeof copyEventParticipantToMatchSlot;
 declare const applyMatchResolution: (
   match: EventMatch | null,
   resolved: MatchResolution | null,
@@ -101,7 +97,7 @@ declare const assignWinnerToNextRound: ({
   roundIndex: number;
   matchIndex: number;
   winnerProfileId: unknown;
-  participantsById: Record<string, EventParticipant>;
+  participantsById: EventParticipants;
   winnerDisqualified?: boolean;
 }) => boolean;
 declare const createInviteForMatch: ({
@@ -113,6 +109,7 @@ declare const createInviteForMatch: ({
   random,
   buildRandomGameSeed,
   ownershipSnapshot,
+  useStoredMatchKey,
 }: {
   eventId: string;
   roundIndex: number | null;
@@ -122,6 +119,7 @@ declare const createInviteForMatch: ({
   random?: () => number;
   buildRandomGameSeed: BuildGameSeed;
   ownershipSnapshot?: EventOwnershipSnapshot | null;
+  useStoredMatchKey?: boolean;
 }) => Promise<boolean>;
 declare const reconcileThirdPlaceMatchReadiness: ({
   eventId,

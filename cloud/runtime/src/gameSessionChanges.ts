@@ -1,4 +1,9 @@
 import type {
+  InviteDocument,
+  InviteFieldChanges,
+} from "./shared/invite-records.js";
+import type { MatchCreationRecord } from "./shared/match-protocol.js";
+import type {
   AutomatchEntryWrite,
   AutomatchTelegramSourceWrite,
   HistoricalMatchDescriptorWrite,
@@ -7,16 +12,8 @@ import type {
   SessionCounter,
   SessionTimestamp,
 } from "./automatchRecords.js";
+export type { InviteFieldChanges } from "./shared/invite-records.js";
 export type { SessionCounter, SessionTimestamp } from "./automatchRecords.js";
-export type InviteFieldChanges = {
-  guestId?: string | null;
-  hostId?: string;
-  hostColor?: "white" | "black";
-  password?: string;
-  automatchStateHint?: "pending" | "matched" | "canceled";
-  automatchCanceledAt?: SessionTimestamp | null;
-  telegramDeliveryVersion?: number;
-};
 export type TelegramSourceChanges = {
   lifecycle?: "pending" | "matched" | "canceled";
   matchedText?: string;
@@ -25,22 +22,21 @@ export type TelegramSourceChanges = {
   generation?: SessionCounter;
 };
 export type TelegramProjectionRequest = {
-  schemaVersion: number;
+  schemaVersion: 1;
   status: "pending";
   requestId: string;
   updatedAtMs: SessionTimestamp;
 };
 export type ProfileProjectionRequest = {
-  schemaVersion: number;
+  schemaVersion: 1;
   status: "pending";
   requestId: string;
   reason: string;
   sourceUpdatedAtMs: SessionTimestamp;
   lastQueuedAtMs: SessionTimestamp;
 };
-export type SessionRecord = Record<string, unknown>;
 export type GameSessionChange =
-  | { kind: "invite-merge"; inviteId: string; value: SessionRecord }
+  | { kind: "invite-merge"; inviteId: string; value: InviteDocument }
   | { kind: "invite-fields"; inviteId: string; value: InviteFieldChanges }
   | {
       kind: "invite-operation";
@@ -58,7 +54,7 @@ export type GameSessionChange =
       kind: "match-create";
       playerId: string;
       matchId: string;
-      value: SessionRecord;
+      value: MatchCreationRecord;
     }
   | {
       kind: "automatch-entry";

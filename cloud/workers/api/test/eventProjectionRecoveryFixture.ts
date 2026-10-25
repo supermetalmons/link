@@ -1,28 +1,128 @@
-import type { EventOutboxReads } from "../src/eventOutboxReadRepository.ts";
+import { retainEventProjectionOutbox } from "../../../runtime/eventProjectionOutboxRecords.js";
+import type {
+  TransactionDecision,
+  TransactionResult,
+} from "../../../runtime/transactions.js";
 import type { EventStore } from "../src/eventStoreContracts.ts";
 import { recoveryScanIdentityFixture } from "./recoveryScanPageFixture.ts";
+import {
+  repairEventProfileProjectionRecord,
+  markInvalidEventTelegramProjectionRecord,
+} from "../src/eventProjectionRecoveryRecords.ts";
 import type {
   EventProjectionRecoveryKind,
+  EventProjectionRecoverySnapshot,
   EventProjectionRecoveryStore,
   EventProjectionRecoveryWriter,
 } from "../src/eventProjectionRecoveryD1.ts";
 
-function recoveryFixture(
-  kind: EventProjectionRecoveryKind,
+export type LegacyEventProjectionTransaction = (
+  eventId: string,
+  updater: (current: unknown) => TransactionDecision<unknown>,
+  signal?: AbortSignal,
+) => Promise<TransactionResult<unknown>>;
+export type LegacyEventProjectionTransactions = {
+  transactEventProfileGameProjectionOutbox: LegacyEventProjectionTransaction;
+  transactEventTelegramProjectionOutbox: LegacyEventProjectionTransaction;
+};
+
+type LegacyRecoveryWriter = { transact: LegacyEventProjectionTransaction };
+export function profileProjectionRepairWriterFixture(
+  writer: LegacyRecoveryWriter,
+): Pick<EventProjectionRecoveryWriter<"profile-game">, "repairInvalid"> {
+  return {
+    repairInvalid: (eventId, input, signal) =>
+      writer.transact(
+        eventId,
+        (current) =>
+          repairEventProfileProjectionRecord(
+            retainEventProjectionOutbox("profile-game", current),
+            input,
+          ),
+        signal,
+      ) as ReturnType<
+        EventProjectionRecoveryWriter<"profile-game">["repairInvalid"]
+      >,
+  };
+}
+export function profileProjectionWriterFixture(
+  writer: LegacyRecoveryWriter &
+    Pick<EventProjectionRecoveryWriter<"profile-game">, "claim">,
+): EventProjectionRecoveryWriter<"profile-game"> {
+  return {
+    claim: (...args) => writer.claim(...args),
+    ...profileProjectionRepairWriterFixture(writer),
+  };
+}
+export function telegramProjectionRepairWriterFixture(
+  writer: LegacyRecoveryWriter,
+): Pick<EventProjectionRecoveryWriter<"telegram">, "markInvalid"> {
+  return {
+    markInvalid: (eventId, nowMs, signal) =>
+      writer.transact(
+        eventId,
+        (current) =>
+          markInvalidEventTelegramProjectionRecord(
+            retainEventProjectionOutbox("telegram", current),
+            eventId,
+            nowMs,
+          ),
+        signal,
+      ) as ReturnType<EventProjectionRecoveryWriter<"telegram">["markInvalid"]>,
+  };
+}
+export function claimRecoveryFixture(
+  writer: EventProjectionRecoveryWriter,
+  snapshot: unknown,
+  requestId: string,
+  expected: number,
+  nowMs: number,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  return Reflect.apply(writer.claim, writer, [
+    snapshot,
+    requestId,
+    expected,
+    nowMs,
+    signal,
+  ]);
+}
+export function projectionSnapshotRecordFixture<
+  Kind extends EventProjectionRecoveryKind,
+>(
+  snapshot: EventProjectionRecoverySnapshot<Kind>,
+  record: unknown,
+): EventProjectionRecoverySnapshot<Kind> {
+  return {
+    ...snapshot,
+    record: retainEventProjectionOutbox(snapshot.kind, record),
+  } as EventProjectionRecoverySnapshot<Kind>;
+}
+function snapshotFixture<Kind extends EventProjectionRecoveryKind>(
+  kind: Kind,
+  eventId: string,
+  record: unknown,
+): EventProjectionRecoverySnapshot<Kind> {
+  return {
+    kind,
+    eventId,
+    record: retainEventProjectionOutbox(kind, record),
+    recordJson: JSON.stringify(record) ?? "null",
+  } as EventProjectionRecoverySnapshot<Kind>;
+}
+function recoveryFixture<Kind extends EventProjectionRecoveryKind>(
+  kind: Kind,
   listDue: (
     beforeMs: number,
     limit: number,
   ) => Promise<Array<{ eventId: string; record: unknown }>>,
-  writer: EventProjectionRecoveryWriter,
-): EventProjectionRecoveryStore {
+  writer: EventProjectionRecoveryWriter<Kind>,
+): EventProjectionRecoveryStore<Kind> {
   return {
     async listDue(beforeMs, limit) {
-      return (await listDue(beforeMs, limit)).map(({ eventId, record }) => ({
-        kind,
-        eventId,
-        record,
-        recordJson: JSON.stringify(record) ?? "null",
-      }));
+      return (await listDue(beforeMs, limit)).map(({ eventId, record }) =>
+        snapshotFixture(kind, eventId, record),
+      );
     },
     async listDuePage(beforeMs, limit, excludedIdentities = []) {
       const entries = (
@@ -33,12 +133,7 @@ function recoveryFixture(
           return identity === null || !excludedIdentities.includes(identity);
         })
         .slice(0, limit)
-        .map(({ eventId, record }) => ({
-          kind,
-          eventId,
-          record,
-          recordJson: JSON.stringify(record) ?? "null",
-        }));
+        .map(({ eventId, record }) => snapshotFixture(kind, eventId, record));
       return {
         entries,
         scannedIdentities: entries.map(({ eventId }) =>
@@ -49,15 +144,18 @@ function recoveryFixture(
     withAdmission: (work) => work(writer),
   };
 }
-
 export function profileGameProjectionRecoveryFixture(
-  source: Pick<
-    EventStore,
-    | "claimEventProfileGameProjectionOutbox"
-    | "transactEventProfileGameProjectionOutbox"
-  > &
-    Pick<EventOutboxReads, "listDueEventProfileGameProjectionOutboxes">,
-): EventProjectionRecoveryStore {
+  source: Pick<EventStore, "claimEventProfileGameProjectionOutbox"> &
+    Pick<
+      LegacyEventProjectionTransactions,
+      "transactEventProfileGameProjectionOutbox"
+    > & {
+      listDueEventProfileGameProjectionOutboxes(
+        beforeMs: number,
+        limit?: number,
+      ): Promise<Array<{ eventId: string; record: unknown }>>;
+    },
+): EventProjectionRecoveryStore<"profile-game"> {
   return recoveryFixture(
     "profile-game",
     (beforeMs, limit) =>
@@ -71,20 +169,25 @@ export function profileGameProjectionRecoveryFixture(
           nowMs,
           signal,
         ),
-      transact: (...args) =>
-        source.transactEventProfileGameProjectionOutbox(...args),
+      ...profileProjectionRepairWriterFixture({
+        transact: (...args) =>
+          source.transactEventProfileGameProjectionOutbox(...args),
+      }),
     },
   );
 }
-
 export function telegramProjectionRecoveryFixture(
-  source: Pick<
-    EventStore,
-    | "claimEventTelegramProjectionOutbox"
-    | "transactEventTelegramProjectionOutbox"
-  > &
-    Pick<EventOutboxReads, "listDueEventTelegramProjectionOutboxes">,
-): EventProjectionRecoveryStore {
+  source: Pick<EventStore, "claimEventTelegramProjectionOutbox"> &
+    Pick<
+      LegacyEventProjectionTransactions,
+      "transactEventTelegramProjectionOutbox"
+    > & {
+      listDueEventTelegramProjectionOutboxes(
+        beforeMs: number,
+        limit?: number,
+      ): Promise<Array<{ eventId: string; record: unknown }>>;
+    },
+): EventProjectionRecoveryStore<"telegram"> {
   return recoveryFixture(
     "telegram",
     (beforeMs, limit) =>
@@ -98,8 +201,10 @@ export function telegramProjectionRecoveryFixture(
           nowMs,
           signal,
         ),
-      transact: (...args) =>
-        source.transactEventTelegramProjectionOutbox(...args),
+      ...telegramProjectionRepairWriterFixture({
+        transact: (...args) =>
+          source.transactEventTelegramProjectionOutbox(...args),
+      }),
     },
   );
 }

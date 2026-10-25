@@ -1,7 +1,12 @@
+import { inviteDocumentFixture } from "./inviteDocumentFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { EventCommand } from "../../../runtime/eventCommands.js";
-import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
+import {
+  decodeEventCompatibilityPlanFixture,
+  eventDocumentFixture,
+  eventRoundFixture,
+} from "./eventCompatibilityFixture.ts";
 import { prepareEventProfileGameProjection } from "../src/eventProfileGameProjectionProducer.ts";
 import type { EventProfileGameProjectionTask } from "../src/profileGameProjectionTasks.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
@@ -27,13 +32,13 @@ test("event preparation emits sparse outbox fields and deduplicated cleanup owne
     {
       readEvent: async (eventId) => {
         assert.equal(eventId, "event-1");
-        return {
+        return eventDocumentFixture({
           participants: {
             source: { profileId: "source-profile" },
             target: { profileId: "target-profile" },
             duplicate: { profileId: "source-profile" },
           },
-        };
+        });
       },
     },
     {
@@ -115,9 +120,10 @@ test("event replacement and deletion preserve accumulated cleanup children", asy
       TELEGRAM_TEST_ENV,
       updates,
       {
-        readEvent: async () => ({
-          participants: { owner: { profileId: previousOwner } },
-        }),
+        readEvent: async () =>
+          eventDocumentFixture({
+            participants: { owner: { profileId: previousOwner } },
+          }),
       },
       {
         createRequestId: () => `request-${++requestIndex}`,
@@ -125,10 +131,16 @@ test("event replacement and deletion preserve accumulated cleanup children", asy
       },
     );
   const first = await prepare([
-    { kind: "event", eventId: "event-1", value: { participants: {} } },
+    {
+      kind: "event",
+      eventId: "event-1",
+      value: eventDocumentFixture({ participants: {} }),
+    },
   ]);
   previousOwner = "owner-b";
-  const second = await prepare(decodeEventUpdates({ "events/event-1": null }));
+  const second = await prepare(
+    decodeEventCompatibilityPlanFixture({ "events/event-1": null }),
+  );
   assert.ok(first);
   assert.ok(second);
   assert.deepEqual(
@@ -168,8 +180,17 @@ test("event replacement and deletion preserve accumulated cleanup children", asy
 
 test("irrelevant commands prepare no profile game projection work", async () => {
   const updates: EventCommand[] = [
-    { kind: "invite", inviteId: "invite-1", value: { status: "active" } },
-    { kind: "event-round", eventId: "event-1", roundKey: "0", value: {} },
+    {
+      kind: "invite",
+      inviteId: "invite-1",
+      value: inviteDocumentFixture({ status: "active" }),
+    },
+    {
+      kind: "event-round",
+      eventId: "event-1",
+      roundKey: "0",
+      value: eventRoundFixture({}),
+    },
   ];
   const prepared = await prepareEventProfileGameProjection(
     TELEGRAM_TEST_ENV,

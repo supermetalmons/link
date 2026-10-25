@@ -1,3 +1,4 @@
+import { eventDocumentFixture } from "./eventCompatibilityFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
@@ -18,12 +19,12 @@ import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const EVENT_ID = "z3oj52Iiime";
 const NOW_MS = 1_000_000;
-const EVENT = {
+const EVENT = eventDocumentFixture({
   status: "scheduled",
   isSundayMons: true,
   startAtMs: 30_000_000,
   participants: { owner: { profileId: "previous-owner" } },
-};
+});
 const UPDATES: EventCommitPlan = [
   {
     kind: "event-field",
@@ -146,7 +147,9 @@ test("the coordinator commits all outboxes before dispatch and shares only each 
   );
   assert.deepEqual(
     committed.flatMap((command) =>
-      command.kind === "progress-outbox" ? [command.value?.sourceKey] : [],
+      command.kind === "progress-outbox"
+        ? [(command.value as { sourceKey?: unknown } | null)?.sourceKey]
+        : [],
     ),
     [`prizes:${EVENT_ID}:30001000`, `reminder:${EVENT_ID}:30001000`],
   );

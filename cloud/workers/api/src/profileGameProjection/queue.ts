@@ -1,3 +1,4 @@
+import { queueFor } from "../queueProducers.ts";
 import { ackQueueMessage, retryQueueMessage } from "../queueMessage.ts";
 import { parseProfileGameProjectionTask } from "../profileGameProjectionTasks.ts";
 import { ProfileGameProjectionLockFailure } from "../profileGameProjectionLocksD1.ts";
@@ -39,7 +40,7 @@ export async function handleProfileGameProjectionMessage(
       task.kind === "event-profile-game-projection" &&
       dependencies.forwardEventTasks
     ) {
-      await env.EVENT_PROFILE_GAME_PROJECTION_QUEUE.send(task);
+      await queueFor(env, "EVENT_PROFILE_GAME_PROJECTION_QUEUE").send(task);
       ackQueueMessage(message, {
         entry: {
           event: "profile_game_projection_queue_processed",
@@ -59,7 +60,7 @@ export async function handleProfileGameProjectionMessage(
       logger,
     );
     if (status === "continued") {
-      await env.PROFILE_GAME_PROJECTION_QUEUE.send(task);
+      await queueFor(env, "PROFILE_GAME_PROJECTION_QUEUE").send(task);
     }
     ackQueueMessage(message, {
       entry: {

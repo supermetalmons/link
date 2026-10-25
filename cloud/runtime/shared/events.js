@@ -16,6 +16,13 @@ exports.THIRD_PLACE_MATCH_KEY =
   exports.EVENT_ETAG_HEADER =
   exports.EVENT_BOOKMARK_HEADER =
   exports.EVENT_POSTPONE_OPTIONS_MINUTES =
+  exports.normalizeEventPrizeId =
+  exports.decodeEventView =
+  exports.decodeEventPrizeAssignmentsView =
+  exports.decodeEventPrizeAssignmentView =
+  exports.decodeEventRoundView =
+  exports.decodeEventMatchView =
+  exports.decodeEventParticipantView =
     void 0;
 exports.eventSnapshotEtag = eventSnapshotEtag;
 exports.eventBookmarkEpoch = eventBookmarkEpoch;
@@ -48,6 +55,56 @@ exports.parseEventMatchKey = parseEventMatchKey;
 exports.resolveEventTelegramAnnouncements = resolveEventTelegramAnnouncements;
 const ids_js_1 = require("./ids.js");
 const profiles_js_1 = require("./profiles.js");
+const event_types_js_1 = require("./event-types.js");
+Object.defineProperty(exports, "THIRD_PLACE_MATCH_KEY", {
+  enumerable: true,
+  get: function () {
+    return event_types_js_1.THIRD_PLACE_MATCH_KEY;
+  },
+});
+var event_views_js_1 = require("./event-views.js");
+Object.defineProperty(exports, "decodeEventParticipantView", {
+  enumerable: true,
+  get: function () {
+    return event_views_js_1.decodeEventParticipantView;
+  },
+});
+Object.defineProperty(exports, "decodeEventMatchView", {
+  enumerable: true,
+  get: function () {
+    return event_views_js_1.decodeEventMatchView;
+  },
+});
+Object.defineProperty(exports, "decodeEventRoundView", {
+  enumerable: true,
+  get: function () {
+    return event_views_js_1.decodeEventRoundView;
+  },
+});
+Object.defineProperty(exports, "decodeEventPrizeAssignmentView", {
+  enumerable: true,
+  get: function () {
+    return event_views_js_1.decodeEventPrizeAssignmentView;
+  },
+});
+Object.defineProperty(exports, "decodeEventPrizeAssignmentsView", {
+  enumerable: true,
+  get: function () {
+    return event_views_js_1.decodeEventPrizeAssignmentsView;
+  },
+});
+Object.defineProperty(exports, "decodeEventView", {
+  enumerable: true,
+  get: function () {
+    return event_views_js_1.decodeEventView;
+  },
+});
+Object.defineProperty(exports, "normalizeEventPrizeId", {
+  enumerable: true,
+  get: function () {
+    return event_views_js_1.normalizeEventPrizeId;
+  },
+});
 const MONS_LINK_ADMIN_USERNAMES = Object.freeze([
   "ivan",
   "meinong",
@@ -71,8 +128,6 @@ function isEventOwnedInvite(value) {
 }
 const EVENT_SCHEMA_VERSION = 2;
 exports.EVENT_SCHEMA_VERSION = EVENT_SCHEMA_VERSION;
-const THIRD_PLACE_MATCH_KEY = "third_place";
-exports.THIRD_PLACE_MATCH_KEY = THIRD_PLACE_MATCH_KEY;
 const MIN_STARTS_IN_MINUTES = 1;
 exports.MIN_STARTS_IN_MINUTES = MIN_STARTS_IN_MINUTES;
 const MAX_STARTS_IN_DAYS = 50;
@@ -362,7 +417,7 @@ function isDisqualifyEventMatchWinnersRequest(value) {
   return (
     isExactRecord(value, ["eventId", "matchKey"]) &&
     (0, ids_js_1.isSafeRecordKey)(value.eventId) &&
-    (value.matchKey === THIRD_PLACE_MATCH_KEY ||
+    (value.matchKey === event_types_js_1.THIRD_PLACE_MATCH_KEY ||
       parseEventMatchKey(value.matchKey) !== null)
   );
 }
@@ -483,7 +538,7 @@ function isDisqualifyEventMatchWinnersResponse(value) {
   const record = value;
   if (
     typeof record.didDisqualify !== "boolean" ||
-    (record.matchKey !== THIRD_PLACE_MATCH_KEY &&
+    (record.matchKey !== event_types_js_1.THIRD_PLACE_MATCH_KEY &&
       parseEventMatchKey(record.matchKey) === null)
   ) {
     return false;

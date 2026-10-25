@@ -6,7 +6,15 @@ import type {
 } from "../transactions.js";
 import { validateTelegramMessageKey } from "./desiredStateCore.js";
 import { normalizeTimestamp } from "./deliveryPolicy.js";
-export type TelegramStoredRecord = Record<string, unknown>;
+import {
+  apiGateDocument,
+  clearTelegramApiGate,
+  controlDocument,
+  updateTelegramControl,
+  type TelegramControlDocument,
+  type TelegramMessageDocument,
+} from "./records.js";
+export type TelegramStoredRecord = TelegramMessageDocument;
 export type TelegramTransactionResult = TransactionResult<TelegramStoredRecord>;
 export type TelegramStorage = {
   readMessage(messageKey: string): Promise<TelegramStoredRecord | null>;
@@ -16,12 +24,12 @@ export type TelegramStorage = {
       current: TelegramStoredRecord | null,
     ) => TransactionDecision<TelegramStoredRecord>,
   ): Promise<TelegramTransactionResult>;
-  readControl(): Promise<TelegramStoredRecord | null>;
+  readControl(): Promise<TelegramControlDocument | null>;
   transactControl(
     updater: (
-      current: TelegramStoredRecord | null,
-    ) => TransactionDecision<TelegramStoredRecord>,
-  ): Promise<TelegramTransactionResult>;
+      current: TelegramControlDocument | null,
+    ) => TransactionDecision<TelegramControlDocument>,
+  ): Promise<TransactionResult<TelegramControlDocument>>;
 };
 
 const normalizeString = (value: unknown): string =>
@@ -31,17 +39,6 @@ const asObject = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
-
-const omitKeys = (
-  value: unknown,
-  keys: readonly string[],
-): Record<string, unknown> => {
-  const output = { ...asObject(value) };
-  for (const key of keys) {
-    delete output[key];
-  }
-  return output;
-};
 
 const createTelegramRepository: (
   input: TelegramStorage,
@@ -66,7 +63,9 @@ const createTelegramRepository: (
       return transactMessage(validateTelegramMessageKey(messageKey), updater);
     },
     async getRetryNotBeforeMs() {
-      const value = Number((await readControl())?.retryNotBeforeMs);
+      const value = Number(
+        readProperty(await readControl(), "retryNotBeforeMs"),
+      );
       return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
     },
     async extendRetryNotBeforeMs(candidateMs) {
@@ -78,15 +77,14 @@ const createTelegramRepository: (
         const control = asObject(current);
         const previous = Number(control.retryNotBeforeMs);
         return {
-          value: {
-            ...control,
+          value: updateTelegramControl(controlDocument(control), {
             retryNotBeforeMs: Math.max(
               Number.isFinite(previous) && previous > 0
                 ? Math.floor(previous)
                 : 0,
               Math.floor(normalizedCandidate),
             ),
-          },
+          }),
           decision: "retry-barrier-extended",
         };
       });
@@ -96,7 +94,9 @@ const createTelegramRepository: (
         });
         throw error;
       }
-      const persistedMs = Number(result.value?.retryNotBeforeMs);
+      const persistedMs = Number(
+        readProperty(result.value, "retryNotBeforeMs"),
+      );
       if (!Number.isFinite(persistedMs) || persistedMs < normalizedCandidate) {
         const error = Object.assign(new Error("retry-barrier-invalid-result"), {
           code: "retry-barrier-invalid-result",
@@ -135,13 +135,15 @@ const createTelegramRepository: (
         }
         if (currentGateOwner === owner) {
           decision = "acquired";
-          return { value: control, decision: "api-gate-reclaimed" };
+          return {
+            value: controlDocument(control),
+            decision: "api-gate-reclaimed",
+          };
         }
         decision = "acquired";
         return {
-          value: {
-            ...control,
-            apiGate: {
+          value: updateTelegramControl(controlDocument(control), {
+            apiGate: apiGateDocument({
               owner,
               messageKey,
               revision,
@@ -156,8 +158,8 @@ const createTelegramRepository: (
               ...(normalizeString(input?.pendingDeleteId)
                 ? { pendingDeleteId: normalizeString(input.pendingDeleteId) }
                 : {}),
-            },
-          },
+            }),
+          }),
           decision,
         };
       });
@@ -166,7 +168,7 @@ const createTelegramRepository: (
         acquired: result.committed && decision === "acquired",
         reason: decision,
         retryNotBeforeMs: normalizeTimestamp(control.retryNotBeforeMs),
-        gate: asObject(control.apiGate),
+        gate: apiGateDocument(control.apiGate),
       };
     },
     async releaseApiGate(ownerInput) {
@@ -182,7 +184,7 @@ const createTelegramRepository: (
         }
         released = true;
         return {
-          value: omitKeys(control, ["apiGate"]),
+          value: clearTelegramApiGate(controlDocument(control)),
           decision: "api-gate-released",
         };
       });
@@ -212,10 +214,12 @@ const createTelegramRepository: (
         }
         applied = true;
         return {
-          value: {
-            ...omitKeys(control, ["apiGate"]),
-            retryNotBeforeMs: Math.max(currentMs, candidateMs),
-          },
+          value: updateTelegramControl(
+            clearTelegramApiGate(controlDocument(control)),
+            {
+              retryNotBeforeMs: Math.max(currentMs, candidateMs),
+            },
+          ),
           decision: "barrier-proof-applied",
         };
       });
@@ -223,7 +227,7 @@ const createTelegramRepository: (
       return {
         applied: result.committed && applied,
         retryNotBeforeMs: normalizeTimestamp(control.retryNotBeforeMs),
-        gate: asObject(control.apiGate),
+        gate: apiGateDocument(control.apiGate),
       };
     },
   };

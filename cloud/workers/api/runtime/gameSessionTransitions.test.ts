@@ -654,9 +654,9 @@ describe("recoverable D1 game-session transitions", () => {
         db: uncertainDb,
         inviteStore: {
           ...source,
-          buildCommitStatements(...args) {
+          buildRetainedCommitStatements(...args) {
             finalizing = true;
-            return source.buildCommitStatements(...args);
+            return source.buildRetainedCommitStatements(...args);
           },
         },
       }).commit(createUpdates(), await leases());

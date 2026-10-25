@@ -1,3 +1,12 @@
+import { inviteHistoricalParticipants } from "@mons/shared/invite-records";
+import {
+  readInviteDocument,
+  inviteMutationParticipants,
+  inviteRematchState,
+  inviteIsEventOwned,
+  createManualInviteDocument,
+  type InviteDocument,
+} from "@mons/shared/invite-records";
 import {
   emptyAutomatchEntryFields,
   type AutomatchEntryFields,
@@ -21,7 +30,6 @@ import {
   type ProposeRematchRequest,
   type ProposeRematchResponse,
 } from "@mons/shared/game-sessions";
-import { isEventOwnedInvite } from "@mons/shared/events";
 import { createGameVariantHelpers } from "@mons/shared/game-variants";
 import { isAutoInviteId, pickHostColor } from "@mons/shared/ids";
 import {
@@ -72,12 +80,6 @@ type GameSessionMutationDependencies = GameSessionMutationRunnerDependencies & {
   random?: () => number;
 };
 
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
 function normalizeString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -124,8 +126,8 @@ function buildMirroredMatch(
   };
 }
 
-function ensureMutableInvite(invite: Record<string, unknown>): void {
-  if (isEventOwnedInvite(invite)) {
+function ensureMutableInvite(invite: InviteDocument): void {
+  if (inviteIsEventOwned(invite)) {
     throw failedPrecondition("event-owned-invite");
   }
 }
@@ -167,12 +169,12 @@ export async function createManualInvite(
           {
             kind: "invite-merge",
             inviteId: request.inviteId,
-            value: {
+            value: createManualInviteDocument({
               version: CONTROLLER_VERSION,
               hostId: identity.uid,
               hostColor,
               guestId: null,
-            },
+            }),
           },
           {
             kind: "match-create",
@@ -263,18 +265,19 @@ export async function joinInvite(
     repository,
     isJoinInviteResponse,
     async () => {
-      const invite = toRecord(
+      const invite = readInviteDocument(
         await repository.readInviteMetadata(request.inviteId),
       );
       if (!invite) {
         throw new AuthApiFailure(404, "not-found", "invite-not-found");
       }
       ensureMutableInvite(invite);
-      const hostUid = readStoredString(invite.hostId);
+      const inviteParticipants = inviteMutationParticipants(invite);
+      const hostUid = inviteParticipants.hostId;
       if (!isSafeRecordKey(hostUid)) {
         throw failedPrecondition("invite-invalid");
       }
-      const currentGuestUid = readStoredString(invite.guestId);
+      const currentGuestUid = inviteParticipants.guestId;
       if (currentGuestUid && !isSafeRecordKey(currentGuestUid)) {
         throw failedPrecondition("invite-invalid");
       }
@@ -423,14 +426,18 @@ export async function joinInvite(
 }
 
 export function nextRematchIndex(
-  invite: Record<string, unknown>,
+  invite: InviteDocument,
   role: "guest" | "host",
 ): number | null {
-  if (rematchSeriesEnded(invite)) {
+  if (rematchSeriesEnded(inviteRematchState(invite))) {
     return null;
   }
-  const hostIndices = parseRematchIndices(invite.hostRematches);
-  const guestIndices = parseRematchIndices(invite.guestRematches);
+  const hostIndices = parseRematchIndices(
+    inviteRematchState(invite).hostRematches,
+  );
+  const guestIndices = parseRematchIndices(
+    inviteRematchState(invite).guestRematches,
+  );
   const own = role === "host" ? hostIndices : guestIndices;
   const other = role === "host" ? guestIndices : hostIndices;
   const common = hostIndices.filter((index) => guestIndices.includes(index));
@@ -449,11 +456,11 @@ export function nextRematchIndex(
 }
 
 function rematchColor(
-  invite: Record<string, unknown>,
+  invite: InviteDocument,
   role: "guest" | "host",
   index: number,
 ): "black" | "white" {
-  const hostColor = invite.hostColor === "black" ? "black" : "white";
+  const hostColor = inviteRematchState(invite).hostColor;
   const guestColor = hostColor === "white" ? "black" : "white";
   if (index % 2 === 0) {
     return role === "host" ? hostColor : guestColor;
@@ -474,7 +481,7 @@ export async function proposeRematch(
     repository,
     isProposeRematchResponse,
     async () => {
-      const invite = toRecord(
+      const invite = readInviteDocument(
         await repository.readInviteMetadata(request.inviteId),
       );
       if (!invite) {
@@ -539,9 +546,9 @@ export async function proposeRematch(
       const opponentField =
         participant.role === "host" ? "guestRematches" : "hostRematches";
       const firstProposal = !parseRematchIndices(
-        invite[opponentField],
+        inviteRematchState(invite)[opponentField],
       ).includes(index);
-      const current = normalizeString(invite[field]);
+      const current = normalizeString(inviteRematchState(invite)[field]);
       const rematches = current ? `${current};${index}` : String(index);
       return {
         response: {
@@ -558,8 +565,8 @@ export async function proposeRematch(
               historicalMatches: [
                 {
                   finalizedAtMs: (dependencies.now || Date.now)(),
-                  guestPlayerId: String(invite.guestId),
-                  hostPlayerId: String(invite.hostId),
+                  guestPlayerId: inviteHistoricalParticipants(invite).guestId,
+                  hostPlayerId: inviteHistoricalParticipants(invite).hostId,
                   matchId:
                     index === 1
                       ? request.inviteId
@@ -606,7 +613,7 @@ export async function endRematchSeries(
     repository,
     isEndRematchResponse,
     async () => {
-      const invite = toRecord(
+      const invite = readInviteDocument(
         await repository.readInviteMetadata(request.inviteId),
       );
       if (!invite) {
@@ -620,8 +627,8 @@ export async function endRematchSeries(
       );
       const field =
         participant.role === "host" ? "hostRematches" : "guestRematches";
-      const current = normalizeString(invite[field]);
-      if (rematchSeriesEnded(invite)) {
+      const current = normalizeString(inviteRematchState(invite)[field]);
+      if (rematchSeriesEnded(inviteRematchState(invite))) {
         return {
           response: {
             ok: true,
@@ -632,8 +639,12 @@ export async function endRematchSeries(
         };
       }
       const rematches = `${current}x`;
-      const latestApprovedIndex = getLatestApprovedRematchIndex(invite);
-      const latestProposedIndex = getLatestRematchIndex(invite);
+      const latestApprovedIndex = getLatestApprovedRematchIndex(
+        inviteRematchState(invite),
+      );
+      const latestProposedIndex = getLatestRematchIndex(
+        inviteRematchState(invite),
+      );
       const matchId =
         latestApprovedIndex === 0
           ? request.inviteId
@@ -651,8 +662,8 @@ export async function endRematchSeries(
               historicalMatches: [
                 {
                   finalizedAtMs: (dependencies.now || Date.now)(),
-                  guestPlayerId: String(invite.guestId),
-                  hostPlayerId: String(invite.hostId),
+                  guestPlayerId: inviteHistoricalParticipants(invite).guestId,
+                  hostPlayerId: inviteHistoricalParticipants(invite).hostId,
                   matchId,
                   source: "transition" as const,
                 },
@@ -687,7 +698,7 @@ export async function ensureParticipantMatch(
     repository,
     isEnsureMatchResponse,
     async () => {
-      const invite = toRecord(
+      const invite = readInviteDocument(
         await repository.readInviteMetadata(request.inviteId),
       );
       if (!invite) {
@@ -695,7 +706,10 @@ export async function ensureParticipantMatch(
       }
       ensureMutableInvite(invite);
       const index = parseInviteMatchIndex(request.inviteId, request.matchId);
-      if (index === null || index > getLatestRematchIndex(invite)) {
+      if (
+        index === null ||
+        index > getLatestRematchIndex(inviteRematchState(invite))
+      ) {
         throw failedPrecondition("match-not-current");
       }
       const participant = await resolveInviteParticipant(

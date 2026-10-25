@@ -1,3 +1,8 @@
+import { timerClaimFixture } from "./matchClaimFixture.ts";
+import {
+  matchDocumentFixture,
+  matchRecordFixture,
+} from "./matchRecordFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MATCH_TIMER_TERMINAL, formatMatchTimer } from "@mons/shared/timers";
@@ -42,12 +47,12 @@ function timerPair(
     pair: {
       ...request,
       revision: 4,
-      playerMatch: {
+      playerMatch: matchDocumentFixture({
         ...player,
         version: 2,
         extra: { retained: ["legacy", null] },
-      },
-      opponentMatch: { ...opponent, version: 2 },
+      }),
+      opponentMatch: matchDocumentFixture({ ...opponent, version: 2 }),
       claim: null,
     },
     player,
@@ -112,11 +117,11 @@ test("timer start accepts concurrent timer changes and preserves non-timer field
   const first = decideMatchStateTimerStartCommit(initial, initial, marker);
   assert.equal(first.changed, true);
   assert.deepEqual(first.playerMatch, {
-    ...initial.pair.playerMatch,
+    ...matchRecordFixture(initial.pair.playerMatch),
     timer: marker.timer,
   });
   assert.equal(initial.player.timer, "");
-  assert.equal(initial.pair.playerMatch?.timer, "");
+  assert.equal(matchRecordFixture(initial.pair.playerMatch)?.timer, "");
 });
 
 test("timer start rejects changed FEN or history from either player", () => {
@@ -202,7 +207,7 @@ test("timer claim accepts the exact deadline and preserves unrelated state", () 
   assert.equal(decision.changed, true);
   assert.equal(decision.claimedAtMs, nowMs);
   assert.deepEqual(decision.playerMatch, {
-    ...current.pair.playerMatch,
+    ...matchRecordFixture(current.pair.playerMatch),
     timer: MATCH_TIMER_TERMINAL,
   });
   assert.deepEqual(decision.claim, {
@@ -220,7 +225,10 @@ test("timer claim accepts the exact deadline and preserves unrelated state", () 
 
 test("timer claim honors pending fences until their exact expiry", () => {
   const current = timerPair({ timer: marker.timer });
-  current.pair.claim = { status: "pending", expiresAtMs: nowMs + 1 };
+  current.pair.claim = timerClaimFixture({
+    status: "pending",
+    expiresAtMs: nowMs + 1,
+  });
   assert.throws(() => decideMatchStateTimerClaim(current, request, nowMs), {
     message: "game state changed.",
   });

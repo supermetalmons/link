@@ -1,3 +1,4 @@
+import type { ApiTransportStatus } from "@mons/shared/api-contracts";
 import { isCanonicalLoginUid } from "./recordKeys.ts";
 import {
   readSocketSession,
@@ -5,7 +6,6 @@ import {
   type SocketSession,
 } from "./socketSession.ts";
 import type { SocketRole } from "./socketTags.ts";
-
 type SocketAdmission = {
   role: SocketRole;
   ip: string;
@@ -38,15 +38,43 @@ export function validateCurrentSocketAdmission({
       channel === "matches"
         ? "Match admission changed"
         : `Invite ${channel} changed`,
-      { status: 409 },
+      {
+        status: 409 satisfies ApiTransportStatus<
+          | "GET /invites/:inviteId/matches/:matchId/socket"
+          | "GET /invites/:inviteId/metadata/socket"
+          | "GET /invites/:inviteId/wagers/socket",
+          "text"
+        >,
+      },
     );
   }
   if (channel === "matches" && !socketSessionCurrent(admission.session))
-    return new Response("Session expired", { status: 401 });
+    return new Response("Session expired", {
+      status: 401 satisfies ApiTransportStatus<
+        | "GET /invites/:inviteId/matches/:matchId/socket"
+        | "GET /invites/:inviteId/metadata/socket"
+        | "GET /invites/:inviteId/wagers/socket",
+        "text"
+      >,
+    });
   if (!canReceive())
-    return new Response("Invite access denied", { status: 403 });
+    return new Response("Invite access denied", {
+      status: 403 satisfies ApiTransportStatus<
+        | "GET /invites/:inviteId/matches/:matchId/socket"
+        | "GET /invites/:inviteId/metadata/socket"
+        | "GET /invites/:inviteId/wagers/socket",
+        "text"
+      >,
+    });
   if (channel !== "matches" && !socketSessionCurrent(admission.session))
-    return new Response("Session expired", { status: 401 });
+    return new Response("Session expired", {
+      status: 401 satisfies ApiTransportStatus<
+        | "GET /invites/:inviteId/matches/:matchId/socket"
+        | "GET /invites/:inviteId/metadata/socket"
+        | "GET /invites/:inviteId/wagers/socket",
+        "text"
+      >,
+    });
   if (capacityFull()) {
     const name =
       channel === "matches"
@@ -55,7 +83,12 @@ export function validateCurrentSocketAdmission({
           ? "Metadata"
           : "Wagers";
     return new Response(`${name} room is full`, {
-      status: 429,
+      status: 429 satisfies ApiTransportStatus<
+        | "GET /invites/:inviteId/matches/:matchId/socket"
+        | "GET /invites/:inviteId/metadata/socket"
+        | "GET /invites/:inviteId/wagers/socket",
+        "text"
+      >,
       headers: { "Retry-After": "60" },
     });
   }

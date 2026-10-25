@@ -1,6 +1,12 @@
 import { isSessionId } from "@mons/shared/session-auth";
 import type { SessionIdentity } from "./sessionAuth.ts";
-import { isParticipantSocketTag } from "./socketTags.ts";
+import {
+  nextSocketAttachmentExpiry,
+  readSocketAttachment,
+  socketAttachmentRequiresSession,
+  socketAttachmentSessionCurrent,
+  unsupportedReactionAttachment,
+} from "./socketAttachmentRecords.ts";
 
 export type SocketSession =
   | { authenticated: false }
@@ -58,26 +64,16 @@ export class SocketSessions {
 
   active(socket: WebSocket): boolean {
     if (socket.readyState !== WebSocket.OPEN) return false;
-    const attachment = socket.deserializeAttachment();
-    if (
-      (attachment?.channel === undefined ||
-        attachment.channel === "reaction") &&
-      attachment?.schemaVersion !== 2
-    ) {
+    const attachment = readSocketAttachment(socket);
+    if (unsupportedReactionAttachment(attachment)) {
       closeSocket(socket, 1008, "Unsupported reaction protocol");
       return false;
     }
-    const authenticated =
-      attachment?.authenticated === true ||
-      this.ctx.getTags(socket).some(isParticipantSocketTag);
+    const authenticated = socketAttachmentRequiresSession(attachment, () =>
+      this.ctx.getTags(socket),
+    );
     if (!authenticated) return true;
-    if (
-      attachment?.authenticated === true &&
-      isSessionId(attachment.sid) &&
-      Number.isSafeInteger(attachment.authExpiresAtMs) &&
-      attachment.authExpiresAtMs > Date.now()
-    )
-      return true;
+    if (socketAttachmentSessionCurrent(attachment)) return true;
     closeSocket(socket, 4001, "Session expired");
     return false;
   }
@@ -95,9 +91,8 @@ export class SocketSessions {
     let next: number | null = null;
     for (const socket of this.ctx.getWebSockets()) {
       if (!this.active(socket)) continue;
-      const attachment = socket.deserializeAttachment();
-      if (attachment?.authenticated === true)
-        next = Math.min(next ?? Infinity, attachment.authExpiresAtMs);
+      const attachment = readSocketAttachment(socket);
+      next = nextSocketAttachmentExpiry(next, attachment);
     }
     return next;
   }

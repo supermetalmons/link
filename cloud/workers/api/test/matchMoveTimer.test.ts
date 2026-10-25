@@ -1,3 +1,4 @@
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type {
@@ -42,12 +43,12 @@ function harness({
       signal.throwIfAborted();
       steps.push("invite");
       onRead();
-      return {
+      return retainedInviteSourceFixture({
         hostId: "actor",
         guestId: "opponent",
         hostRematches: "1",
         guestRematches: "1",
-      };
+      });
     },
     async readProfileOwnershipSnapshot() {
       throw new Error("unexpected-ownership-read");

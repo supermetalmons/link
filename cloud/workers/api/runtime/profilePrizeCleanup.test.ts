@@ -38,7 +38,9 @@ const input = { profileId, eventId, prizeId };
 
 function assignment(
   overrides: Partial<EventPrizeAssignmentRecord> = {},
-): EventPrizeAssignmentRecord {
+): EventPrizeAssignmentRecord & {
+  futureMetadata: { edition: number; labels: string[] };
+} {
   return {
     eventId,
     profileId,

@@ -1,15 +1,19 @@
-import {
-  isMineRockResponse,
-  type MineRockRequest,
-  type MineRockResponse,
-} from "@mons/shared/mining";
+import type {
+  ApiHttpUrl,
+  ApiRequest,
+  ApiResponse,
+} from "@mons/shared/api-contracts";
+import { isMineRockResponse } from "@mons/shared/mining";
 import {
   authenticatedJsonRequest,
   type ApiErrorPolicy,
   type AuthTokenProvider,
 } from "./apiTransport";
+type MineRockRequest = ApiRequest<"POST /mining/rock">;
+type MineRockResponse = ApiResponse<"POST /mining/rock">;
 
-const MINING_API_URL = "https://api.mons.link/mining/rock";
+const MINING_API_URL =
+  "https://api.mons.link/mining/rock" satisfies ApiHttpUrl<"POST /mining/rock">;
 const MINING_API_TIMEOUT_MS = 45_000;
 const MINING_API_MAX_RESPONSE_BYTES = 64 * 1024;
 

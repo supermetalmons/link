@@ -74,11 +74,22 @@ export class SessionStorageError extends Error {
 
 function isSessionState(value: unknown): value is SessionState {
   if (!value || typeof value !== "object") return false;
-  const state = value as SessionState;
+  const state = value as {
+    generation?: unknown;
+    revision?: unknown;
+    initialized?: unknown;
+    session?: {
+      sessionId?: unknown;
+      refreshSecret?: unknown;
+      revokeSecret?: unknown;
+      uid?: unknown;
+    } | null;
+    revocations?: unknown;
+  };
   return (
     isSessionId(state.generation) &&
     Number.isSafeInteger(state.revision) &&
-    state.revision >= 0 &&
+    (state.revision as number) >= 0 &&
     typeof state.initialized === "boolean" &&
     (state.session === null ||
       (typeof state.session === "object" &&
@@ -89,12 +100,15 @@ function isSessionState(value: unknown): value is SessionState {
           (typeof state.session.uid === "string" &&
             /^[A-Za-z0-9]{28}$/.test(state.session.uid))))) &&
     Array.isArray(state.revocations) &&
-    state.revocations.every(
-      (entry) =>
+    state.revocations.every((value: unknown) => {
+      const entry = value as
+        { sessionId?: unknown; revokeSecret?: unknown } | null | undefined;
+      return (
         entry &&
         isSessionId(entry.sessionId) &&
-        isSessionSecret(entry.revokeSecret),
-    )
+        isSessionSecret(entry.revokeSecret)
+      );
+    })
   );
 }
 

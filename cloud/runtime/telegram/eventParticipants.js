@@ -9,6 +9,11 @@ exports.resolveParticipantToken =
 const values_js_1 = require("./values.js");
 const telegramDisplay_js_1 = require("../telegramDisplay.js");
 const telegramEmojiData_js_1 = require("../telegramEmojiData.js");
+const documents_js_1 = require("../events/documents.js");
+const participantFields = (value) => {
+  const retained = value;
+  return retained;
+};
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 const normalizeNumberOrNull = (value) => {
@@ -49,13 +54,18 @@ const getParticipantRecords = (eventData) => {
         typeof participant === "object"
       );
     })
-    .map(([profileId, participant]) => ({ profileId, participant }))
+    .map(([profileId, participant]) => ({
+      profileId,
+      participant: (0, documents_js_1.readEventParticipantDocument)(
+        participant,
+      ),
+    }))
     .sort((left, right) => {
       const leftJoined = normalizePositiveNumberOrNull(
-        left.participant.joinedAtMs,
+        participantFields(left.participant).joinedAtMs,
       );
       const rightJoined = normalizePositiveNumberOrNull(
-        right.participant.joinedAtMs,
+        participantFields(right.participant).joinedAtMs,
       );
       const leftJoinedValue = leftJoined === null ? 0 : leftJoined;
       const rightJoinedValue = rightJoined === null ? 0 : rightJoined;
@@ -69,10 +79,16 @@ exports.getParticipantRecords = getParticipantRecords;
 const buildParticipantRenderKey = (eventData) =>
   getParticipantRecords(eventData)
     .map(({ profileId, participant }) => {
-      const emojiId = normalizePositiveNumberOrNull(participant.emojiId);
-      const joinedAtMs = normalizePositiveNumberOrNull(participant.joinedAtMs);
-      const username = normalizeString(participant.username);
-      const displayName = normalizeString(participant.displayName);
+      const emojiId = normalizePositiveNumberOrNull(
+        participantFields(participant).emojiId,
+      );
+      const joinedAtMs = normalizePositiveNumberOrNull(
+        participantFields(participant).joinedAtMs,
+      );
+      const username = normalizeString(participantFields(participant).username);
+      const displayName = normalizeString(
+        participantFields(participant).displayName,
+      );
       return [
         profileId,
         username,

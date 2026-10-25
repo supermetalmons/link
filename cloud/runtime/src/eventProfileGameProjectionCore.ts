@@ -1,3 +1,16 @@
+import {
+  createEventProjection,
+  type ProfileGameProjectionDocument,
+} from "./profileGameProjectionRecords.js";
+import {
+  eventState,
+  eventParticipants,
+  eventParticipantState,
+  plainEventParticipantEntries,
+  createEventParticipantsDocument,
+  copyEventParticipant,
+} from "./events/documents.js";
+import type { EventParticipants } from "./events/model.js";
 import type { EventData, EventParticipant } from "./events/model.js";
 
 import { NAVIGATION_SORT_BUCKETS as SORT_BUCKETS } from "@mons/shared/navigation";
@@ -14,12 +27,10 @@ import {
   mapEventStatusToNavigationStatus,
   normalizeString,
 } from "./events/eventProjectionModel.js";
-export type EventProjectionWrite = {
-  type: "delete" | "merge";
-  profileId: string;
-  eventId: string;
-  data?: Record<string, unknown>;
-};
+export type EventProjectionWrite = { profileId: string; eventId: string } & (
+  | { type: "delete"; data?: never }
+  | { type: "merge"; data: ProfileGameProjectionDocument }
+);
 export type EventProjectionSourceFence = {
   eventId: string;
   generation: number;
@@ -114,25 +125,19 @@ const createEventProfileGameProjectionCore: Signature_createEventProfileGameProj
       throw failure;
     };
 
-    const participantEntries = (
-      participants: Record<string, EventParticipant>,
-    ) =>
-      Object.entries(participants).flatMap(([key, value]) =>
-        value && typeof value === "object" && !Array.isArray(value)
-          ? [
-              {
-                key: normalizeString(key),
-                loginUid: normalizeString(value.loginUid),
-                participant: value,
-                profileId:
-                  normalizeString(value.profileId) || normalizeString(key),
-              },
-            ]
-          : [],
-      );
+    const participantEntries = (participants: EventParticipants) =>
+      plainEventParticipantEntries(participants).map(([key, participant]) => {
+        const value = eventParticipantState(participant);
+        return {
+          key: normalizeString(key),
+          loginUid: normalizeString(value.loginUid),
+          participant,
+          profileId: normalizeString(value.profileId) || normalizeString(key),
+        };
+      });
 
     const readOwnershipPlan = async (
-      participants: Record<string, EventParticipant>,
+      participants: EventParticipants,
       cleanupOwnerProfileIds: string[],
     ) => {
       const entries = participantEntries(participants);
@@ -183,10 +188,12 @@ const createEventProfileGameProjectionCore: Signature_createEventProfileGameProj
       const canonicalParticipants: Record<string, EventParticipant> = {};
       entries.forEach((entry, index) => {
         const ownerProfileId = ownerProfileIds[index];
-        canonicalParticipants[ownerProfileId] = {
-          ...entry.participant,
-          profileId: ownerProfileId,
-        };
+        canonicalParticipants[ownerProfileId] = copyEventParticipant(
+          entry.participant,
+          {
+            profileId: ownerProfileId,
+          },
+        );
       });
       const allProfileIds = new Set([
         ...entries.flatMap(({ key, profileId }) => [key, profileId]),
@@ -206,7 +213,9 @@ const createEventProfileGameProjectionCore: Signature_createEventProfileGameProj
               Boolean(profileId && !currentOwnerIds.has(profileId)),
           ),
         ],
-        canonicalParticipants,
+        canonicalParticipants: createEventParticipantsDocument(
+          canonicalParticipants,
+        ),
         ownerProfileIds,
       };
     };
@@ -235,9 +244,7 @@ const createEventProfileGameProjectionCore: Signature_createEventProfileGameProj
           throw new TypeError("event projection source fence is invalid");
         }
         const participants =
-          eventData?.participants && typeof eventData.participants === "object"
-            ? eventData.participants
-            : {};
+          eventParticipants(eventData) || createEventParticipantsDocument();
         const normalizedCleanupOwnerProfileIds = Array.from(
           new Set(
             cleanupOwnerProfileIds
@@ -255,7 +262,7 @@ const createEventProfileGameProjectionCore: Signature_createEventProfileGameProj
         );
 
         const status = mapEventStatusToNavigationStatus(
-          normalizeString(eventData?.status),
+          normalizeString(eventState(eventData).status),
         );
         const previewParticipants = buildPreviewParticipants(
           canonicalParticipants,
@@ -268,7 +275,7 @@ const createEventProfileGameProjectionCore: Signature_createEventProfileGameProj
               type: "merge",
               profileId: ownerProfileId,
               eventId,
-              data: {
+              data: createEventProjection({
                 schemaVersion: 1,
                 source: "event-projector",
                 entityType: "event",
@@ -281,25 +288,27 @@ const createEventProfileGameProjectionCore: Signature_createEventProfileGameProj
                 ),
                 ownerProfileId,
                 startAt:
-                  typeof eventData.startAtMs === "number"
-                    ? toTimestampMillis(eventData.startAtMs)
+                  typeof eventState(eventData).startAtMs === "number"
+                    ? toTimestampMillis(eventState(eventData).startAtMs)
                     : null,
                 updatedAt: toTimestampMillis(
-                  typeof eventData.updatedAtMs === "number"
-                    ? eventData.updatedAtMs
+                  typeof eventState(eventData).updatedAtMs === "number"
+                    ? eventState(eventData).updatedAtMs
                     : now(),
                 ),
                 endedAt:
-                  typeof eventData.endedAtMs === "number"
-                    ? toTimestampMillis(eventData.endedAtMs)
+                  typeof eventState(eventData).endedAtMs === "number"
+                    ? toTimestampMillis(eventState(eventData).endedAtMs)
                     : null,
                 participantCount: previewParticipants.length,
                 participantPreview: previewParticipants.slice(
                   0,
                   NAVIGATION_PARTICIPANT_PREVIEW_LIMIT,
                 ),
-                winnerDisplayName: normalizeString(eventData.winnerDisplayName),
-              },
+                winnerDisplayName: normalizeString(
+                  eventState(eventData).winnerDisplayName,
+                ),
+              }),
             });
           }
         }
@@ -334,9 +343,7 @@ const createEventProfileGameProjectionCore: Signature_createEventProfileGameProj
           return event;
         });
         getOwnerProfileIds(
-          liveData?.participants && typeof liveData.participants === "object"
-            ? liveData.participants
-            : {},
+          eventParticipants(liveData) || createEventParticipantsDocument(),
         ).forEach((profileId) => cleanupIds.add(profileId));
         const result = await projectEvent(
           eventId,

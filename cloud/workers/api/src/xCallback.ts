@@ -1,3 +1,4 @@
+import type { ApiQuery, ApiTransportStatus } from "@mons/shared/api-contracts";
 import {
   X_REDIRECT_RESULT_PARAMS,
   normalizeServerXConsentSource,
@@ -22,7 +23,6 @@ import {
 import { authMutationsDisabled } from "./authPolicy.ts";
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 import { safeXReturnUrl, X_FLOW_ID_PATTERN, X_FLOW_TTL_MS } from "./xFlow.ts";
-
 const X_CALLBACK_PROCESSING_LEASE_MS = 60_000;
 
 const RESPONSE_HEADERS = {
@@ -40,7 +40,11 @@ export type XCallbackDependencyOverrides = {
   logFailure?: (kind: string) => void;
 };
 
-function textResponse(body: string, status: number, headers?: HeadersInit) {
+function textResponse(
+  body: string,
+  status: ApiTransportStatus<"GET /auth/x/callback", "text">,
+  headers?: HeadersInit,
+) {
   return new Response(body, {
     status,
     headers: {
@@ -77,7 +81,7 @@ function redirectResponse({
     consentSource,
   );
   return new Response(null, {
-    status: 302,
+    status: 302 satisfies ApiTransportStatus<"GET /auth/x/callback", "empty">,
     headers: { ...RESPONSE_HEADERS, Location: target.toString() },
   });
 }
@@ -125,7 +129,10 @@ export async function handleXCallback(
   if (request.method !== "GET") {
     return textResponse("Method Not Allowed", 405, { Allow: "GET" });
   }
-  const flowId = new URL(request.url).searchParams.get("state")?.trim() || "";
+  const flowId: NonNullable<ApiQuery<"GET /auth/x/callback">["state"]> =
+    new URL(request.url).searchParams
+      .get("state" satisfies keyof ApiQuery<"GET /auth/x/callback">)
+      ?.trim() || "";
   if (!X_FLOW_ID_PATTERN.test(flowId)) {
     return textResponse("Missing or invalid state.", 400);
   }
@@ -283,11 +290,17 @@ export async function handleXCallback(
   }
 
   const url = new URL(request.url);
-  const oauthError = url.searchParams.get("error")?.trim() || "";
+  const oauthError: NonNullable<ApiQuery<"GET /auth/x/callback">["error"]> =
+    url.searchParams
+      .get("error" satisfies keyof ApiQuery<"GET /auth/x/callback">)
+      ?.trim() || "";
   if (oauthError) {
     return failFlow(flow, `x-oauth-${oauthError}`.slice(0, 120));
   }
-  const code = url.searchParams.get("code")?.trim() || "";
+  const code: NonNullable<ApiQuery<"GET /auth/x/callback">["code"]> =
+    url.searchParams
+      .get("code" satisfies keyof ApiQuery<"GET /auth/x/callback">)
+      ?.trim() || "";
   if (!code) {
     return failFlow(flow, "x-oauth-missing-code");
   }

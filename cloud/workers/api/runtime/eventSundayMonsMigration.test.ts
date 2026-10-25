@@ -1,3 +1,4 @@
+import { eventIntentFixture } from "../test/transitionIntentFixture.ts";
 import { patchEventOwnedPaths } from "./eventD1Fixture.ts";
 import { env } from "cloudflare:workers";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
@@ -69,7 +70,7 @@ async function pendingTransition(eventId: string) {
   try {
     await createEventTransitionIntent(
       db,
-      {
+      eventIntentFixture({
         schemaVersion: 1,
         transitionId: `transition-${eventId}`,
         eventId,
@@ -78,7 +79,7 @@ async function pendingTransition(eventId: string) {
         rtdbEffects: { "invites/invite-one/status": "active" },
         createdAtMs: 400,
         updatedAtMs: 400,
-      },
+      }),
       { admission },
     );
   } finally {

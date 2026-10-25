@@ -1,3 +1,4 @@
+import { matchDocumentFixture } from "../test/matchRecordFixture.ts";
 import { INVITE_METADATA_SOCKET_PROTOCOL } from "@mons/shared/invite-metadata";
 import { INVITE_WAGERS_SOCKET_PROTOCOL } from "@mons/shared/invite-wagers";
 import { MATCH_SYNC_SOCKET_PROTOCOL } from "@mons/shared/match-sync";
@@ -45,7 +46,7 @@ async function install(room: Room, source: Source) {
     mutable.wagerReader = async () => [];
     const readMatch = (playerId: string) => {
       source.reads++;
-      return {
+      return matchDocumentFixture({
         version: 2,
         color: playerId === "host-login" ? "white" : "black",
         emojiId: 1,
@@ -55,7 +56,7 @@ async function install(room: Room, source: Source) {
         status: "",
         flatMovesString: "",
         timer: "",
-      };
+      });
     };
     mutable.matchSync.readSyncState = async (input) => {
       source.syncReads++;

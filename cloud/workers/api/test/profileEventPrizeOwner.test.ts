@@ -1,3 +1,5 @@
+import { withdrawalFixture } from "./withdrawalStorageFixture.ts";
+import { eventDocumentFixture } from "./eventCompatibilityFixture.ts";
 import type { EventPrizeAssignmentRecord } from "../../../runtime/eventReads.js";
 import type { EventCommitPlan } from "../../../runtime/eventCommands.js";
 import { encodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
@@ -71,7 +73,7 @@ function prizeOwnership(
   };
 }
 
-const emptyEvent = { participants: {} };
+const emptyEvent = eventDocumentFixture({ participants: {} });
 const mergedPrizeOwnership = prizeOwnership([
   ["source-profile", "target-profile"],
 ]);
@@ -149,12 +151,12 @@ test("uses injected canonical withdrawals when filtering prize projections", asy
     },
     state: createState(values),
     readEventPrizeWithdrawals: async () => ({
-      [prizeId]: {
+      [prizeId]: withdrawalFixture({
         assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
         eventId,
         prizeId,
         status: "completed",
-      },
+      }),
     }),
   });
 

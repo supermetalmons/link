@@ -8,6 +8,8 @@ exports.readExistingProjectionRecords =
   exports.READ_RETRY_DELAY_MS =
   exports.READ_RETRY_ATTEMPTS =
     void 0;
+const profileGameProjectionRecords_js_1 = require("./profileGameProjectionRecords.js");
+const invite_records_1 = require("@mons/shared/invite-records");
 const stateCompatibility_js_1 = require("./stateCompatibility.js");
 const profileMergeTargets_js_1 = require("./profileMergeTargets.js");
 const rematches_1 = require("@mons/shared/rematches");
@@ -120,31 +122,6 @@ const buildInviteProjectionOwnerPlan = (
   };
 };
 exports.buildInviteProjectionOwnerPlan = buildInviteProjectionOwnerPlan;
-const getStoredProjectionOwnerRole = (profileId, data) => {
-  const ownerRole = (0, gameProjectionModel_js_1.normalizeString)(
-    data && data.ownerRole,
-  );
-  if (ownerRole === "host" || ownerRole === "guest") {
-    return ownerRole;
-  }
-  const ownerProfileId =
-    (0, gameProjectionModel_js_1.normalizeString)(
-      data && data.ownerProfileId,
-    ) || profileId;
-  if (
-    ownerProfileId ===
-    (0, gameProjectionModel_js_1.normalizeString)(data && data.hostProfileId)
-  ) {
-    return "host";
-  }
-  if (
-    ownerProfileId ===
-    (0, gameProjectionModel_js_1.normalizeString)(data && data.guestProfileId)
-  ) {
-    return "guest";
-  }
-  return null;
-};
 const findFreshestSourceProjectionData = ({
   existingRecords,
   ownerContext,
@@ -158,9 +135,8 @@ const findFreshestSourceProjectionData = ({
       continue;
     }
     const data = existing.data;
-    const storedOwnerLoginId = (0, gameProjectionModel_js_1.normalizeString)(
-      data.ownerLoginId,
-    );
+    const storedOwnerLoginId = (0,
+    profileGameProjectionRecords_js_1.projectionOwnerLoginId)(data);
     const ownerLoginId = (0, gameProjectionModel_js_1.normalizeString)(
       ownerContext.ownerLoginId,
     );
@@ -173,28 +149,22 @@ const findFreshestSourceProjectionData = ({
     }
     if (
       (!storedOwnerLoginId || !ownerLoginId) &&
-      getStoredProjectionOwnerRole(existing.profileId, data) !==
-        ownerContext.ownerRole
+      (0, profileGameProjectionRecords_js_1.projectionOwnerRole)(
+        existing.profileId,
+        data,
+      ) !== ownerContext.ownerRole
     ) {
       continue;
     }
     if (
       requiresResolvedOpponentEmoji &&
-      (0, gameProjectionModel_js_1.getEmojiId)(
-        data.opponentEmoji ?? data.opponentEmojiId,
-      ) === null
+      (0, profileGameProjectionRecords_js_1.projectionOpponentEmoji)(data) ===
+        null
     ) {
       continue;
     }
-    const freshnessMs = [
-      data.updatedAt,
-      data.lastEventAt,
-      data.listSortAt,
-      data.createdAt,
-    ].reduce((current, value) => {
-      const millis = (0, gameProjectionModel_js_1.readTimestampMillis)(value);
-      return Number.isFinite(millis) ? Math.max(current, millis) : current;
-    }, Number.NEGATIVE_INFINITY);
+    const freshnessMs = (0,
+    profileGameProjectionRecords_js_1.projectionFreshness)(data);
     if (!freshest || freshnessMs > freshestMs) {
       freshest = data;
       freshestMs = freshnessMs;
@@ -340,12 +310,14 @@ const createProfileGamesProjectionCore = ({
       retry(() => repository.readInviteMetadata(normalizedInviteId)),
       retry(() => repository.readAutomatchEntry(normalizedInviteId)),
     ]);
-    const hostLoginId = (0, gameProjectionModel_js_1.normalizeString)(
-      inviteData && inviteData.hostId,
+    const participants = (0, invite_records_1.inviteTrimmedParticipants)(
+      inviteData,
     );
-    const guestLoginId = (0, gameProjectionModel_js_1.normalizeString)(
-      inviteData && inviteData.guestId,
+    const inviteProjection = (0, invite_records_1.inviteProjectionState)(
+      inviteData,
     );
+    const hostLoginId = participants.hostId || null;
+    const guestLoginId = participants.guestId || null;
     const loginUids = Array.from(
       new Set([hostLoginId, guestLoginId].filter((value) => Boolean(value))),
     );
@@ -377,11 +349,11 @@ const createProfileGamesProjectionCore = ({
       inviteId: normalizedInviteId,
       queueValue: automatchData.isTruthy,
       hasGuest: !!guestLoginId,
-      storedStateHint: inviteData ? inviteData.automatchStateHint : null,
+      storedStateHint: inviteProjection.automatchStateHint,
     });
     const latestMatchId = (0, rematches_1.deriveLatestMatchId)(
       normalizedInviteId,
-      inviteData,
+      inviteData ? (0, invite_records_1.inviteRematchState)(inviteData) : null,
       options.latestMatchIdHint || null,
     );
     const latestMatchRatingCompleted =
@@ -477,10 +449,7 @@ const createProfileGamesProjectionCore = ({
       sortBucket,
       isPendingAutomatch: status === "pending",
       automatchStateHint,
-      automatchCanceledAt:
-        typeof (inviteData && inviteData.automatchCanceledAt) === "number"
-          ? inviteData.automatchCanceledAt
-          : null,
+      automatchCanceledAt: inviteProjection.automatchCanceledAt,
       latestMatchId,
     };
     for (const ownerProfileId of ownerProfileIds) {
@@ -506,16 +475,10 @@ const createProfileGamesProjectionCore = ({
         ? readProfileSummary(ownership, ownerContext.opponentProfileId)
         : null;
       const existingOpponentName = (0,
-      gameProjectionModel_js_1.normalizeString)(
-        existingData
-          ? (existingData.opponentName ?? existingData.opponentDisplayName)
-          : null,
-      );
-      const sourceOpponentName = (0, gameProjectionModel_js_1.normalizeString)(
-        sourceProjectionData
-          ? (sourceProjectionData.opponentName ??
-              sourceProjectionData.opponentDisplayName)
-          : null,
+      profileGameProjectionRecords_js_1.projectionOpponentName)(existingData);
+      const sourceOpponentName = (0,
+      profileGameProjectionRecords_js_1.projectionOpponentName)(
+        sourceProjectionData,
       );
       const opponentName =
         opponentProfileSummary &&
@@ -541,16 +504,11 @@ const createProfileGamesProjectionCore = ({
             ? summary.emoji
             : null;
       }
-      const existingOpponentEmoji = (0, gameProjectionModel_js_1.getEmojiId)(
-        existingData
-          ? (existingData.opponentEmoji ?? existingData.opponentEmojiId)
-          : null,
-      );
-      const sourceOpponentEmoji = (0, gameProjectionModel_js_1.getEmojiId)(
-        sourceProjectionData
-          ? (sourceProjectionData.opponentEmoji ??
-              sourceProjectionData.opponentEmojiId)
-          : null,
+      const existingOpponentEmoji = (0,
+      profileGameProjectionRecords_js_1.projectionOpponentEmoji)(existingData);
+      const sourceOpponentEmoji = (0,
+      profileGameProjectionRecords_js_1.projectionOpponentEmoji)(
+        sourceProjectionData,
       );
       const opponentEmoji =
         opponentEmojiFromProfile !== null
@@ -592,22 +550,24 @@ const createProfileGamesProjectionCore = ({
       gameProjectionModel_js_1.fingerprintForProjection)(
         projectionFingerprintPayload,
       );
-      const previousFingerprint =
-        existingData && typeof existingData.lastEventFingerprint === "string"
-          ? existingData.lastEventFingerprint
-          : null;
+      const previousFingerprint = (0,
+      profileGameProjectionRecords_js_1.projectionLastFingerprint)(
+        existingData,
+      );
       if (previousFingerprint === nextFingerprint) {
         skippedCount += 1;
         continue;
       }
       const canonicalListSortMs = existingData
-        ? (0, gameProjectionModel_js_1.readTimestampMillis)(
-            existingData.listSortAt,
+        ? (0, profileGameProjectionRecords_js_1.projectionTime)(
+            existingData,
+            "listSortAt",
           )
         : null;
       const sourceListSortMs = (0,
-      gameProjectionModel_js_1.readTimestampMillis)(
-        sourceProjectionData && sourceProjectionData.listSortAt,
+      profileGameProjectionRecords_js_1.projectionTime)(
+        sourceProjectionData,
+        "listSortAt",
       );
       const existingListSortMs = Number.isFinite(canonicalListSortMs)
         ? canonicalListSortMs
@@ -623,20 +583,25 @@ const createProfileGamesProjectionCore = ({
         existingListSortMs,
       });
       const existingCreatedAt =
-        (0, gameProjectionModel_js_1.readTimestampMillis)(
-          existingData && existingData.createdAt,
+        (0, profileGameProjectionRecords_js_1.projectionTime)(
+          existingData,
+          "createdAt",
         ) ??
-        (0, gameProjectionModel_js_1.readTimestampMillis)(
-          sourceProjectionData && sourceProjectionData.createdAt,
+        (0, profileGameProjectionRecords_js_1.projectionTime)(
+          sourceProjectionData,
+          "createdAt",
         );
       const existingEndedAt =
-        (0, gameProjectionModel_js_1.readTimestampMillis)(
-          existingData && existingData.endedAt,
+        (0, profileGameProjectionRecords_js_1.projectionTime)(
+          existingData,
+          "endedAt",
         ) ??
-        (0, gameProjectionModel_js_1.readTimestampMillis)(
-          sourceProjectionData && sourceProjectionData.endedAt,
+        (0, profileGameProjectionRecords_js_1.projectionTime)(
+          sourceProjectionData,
+          "endedAt",
         );
-      const projectionData = {
+      const projectionData = (0,
+      profileGameProjectionRecords_js_1.createGameProjection)({
         ...commonProjection,
         ownerProfileId,
         ownerRole: ownerContext.ownerRole,
@@ -665,22 +630,29 @@ const createProfileGamesProjectionCore = ({
         lastEventReason:
           (0, gameProjectionModel_js_1.normalizeString)(reason) || null,
         lastEventAt: toTimestampMillis(nowMs),
-      };
+      });
       const type =
         options.preserveListSortAt === true
           ? existingRecord
             ? "update"
             : "create"
           : "merge";
-      writes.push({
-        type,
-        profileId: ownerProfileId,
-        inviteId: normalizedInviteId,
-        data: projectionData,
-        ...(type === "update"
-          ? { expectedVersion: existingRecord.version }
-          : {}),
-      });
+      writes.push(
+        type === "update"
+          ? {
+              type,
+              profileId: ownerProfileId,
+              inviteId: normalizedInviteId,
+              data: projectionData,
+              expectedVersion: existingRecord.version,
+            }
+          : {
+              type,
+              profileId: ownerProfileId,
+              inviteId: normalizedInviteId,
+              data: projectionData,
+            },
+      );
       setCount += 1;
     }
     if (sourceCleanupSafe) {

@@ -1,7 +1,7 @@
+import type { ApiResponse } from "@mons/shared/api-contracts";
 import {
   INVITE_WAGERS_MAX_MESSAGE_BYTES,
   isReadInviteWagersResponse,
-  type ReadInviteWagersResponse,
 } from "@mons/shared/invite-wagers";
 import { isInviteMetadataSnapshot } from "@mons/shared/invite-metadata";
 import { AuthApiFailure } from "./authErrors.ts";
@@ -14,6 +14,7 @@ import {
   resolveInviteReadRole,
   type InviteReadRouteDependencies,
 } from "./inviteReadRoute.ts";
+type ReadInviteWagersResponse = ApiResponse<"GET /invites/:inviteId/wagers">;
 
 export type InviteWagersRouteDependencies = InviteReadRouteDependencies & {
   room?: Pick<InviteReactions, "readWagers" | "fetch">;

@@ -1,5 +1,5 @@
 // Generated from src/events/ownership.ts. Run npm run generate:runtime.
-import type { EventData, EventParticipant } from "./model.js";
+import type { EventData, EventParticipants } from "./model.js";
 export type EventOwnershipProfile = {
   aura: string;
   emoji: number | string;
@@ -47,7 +47,7 @@ type Signature_canonicalizeEventParticipants = (
   snapshot: EventOwnershipSnapshot,
 ) => {
   didChange: boolean;
-  participantsById: Record<string, EventParticipant>;
+  participantsById: EventParticipants;
 };
 type Signature_directRequesterParticipation = (
   event: EventData,

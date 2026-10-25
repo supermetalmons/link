@@ -72,7 +72,9 @@ exports.validateTelegramMessageKey =
   exports.TELEGRAM_LEASE_TTL_MS =
   exports.TELEGRAM_DESTINATIONS =
     void 0;
+const records_js_1 = require("./records.js");
 const crypto = __importStar(require("node:crypto"));
+const records_js_2 = require("./records.js");
 const deliveryCleanup_js_1 = require("./deliveryCleanup.js");
 const deliveryControl_js_1 = require("./deliveryControl.js");
 const deliveryDesired_js_1 = require("./deliveryDesired.js");
@@ -259,7 +261,7 @@ const createTelegramDeliveryEngine = ({
         barrierRetryNotBeforeMs: input.barrierRetryNotBeforeMs,
       });
       if (!barrierProof.applied) {
-        if ((0, deliveryState_js_1.normalizeString)(barrierProof.gate?.owner)) {
+        if ((0, records_js_2.telegramApiGateOwner)(barrierProof.gate)) {
           return { status: "settled", reason: "stale-rate-limit-proof" };
         }
         const error = Object.assign(new Error("rate-limit-proof-not-applied"), {
@@ -282,11 +284,14 @@ const createTelegramDeliveryEngine = ({
     ) {
       return desiredResult;
     }
-    const record = (0, deliveryState_js_1.asObject)(
+    const record = (0, records_js_1.messageDocument)(
       await repository.getMessage(effectiveInput.messageKey),
     );
     const pendingDelete = (0, deliveryState_js_1.readPendingDelete)(
-      (0, values_js_1.readProperty)(record.delivery, "pendingDelete"),
+      (0, values_js_1.readProperty)(
+        (0, records_js_1.messageDeliveryDocument)(record),
+        "pendingDelete",
+      ),
     );
     if (!pendingDelete.present) {
       return desiredResult;
@@ -301,9 +306,7 @@ const createTelegramDeliveryEngine = ({
       await scheduleExactRetry({
         messageKey: effectiveInput.messageKey,
         revision:
-          (0, deliveryState_js_1.normalizeString)(
-            (0, values_js_1.readProperty)(record.desired, "revision"),
-          ) ||
+          (0, records_js_1.messageDesiredRevision)(record) ||
           (0, deliveryState_js_1.normalizeString)(
             effectiveInput.requestedRevision,
           ) ||
@@ -334,11 +337,14 @@ const createTelegramDeliveryEngine = ({
     });
     let cleanupScheduled = false;
     if (cleanupResult.status === "settled") {
-      const refreshed = (0, deliveryState_js_1.asObject)(
+      const refreshed = (0, records_js_1.messageDocument)(
         await repository.getMessage(effectiveInput.messageKey),
       );
       const nextPendingDelete = (0, deliveryState_js_1.readPendingDelete)(
-        (0, values_js_1.readProperty)(refreshed.delivery, "pendingDelete"),
+        (0, values_js_1.readProperty)(
+          (0, records_js_1.messageDeliveryDocument)(refreshed),
+          "pendingDelete",
+        ),
       );
       if (nextPendingDelete.present) {
         const nextPendingDeleteId = (0,
@@ -346,9 +352,7 @@ const createTelegramDeliveryEngine = ({
         await scheduleExactRetry({
           messageKey: effectiveInput.messageKey,
           revision:
-            (0, deliveryState_js_1.normalizeString)(
-              (0, values_js_1.readProperty)(refreshed.desired, "revision"),
-            ) ||
+            (0, records_js_1.messageDesiredRevision)(refreshed) ||
             (0, deliveryState_js_1.normalizeString)(
               effectiveInput.requestedRevision,
             ) ||

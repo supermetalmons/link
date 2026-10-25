@@ -1,3 +1,4 @@
+import type { GameplayPath } from "@mons/shared/api-contracts";
 import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
 import { authJsonResponse, getAuthCorsHeaders } from "./authHttp.ts";
 import { authenticatedPost } from "./authenticatedPost.ts";
@@ -23,7 +24,6 @@ import { MatchStateD1Failure } from "./matchStateD1.ts";
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 import type { WorkerExecutionContext } from "./sessionAuth.ts";
 import { WagerClientUpdateRequired } from "./wagerReservationRuntime.ts";
-
 export { cancelAutomatch } from "./gameplayRoutes/automatch.ts";
 export {
   removeNavigationGame,
@@ -175,7 +175,11 @@ async function handleGameplayRequest(
       await boundRoute.beforeBody?.();
       const prepared = await prepareGameplayRoute(request, boundRoute);
       const response = await prepared.execute();
-      return authJsonResponse(response, 200, corsHeaders);
+      return authJsonResponse<`POST ${GameplayPath}`, 200>(
+        response,
+        200,
+        corsHeaders,
+      );
     },
   );
 }

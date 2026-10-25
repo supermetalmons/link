@@ -1,4 +1,8 @@
 import {
+  eventDocumentFixture,
+  eventRecordFixture,
+} from "../test/eventCompatibilityFixture.ts";
+import {
   COMPRESSED_PRIZES_EVENT_ID,
   LEGACY_CORE_PRIZES_EVENT_ID,
 } from "@mons/shared/event-prizes";
@@ -153,7 +157,7 @@ function fixture(
         {
           kind: "event",
           eventId,
-          value: {
+          value: eventDocumentFixture({
             schemaVersion: 2,
             eventId,
             status: "scheduled",
@@ -171,7 +175,7 @@ function fixture(
               matches: false,
               results: false,
             },
-          },
+          }),
         },
         ...(prizeId
           ? [
@@ -281,8 +285,8 @@ describe("leave event D1 integration", () => {
       removedProfileId: guestId,
     });
     const snapshot = await state.repository.readEventSnapshot(eventId);
-    expect(snapshot.event?.status).toBe("scheduled");
-    expect(snapshot.event?.participants).toEqual({
+    expect(eventRecordFixture(snapshot.event).status).toBe("scheduled");
+    expect(eventRecordFixture(snapshot.event).participants).toEqual({
       [creatorId]: state.participants[creatorId],
     });
     expect(snapshot.prizeSelections).toEqual({});
@@ -367,10 +371,12 @@ describe("leave event D1 integration", () => {
         error: "failed-precondition",
       });
       const snapshot = await state.repository.readEventSnapshot(eventId);
-      expect(snapshot.event?.status).toBe("active");
-      expect(snapshot.event?.participants).toEqual(state.participants);
+      expect(eventRecordFixture(snapshot.event).status).toBe("active");
+      expect(eventRecordFixture(snapshot.event).participants).toEqual(
+        state.participants,
+      );
       expect(snapshot.prizeSelections).toEqual({});
-      expect(snapshot.event?.rounds).toMatchObject({
+      expect(eventRecordFixture(snapshot.event).rounds).toMatchObject({
         0: {
           matches: {
             "0_0": {

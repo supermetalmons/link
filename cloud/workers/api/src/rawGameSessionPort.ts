@@ -1,8 +1,9 @@
+import type { InviteDocument } from "@mons/shared/invite-records";
 import type { GameSessionChange } from "../../../runtime/gameSessionChanges.js";
-import type { RecoveryScanPage } from "./recoveryScanPage.ts";
 import type {
   AutomatchOutboxClaimSnapshot,
   AutomatchOutboxRecoveryPage,
+  AutomatchRecordValue,
 } from "./automatchD1/types.ts";
 import type {
   TransactionDecision,
@@ -14,7 +15,7 @@ export type RawAutomatchProjectionPort = {
   readAutomatchTelegramSource(
     inviteId: string,
     signal?: AbortSignal,
-  ): Promise<unknown>;
+  ): Promise<AutomatchRecordValue<"telegramAutomatches">>;
   transactAutomatchTelegramSource(
     inviteId: string,
     update: (current: unknown) => TransactionDecision<unknown>,
@@ -23,7 +24,7 @@ export type RawAutomatchProjectionPort = {
   readAutomatchTelegramOutbox(
     inviteId: string,
     signal?: AbortSignal,
-  ): Promise<unknown>;
+  ): Promise<AutomatchRecordValue<"telegramProjectionOutbox/automatch">>;
   transactAutomatchTelegramOutbox(
     inviteId: string,
     update: (current: unknown) => TransactionDecision<unknown>,
@@ -35,7 +36,7 @@ export type RawAutomatchProjectionPort = {
     expectedUpdatedAtMs: number,
     nowMs: number,
     signal?: AbortSignal,
-    snapshot?: AutomatchOutboxClaimSnapshot,
+    snapshot?: AutomatchOutboxClaimSnapshot<"telegramProjectionOutbox/automatch">,
   ): Promise<boolean>;
   acknowledgeAutomatchTelegramOutbox(
     inviteId: string,
@@ -46,17 +47,20 @@ export type RawAutomatchProjectionPort = {
     nowMs: number,
     limit: number,
     signal?: AbortSignal,
-  ): Promise<Record<string, unknown> | null>;
+  ): Promise<Record<
+    string,
+    AutomatchRecordValue<"telegramProjectionOutbox/automatch">
+  > | null>;
   listDueAutomatchTelegramOutboxesPage(
     nowMs: number,
     limit: number,
     excludedIdentities?: readonly string[],
     signal?: AbortSignal,
-  ): Promise<AutomatchOutboxRecoveryPage>;
+  ): Promise<AutomatchOutboxRecoveryPage<"telegramProjectionOutbox/automatch">>;
   readAutomatchProfileOutbox(
     inviteId: string,
     signal?: AbortSignal,
-  ): Promise<unknown>;
+  ): Promise<AutomatchRecordValue<"profileGameProjectionOutbox/automatch">>;
   transactAutomatchProfileOutbox(
     inviteId: string,
     update: (current: unknown) => TransactionDecision<unknown>,
@@ -68,7 +72,7 @@ export type RawAutomatchProjectionPort = {
     expectedLastQueuedAtMs: number,
     nowMs: number,
     signal?: AbortSignal,
-    snapshot?: AutomatchOutboxClaimSnapshot,
+    snapshot?: AutomatchOutboxClaimSnapshot<"profileGameProjectionOutbox/automatch">,
   ): Promise<boolean>;
   acknowledgeAutomatchProfileOutbox(
     inviteId: string,
@@ -85,46 +89,59 @@ export type RawAutomatchProjectionPort = {
     beforeMs: number,
     limit: number,
     signal?: AbortSignal,
-  ): Promise<Record<string, unknown> | null>;
+  ): Promise<Record<
+    string,
+    AutomatchRecordValue<"profileGameProjectionOutbox/automatch">
+  > | null>;
   listDueAutomatchProfileOutboxesPage(
     beforeMs: number,
     limit: number,
     excludedIdentities?: readonly string[],
     signal?: AbortSignal,
-  ): Promise<AutomatchOutboxRecoveryPage>;
+  ): Promise<
+    AutomatchOutboxRecoveryPage<"profileGameProjectionOutbox/automatch">
+  >;
   listMalformedAutomatchProfileOutboxes(
     limit: number,
     signal?: AbortSignal,
-  ): Promise<Record<string, unknown> | null>;
+  ): Promise<Record<
+    string,
+    AutomatchRecordValue<"profileGameProjectionOutbox/automatch">
+  > | null>;
   listMalformedAutomatchProfileOutboxesPage(
     limit: number,
     excludedIdentities?: readonly string[],
     signal?: AbortSignal,
-  ): Promise<RecoveryScanPage<Record<string, unknown> | null>>;
+  ): Promise<
+    AutomatchOutboxRecoveryPage<"profileGameProjectionOutbox/automatch">
+  >;
 };
 
 export type RawGameSessionPort = RawAutomatchProjectionPort & {
   readInviteMetadata(
     inviteId: string,
     signal?: AbortSignal,
-  ): Promise<Record<string, unknown> | null>;
+  ): Promise<InviteDocument | null>;
   readInviteMetadataMany(
     inviteIds: readonly string[],
     signal?: AbortSignal,
-  ): Promise<Array<Record<string, unknown> | null>>;
-  readAutomatchEntry(inviteId: string, signal?: AbortSignal): Promise<unknown>;
+  ): Promise<Array<InviteDocument | null>>;
+  readAutomatchEntry(
+    inviteId: string,
+    signal?: AbortSignal,
+  ): Promise<AutomatchRecordValue<"automatch">>;
   listAutomatchEntriesByLogin(
     uid: string,
     limit: number,
     signal?: AbortSignal,
-  ): Promise<Record<string, unknown> | null>;
+  ): Promise<Record<string, AutomatchRecordValue<"automatch">> | null>;
   readFirstAutomatchEntry(
     signal?: AbortSignal,
-  ): Promise<Record<string, unknown> | null>;
+  ): Promise<Record<string, AutomatchRecordValue<"automatch">> | null>;
   readMutationReceipt(
     operationId: string,
     signal?: AbortSignal,
-  ): Promise<unknown>;
+  ): Promise<AutomatchRecordValue<"gameplayMutationReceipts">>;
   commitSessionChanges(
     changes: readonly GameSessionChange[],
     signal?: AbortSignal,

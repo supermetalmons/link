@@ -1,3 +1,4 @@
+import { matchDocumentFixture } from "./matchRecordFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
@@ -30,9 +31,14 @@ function pair(input: MatchStatePairRequest): MatchStatePair {
   return {
     ...input,
     revision: 1,
-    playerMatch: { playerId: input.playerId, epoch: input.epoch },
+    playerMatch: matchDocumentFixture({
+      playerId: input.playerId,
+      epoch: input.epoch,
+    }),
     opponentMatch:
-      input.opponentId === null ? null : { playerId: input.opponentId },
+      input.opponentId === null
+        ? null
+        : matchDocumentFixture({ playerId: input.opponentId }),
     claim: null,
   };
 }

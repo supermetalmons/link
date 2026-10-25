@@ -1,3 +1,8 @@
+import { projectionDocumentFixture } from "../test/profileDataBoundaryFixture.ts";
+import {
+  createWithdrawalStorageFixture as createD1EventPrizeWithdrawalStore,
+  withdrawalFixture,
+} from "../test/withdrawalStorageFixture.ts";
 import { getEventPrizeDefinition } from "@mons/shared/event-prizes";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
@@ -18,7 +23,6 @@ import {
   removeCanonicalAuthRecoveryLoginUid,
 } from "../src/authRecovery.ts";
 import { readEventRuntimeControl } from "../src/eventD1.ts";
-import { createD1EventPrizeWithdrawalStore } from "../src/eventPrizeWithdrawalD1.ts";
 import { createD1AuthRecoveryPrizeStore } from "../src/eventRepository.ts";
 import { CanonicalProfileConflict } from "../src/profileCanonicalD1.ts";
 import {
@@ -68,7 +72,7 @@ const logger = { error() {}, info() {} };
 let fixtureSequence = 0;
 
 function gameData(projectionId: string, ownerProfileId: string) {
-  return {
+  return projectionDocumentFixture({
     entityType: "game",
     inviteId: projectionId,
     kind: "direct",
@@ -84,7 +88,7 @@ function gameData(projectionId: string, ownerProfileId: string) {
     opponentEmoji: null,
     automatchStateHint: null,
     isPendingAutomatch: false,
-  };
+  });
 }
 
 function observeTargetReads(
@@ -1017,7 +1021,11 @@ describe("canonical auth recovery with D1 storage", () => {
                 async get(readEventId: string, readPrizeId: string) {
                   reads++;
                   if (reads === 2) await complete();
-                  return withdrawals.get(readEventId, readPrizeId);
+                  const current = await withdrawals.get(
+                    readEventId,
+                    readPrizeId,
+                  );
+                  return current === null ? null : withdrawalFixture(current);
                 },
               },
             }

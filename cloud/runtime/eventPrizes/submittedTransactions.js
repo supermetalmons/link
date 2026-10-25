@@ -8,23 +8,23 @@ exports.waitForSubmittedTransactionStatus =
   exports.deserializePersistedSubmittedTransaction =
   exports.buildSubmittedTransaction =
     void 0;
+const records_js_1 = require("./records.js");
 const errors_js_1 = require("./errors.js");
 const withdrawalRepository_js_1 = require("./withdrawalRepository.js");
 const solana_js_1 = require("./solana.js");
-const normalizeString = (value) =>
-  typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 class DefinitiveSubmittedTransactionFailure extends Error {}
 const isDefinitiveSubmittedTransactionFailure = (error) =>
   error instanceof DefinitiveSubmittedTransactionFailure;
 exports.isDefinitiveSubmittedTransactionFailure =
   isDefinitiveSubmittedTransactionFailure;
 const deserializePersistedSubmittedTransaction = (umi, withdrawal) => {
-  const encoded = normalizeString(withdrawal?.signedTransactionBase64);
-  const transactionSignature = normalizeString(
-    withdrawal?.transactionSignature,
+  const evidence = (0, records_js_1.withdrawalSubmissionStrings)(withdrawal);
+  const encoded = evidence.signedTransactionBase64;
+  const transactionSignature = evidence.transactionSignature;
+  const blockhash = evidence.blockhash;
+  const lastValidBlockHeight = (0, records_js_1.withdrawalLastValidBlockHeight)(
+    withdrawal,
   );
-  const blockhash = normalizeString(withdrawal?.blockhash);
-  const lastValidBlockHeight = Number(withdrawal?.lastValidBlockHeight);
   if (
     !encoded ||
     !transactionSignature ||

@@ -1,24 +1,23 @@
+import { readMatchCreationInput } from "./matchRecordCodec.ts";
+import { readRetainedTimerClaim } from "./matchClaimCodec.ts";
 import {
   record,
   canonical,
   digest,
-  digestInput,
+  eventIntentPayloadDigest,
+  eventIntentInviteChanges,
+  prepareEventIntentEnvelope,
+  completeEventIntentEnvelope,
   effectLayout,
-  preparedEventEffects,
 } from "./eventTransitionCodec.ts";
-import { STATE_EFFECTS_FIELD } from "./stateCompatibility.ts";
 import { normalizeHistoricalMatchRecord } from "@mons/shared/game-sessions";
 import type {
   EventInviteSourceMutation,
   EventTransitionIntent,
 } from "./eventD1.ts";
 import type { MatchStatePort } from "./repositoryContracts.ts";
-import { decodeEventUpdates } from "./eventCompatibilityCodec.ts";
 import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
-import type {
-  MatchStateEventEffectsRequest,
-  MatchStateRecord,
-} from "./matchStateTypes.ts";
+import type { MatchStateEventEffectsRequest } from "./matchStateTypes.ts";
 import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 import {
   EVENT_RECEIPT_ADMISSION_KIND,
@@ -81,7 +80,7 @@ async function applyTypedMatchEffects(
     group(matchId).creations!.push({
       playerId,
       matchId,
-      value: value as MatchStateRecord,
+      value: readMatchCreationInput(value),
       marker: await digest({
         transitionId: intent.transitionId,
         payloadDigest: intent.payloadDigest,
@@ -103,7 +102,7 @@ async function applyTypedMatchEffects(
       matchId: effect.matchId,
       playerId: value.playerId,
       opponentId: value.opponentId,
-      claim: value as MatchStateRecord,
+      claim: readRetainedTimerClaim(value),
     });
   }
   for (const effect of otherEffects) {
@@ -153,27 +152,19 @@ export async function prepareInviteEventIntent(
   }
   const inviteMutations: EventInviteSourceMutation[] =
     await createInviteSourceD1Store(db).prepareChanges(
-      decodeEventUpdates(intent[STATE_EFFECTS_FIELD]).flatMap((command) =>
-        command.kind === "invite"
-          ? [{ inviteId: command.inviteId, value: command.value }]
-          : [],
-      ),
+      eventIntentInviteChanges(intent),
       intent.createdAtMs,
       signal,
     );
-  const next: Omit<V2Intent, "payloadDigest"> = {
-    ...intent,
-    schemaVersion: 2,
-    sourceEpoch: control.epoch,
+  const next = prepareEventIntentEnvelope(
+    intent,
+    control.epoch,
     inviteMutations,
-    [STATE_EFFECTS_FIELD]: preparedEventEffects(
-      intent[STATE_EFFECTS_FIELD],
-      intent.createdAtMs,
-    ),
-  };
-  const prepared = { ...next, payloadDigest: await digest(digestInput(next)) };
-  effectLayout(prepared);
-  return prepared;
+  );
+  return completeEventIntentEnvelope(
+    next,
+    await eventIntentPayloadDigest(next),
+  );
 }
 
 async function readEffectReceipt(
@@ -221,7 +212,7 @@ async function applyAdmittedInviteEventEffects(
   signal?: AbortSignal,
   prepareMatchPresentations?: PrepareMatchPresentations,
 ): Promise<void> {
-  if ((await digest(digestInput(intent))) !== intent.payloadDigest) {
+  if ((await eventIntentPayloadDigest(intent)) !== intent.payloadDigest) {
     throw new Error("event-transition-payload-conflict");
   }
   const { creations, otherEffects, discovery } = effectLayout(intent);
@@ -315,7 +306,7 @@ async function applyAdmittedInviteEventEffects(
     try {
       await db.batch([
         ...guards(),
-        ...store.buildRevisionGuardStatements(intent.inviteMutations),
+        ...store.buildRetainedRevisionGuardStatements(intent.inviteMutations),
       ]);
     } catch (error) {
       if (await hasCommittedEffects()) return;
@@ -349,7 +340,7 @@ async function applyAdmittedInviteEventEffects(
       await db.batch([
         ...guards(),
         ...eventTransitionReceiptGuardStatements(db, expectedReceipt),
-        ...store.buildRevisionGuardStatements(intent.inviteMutations),
+        ...store.buildRetainedRevisionGuardStatements(intent.inviteMutations),
         ...buildMatchPresentationRegistrationStatements(
           db,
           registrations,
@@ -367,7 +358,7 @@ async function applyAdmittedInviteEventEffects(
             intent.payloadDigest,
             intent.createdAtMs,
           ),
-        ...store.buildCommitStatements(
+        ...store.buildRetainedCommitStatements(
           intent.inviteMutations,
           intent.createdAtMs,
         ),

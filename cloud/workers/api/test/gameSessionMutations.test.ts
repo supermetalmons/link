@@ -1,3 +1,6 @@
+import { inviteDocumentFixture } from "./inviteDocumentFixture.ts";
+import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
+import { matchDocumentFixture } from "./matchRecordFixture.ts";
 import {
   attachGameplayTestPorts,
   type LegacyGameplayTestMethods,
@@ -302,10 +305,12 @@ function repository(initial: Record<string, unknown> = {}, nowMs = 1_000) {
     LegacyGameplayTestMethods &
     Pick<GameSessionRepository, "readInviteMetadata"> = {
     readInviteMetadata: async (inviteId) =>
-      (values.get(`invites/${inviteId}`) ?? null) as Record<
-        string,
-        unknown
-      > | null,
+      retainedInviteSourceFixture(
+        (values.get(`invites/${inviteId}`) ?? null) as Record<
+          string,
+          unknown
+        > | null,
+      ),
     getStatePath: async (path) => {
       assert.ok(!/^invites\/[^/]+$/.test(path), "use readInviteMetadata");
       return values.get(path) ?? null;
@@ -371,7 +376,10 @@ test("does not advance beyond the canonical rematch index range", () => {
   const maximum = String(Number.MAX_SAFE_INTEGER);
   assert.equal(
     nextRematchIndex(
-      { hostRematches: maximum, guestRematches: maximum },
+      inviteDocumentFixture({
+        hostRematches: maximum,
+        guestRematches: maximum,
+      }),
       "host",
     ),
     null,
@@ -560,7 +568,7 @@ test("uses only canonical D1 evidence for alternate invite roles", async () => {
 
   canonicalHost.readInviteMetadata = async (inviteId) => {
     assert.equal(inviteId, "abcdefghijk");
-    return base["invites/abcdefghijk"];
+    return retainedInviteSourceFixture(base["invites/abcdefghijk"]);
   };
   assert.equal(
     (
@@ -1426,7 +1434,9 @@ test("batches rematch participants in actor order and replays without reading ag
     const batches: Array<
       Parameters<GameSessionRepository["readMatchRecords"]>[0]
     > = [];
-    const opponentMatch = match(role === "host" ? "white" : "black");
+    const opponentMatch = matchDocumentFixture(
+      match(role === "host" ? "white" : "black"),
+    );
     state.repository.readMatchRecords = async (inputs) => {
       batches.push([...inputs]);
       return [null, opponentMatch];

@@ -1,9 +1,30 @@
+import {
+  type EventMatchesDocument,
+  eventState,
+  eventParticipantState,
+  eventMatchState,
+  eventRoundAt,
+  eventRoundMatches,
+  eventMatchAt,
+  eventPlacementMatches,
+  eventMatchEntries,
+  eventParticipantAt,
+  eventParticipantEntries,
+  eventParticipantJoinedOrder,
+  eventPrizeAssignments,
+  createEventParticipantsDocument,
+  copyEventParticipant,
+  copyEventParticipants,
+  readEventDocument,
+} from "./documents.js";
 import type { EventRuntimeStore, EventCommitPlan } from "../eventCommands.js";
+import type { WithdrawalDocument } from "../eventPrizes/records.js";
 import type { EventPrizeAssignmentRecord } from "../eventReads.js";
 import type { EventOwnershipSnapshot } from "./ownership.js";
 import type {
   EventData,
   EventParticipant,
+  EventParticipants,
   EventMatch,
   EventRounds,
   EventPlacement,
@@ -19,10 +40,7 @@ import type {
 import { eventField } from "../eventCommands.js";
 
 import { resolveMatchWinner as defaultResolveMatchWinner } from "../matchOutcome.js";
-import {
-  buildEventPrizeAssignments,
-  normalizeEventPrizeAssignments,
-} from "../eventPrizeAwards.js";
+import { buildEventPrizeAssignments } from "../eventPrizeAwards.js";
 import { getEventPrizeDefinitions } from "@mons/shared/event-prizes";
 import {
   filterProjectableEventPrizeAssignments,
@@ -74,12 +92,12 @@ export type EventBracketDependencies = {
   ): Promise<{ winner: "player" | "opponent" | null; reason?: string }>;
   readEventPrizeWithdrawals?(
     eventId: string,
-  ): Promise<Record<string, Record<string, unknown>>>;
+  ): Promise<Record<string, WithdrawalDocument>>;
 };
 export type EventPrizePlacementsInput = {
   event: EventData | null;
   rounds: EventRounds;
-  participantsById: Record<string, EventParticipant>;
+  participantsById: EventParticipants;
   thirdPlaceMatch?: EventMatch | null;
 };
 type PrizeProjectionInput = {
@@ -111,7 +129,7 @@ const createEventBracketRuntime = (
   const canonicalizePrizePlacementsAndSelections = (
     placements: EventPlacement[],
     value: Record<string, string> | null | undefined,
-    participantsById: Record<string, EventParticipant>,
+    participantsById: EventParticipants,
     ownershipSnapshot: EventOwnershipSnapshot | null,
   ) => {
     const selections =
@@ -126,16 +144,21 @@ const createEventBracketRuntime = (
     if (!ownershipSnapshot) throw profileOwnershipUnavailable();
     const placementReferences = placementProfileIds.map((profileId) => {
       const participant =
-        participantsById?.[profileId] ||
-        Object.values(participantsById || {}).find(
-          (candidate) =>
-            candidate &&
-            typeof candidate === "object" &&
-            normalizeString(candidate.profileId) === profileId,
-        );
+        eventParticipantAt(participantsById, profileId) ||
+        eventParticipantEntries(participantsById)
+          .map(([, value]) => value)
+          .find(
+            (candidate) =>
+              candidate &&
+              typeof candidate === "object" &&
+              normalizeString(eventParticipantState(candidate).profileId) ===
+                profileId,
+          );
       return {
         profileId,
-        loginUid: normalizeString(participant && participant.loginUid),
+        loginUid: normalizeString(
+          participant && eventParticipantState(participant).loginUid,
+        ),
       };
     });
     const canonicalPlacementProfileIds = resolveOwnedProfileReferences(
@@ -147,14 +170,16 @@ const createEventBracketRuntime = (
       profileId: canonicalPlacementProfileIds[index],
     }));
     const placementProfileIdSet = new Set(placementProfileIds);
-    const participantEntries = Object.entries(participantsById || {});
+    const participantEntries = eventParticipantEntries(participantsById);
     const participantProfileIds = ([profileId, participant]: [
       string,
       EventParticipant,
     ]) =>
       [
         normalizeString(profileId),
-        normalizeString(participant && participant.profileId),
+        normalizeString(
+          participant && eventParticipantState(participant).profileId,
+        ),
       ].filter(Boolean);
     const isPlacementParticipant = ([profileId, participant]: [
       string,
@@ -162,7 +187,9 @@ const createEventBracketRuntime = (
     ]) =>
       placementProfileIdSet.has(normalizeString(profileId)) ||
       placementProfileIdSet.has(
-        normalizeString(participant && participant.profileId),
+        normalizeString(
+          participant && eventParticipantState(participant).profileId,
+        ),
       );
     const placementParticipantEntries = participantEntries.filter(
       isPlacementParticipant,
@@ -187,7 +214,11 @@ const createEventBracketRuntime = (
       ),
     );
     const canonicalSelections = canonicalizeEventPrizeSelections(
-      { participants: Object.fromEntries(placementParticipantEntries) },
+      readEventDocument({
+        participants: createEventParticipantsDocument(
+          Object.fromEntries(placementParticipantEntries),
+        ),
+      })!,
       placementSelections,
       ownershipSnapshot,
     ).selectionsByProfileId;
@@ -195,14 +226,6 @@ const createEventBracketRuntime = (
       placements: canonicalPlacements,
       selections: canonicalSelections,
     };
-  };
-
-  const toFiniteInteger = (value: unknown, fallback = 0) => {
-    const numeric = typeof value === "number" ? value : Number(value);
-    if (!Number.isFinite(numeric)) {
-      return fallback;
-    }
-    return Math.floor(numeric);
   };
 
   const reconcileBracketMatchReadiness = (
@@ -231,7 +254,7 @@ const createEventBracketRuntime = (
     winnerProfileId,
     eventEnded,
   }: {
-    participantsById: Record<string, EventParticipant>;
+    participantsById: EventParticipants;
     rounds: EventRounds;
     winnerProfileId: unknown;
     eventEnded: boolean;
@@ -242,13 +265,17 @@ const createEventBracketRuntime = (
     > = {};
     const sortedRoundIndexes = getSortedRoundIndexes(rounds);
     for (const roundIndex of sortedRoundIndexes) {
-      const round = rounds[String(roundIndex)];
-      if (!round || !round.matches || typeof round.matches !== "object") {
+      const round = eventRoundAt(rounds, String(roundIndex));
+      if (
+        !round ||
+        !eventRoundMatches(round) ||
+        typeof eventRoundMatches(round) !== "object"
+      ) {
         continue;
       }
-      const matchKeys = getSortedMatchKeys(round.matches);
+      const matchKeys = getSortedMatchKeys(eventRoundMatches(round));
       for (const matchKey of matchKeys) {
-        const match = round.matches[matchKey];
+        const match = eventMatchAt(eventRoundMatches(round), matchKey);
         if (!match || typeof match !== "object") {
           continue;
         }
@@ -256,31 +283,29 @@ const createEventBracketRuntime = (
         if (!isMatchResolved(match)) {
           continue;
         }
-        const loserProfileId = normalizeString(match && match.loserProfileId);
+        const loserProfileId = normalizeString(
+          match && eventMatchState(match).loserProfileId,
+        );
         if (!loserProfileId || eliminationsByProfileId[loserProfileId]) {
           continue;
         }
         eliminationsByProfileId[loserProfileId] = {
           eliminatedRoundIndex: roundIndex,
           eliminatedByProfileId:
-            normalizeString(match && match.winnerProfileId) || null,
+            normalizeString(match && eventMatchState(match).winnerProfileId) ||
+            null,
         };
       }
     }
 
     const normalizedWinnerProfileId = normalizeStringOrNull(winnerProfileId);
-    const nextParticipants: Record<string, EventParticipant> = {};
+    const replacements = new Map<string, EventParticipant>();
     let didChange = false;
-    for (const [profileId, participant] of Object.entries(
-      participantsById || {},
+    for (const [profileId, participant] of eventParticipantEntries(
+      participantsById,
     )) {
-      if (!participant || typeof participant !== "object") {
-        nextParticipants[profileId] = participant;
-        continue;
-      }
-
       const elimination = eliminationsByProfileId[profileId] || null;
-      let state = "active";
+      let state: "active" | "winner" | "eliminated" = "active";
       let eliminatedRoundIndex = null;
       let eliminatedByProfileId = null;
 
@@ -296,32 +321,35 @@ const createEventBracketRuntime = (
         eliminatedByProfileId = elimination.eliminatedByProfileId;
       }
 
+      const participantState = eventParticipantState(participant);
       const normalizedCurrentEliminatedRoundIndex =
-        typeof participant.eliminatedRoundIndex === "number"
-          ? Math.floor(participant.eliminatedRoundIndex)
+        typeof participantState.eliminatedRoundIndex === "number"
+          ? Math.floor(participantState.eliminatedRoundIndex)
           : null;
       const normalizedCurrentEliminatedByProfileId = normalizeStringOrNull(
-        participant.eliminatedByProfileId,
+        eventParticipantState(participant).eliminatedByProfileId,
       );
       if (
-        participant.state !== state ||
+        eventParticipantState(participant).state !== state ||
         normalizedCurrentEliminatedRoundIndex !== eliminatedRoundIndex ||
         normalizedCurrentEliminatedByProfileId !== eliminatedByProfileId
       ) {
         didChange = true;
       }
 
-      nextParticipants[profileId] = {
-        ...participant,
-        state,
-        eliminatedRoundIndex,
-        eliminatedByProfileId,
-      };
+      replacements.set(
+        profileId,
+        copyEventParticipant(participant, {
+          state,
+          eliminatedRoundIndex,
+          eliminatedByProfileId,
+        }),
+      );
     }
 
     return {
       didChange,
-      participantsById: nextParticipants,
+      participantsById: copyEventParticipants(participantsById, replacements),
     };
   };
 
@@ -334,14 +362,14 @@ const createEventBracketRuntime = (
   }) => {
     const identityKeys = new Set<string>();
     const addMatchIdentities = (match: EventMatch | null | undefined) => {
-      if (!match || match.winnerDisqualified !== true) {
+      if (!match || eventMatchState(match).winnerDisqualified !== true) {
         return;
       }
       for (const value of [
-        match.hostProfileId,
-        match.hostLoginUid,
-        match.guestProfileId,
-        match.guestLoginUid,
+        eventMatchState(match).hostProfileId,
+        eventMatchState(match).hostLoginUid,
+        eventMatchState(match).guestProfileId,
+        eventMatchState(match).guestLoginUid,
       ]) {
         const identityKey = normalizeString(value);
         if (identityKey) {
@@ -351,9 +379,11 @@ const createEventBracketRuntime = (
     };
 
     for (const roundIndex of getSortedRoundIndexes(rounds)) {
-      const matches = rounds[String(roundIndex)]?.matches;
+      const matches = eventRoundMatches(
+        eventRoundAt(rounds, String(roundIndex)),
+      );
       for (const matchKey of getSortedMatchKeys(matches)) {
-        addMatchIdentities(matches![matchKey]);
+        addMatchIdentities(eventMatchAt(matches, matchKey));
       }
     }
     addMatchIdentities(thirdPlaceMatch);
@@ -367,8 +397,12 @@ const createEventBracketRuntime = (
     if (!participant) {
       return false;
     }
-    const profileId = normalizeString(participant.profileId);
-    const loginUid = normalizeString(participant.loginUid);
+    const profileId = normalizeString(
+      eventParticipantState(participant).profileId,
+    );
+    const loginUid = normalizeString(
+      eventParticipantState(participant).loginUid,
+    );
     return (
       (profileId && identityKeys.has(profileId)) ||
       (loginUid && identityKeys.has(loginUid))
@@ -380,12 +414,14 @@ const createEventBracketRuntime = (
     result: "winner" | "loser",
   ) => {
     const directProfileId = normalizeString(
-      result === "winner" ? match?.winnerProfileId : match?.loserProfileId,
+      result === "winner"
+        ? eventMatchState(match).winnerProfileId
+        : eventMatchState(match).loserProfileId,
     );
     if (directProfileId) {
       return directProfileId;
     }
-    const status = normalizeString(match?.status);
+    const status = normalizeString(eventMatchState(match).status);
     const winnerSide =
       status === "host" ? "host" : status === "guest" ? "guest" : null;
     if (!winnerSide) {
@@ -397,7 +433,11 @@ const createEventBracketRuntime = (
         : winnerSide === "host"
           ? "guest"
           : "host";
-    return normalizeString(match?.[`${side}ProfileId`]);
+    return normalizeString(
+      eventMatchState(match)[
+        side === "guest" ? "guestProfileId" : "hostProfileId"
+      ],
+    );
   };
 
   const getEventPrizePlacements = ({
@@ -408,21 +448,20 @@ const createEventBracketRuntime = (
   }: EventPrizePlacementsInput): EventPlacement[] => {
     const sortedRoundIndexes = getSortedRoundIndexes(rounds);
     const finalRoundIndex = sortedRoundIndexes[sortedRoundIndexes.length - 1];
-    const finalRound = rounds[String(finalRoundIndex)];
-    const finalMatchKey = getSortedMatchKeys(finalRound?.matches)[0];
-    const finalMatch = finalRound?.matches?.[finalMatchKey];
-    if (!finalMatch) {
-      return [];
-    }
+    const finalRound = eventRoundAt(rounds, String(finalRoundIndex));
+    const finalMatches = eventPlacementMatches(finalRound);
+    const finalMatchEntry = finalMatches[getSortedMatchKeys(finalMatches)[0]];
+    if (!finalMatchEntry?.present) return [];
+    const finalMatch = finalMatchEntry.match;
 
     const disqualifiedIdentityKeys = getEventPrizeDisqualifiedIdentityKeys({
       rounds,
       thirdPlaceMatch,
     });
     const winnerProfileId =
-      normalizeString(event?.winnerProfileId) ||
+      normalizeString(eventState(event).winnerProfileId) ||
       getResolvedMatchProfileId(finalMatch, "winner");
-    const winner = participantsById[winnerProfileId];
+    const winner = eventParticipantAt(participantsById, winnerProfileId);
     if (
       !winner ||
       isEventPrizeParticipantDisqualified(winner, disqualifiedIdentityKeys)
@@ -437,7 +476,10 @@ const createEventBracketRuntime = (
     const placementCandidates: string[] = [];
     const pushCandidate = (profileId: unknown) => {
       const normalizedProfileId = normalizeString(profileId);
-      const participant = participantsById[normalizedProfileId];
+      const participant = eventParticipantAt(
+        participantsById,
+        normalizedProfileId,
+      );
       if (
         !normalizedProfileId ||
         !participant ||
@@ -458,7 +500,8 @@ const createEventBracketRuntime = (
       pushCandidate(getResolvedMatchProfileId(thirdPlaceMatch, "winner"));
     }
 
-    Object.values(participantsById)
+    eventParticipantEntries(participantsById)
+      .map(([, value]) => value)
       .filter(
         (participant) =>
           !isEventPrizeParticipantDisqualified(
@@ -467,26 +510,38 @@ const createEventBracketRuntime = (
           ),
       )
       .sort((left, right) => {
-        const leftRound = Number.isFinite(left.eliminatedRoundIndex)
-          ? Math.floor(left.eliminatedRoundIndex as number)
+        const leftRound = Number.isFinite(
+          eventParticipantState(left).eliminatedRoundIndex,
+        )
+          ? Math.floor(
+              eventParticipantState(left).eliminatedRoundIndex as number,
+            )
           : -1;
-        const rightRound = Number.isFinite(right.eliminatedRoundIndex)
-          ? Math.floor(right.eliminatedRoundIndex as number)
+        const rightRound = Number.isFinite(
+          eventParticipantState(right).eliminatedRoundIndex,
+        )
+          ? Math.floor(
+              eventParticipantState(right).eliminatedRoundIndex as number,
+            )
           : -1;
         if (leftRound !== rightRound) {
           return rightRound - leftRound;
         }
         const joinedDifference =
-          toFiniteInteger(left.joinedAtMs, 0) -
-          toFiniteInteger(right.joinedAtMs, 0);
+          eventParticipantJoinedOrder(left, 0) -
+          eventParticipantJoinedOrder(right, 0);
         if (joinedDifference !== 0) {
           return joinedDifference;
         }
-        return normalizeString(left.profileId).localeCompare(
-          normalizeString(right.profileId),
+        return normalizeString(
+          eventParticipantState(left).profileId,
+        ).localeCompare(
+          normalizeString(eventParticipantState(right).profileId),
         );
       })
-      .forEach((participant) => pushCandidate(participant.profileId));
+      .forEach((participant) =>
+        pushCandidate(eventParticipantState(participant).profileId),
+      );
 
     if (placementCandidates[0]) {
       placements.push({ place: 2, profileId: placementCandidates[0] });
@@ -689,10 +744,7 @@ const createEventBracketRuntime = (
       participantsById,
       thirdPlaceMatch,
     });
-    const storedAssignments = normalizeEventPrizeAssignments(
-      event?.prizeAssignments,
-      eventId,
-    );
+    const storedAssignments = eventPrizeAssignments(event, eventId);
     if (
       hasCompleteEventPrizeAssignments(
         storedAssignments,
@@ -722,13 +774,17 @@ const createEventBracketRuntime = (
   const getRoundMatchRead = (matchRecord: EventMatch | null) => {
     if (!matchRecord || typeof matchRecord !== "object") return null;
     if (
-      ["bye", "host", "guest"].includes(normalizeString(matchRecord.status))
+      ["bye", "host", "guest"].includes(
+        normalizeString(eventMatchState(matchRecord).status),
+      )
     ) {
       return null;
     }
-    const playerId = normalizeString(matchRecord.hostLoginUid);
-    const opponentId = normalizeString(matchRecord.guestLoginUid);
-    const inviteId = normalizeString(matchRecord.inviteId);
+    const playerId = normalizeString(eventMatchState(matchRecord).hostLoginUid);
+    const opponentId = normalizeString(
+      eventMatchState(matchRecord).guestLoginUid,
+    );
+    const inviteId = normalizeString(eventMatchState(matchRecord).inviteId);
     return playerId && opponentId && inviteId
       ? { inviteId, matchId: inviteId, playerId, opponentId }
       : null;
@@ -742,9 +798,11 @@ const createEventBracketRuntime = (
       return null;
     }
 
-    const existingStatus = normalizeString(matchRecord.status);
+    const existingStatus = normalizeString(eventMatchState(matchRecord).status);
     if (existingStatus === "bye") {
-      const winnerProfileId = normalizeString(matchRecord.winnerProfileId);
+      const winnerProfileId = normalizeString(
+        eventMatchState(matchRecord).winnerProfileId,
+      );
       if (!winnerProfileId) {
         return null;
       }
@@ -757,15 +815,15 @@ const createEventBracketRuntime = (
 
     if (existingStatus === "host" || existingStatus === "guest") {
       const winnerProfileId =
-        normalizeString(matchRecord.winnerProfileId) ||
+        normalizeString(eventMatchState(matchRecord).winnerProfileId) ||
         (existingStatus === "host"
-          ? normalizeString(matchRecord.hostProfileId)
-          : normalizeString(matchRecord.guestProfileId));
+          ? normalizeString(eventMatchState(matchRecord).hostProfileId)
+          : normalizeString(eventMatchState(matchRecord).guestProfileId));
       const loserProfileId =
-        normalizeString(matchRecord.loserProfileId) ||
+        normalizeString(eventMatchState(matchRecord).loserProfileId) ||
         (existingStatus === "host"
-          ? normalizeString(matchRecord.guestProfileId)
-          : normalizeString(matchRecord.hostProfileId));
+          ? normalizeString(eventMatchState(matchRecord).guestProfileId)
+          : normalizeString(eventMatchState(matchRecord).hostProfileId));
       if (!winnerProfileId) {
         return null;
       }
@@ -787,24 +845,32 @@ const createEventBracketRuntime = (
     if (outcome.winner === "player") {
       return {
         status: "host",
-        winnerProfileId: normalizeString(matchRecord.hostProfileId),
-        loserProfileId: normalizeStringOrNull(matchRecord.guestProfileId),
+        winnerProfileId: normalizeString(
+          eventMatchState(matchRecord).hostProfileId,
+        ),
+        loserProfileId: normalizeStringOrNull(
+          eventMatchState(matchRecord).guestProfileId,
+        ),
       };
     }
     if (outcome.winner === "opponent") {
       return {
         status: "guest",
-        winnerProfileId: normalizeString(matchRecord.guestProfileId),
-        loserProfileId: normalizeStringOrNull(matchRecord.hostProfileId),
+        winnerProfileId: normalizeString(
+          eventMatchState(matchRecord).guestProfileId,
+        ),
+        loserProfileId: normalizeStringOrNull(
+          eventMatchState(matchRecord).hostProfileId,
+        ),
       };
     }
     return null;
   };
 
   const resolveRoundMatchesWithConcurrency = async (
-    matchesByKey: Record<string, EventMatch | null>,
+    matchesByKey: EventMatchesDocument,
   ) => {
-    const entries = Object.entries(matchesByKey || {});
+    const entries = eventMatchEntries(matchesByKey);
     if (entries.length <= 0) {
       return [];
     }

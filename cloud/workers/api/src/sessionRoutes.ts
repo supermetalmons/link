@@ -1,3 +1,8 @@
+import type {
+  ApiResponse,
+  ApiRequestValidator,
+  ApiTransportStatus,
+} from "@mons/shared/api-contracts";
 import {
   isSessionCreateRequest,
   parseSessionCapability,
@@ -36,7 +41,6 @@ import {
   type SessionBootstrapDependencies,
   type SessionIdentityBootstrapDependencies,
 } from "./sessionBootstrap.ts";
-
 export type SessionRouteDependencies = {
   now?: () => number;
   repository?: SessionRepository;
@@ -130,7 +134,9 @@ export async function handleSessionRoute(
           )
         : Promise.resolve(undefined),
     ]);
-    const body = {
+    const body: ApiResponse<
+      "POST /auth/session/anonymous" | "POST /auth/session/refresh"
+    > = {
       ...session,
       ...bootstrap,
       ...(includeIdentity ? { identityBootstrap } : {}),
@@ -147,7 +153,12 @@ export async function handleSessionRoute(
     ) {
       body.identityBootstrap = { ok: false, status: 503 };
     }
-    return finish(authJsonResponse(body, 200, headers));
+    return finish(
+      authJsonResponse<
+        "POST /auth/session/anonymous" | "POST /auth/session/refresh",
+        200
+      >(body, 200, headers),
+    );
   };
   try {
     headers = getAuthCorsHeaders(request);
@@ -207,7 +218,11 @@ export async function handleSessionRoute(
           "invalid-session-request",
         );
       }
-      if (!isSessionCreateRequest(value))
+      if (
+        !(
+          isSessionCreateRequest satisfies ApiRequestValidator<`POST ${typeof pathname}`>
+        )(value)
+      )
         throw new AuthApiFailure(
           400,
           "invalid-argument",
@@ -234,7 +249,10 @@ export async function handleSessionRoute(
       await repository.revoke(proof!, nowMs);
       return finish(
         new Response(null, {
-          status: 204,
+          status: 204 satisfies ApiTransportStatus<
+            "POST /auth/session/logout",
+            "empty"
+          >,
           headers: { ...headers, "Cache-Control": "no-store" },
         }),
       );

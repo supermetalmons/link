@@ -4,6 +4,7 @@ import { isCanonicalLoginUid } from "./recordKeys.ts";
 import type {
   MatchTimerStartCandidate,
   MatchTimerStartMarker,
+  RetainedTimerCleanupInput,
 } from "./gameplayCoordinationD1.ts";
 
 export type MatchTimerStorageMode = "d1" | "local";
@@ -31,6 +32,16 @@ export class LocalMatchTimerStore {
   constructor(private readonly sql: SqlStorage) {}
 
   mode(matchId: string): MatchTimerStorageMode | null {
+    return this.readMode(matchId);
+  }
+
+  modeForRetainedCleanup(
+    input: RetainedTimerCleanupInput,
+  ): MatchTimerStorageMode | null {
+    return this.readMode(input.matchId);
+  }
+
+  private readMode(matchId: unknown): MatchTimerStorageMode | null {
     const [cohort] = this.sql
       .exec<{ mode: string; schema_version: number }>(
         "SELECT mode, schema_version FROM match_state_timer_cohorts WHERE match_id = ?",

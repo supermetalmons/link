@@ -1,7 +1,9 @@
-import {
-  isEventSnapshotResponse,
-  type EventSnapshotResponse,
-} from "@mons/shared/events";
+import type {
+  ApiQuery,
+  ApiHttpUrl,
+  ApiResponse,
+} from "@mons/shared/api-contracts";
+import { isEventSnapshotResponse } from "@mons/shared/events";
 import type { AuthTokenProvider } from "./authApi";
 import {
   GAMEPLAY_API_ROOT,
@@ -9,6 +11,7 @@ import {
   type ConditionalRead,
   type ConditionalReadOptions,
 } from "./gameplayTransport";
+type EventSnapshotResponse = ApiResponse<"GET /events/snapshot">;
 
 export type {
   ConditionalRead,
@@ -20,9 +23,15 @@ export function readEventSnapshotViaApi(
   tokenProvider: AuthTokenProvider,
   options: ConditionalReadOptions = {},
 ): Promise<ConditionalRead<EventSnapshotResponse>> {
-  const normalizedEventId = eventId.trim();
-  const url = new URL(`${GAMEPLAY_API_ROOT}/events/snapshot`);
-  url.searchParams.set("eventId", normalizedEventId);
+  const normalizedEventId: ApiQuery<"GET /events/snapshot">["eventId"] =
+    eventId.trim();
+  const url = new URL(
+    `${GAMEPLAY_API_ROOT}/events/snapshot` satisfies ApiHttpUrl<"GET /events/snapshot">,
+  );
+  url.searchParams.set(
+    "eventId" satisfies keyof ApiQuery<"GET /events/snapshot">,
+    normalizedEventId,
+  );
   return conditionalGameplayRead(
     url,
     tokenProvider,

@@ -3,6 +3,7 @@ import {
   canonicalRatingProjectionFields,
   ratingProjectionColumns,
   ratingProjectionWriteRow,
+  ratingProjectionFieldJson,
   ratingWriteRow,
 } from "./accounting.ts";
 import { canonicalRowMutationStatement } from "./rowStatements.ts";
@@ -84,7 +85,7 @@ function accountingMutationStatement(
         )
         .bind(
           ...fields.map((field) =>
-            JSON.stringify(mutation.value.payload[field]),
+            ratingProjectionFieldJson(mutation.value, field),
           ),
           ...Object.values(columns),
           operation_id,

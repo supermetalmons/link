@@ -1,9 +1,10 @@
+import { readTelegramMessageDocument } from "../../../runtime/telegram/records.js";
+import { createWithdrawalStorageFixture as createD1EventPrizeWithdrawalStore } from "../test/withdrawalStorageFixture.ts";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { createVersionedJsonRowStore } from "../src/versionedJsonD1.ts";
 import { createD1TelegramRepository } from "../src/telegramD1.ts";
-import { createD1EventPrizeWithdrawalStore } from "../src/eventPrizeWithdrawalD1.ts";
 
 const testEnv = env as Env & {
   TEST_TELEGRAM_D1_MIGRATIONS: D1Migration[];
@@ -133,7 +134,7 @@ describe("versioned JSON row persistence", () => {
       if (operation !== "insert") {
         await createD1TelegramRepository(testEnv.TELEGRAM_DB).transactMessage(
           messageKey,
-          () => ({ value }),
+          () => ({ value: readTelegramMessageDocument(value)! }),
         );
         await createD1EventPrizeWithdrawalStore(
           testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
@@ -148,7 +149,10 @@ describe("versioned JSON row persistence", () => {
         firstWriteChanges(testEnv.TELEGRAM_DB, 2),
       ).transactMessage(messageKey, () => {
         telegramDecisions++;
-        return { value: proposed };
+        return {
+          value:
+            proposed === null ? null : readTelegramMessageDocument(proposed)!,
+        };
       });
       const withdrawalResult = await createD1EventPrizeWithdrawalStore(
         firstWriteChanges(testEnv.EVENT_PRIZE_WITHDRAWALS_DB, 2),

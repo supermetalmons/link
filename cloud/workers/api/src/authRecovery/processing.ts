@@ -1,4 +1,14 @@
+import { queueFor } from "../queueProducers.ts";
+import {
+  projectionMergeFreshness,
+  copyProjectionOwner,
+} from "../../../../runtime/profileGameProjectionRecords.js";
 import type { EventPrizeAssignmentRecord } from "../../../../runtime/eventReads.js";
+import {
+  withdrawalIdentity,
+  withdrawalStatus,
+  type WithdrawalDocument,
+} from "../../../../runtime/eventPrizes/records.js";
 import {
   getEventPrizeDefinition,
   isEventPrizeAssignmentWireRecord,
@@ -87,19 +97,6 @@ export type AuthRecoveryDependencies = {
   withdrawalStore?: Pick<EventPrizeWithdrawalStore, "get">;
 };
 
-function timestampMillis(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value)
-    ? Math.floor(value)
-    : 0;
-}
-
-function mergeFreshness(fields: Record<string, unknown>): number {
-  return Math.max(
-    timestampMillis(fields.updatedAt),
-    timestampMillis(fields.listSortAt),
-  );
-}
-
 function isSamePrizeAssignment(value: unknown, expected: unknown): boolean {
   const current = record(value);
   const assignment = record(expected);
@@ -141,11 +138,11 @@ function buildPrizeCopy(
 }
 
 function isCompletedPrizeWithdrawal(
-  value: unknown,
+  value: WithdrawalDocument | null,
   eventId: string,
   prizeId: string,
 ): boolean {
-  const withdrawal = record(value);
+  const withdrawal = withdrawalIdentity(value);
   const definition = getEventPrizeDefinition(eventId, prizeId);
   const assetAddress = cleanString(definition?.assetAddress);
   const expectedStandard = cleanString(definition?.standard);
@@ -156,7 +153,7 @@ function isCompletedPrizeWithdrawal(
     (!recordedStandard && expectedStandard === "core");
   return (
     Boolean(assetAddress) &&
-    withdrawal.status === "completed" &&
+    withdrawalStatus(value) === "completed" &&
     standardMatches &&
     cleanString(withdrawal.eventId) === eventId &&
     cleanString(withdrawal.prizeId) === prizeId &&
@@ -286,7 +283,7 @@ function createCanonicalAuthRecoveryService(
         await dispatchProfileLinkCatchupForOwner(uid, job.profileId, {
           catchupStore,
           enqueueProfileLinkProjection: (task) =>
-            env.PROFILE_GAME_PROJECTION_QUEUE.send(task),
+            queueFor(env, "PROFILE_GAME_PROJECTION_QUEUE").send(task),
           logger,
         });
         const removed = await removeCanonicalAuthRecoveryLoginUid(
@@ -394,17 +391,25 @@ function createCanonicalAuthRecoveryService(
       const writes = sourcePage.flatMap((game) => {
         const current = targets.get(game.projectionId);
         const copy =
-          !current || mergeFreshness(game.data) >= mergeFreshness(current.data)
+          !current ||
+          projectionMergeFreshness(game.data) >=
+            projectionMergeFreshness(current.data)
             ? [
-                {
-                  type: current ? ("update" as const) : ("create" as const),
-                  profileId: job.profileId,
-                  projectionId: game.projectionId,
-                  data: { ...game.data, ownerProfileId: job.profileId },
-                  ...(current
-                    ? { expectedVersion: current.version }
-                    : { requireAbsent: true }),
-                },
+                current
+                  ? {
+                      type: "update" as const,
+                      profileId: job.profileId,
+                      projectionId: game.projectionId,
+                      data: copyProjectionOwner(game.data, job.profileId),
+                      expectedVersion: current.version,
+                    }
+                  : {
+                      type: "create" as const,
+                      profileId: job.profileId,
+                      projectionId: game.projectionId,
+                      data: copyProjectionOwner(game.data, job.profileId),
+                      requireAbsent: true,
+                    },
               ]
             : [];
         return [

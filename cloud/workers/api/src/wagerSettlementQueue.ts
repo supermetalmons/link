@@ -1,3 +1,4 @@
+import { queueFor } from "./queueProducers.ts";
 import { infrastructureRetryDelaySeconds } from "./queueRetry.ts";
 import { ackQueueMessage, retryQueueMessage } from "./queueMessage.ts";
 import {
@@ -92,7 +93,7 @@ async function deferWagerSettlement(
   code?: string,
 ): Promise<void> {
   try {
-    await env.WAGER_SETTLEMENT_QUEUE.send(task, {
+    await queueFor(env, "WAGER_SETTLEMENT_QUEUE").send(task, {
       delaySeconds: WAGER_SETTLEMENT_RETRY_DELAY_SECONDS,
     });
     ackQueueMessage(message, {

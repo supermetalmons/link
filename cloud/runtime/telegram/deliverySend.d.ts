@@ -1,10 +1,11 @@
 // Generated from src/telegram/deliverySend.ts. Run npm run generate:runtime.
+import type { TextDesiredView } from "./desiredRecords.js";
+import { type TelegramAppliedDocument } from "./records.js";
 import type { TelegramClient } from "./client.js";
 import type { TelegramDeliveryControl } from "./deliveryControl.js";
 import {
   type DesiredContext,
   type DesiredSendOperations,
-  type RawRecord,
 } from "./deliveryState.js";
 export declare function createTelegramSendDelivery({
   client,
@@ -34,8 +35,9 @@ export declare function createTelegramSendDelivery({
     previousApplied,
     nowMs,
   }: DesiredContext & {
+    desired: TextDesiredView;
     chatId: string;
-    previousApplied: RawRecord | null;
+    previousApplied: TelegramAppliedDocument | null;
     nowMs: number;
     requestedGeneration?: string;
   }) => Promise<
@@ -57,7 +59,7 @@ export declare function createTelegramSendDelivery({
       }
     | {
         status: string;
-        messageId: number | undefined;
+        messageId: number;
         retryAtMs?: undefined;
         scheduled?: undefined;
       }

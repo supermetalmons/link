@@ -9,6 +9,10 @@ export type PendingRematchEnd = RematchEndScope & {
   operationId: string;
 };
 
+type StoredRematchEnd = { version: 1; record: PendingRematchEnd };
+type RematchEndFields = { [Key in keyof PendingRematchEnd]?: unknown };
+type StoredRematchEndFields = { version?: unknown; record?: unknown };
+
 type Timer = ReturnType<typeof setTimeout> | number;
 type Dependencies = {
   storage: Pick<Storage, "getItem" | "setItem" | "removeItem"> | null;
@@ -30,17 +34,36 @@ export function rematchEndDeliveryStorageKey(scope: RematchEndScope): string {
   ])}`;
 }
 
+function hasRematchEndIdentifiers(
+  record: RematchEndFields,
+): record is RematchEndFields &
+  Pick<PendingRematchEnd, "loginUid" | "inviteId" | "matchId" | "actorUid"> {
+  return [
+    record.loginUid,
+    record.inviteId,
+    record.matchId,
+    record.actorUid,
+  ].every(
+    (id) => typeof id === "string" && id === id.trim() && isSafeRecordKey(id),
+  );
+}
+
 function isPendingRematchEnd(value: unknown): value is PendingRematchEnd {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as PendingRematchEnd;
+  const record = value as RematchEndFields;
   return (
-    [record.loginUid, record.inviteId, record.matchId, record.actorUid].every(
-      (id) => typeof id === "string" && id === id.trim() && isSafeRecordKey(id),
-    ) &&
+    hasRematchEndIdentifiers(record) &&
     parseInviteMatchIndex(record.inviteId, record.matchId) !== null &&
     typeof record.operationId === "string" &&
     GAME_SESSION_OPERATION_ID_PATTERN.test(record.operationId)
   );
+}
+
+function storedRematchEndOperationId(text: string): unknown {
+  const parsed: unknown = JSON.parse(text);
+  return (
+    parsed as { record?: { operationId?: unknown } | null } | null | undefined
+  )?.record?.operationId;
 }
 
 export function readPendingRematchEnd(
@@ -50,7 +73,8 @@ export function readPendingRematchEnd(
   const key = rematchEndDeliveryStorageKey(scope);
   const text = persistence?.getItem(key);
   if (!text) return null;
-  const stored = JSON.parse(text);
+  const parsed: unknown = JSON.parse(text);
+  const stored = parsed as StoredRematchEndFields | null | undefined;
   if (
     stored?.version !== 1 ||
     !isPendingRematchEnd(stored.record) ||
@@ -148,7 +172,7 @@ export class RematchEndDelivery {
       }
       this.dependencies.storage.setItem(
         this.key,
-        JSON.stringify({ version: 1, record }),
+        JSON.stringify({ version: 1, record } satisfies StoredRematchEnd),
       );
     } catch (error) {
       this.report(error);
@@ -177,10 +201,7 @@ export class RematchEndDelivery {
     this.failures = 0;
     try {
       const text = this.dependencies.storage?.getItem(this.key);
-      if (
-        text &&
-        JSON.parse(text)?.record?.operationId === record.operationId
-      ) {
+      if (text && storedRematchEndOperationId(text) === record.operationId) {
         this.dependencies.storage?.removeItem(this.key);
       }
     } catch (error) {
