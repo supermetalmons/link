@@ -5,6 +5,7 @@ import {
   createWagerStateRepository,
 } from "../src/wagerStateRepository.ts";
 import type { SendWagerProposalCommand } from "../src/wagerStateCommands.ts";
+import { createWagerStateD1Store } from "../src/wagerStateD1.ts";
 
 function fixture() {
   let accesses = 0;
@@ -33,8 +34,6 @@ test("read-only wager capability exposes no writer or generic state operations",
   const f = fixture();
   const reader = createWagerStateReader(f.db);
   assert.deepEqual(Object.keys(reader).sort(), [
-    "readInviteWagerPresence",
-    "readInviteWagerState",
     "readWager",
     "readWagerSnapshot",
   ]);
@@ -96,11 +95,7 @@ test("typed keys reject unsafe IDs before touching D1", async () => {
     );
   }
   await assert.rejects(
-    reader.readInviteWagerState("invite/child"),
-    /invalid-wager-state-key/,
-  );
-  await assert.rejects(
-    reader.readInviteWagerPresence("invite/child"),
+    createWagerStateD1Store(f.db).readInvite("invite/child"),
     /invalid-wager-state-key/,
   );
   assert.equal(f.accesses(), 0);
@@ -134,6 +129,13 @@ test("a cancelled wager snapshot cannot read D1", async () => {
   await assert.rejects(
     createWagerStateReader(f.db).readWagerSnapshot(
       { inviteId: "invite", matchId: "match" },
+      AbortSignal.abort(reason),
+    ),
+    (error) => error === reason,
+  );
+  await assert.rejects(
+    createWagerStateD1Store(f.db).readInvite(
+      "invite",
       AbortSignal.abort(reason),
     ),
     (error) => error === reason,

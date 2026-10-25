@@ -9,7 +9,6 @@ import {
   createWagerStateD1Store,
   WagerStateD1Failure,
   type WagerStateD1Options,
-  type WagerStateSnapshot,
 } from "./wagerStateD1.ts";
 import {
   sendProposalDecision,
@@ -37,19 +36,11 @@ export type WagerReadSnapshot = {
   resolutionMarker: boolean | null;
 };
 export type WagerReader = {
-  readInviteWagerPresence(
-    inviteId: string,
-    signal?: AbortSignal,
-  ): Promise<{ wagerMatchIds: string[]; resolutionMatchIds: string[] }>;
   readWager(key: WagerKey, signal?: AbortSignal): Promise<DecodedWager | null>;
   readWagerSnapshot(
     key: WagerKey,
     signal?: AbortSignal,
   ): Promise<WagerReadSnapshot>;
-  readInviteWagerState(
-    inviteId: string,
-    signal?: AbortSignal,
-  ): Promise<WagerStateSnapshot[]>;
 };
 export type WagerWriter = WagerReader & {
   sendProposal(
@@ -142,22 +133,9 @@ export function createWagerStateReader(db: D1Database): WagerReader {
     };
   };
   return {
-    async readInviteWagerPresence(inviteId, signal) {
-      const states = await store.readInvite(inviteId, signal, true);
-      return {
-        wagerMatchIds: states
-          .filter((state) => state.wager !== null)
-          .map((state) => state.matchId),
-        resolutionMatchIds: states
-          .filter((state) => state.resolutionMarker !== null)
-          .map((state) => state.matchId),
-      };
-    },
     readWager: async (key, signal) =>
       (await readWagerSnapshot(key, signal)).wager,
     readWagerSnapshot,
-    readInviteWagerState: (inviteId, signal) =>
-      store.readInvite(inviteId, signal),
   };
 }
 export function createWagerStateRepository(

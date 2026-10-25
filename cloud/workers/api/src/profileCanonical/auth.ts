@@ -5,6 +5,11 @@ import {
 import { type AuthMethodKey } from "@mons/shared/auth";
 import { canonicalProfileRedirectCte } from "./redirectSql.ts";
 import {
+  canonicalProfileAggregatePart,
+  canonicalProfileAggregateValues,
+  type CanonicalProfileAggregateParts,
+} from "./aggregateLayout.ts";
+import {
   type CanonicalLoginOwnerSnapshot,
   type LoginOwnerRow,
   CanonicalProfileCorruption,
@@ -251,33 +256,46 @@ function canonicalProfileAggregateStatements(
       ? "?"
       : "(SELECT profile_id FROM profile_login_owners WHERE login_uid = ?)";
   const key = "profileId" in source ? source.profileId : source.loginUid;
-  return [
-    `SELECT * FROM profile_records WHERE profile_id = ${profileIdSql}`,
-    `SELECT * FROM profile_login_owners
+  const queries: CanonicalProfileAggregateParts<string> = {
+    profile: `SELECT * FROM profile_records WHERE profile_id = ${profileIdSql}`,
+    loginOwners: `SELECT * FROM profile_login_owners
      WHERE profile_id = ${profileIdSql} ORDER BY login_uid ASC`,
-    `SELECT * FROM profile_auth_methods
+    authMethods: `SELECT * FROM profile_auth_methods
      WHERE profile_id = ${profileIdSql} ORDER BY method ASC`,
-    `SELECT opponent_profile_id FROM profile_february_opponents
+    februaryOpponentProfileIds: `SELECT opponent_profile_id FROM profile_february_opponents
      WHERE profile_id = ${profileIdSql} ORDER BY opponent_profile_id ASC`,
-    `SELECT source_profile_id, target_profile_id, merged_at_ms, op_id
+    mergeTarget: `SELECT source_profile_id, target_profile_id, merged_at_ms, op_id
      FROM profile_merge_targets WHERE source_profile_id = ${profileIdSql}`,
-    `SELECT * FROM profile_auth_recovery_jobs WHERE profile_id = ${profileIdSql}`,
-  ].map((query) => db.prepare(query).bind(key));
+    recovery: `SELECT * FROM profile_auth_recovery_jobs WHERE profile_id = ${profileIdSql}`,
+  };
+  return canonicalProfileAggregateValues(queries).map((query) =>
+    db.prepare(query).bind(key),
+  );
 }
 
 export function parseCanonicalProfileAggregateResults(
   results: readonly Pick<D1Result, "results">[],
 ): CanonicalProfileAggregateSnapshot {
-  const profileRow = results[0].results[0];
-  const mergeRow = results[4].results[0];
-  const recoveryRow = results[5].results[0];
+  const profileRow = canonicalProfileAggregatePart(results, "profile")
+    .results[0];
+  const mergeRow = canonicalProfileAggregatePart(results, "mergeTarget")
+    .results[0];
+  const recoveryRow = canonicalProfileAggregatePart(results, "recovery")
+    .results[0];
   return {
     profile: profileRow ? parseCanonicalProfileRow(profileRow) : null,
-    loginOwners: results[1].results.map(parseCanonicalLoginOwnerRow),
-    authMethods: results[2].results.map(parseCanonicalAuthMethodRow),
-    februaryOpponentProfileIds: results[3].results.map((entry) =>
-      nonempty(record(entry)?.opponent_profile_id),
-    ),
+    loginOwners: canonicalProfileAggregatePart(
+      results,
+      "loginOwners",
+    ).results.map(parseCanonicalLoginOwnerRow),
+    authMethods: canonicalProfileAggregatePart(
+      results,
+      "authMethods",
+    ).results.map(parseCanonicalAuthMethodRow),
+    februaryOpponentProfileIds: canonicalProfileAggregatePart(
+      results,
+      "februaryOpponentProfileIds",
+    ).results.map((entry) => nonempty(record(entry)?.opponent_profile_id)),
     mergeTarget: mergeRow ? parseCanonicalMergeTargetRow(mergeRow) : null,
     recovery: recoveryRow ? parseCanonicalAuthRecoveryRow(recoveryRow) : null,
   };

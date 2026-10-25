@@ -1,7 +1,6 @@
 import { readPlainEventDocument } from "../../../runtime/events/documents.js";
 import type { EventReads } from "../../../runtime/eventReads.js";
 import {
-  listEventAggregates,
   listProfileEventPrizeAssignments,
   readEvent,
   readEventPrizeSelections,
@@ -25,12 +24,6 @@ export function createEventReadRepository(db: EventD1Connection): EventReads {
     },
     readProfileEventPrizes: (profileId) =>
       readProfileEventPrizes(db, profileId),
-    listEventsByStatus: async (status, limit) =>
-      Object.fromEntries(
-        Object.entries(await listEventAggregates(db, { status, limit })).map(
-          ([eventId, event]) => [eventId, readPlainEventDocument(event)!],
-        ),
-      ),
     listProfileEventPrizeAssignments: (profileId, query) =>
       listProfileEventPrizeAssignments(db, profileId, query),
   };

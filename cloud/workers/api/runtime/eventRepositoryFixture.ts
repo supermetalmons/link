@@ -64,12 +64,7 @@ export async function readEventRepositoryFixture(
 ): Promise<unknown> {
   const [root, id, ...parts] = path.split("/");
   if (root === "events" && id === undefined) {
-    if (query?.orderBy !== "status")
-      throw new Error("event-d1-query-unsupported");
-    return store.listEventsByStatus(
-      query.equalTo as "active",
-      query.limitToFirst,
-    );
+    throw new Error("event-d1-query-unsupported");
   }
   if (query && Object.keys(query).length) {
     if (

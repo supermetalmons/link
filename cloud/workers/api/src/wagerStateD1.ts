@@ -132,7 +132,6 @@ export function createWagerStateD1Store(
     async readInvite(
       inviteId: string,
       signal?: AbortSignal,
-      shallow = false,
     ): Promise<WagerStateSnapshot[]> {
       if (!isSafeRecordKey(inviteId))
         throw new TypeError("invalid-wager-state-key");
@@ -142,7 +141,7 @@ export function createWagerStateD1Store(
         .prepare(
           `SELECT activation.activation_epoch, activation.verified_at_ms,
              activation.activated_at_ms, state.invite_id, state.match_id,
-             ${shallow ? "CASE WHEN state.wager_json IS NOT NULL THEN 'true' END" : "state.wager_json"} AS wager_json,
+             state.wager_json AS wager_json,
              state.resolution_marker, state.revision
            FROM wager_state_activation AS activation
            LEFT JOIN invite_wager_states AS state ON state.invite_id = ?

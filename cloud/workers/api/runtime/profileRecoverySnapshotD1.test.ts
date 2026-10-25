@@ -369,6 +369,28 @@ describe("profile recovery finalization snapshot", () => {
     },
   );
 
+  it.each([-1, 2, "0"])(
+    "rejects invalid recovery request index %s before decoding a path",
+    async (requestIndex) => {
+      const f = await fixture({ sourcePresent: true });
+      const observed = observeDatabase({
+        mapSnapshot(results) {
+          results[0].results[0].recovery_request_index = requestIndex;
+          return results;
+        },
+      });
+      await expect(
+        readCanonicalRecoveryFinalizationSnapshot(
+          observed.database,
+          f.targetId,
+          f.sourceId,
+        ),
+      ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+      expect(observed.batches.map((batch) => batch.length)).toEqual([7]);
+      expect(observed.reads).toEqual([]);
+    },
+  );
+
   it.each([1, 2, 32, 33, 34])(
     "preserves the finalization boundary for %i redirect edges",
     async (edges) => {
@@ -495,6 +517,50 @@ describe("profile recovery finalization snapshot", () => {
     ).toBeNull();
   });
 
+  it.each(["target", "recovery"])(
+    "still decodes source corruption when the %s is missing",
+    async (missing) => {
+      const f = await fixture({ sourcePresent: true });
+      for (const corruptSource of [false, true]) {
+        const observed = observeDatabase({
+          mapSnapshot(results) {
+            const omitted =
+              missing === "target" ? results.slice(0, 6) : [results[5]];
+            for (const result of omitted) {
+              result.results = result.results.filter(
+                (row) => row.recovery_request_index !== 0,
+              );
+            }
+            if (corruptSource) {
+              const source = results[0].results.find(
+                (row) => row.recovery_request_index === 1,
+              );
+              if (!source) throw new Error("missing-source-fixture");
+              source.revision = 0;
+            }
+            return results;
+          },
+        });
+        const read = readCanonicalRecoveryFinalizationSnapshot(
+          observed.database,
+          f.targetId,
+          f.sourceId,
+        );
+        if (corruptSource) {
+          await expect(read).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+        } else {
+          const snapshot = await read;
+          expect(snapshot.mergePath).toBeNull();
+          expect(snapshot.source.profile?.profileId).toBe(f.sourceId);
+          if (missing === "target") expect(snapshot.target.profile).toBeNull();
+          else expect(snapshot.target.recovery).toBeNull();
+        }
+        expect(observed.batches.map((batch) => batch.length)).toEqual([7]);
+        expect(observed.reads).toEqual([]);
+      }
+    },
+  );
+
   it.each(["source", "target"])(
     "keeps a lone surrogate %s bound directly during fallback",
     async (kind) => {
@@ -574,7 +640,7 @@ describe("profile recovery finalization snapshot", () => {
     ]);
   });
 
-  it("preserves D1 failures and rejects incomplete batch results", async () => {
+  it("preserves D1 snapshot failures", async () => {
     const f = await fixture();
     const failure = new Error("snapshot database unavailable");
     const failed = observeDatabase({
@@ -589,17 +655,31 @@ describe("profile recovery finalization snapshot", () => {
         f.sourceId,
       ),
     ).rejects.toBe(failure);
-    const incomplete = observeDatabase({
-      mapSnapshot: (results) => results.slice(0, 6),
-    });
-    await expect(
-      readCanonicalRecoveryFinalizationSnapshot(
-        incomplete.database,
-        f.targetId,
-        f.sourceId,
-      ),
-    ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
   });
+
+  it.each(["incomplete", "unsuccessful aggregate", "unsuccessful path"])(
+    "rejects %s snapshot batches before reading again",
+    async (failure) => {
+      const f = await fixture();
+      const observed = observeDatabase({
+        mapSnapshot(results) {
+          if (failure === "incomplete") return results.slice(0, 6);
+          const index = failure === "unsuccessful aggregate" ? 0 : 6;
+          Object.assign(results[index], { success: false });
+          return results;
+        },
+      });
+      await expect(
+        readCanonicalRecoveryFinalizationSnapshot(
+          observed.database,
+          f.targetId,
+          f.sourceId,
+        ),
+      ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+      expect(observed.batches.map((batch) => batch.length)).toEqual([7]);
+      expect(observed.reads).toEqual([]);
+    },
+  );
 
   it("deletes a retired source without prematurely advancing the source list", async () => {
     const f = await fixture({ sourcePresent: true });

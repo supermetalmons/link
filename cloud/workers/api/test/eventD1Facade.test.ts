@@ -33,7 +33,6 @@ test("event D1 preserves its exact public facade and implementation identities",
     listDueEventProgressOutboxes: reads.listDueEventProgressOutboxes,
     listDueEventTelegramProjectionOutboxes:
       reads.listDueEventTelegramProjectionOutboxes,
-    listEventAggregates: reads.listEventAggregates,
     listPendingEventTransitionIntents:
       transitions.listPendingEventTransitionIntents,
     listProfileEventPrizeAssignments: reads.listProfileEventPrizeAssignments,

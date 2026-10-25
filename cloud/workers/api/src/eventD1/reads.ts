@@ -252,37 +252,6 @@ export async function readStoredEventSnapshotIfChanged(
   };
 }
 
-export async function listEventAggregates(
-  db: EventD1Connection,
-  input: {
-    limit?: number;
-    status?: "scheduled" | "active" | "ended" | "dismissed";
-  } = {},
-): Promise<Record<string, EventJsonRecord>> {
-  const limit = Math.min(safeInteger(input.limit ?? 1_000, 1), 1_000);
-  const rows = input.status
-    ? await db
-        .prepare(
-          `SELECT event_id, status, start_at_ms, updated_at_ms, revision,
-                  pending_transition_id, record_json
-           FROM event_records WHERE status = ?
-           ORDER BY start_at_ms, event_id LIMIT ?`,
-        )
-        .bind(input.status, limit)
-        .all<EventRow>()
-    : await db
-        .prepare(
-          `SELECT event_id, status, start_at_ms, updated_at_ms, revision,
-                  pending_transition_id, record_json
-           FROM event_records ORDER BY updated_at_ms, event_id LIMIT ?`,
-        )
-        .bind(limit)
-        .all<EventRow>();
-  return Object.fromEntries(
-    rows.results.map((row) => [row.event_id, decodeEventRow(row).event]),
-  );
-}
-
 export async function readProfileEventPrizes(
   db: EventD1Connection,
   profileId: string,

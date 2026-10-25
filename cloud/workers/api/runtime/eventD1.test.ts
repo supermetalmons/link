@@ -31,7 +31,6 @@ import {
   listDueEventProfileGameProjectionOutboxes,
   listDueEventProgressOutboxes,
   listDueEventTelegramProjectionOutboxes,
-  listEventAggregates,
   listPendingEventTransitionIntents,
   listProfileEventPrizeAssignments,
   readEvent,
@@ -597,9 +596,6 @@ describe("event D1 store", () => {
     });
     expect(session.getBookmark()).toBeTypeOf("string");
     await expect(readEvent(session, eventId)).resolves.toEqual(eventRecord());
-    await expect(listEventAggregates(session)).resolves.toEqual({
-      [eventId]: eventRecord(),
-    });
     await expect(readEventPrizeSelections(session, eventId)).resolves.toEqual({
       [profileId]: prizeId,
     });
@@ -974,9 +970,6 @@ describe("event D1 store", () => {
     await expect(readEventSnapshot(testEnv.EVENT_DB, eventId)).rejects.toThrow(
       "invalid-event-record",
     );
-    await expect(listEventAggregates(testEnv.EVENT_DB)).rejects.toThrow(
-      "invalid-event-record",
-    );
     await expect(
       readProfileEventPrizes(testEnv.EVENT_DB, profileId),
     ).rejects.toThrow("invalid-event-prize-assignment");
@@ -1019,7 +1012,6 @@ describe("event D1 store", () => {
 
   it("returns empty typed reads for missing records and rejects invalid IDs", async () => {
     await expect(readEvent(testEnv.EVENT_DB, eventId)).resolves.toBeNull();
-    await expect(listEventAggregates(testEnv.EVENT_DB)).resolves.toEqual({});
     await expect(
       readEventPrizeSelections(testEnv.EVENT_DB, eventId),
     ).resolves.toEqual({});
@@ -1062,9 +1054,6 @@ describe("event D1 store", () => {
     await expect(readEvent(testEnv.EVENT_DB, eventId)).resolves.toEqual(
       eventRecord(),
     );
-    await expect(listEventAggregates(testEnv.EVENT_DB)).resolves.toEqual({
-      [eventId]: eventRecord(),
-    });
     await expect(
       readEventPrizeSelections(testEnv.EVENT_DB, eventId),
     ).rejects.toThrow("invalid-event-prize-selection");
@@ -1081,9 +1070,6 @@ describe("event D1 store", () => {
       ).bind(eventId),
     ]);
     await expect(readEvent(testEnv.EVENT_DB, eventId)).rejects.toThrow(
-      "event-row-mismatch",
-    );
-    await expect(listEventAggregates(testEnv.EVENT_DB)).rejects.toThrow(
       "event-row-mismatch",
     );
     await expect(

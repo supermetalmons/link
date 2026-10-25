@@ -55,21 +55,6 @@ export function eventReadFixture(
         revision: prizes ? 1 : 0,
       };
     },
-    listEventsByStatus: async (status, limit, signal) => {
-      const events =
-        (await read(
-          "events",
-          { orderBy: "status", equalTo: status, limitToFirst: limit },
-          signal,
-        )) ?? {};
-      return Object.fromEntries(
-        Object.entries(events).map(([eventId, value]) => {
-          const event = readEventDocument(value);
-          if (!event) throw new TypeError("invalid event list fixture");
-          return [eventId, event];
-        }),
-      );
-    },
     listProfileEventPrizeAssignments: async (profileId, query = {}, signal) =>
       ((await read(
         `profileEventPrizes/${profileId}`,

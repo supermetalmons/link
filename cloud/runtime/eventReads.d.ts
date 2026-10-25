@@ -1,7 +1,6 @@
 // Generated from src/eventReads.ts. Run npm run generate:runtime.
 import type { EventDocument } from "./events/documents.js";
 export type EventJsonRecord = Record<string, unknown>;
-export type EventStatus = "scheduled" | "active" | "ended" | "dismissed";
 export type EventPrizeAssignmentRecord = {
   assignedAtMs: number;
   eventId: string;
@@ -46,11 +45,6 @@ export type EventReads = {
     profileId: string,
     signal?: AbortSignal,
   ): Promise<ProfileEventPrizeSnapshot>;
-  listEventsByStatus(
-    status: EventStatus,
-    limit?: number,
-    signal?: AbortSignal,
-  ): Promise<Record<string, EventDocument>>;
   listProfileEventPrizeAssignments(
     profileId: string,
     query?: ProfileEventPrizePageQuery,

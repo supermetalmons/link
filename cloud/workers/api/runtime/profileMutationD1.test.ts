@@ -12,9 +12,9 @@ import {
 } from "../src/profileCanonicalD1.ts";
 import {
   readCanonicalProfileMutationByLogin,
-  readCanonicalRatingProfiles,
   type CanonicalProfileMutationSnapshot,
 } from "../src/profileMutationD1.ts";
+import { readMutableRatingProfiles } from "../src/profileMutableD1.ts";
 import { createProfileCustomizationRepository } from "../src/profileCustomizationRepository.ts";
 import { createMiningRepository } from "../src/miningRepository.ts";
 import {
@@ -85,6 +85,14 @@ async function createProfile(
       updatedAtMs: 2_000,
     },
     profile: { ...value, profileId, revision: 1 },
+  };
+}
+
+function mutableSnapshot(snapshot: CanonicalProfileMutationSnapshot) {
+  const { legacyFields: _legacyFields, ...profile } = snapshot.profile;
+  return {
+    owner: snapshot.owner,
+    profile: { ...profile, storageShape: "mutable" as const },
   };
 }
 
@@ -286,8 +294,8 @@ describe("canonical profile mutation reads", () => {
     );
   });
 
-  describe("paired rating reads", () => {
-    it("reads both complete profiles in one two-query batch", async () => {
+  describe("paired mutable rating reads", () => {
+    it("reads both mutable profiles in one ordered two-query batch", async () => {
       const player = await createProfile(
         { rating: 0, nonce: 0, totalManaPoints: 0, emoji: 0 },
         { gameplayEmoji: 0 },
@@ -308,17 +316,20 @@ describe("canonical profile mutation reads", () => {
       );
       const observed = observeDatabase({ forbidStandaloneReads: true });
       await expect(
-        readCanonicalRatingProfiles(observed.database, {
+        readMutableRatingProfiles(observed.database, {
           playerLoginUid: player.owner.loginUid,
           opponentLoginUid: opponent.owner.loginUid,
         }),
       ).resolves.toEqual({
-        player,
-        opponent,
+        player: mutableSnapshot(player),
+        opponent: mutableSnapshot(opponent),
       });
       expect(observed.firstQueries).toHaveLength(0);
       expect(observed.batchQueries.map((queries) => queries.length)).toEqual([
         2,
+      ]);
+      expect(observed.batchBindings).toEqual([
+        [[player.owner.loginUid], [opponent.owner.loginUid]],
       ]);
       expect(observed.batchQueries[0].join("\n")).not.toMatch(
         /profile_february_opponents|profile_auth_methods|profile_auth_recovery_jobs|FROM profile_login_owners\s+WHERE profile_id/,
@@ -335,7 +346,7 @@ describe("canonical profile mutation reads", () => {
         const existing = await createProfile();
         const observed = observeDatabase({ forbidStandaloneReads: true });
         await expect(
-          readCanonicalRatingProfiles(observed.database, {
+          readMutableRatingProfiles(observed.database, {
             playerLoginUid: missingPlayer
               ? "missing-rating-player"
               : existing.owner.loginUid,
@@ -344,8 +355,8 @@ describe("canonical profile mutation reads", () => {
               : existing.owner.loginUid,
           }),
         ).resolves.toEqual({
-          player: missingPlayer ? null : existing,
-          opponent: missingOpponent ? null : existing,
+          player: missingPlayer ? null : mutableSnapshot(existing),
+          opponent: missingOpponent ? null : mutableSnapshot(existing),
         });
         expect(observed.batchQueries.map((queries) => queries.length)).toEqual([
           2,
@@ -356,20 +367,21 @@ describe("canonical profile mutation reads", () => {
     it("keeps both roles when logins share a canonical profile", async () => {
       const source = await createProfile();
       const target = await createProfile();
+      const expectedProfile = mutableSnapshot(target).profile;
       await mergeOwner(source, target);
       const observed = observeDatabase({ forbidStandaloneReads: true });
       for (const playerLoginUid of [
         source.owner.loginUid,
         target.owner.loginUid,
       ]) {
-        const result = await readCanonicalRatingProfiles(observed.database, {
+        const result = await readMutableRatingProfiles(observed.database, {
           playerLoginUid,
           opponentLoginUid: target.owner.loginUid,
         });
         expect(result.player?.owner.loginUid).toBe(playerLoginUid);
         expect(result.opponent?.owner).toEqual(target.owner);
-        expect(result.player?.profile).toEqual(target.profile);
-        expect(result.opponent?.profile).toEqual(target.profile);
+        expect(result.player?.profile).toEqual(expectedProfile);
+        expect(result.opponent?.profile).toEqual(expectedProfile);
       }
       expect(observed.batchQueries.map((queries) => queries.length)).toEqual([
         2, 2,
@@ -388,11 +400,11 @@ describe("canonical profile mutation reads", () => {
             ? { beforeFirstBatch: merge }
             : { afterFirstBatch: merge }),
         });
-        const result = await readCanonicalRatingProfiles(observed.database, {
+        const result = await readMutableRatingProfiles(observed.database, {
           playerLoginUid: source.owner.loginUid,
           opponentLoginUid: target.owner.loginUid,
         });
-        expect(result.opponent).toEqual(target);
+        expect(result.opponent).toEqual(mutableSnapshot(target));
         expect(result.player).toEqual(
           timing === "before"
             ? {
@@ -402,9 +414,9 @@ describe("canonical profile mutation reads", () => {
                   revision: 2,
                   updatedAtMs: 3_000,
                 },
-                profile: target.profile,
+                profile: mutableSnapshot(target).profile,
               }
-            : source,
+            : mutableSnapshot(source),
         );
         expect(observed.batchQueries.map((queries) => queries.length)).toEqual([
           2,
@@ -427,7 +439,7 @@ describe("canonical profile mutation reads", () => {
       ["invalid player owner", 0, { canonical_owner_revision: 0 }],
       ["invalid opponent profile", 1, { revision: 0 }],
       ["invalid player payload", 0, { payload_json: "{}" }],
-      ["invalid opponent legacy fields", 1, { legacy_fields_json: "[]" }],
+      ["invalid opponent legacy fields", 1, { legacy_fields_validation: 0 }],
       [
         "retiring player",
         0,
@@ -456,7 +468,7 @@ describe("canonical profile mutation reads", () => {
           ),
       });
       await expect(
-        readCanonicalRatingProfiles(observed.database, {
+        readMutableRatingProfiles(observed.database, {
           playerLoginUid: initial.owner.loginUid,
           opponentLoginUid: initial.owner.loginUid,
         }),
@@ -472,7 +484,7 @@ describe("canonical profile mutation reads", () => {
         },
       });
       await expect(
-        readCanonicalRatingProfiles(observed.database, {
+        readMutableRatingProfiles(observed.database, {
           playerLoginUid: "player",
           opponentLoginUid: "opponent",
         }),

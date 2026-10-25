@@ -1485,6 +1485,228 @@ test("batches rematch participants in actor order and replays without reading ag
   }
 });
 
+for (const failureStage of [
+  "ownership",
+  "unavailable",
+  "invalid-match",
+] as const) {
+  test(`rematch ${failureStage} failure preserves read ordering without writes or dispatch`, async () => {
+    const state = repository({
+      "invites/abcdefghijk": {
+        hostId: identity.uid,
+        guestId: "guest-login",
+        hostColor: "white",
+        ...(failureStage === "invalid-match" ? {} : { hostRematches: "1" }),
+      },
+    });
+    const ownership = state.repository.readProfileOwnershipSnapshot;
+    const reads: string[] = [];
+    let projections = 0;
+    state.repository.readProfileOwnershipSnapshot = async (query) => {
+      reads.push("ownership");
+      if (failureStage === "ownership") throw new Error("ownership-failed");
+      return ownership(query);
+    };
+    state.repository.readMatchRecords = async () => {
+      reads.push("matches");
+      return [matchDocumentFixture({ ...match("black"), fen: "" }), null];
+    };
+
+    await assert.rejects(
+      proposeRematch(
+        identity,
+        {
+          operationId: ids.propose,
+          inviteId: "abcdefghijk",
+          ...presentation(),
+        },
+        state.repository,
+        {
+          now: () => 1_000,
+          enqueueProfileGameProjection: async () => {
+            projections++;
+          },
+        },
+      ),
+      (error) =>
+        error instanceof AuthApiFailure &&
+        error.message ===
+          (failureStage === "ownership"
+            ? "profile-ownership-unavailable"
+            : failureStage === "unavailable"
+              ? "rematch-unavailable"
+              : "rematch-match-invalid"),
+    );
+    assert.deepEqual(
+      reads,
+      failureStage === "invalid-match"
+        ? ["ownership", "matches"]
+        : ["ownership"],
+    );
+    assert.equal(state.patches.length, 0);
+    assert.equal(projections, 0);
+  });
+}
+
+for (const operation of ["propose", "end"] as const) {
+  test(`a stored ${operation} receipt bypasses every rematch domain read`, async () => {
+    const state = repository({
+      "invites/abcdefghijk": {
+        hostId: identity.uid,
+        guestId: "guest-login",
+        hostColor: "white",
+      },
+    });
+    const run = () =>
+      operation === "propose"
+        ? proposeRematch(
+            identity,
+            {
+              operationId: ids.propose,
+              inviteId: "abcdefghijk",
+              ...presentation(),
+            },
+            state.repository,
+            { now: () => 1_000 },
+          )
+        : endRematchSeries(
+            identity,
+            { operationId: ids.end, inviteId: "abcdefghijk" },
+            state.repository,
+            { now: () => 1_000 },
+          );
+    const response = await run();
+    assert.equal(state.patches.length, 1);
+    let domainReads = 0;
+    const unexpected = async (): Promise<never> => {
+      domainReads++;
+      throw new Error("unexpected-replay-read");
+    };
+    state.repository.readInviteMetadata = unexpected;
+    state.repository.readProfileOwnershipSnapshot = unexpected;
+    state.repository.readMatchRecord = unexpected;
+    state.repository.readMatchRecords = unexpected;
+
+    assert.deepEqual(await run(), response);
+    assert.equal(domainReads, 0);
+    assert.equal(state.patches.length, 1);
+  });
+}
+
+for (const scenario of [
+  "first-proposal",
+  "second-proposal",
+  "end-base",
+  "end-pending",
+  "already-ended",
+  "history-clock-failed",
+] as const) {
+  test(`rematch ${scenario} retains lazy history timing before write admission`, async () => {
+    const proposes =
+      scenario.endsWith("proposal") || scenario === "history-clock-failed";
+    const actor =
+      scenario === "second-proposal" ? { uid: "guest-login" } : identity;
+    const state = repository({
+      "invites/abcdefghijk": {
+        hostId: identity.uid,
+        guestId: "guest-login",
+        hostColor: "white",
+        ...(scenario === "second-proposal" || scenario === "end-pending"
+          ? { hostRematches: "1" }
+          : {}),
+        ...(scenario === "already-ended" ? { guestRematches: "1x" } : {}),
+      },
+    });
+    const events: string[] = [];
+    const failure = new Error("history-clock-failed");
+    let historyPhase = false;
+    let projections = 0;
+    const ready = () => {
+      events.push("plan-ready");
+      historyPhase = true;
+    };
+    const readInvite = state.repository.readInviteMetadata;
+    state.repository.readInviteMetadata = async (...args) => {
+      const invite = await readInvite(...args);
+      if (!proposes) ready();
+      return invite;
+    };
+    state.repository.readMatchRecords = async () => {
+      ready();
+      return [null, null];
+    };
+    const commit = state.repository.commitSessionChanges;
+    state.repository.commitSessionChanges = async (...args) => {
+      events.push("commit");
+      return commit(...args);
+    };
+    const dependencies: GameSessionDependencyOverrides = {
+      now: () => {
+        if (historyPhase) {
+          events.push("history-clock");
+          if (scenario === "history-clock-failed") throw failure;
+        }
+        return 1_000;
+      },
+      assertMutationAllowed: async () => {
+        events.push("admit");
+        historyPhase = false;
+      },
+      enqueueProfileGameProjection: async () => {
+        projections++;
+      },
+    };
+    const result = proposes
+      ? proposeRematch(
+          actor,
+          {
+            operationId: ids.propose,
+            inviteId: "abcdefghijk",
+            ...presentation(),
+          },
+          state.repository,
+          dependencies,
+        )
+      : endRematchSeries(
+          actor,
+          { operationId: ids.end, inviteId: "abcdefghijk" },
+          state.repository,
+          dependencies,
+        );
+    if (scenario === "history-clock-failed") {
+      await assert.rejects(result, (error) => error === failure);
+      assert.deepEqual(events, ["plan-ready", "history-clock"]);
+      assert.equal(state.patches.length, 0);
+      assert.equal(projections, 0);
+    } else {
+      await result;
+      const hasHistory =
+        scenario === "first-proposal" || scenario === "end-base";
+      assert.deepEqual(events, [
+        "plan-ready",
+        ...(hasHistory ? ["history-clock"] : []),
+        "admit",
+        "commit",
+      ]);
+      assert.equal(state.patches.length, 1);
+      const descriptor =
+        state.patches[0][
+          "profileGameProjectionOutbox/automatch/abcdefghijk/historicalMatches/abcdefghijk"
+        ];
+      assert.equal(descriptor !== undefined, hasHistory);
+      if (hasHistory) {
+        assert.deepEqual(descriptor, {
+          finalizedAtMs: 1_000,
+          guestPlayerId: "guest-login",
+          hostPlayerId: identity.uid,
+          source: "transition",
+        });
+      }
+    }
+    assert.equal(coordination(state.repository).lockRows.size, 0);
+  });
+}
+
 test("a failed rematch batch leaves session state and projections untouched", async () => {
   const state = repository({
     "invites/abcdefghijk": {

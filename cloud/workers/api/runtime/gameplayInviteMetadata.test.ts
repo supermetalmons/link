@@ -6,6 +6,7 @@ import { createGameSessionMutationLockStore } from "../src/gameplayCoordinationD
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { normalizeInviteMetadata } from "../src/inviteMetadata.ts";
 import { composeInviteWagerSource } from "../src/inviteWagerSource.ts";
+import { createWagerStateD1Store } from "../src/wagerStateD1.ts";
 import type { MatchStatePort } from "../src/repositoryContracts.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
@@ -207,7 +208,7 @@ describe("gameplay invite metadata reads", () => {
       passwordProtected: false,
     });
     await expect(
-      gameplay.wagers.readInviteWagerState(inviteId),
+      gameplay.wagers.readWagerSnapshot({ inviteId, matchId: inviteId }),
     ).rejects.toThrow("unexpected-profile-database-access");
   });
 
@@ -296,7 +297,7 @@ describe("gameplay invite metadata reads", () => {
     expect(
       composeInviteWagerSource(
         await gameplay.readInviteMetadata(inviteId),
-        await gameplay.wagers.readInviteWagerState(inviteId),
+        await createWagerStateD1Store(env.PROFILE_DB).readInvite(inviteId),
       ),
     ).toEqual({
       ...source,

@@ -29,7 +29,6 @@ export {
   readEventPrizeSelections,
   readEventSnapshot,
   readEventSnapshotIfChanged,
-  listEventAggregates,
   readProfileEventPrizes,
   readProfileEventPrizesIfChanged,
   readProfileEventPrizeAssignment,

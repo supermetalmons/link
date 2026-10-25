@@ -263,8 +263,6 @@ function fixture(route: RouteCase) {
     wagers: {
       readWager: unexpected,
       readWagerSnapshot: unexpected,
-      readInviteWagerState: unexpected,
-      readInviteWagerPresence: unexpected,
     },
     applyWagerTransferOnce: unexpected,
     deleteNavigationGame: async (profileId, inviteId) => {

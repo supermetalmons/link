@@ -273,6 +273,22 @@ test("gameplay route runtimes keep event and rating dependencies scoped", () => 
   }
 });
 
+test("rematch planning stays independent of mutation execution and repositories", () => {
+  const sourceRoot = resolve(import.meta.dirname, "../src");
+  const reachable = new Set(
+    reachableRuntimeFiles(resolve(sourceRoot, "gameSessionRematchPolicy.ts")),
+  );
+  for (const dependency of [
+    "gameSessionMutations.ts",
+    "gameSessionMutationRunner.ts",
+    "gameplayRepository.ts",
+    "profileCanonicalD1.ts",
+    "matchStateSource.ts",
+  ]) {
+    assert.ok(!reachable.has(resolve(sourceRoot, dependency)), dependency);
+  }
+});
+
 test("canonical profile internals never import their public facade", () => {
   const facade = resolve(import.meta.dirname, "../src/profileCanonicalD1.ts");
   const internalRoot = resolve(import.meta.dirname, "../src/profileCanonical");

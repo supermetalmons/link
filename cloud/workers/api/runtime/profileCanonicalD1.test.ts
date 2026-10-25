@@ -3176,19 +3176,105 @@ describe("canonical profile D1 store", () => {
         value,
       })),
     });
+    const children = [
+      {
+        profileId: first.profile.id,
+        loginUids: ["first-z-login", "first-a-login"],
+        methods: ["sol", "eth"],
+        opponents: ["first-z-opponent", "first-a-opponent"],
+      },
+      {
+        profileId: second.profile.id,
+        loginUids: ["second-z-login", "second-b-login", "second-a-login"],
+        methods: ["x", "apple"],
+        opponents: ["second-y-opponent", "second-b-opponent"],
+      },
+    ];
+    await testEnv.PROFILE_DB.batch(
+      children.flatMap(({ profileId, loginUids, methods, opponents }) => [
+        ...loginUids.map((loginUid) =>
+          testEnv.PROFILE_DB.prepare(
+            `INSERT INTO profile_login_owners
+             (login_uid, profile_id, revision, created_at_ms, updated_at_ms)
+             VALUES (?, ?, 1, 1000, 1000)`,
+          ).bind(loginUid, profileId),
+        ),
+        ...methods.map((method) =>
+          testEnv.PROFILE_DB.prepare(
+            `INSERT INTO profile_auth_methods
+             (method, normalized_value, raw_value, profile_id, revision, created_at_ms, updated_at_ms)
+             VALUES (?, ?, ?, ?, 1, 1000, 1000)`,
+          ).bind(
+            method,
+            `${profileId}-${method}`,
+            `${profileId}-${method}`,
+            profileId,
+          ),
+        ),
+        ...opponents.map((opponent) =>
+          testEnv.PROFILE_DB.prepare(
+            `INSERT INTO profile_february_opponents
+             (profile_id, opponent_profile_id, recorded_at_ms)
+             VALUES (?, ?, 1000)`,
+          ).bind(profileId, opponent),
+        ),
+      ]),
+    );
     const observed = observeAggregateDatabase();
-    const aggregates = await readCanonicalProfileAggregates(observed.database, [
+    const profileIds = [
       second.profile.id,
       "missing-bulk-profile",
       first.profile.id,
       second.profile.id,
-    ]);
+    ];
+    const aggregates = await readCanonicalProfileAggregates(
+      observed.database,
+      profileIds,
+    );
     expect(
       aggregates.map((aggregate) => aggregate.profile?.profileId ?? null),
     ).toEqual([second.profile.id, null, first.profile.id, second.profile.id]);
     expect(aggregates[0]).toEqual(aggregates[3]);
     expect(aggregates[0]).not.toBe(aggregates[3]);
+    expect(aggregates[0].loginOwners).not.toBe(aggregates[3].loginOwners);
+    expect(aggregates[0].authMethods).not.toBe(aggregates[3].authMethods);
+    expect(aggregates[0].februaryOpponentProfileIds).not.toBe(
+      aggregates[3].februaryOpponentProfileIds,
+    );
+    for (const [index, profileId] of profileIds.entries()) {
+      const expected = children.find((child) => child.profileId === profileId);
+      const aggregate = aggregates[index];
+      expect(
+        aggregate.loginOwners.map((owner) => [owner.loginUid, owner.profileId]),
+      ).toEqual(
+        (expected?.loginUids.toSorted() ?? []).map((loginUid) => [
+          loginUid,
+          profileId,
+        ]),
+      );
+      expect(
+        aggregate.authMethods.map((method) => [
+          method.method,
+          method.profileId,
+          method.normalizedValue,
+        ]),
+      ).toEqual(
+        (expected?.methods.toSorted() ?? []).map((method) => [
+          method,
+          profileId,
+          `${profileId}-${method}`,
+        ]),
+      );
+      expect(aggregate.februaryOpponentProfileIds).toEqual(
+        expected?.opponents.toSorted() ?? [],
+      );
+    }
     expect(observed.batches.map((queries) => queries.length)).toEqual([24]);
+    expect(observed.batchBindings).toEqual([
+      profileIds.flatMap((profileId) =>
+        Array.from({ length: 6 }, () => [profileId]),
+      ),
+    ]);
 
     const checked = observeAggregateDatabase();
     await expect(

@@ -1,5 +1,11 @@
 import { parseCanonicalProfileAggregateResults } from "./auth.ts";
 import {
+  CANONICAL_PROFILE_AGGREGATE_PARTS,
+  canonicalProfileAggregatePart,
+  canonicalProfileAggregateValues,
+  type CanonicalProfileAggregateParts,
+} from "./aggregateLayout.ts";
+import {
   parseCanonicalMergeTargetRow,
   readCanonicalMergeTarget,
 } from "./profiles.ts";
@@ -26,28 +32,29 @@ function aggregateStatements(
   targetProfileId: string,
   sourceProfileId: string,
 ): D1PreparedStatement[] {
-  return [
-    `SELECT requested.request_index AS recovery_request_index, value.*
+  const queries: CanonicalProfileAggregateParts<string> = {
+    profile: `SELECT requested.request_index AS recovery_request_index, value.*
      FROM requested JOIN profile_records value USING (profile_id)
      ORDER BY requested.request_index`,
-    `SELECT requested.request_index AS recovery_request_index, value.*
+    loginOwners: `SELECT requested.request_index AS recovery_request_index, value.*
      FROM requested JOIN profile_login_owners value USING (profile_id)
      ORDER BY requested.request_index, value.login_uid ASC`,
-    `SELECT requested.request_index AS recovery_request_index, value.*
+    authMethods: `SELECT requested.request_index AS recovery_request_index, value.*
      FROM requested JOIN profile_auth_methods value USING (profile_id)
      ORDER BY requested.request_index, value.method ASC`,
-    `SELECT requested.request_index AS recovery_request_index, value.opponent_profile_id
+    februaryOpponentProfileIds: `SELECT requested.request_index AS recovery_request_index, value.opponent_profile_id
      FROM requested JOIN profile_february_opponents value USING (profile_id)
      ORDER BY requested.request_index, value.opponent_profile_id ASC`,
-    `SELECT requested.request_index AS recovery_request_index,
+    mergeTarget: `SELECT requested.request_index AS recovery_request_index,
             value.source_profile_id, value.target_profile_id, value.merged_at_ms, value.op_id
      FROM requested JOIN profile_merge_targets value
        ON value.source_profile_id = requested.profile_id
      ORDER BY requested.request_index`,
-    `SELECT requested.request_index AS recovery_request_index, value.*
+    recovery: `SELECT requested.request_index AS recovery_request_index, value.*
      FROM requested JOIN profile_auth_recovery_jobs value USING (profile_id)
      ORDER BY requested.request_index`,
-  ].map((query) =>
+  };
+  return canonicalProfileAggregateValues(queries).map((query) =>
     db
       .prepare(`${REQUESTED_PROFILES_SQL} ${query}`)
       .bind(targetProfileId, sourceProfileId),
@@ -162,15 +169,19 @@ export async function readCanonicalRecoveryFinalizationSnapshot(
     throw new CanonicalProfileCorruption();
   }
   const groups = [targetProfileId, sourceProfileId].map(() =>
-    statements.map(() => ({ results: [] as Record<string, unknown>[] })),
+    CANONICAL_PROFILE_AGGREGATE_PARTS.map(() => ({
+      results: [] as Record<string, unknown>[],
+    })),
   );
-  for (let table = 0; table < statements.length; table++) {
-    const result = results[table];
+  for (const part of CANONICAL_PROFILE_AGGREGATE_PARTS) {
+    const result = canonicalProfileAggregatePart(results, part);
     if (!result) throw new CanonicalProfileCorruption();
     for (const row of result.results) {
       const requestIndex = safeInteger(row.recovery_request_index);
       if (requestIndex > 1) throw new CanonicalProfileCorruption();
-      groups[requestIndex][table].results.push(row);
+      canonicalProfileAggregatePart(groups[requestIndex], part).results.push(
+        row,
+      );
     }
   }
   const [target, source] = groups.map(parseCanonicalProfileAggregateResults);

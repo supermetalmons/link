@@ -189,30 +189,6 @@ export async function readCanonicalProfileMutationByLogin(
   return parseCanonicalOwnedProfileRow(row, loginUid);
 }
 
-export async function readCanonicalRatingProfiles(
-  db: D1Database,
-  {
-    playerLoginUid,
-    opponentLoginUid,
-  }: { playerLoginUid: string; opponentLoginUid: string },
-): Promise<{
-  player: CanonicalProfileMutationSnapshot | null;
-  opponent: CanonicalProfileMutationSnapshot | null;
-}> {
-  const statements = [playerLoginUid, opponentLoginUid].map((loginUid) =>
-    prepareCanonicalOwnedProfileRead(db, loginUid),
-  );
-  const [player, opponent] =
-    await db.batch<Record<string, unknown>>(statements);
-  return {
-    player: parseCanonicalOwnedProfileRow(player.results[0], playerLoginUid),
-    opponent: parseCanonicalOwnedProfileRow(
-      opponent.results[0],
-      opponentLoginUid,
-    ),
-  };
-}
-
 function canonicalChallengeReplayProfileStatement(
   db: D1Database,
   profileId: string,

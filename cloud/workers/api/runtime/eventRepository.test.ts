@@ -752,10 +752,6 @@ describe("typed event repository", () => {
       prizes: { [eventId]: assignment },
       revision: 1,
     });
-    await expect(client.listEventsByStatus("scheduled", 1)).resolves.toEqual({
-      [eventId]: eventRecord(),
-    });
-    await expect(client.listEventsByStatus("active")).resolves.toEqual({});
     const prizeStore = createD1AuthRecoveryPrizeStore(testEnv.EVENT_DB);
     await expect(
       prizeStore.readProfileEventPrizeAssignment(profileId, eventId),

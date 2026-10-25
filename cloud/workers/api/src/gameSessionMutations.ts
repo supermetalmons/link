@@ -1,4 +1,3 @@
-import { inviteHistoricalParticipants } from "@mons/shared/invite-records";
 import {
   readInviteDocument,
   inviteMutationParticipants,
@@ -37,11 +36,8 @@ import {
   buildFreshMatchRecord,
 } from "@mons/shared/match-protocol";
 import {
-  getLatestApprovedRematchIndex,
   getLatestRematchIndex,
   parseInviteMatchIndex,
-  parseRematchIndices,
-  rematchSeriesEnded,
 } from "@mons/shared/rematches";
 import * as monsRules from "mons-rules";
 import {
@@ -66,6 +62,12 @@ import {
   type GameSessionMutationRunnerDependencies,
 } from "./gameSessionMutationRunner.ts";
 import {
+  finalizeRematchProposal,
+  inspectRematchProposal,
+  planRematchEnd,
+  type RematchPlan,
+} from "./gameSessionRematchPolicy.ts";
+import {
   getLoginProfileId,
   getOwnershipProfile,
   loginsShareProfile,
@@ -79,10 +81,6 @@ const gameVariantHelpers = createGameVariantHelpers(monsRules);
 type GameSessionMutationDependencies = GameSessionMutationRunnerDependencies & {
   random?: () => number;
 };
-
-function normalizeString(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
 
 function readStoredString(value: unknown): string {
   return typeof value === "string" ? value : "";
@@ -425,47 +423,23 @@ export async function joinInvite(
   );
 }
 
-export function nextRematchIndex(
-  invite: InviteDocument,
-  role: "guest" | "host",
-): number | null {
-  if (rematchSeriesEnded(inviteRematchState(invite))) {
-    return null;
-  }
-  const hostIndices = parseRematchIndices(
-    inviteRematchState(invite).hostRematches,
-  );
-  const guestIndices = parseRematchIndices(
-    inviteRematchState(invite).guestRematches,
-  );
-  const own = role === "host" ? hostIndices : guestIndices;
-  const other = role === "host" ? guestIndices : hostIndices;
-  const common = hostIndices.filter((index) => guestIndices.includes(index));
-  const latestCommon = common.at(-1) || 0;
-  if (latestCommon === 0) {
-    if (own.length === 0 && other.length === 0) {
-      return 1;
-    }
-    return own.length < other.length && own.length === 0 ? 1 : null;
-  }
-  if (own.length > other.length) {
-    return null;
-  }
-  const nextIndex = latestCommon + 1;
-  return Number.isSafeInteger(nextIndex) ? nextIndex : null;
-}
-
-function rematchColor(
-  invite: InviteDocument,
-  role: "guest" | "host",
-  index: number,
-): "black" | "white" {
-  const hostColor = inviteRematchState(invite).hostColor;
-  const guestColor = hostColor === "white" ? "black" : "white";
-  if (index % 2 === 0) {
-    return role === "host" ? hostColor : guestColor;
-  }
-  return role === "host" ? guestColor : hostColor;
+function completeRematchOutcome<
+  Response extends ProposeRematchResponse | EndRematchResponse,
+>(plan: RematchPlan<Response>, now: () => number) {
+  const { history, ...outcome } = plan;
+  if (!history) return outcome;
+  return {
+    ...outcome,
+    historicalMatches: [
+      {
+        finalizedAtMs: now(),
+        guestPlayerId: history.guestPlayerId,
+        hostPlayerId: history.hostPlayerId,
+        matchId: history.matchId,
+        source: history.source,
+      },
+    ],
+  };
 }
 
 export async function proposeRematch(
@@ -508,93 +482,34 @@ export async function proposeRematch(
       ) {
         throw failedPrecondition("rematch-unavailable");
       }
-      const index = nextRematchIndex(invite, participant.role);
-      if (!index) {
-        throw failedPrecondition("rematch-unavailable");
-      }
-      const matchId = `${request.inviteId}${index}`;
+      const inspection = inspectRematchProposal({
+        invite,
+        inviteId: request.inviteId,
+        role: participant.role,
+      });
+      const { matchId } = inspection;
       const [storedMatch, storedOpponent] = await repository.readMatchRecords([
         { playerId: participant.actorUid, matchId },
         { playerId: participant.opponentUid, matchId },
       ]);
-      const existingMatch = normalizeMatch(storedMatch);
-      const color = rematchColor(invite, participant.role, index);
-      if (
-        (storedMatch !== null && storedMatch !== undefined && !existingMatch) ||
-        (existingMatch && existingMatch.color !== color)
-      ) {
-        throw failedPrecondition("rematch-match-invalid");
-      }
-      const opponentMatch = normalizeMatch(storedOpponent);
-      const seed = opponentMatch
-        ? {
-            gameVariant: opponentMatch.gameVariant,
-            fen: opponentMatch.fen,
-          }
-        : gameVariantHelpers.buildDeterministicGameSeed(`rematch:${matchId}`);
-      const match: GameSessionMatch = existingMatch || {
-        ...buildFreshMatchRecord({
-          color,
-          emojiId: request.emojiId,
-          aura: request.aura,
-          seed,
-        }),
-        color,
-      };
-      const field =
-        participant.role === "host" ? "hostRematches" : "guestRematches";
-      const opponentField =
-        participant.role === "host" ? "guestRematches" : "hostRematches";
-      const firstProposal = !parseRematchIndices(
-        inviteRematchState(invite)[opponentField],
-      ).includes(index);
-      const current = normalizeString(inviteRematchState(invite)[field]);
-      const rematches = current ? `${current};${index}` : String(index);
-      return {
-        response: {
-          ok: true,
-          inviteId: request.inviteId,
-          actorUid: participant.actorUid,
-          matchId,
-          rematches,
-          match,
+      const plan = finalizeRematchProposal(
+        {
+          invite,
+          request,
+          actor: participant,
+          inspection,
+          storedMatch,
+          storedOpponent,
         },
-        projectReason: `manual-${field}-updated`,
-        ...(firstProposal
-          ? {
-              historicalMatches: [
-                {
-                  finalizedAtMs: (dependencies.now || Date.now)(),
-                  guestPlayerId: inviteHistoricalParticipants(invite).guestId,
-                  hostPlayerId: inviteHistoricalParticipants(invite).hostId,
-                  matchId:
-                    index === 1
-                      ? request.inviteId
-                      : `${request.inviteId}${index - 1}`,
-                  source: "transition" as const,
-                },
-              ],
-            }
-          : {}),
-        changes: [
-          {
-            kind: "invite-rematches",
-            inviteId: request.inviteId,
-            role: participant.role,
-            value: rematches,
-          },
-          ...(existingMatch
-            ? []
-            : [
-                {
-                  kind: "match-create" as const,
-                  playerId: participant.actorUid,
-                  matchId,
-                  value: match,
-                },
-              ]),
-        ],
-      };
+        {
+          normalizeMatch,
+          buildDeterministicGameSeed: (seedValue) =>
+            gameVariantHelpers.buildDeterministicGameSeed(seedValue),
+        },
+      );
+      return completeRematchOutcome(plan, () =>
+        (dependencies.now || Date.now)(),
+      );
     },
     dependencies,
   );
@@ -625,60 +540,14 @@ export async function endRematchSeries(
         invite,
         repository,
       );
-      const field =
-        participant.role === "host" ? "hostRematches" : "guestRematches";
-      const current = normalizeString(inviteRematchState(invite)[field]);
-      if (rematchSeriesEnded(inviteRematchState(invite))) {
-        return {
-          response: {
-            ok: true,
-            inviteId: request.inviteId,
-            actorUid: participant.actorUid,
-            rematches: current.endsWith("x") ? current : `${current}x`,
-          },
-        };
-      }
-      const rematches = `${current}x`;
-      const latestApprovedIndex = getLatestApprovedRematchIndex(
-        inviteRematchState(invite),
+      const plan = planRematchEnd({
+        invite,
+        inviteId: request.inviteId,
+        actor: participant,
+      });
+      return completeRematchOutcome(plan, () =>
+        (dependencies.now || Date.now)(),
       );
-      const latestProposedIndex = getLatestRematchIndex(
-        inviteRematchState(invite),
-      );
-      const matchId =
-        latestApprovedIndex === 0
-          ? request.inviteId
-          : `${request.inviteId}${latestApprovedIndex}`;
-      return {
-        response: {
-          ok: true,
-          inviteId: request.inviteId,
-          actorUid: participant.actorUid,
-          rematches,
-        },
-        projectReason: `manual-${field}-ended`,
-        ...(latestApprovedIndex === latestProposedIndex
-          ? {
-              historicalMatches: [
-                {
-                  finalizedAtMs: (dependencies.now || Date.now)(),
-                  guestPlayerId: inviteHistoricalParticipants(invite).guestId,
-                  hostPlayerId: inviteHistoricalParticipants(invite).hostId,
-                  matchId,
-                  source: "transition" as const,
-                },
-              ],
-            }
-          : {}),
-        changes: [
-          {
-            kind: "invite-rematches",
-            inviteId: request.inviteId,
-            role: participant.role,
-            value: rematches,
-          },
-        ],
-      };
     },
     dependencies,
     { acquireRetryTimeoutMs: END_REMATCH_LEASE_RETRY_TIMEOUT_MS },
@@ -769,6 +638,7 @@ export async function ensureParticipantMatch(
   );
 }
 
+export { nextRematchIndex } from "./gameSessionRematchPolicy.ts";
 export {
   acquireGameSessionMutationLease,
   enforceGameSessionMutationRateLimit,

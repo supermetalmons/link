@@ -1,7 +1,7 @@
 import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
 import type { D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { classifyD1Failure } from "../src/d1Failure.ts";
 import { notifyInviteRooms } from "../src/inviteRoomNotifications.ts";
 import { composeInviteWagerSource } from "../src/inviteWagerSource.ts";
@@ -353,7 +353,8 @@ describe("canonical wager state", () => {
     await withWriter(async (writeGuards) => {
       const writer = createWagerStateRepository(db, { writeGuards, now });
       await writer.sendProposal(key("composed"), proposal());
-      const states = await writer.readInviteWagerState("composed");
+      const store = createWagerStateD1Store(db);
+      const states = await store.readInvite("composed");
       const composed = composeInviteWagerSource(
         inviteDocumentFixture({
           hostId: "host",
@@ -370,11 +371,11 @@ describe("canonical wager state", () => {
         wagers: { composed: (await writer.readWager(key("composed")))?.raw },
       });
       expect(composeInviteWagerSource(null, states, false)).toBeNull();
-      expect(await writer.readInviteWagerState("missing")).toEqual([]);
+      expect(await store.readInvite("missing")).toEqual([]);
       expect(await writer.readWager(key("missing"))).toBeNull();
     });
   });
-  it("reads only field presence for large histories without parsing retained payloads", async () => {
+  it("reads full invite payloads with false, null, and completed markers and retained tombstones", async () => {
     await withWriter(async (writeGuards) => {
       const history = "x".repeat(100_000);
       const store = createWagerStateD1Store(db, { writeGuards, now });
@@ -385,30 +386,45 @@ describe("canonical wager state", () => {
         marker: { wager: null, resolutionMarker: true },
       })) {
         const current = await store.read({
-          inviteId: "shallow-history",
+          inviteId: "full-history",
           matchId,
         });
         await store.commit([{ current, value: value as WagerStateValue }]);
       }
-      const reader = createWagerStateReader(db);
-      const parse = vi.spyOn(JSON, "parse");
-      try {
-        expect(await reader.readInviteWagerPresence("shallow-history")).toEqual(
-          {
-            wagerMatchIds: ["first", "second"],
-            resolutionMatchIds: ["first", "marker"],
-          },
-        );
-        expect(
-          parse.mock.calls.reduce((bytes, [json]) => bytes + json.length, 0),
-        ).toBeLessThan(history.length);
-      } finally {
-        parse.mockRestore();
-      }
+      expect(
+        (await store.readInvite("full-history")).map(
+          ({ matchId, wager, resolutionMarker, revision }) => ({
+            matchId,
+            wager,
+            resolutionMarker,
+            revision,
+          }),
+        ),
+      ).toEqual([
+        {
+          matchId: "deleted",
+          wager: null,
+          resolutionMarker: null,
+          revision: 1,
+        },
+        {
+          matchId: "first",
+          wager: { history },
+          resolutionMarker: false,
+          revision: 1,
+        },
+        { matchId: "marker", wager: null, resolutionMarker: true, revision: 1 },
+        {
+          matchId: "second",
+          wager: { history },
+          resolutionMarker: null,
+          revision: 1,
+        },
+      ]);
       expect(
         (
-          await reader.readWager({
-            inviteId: "shallow-history",
+          await createWagerStateReader(db).readWager({
+            inviteId: "full-history",
             matchId: "first",
           })
         )?.raw,

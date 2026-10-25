@@ -71,12 +71,6 @@ export function createMemoryWagerState(state: WagerTestState): WagerWriter {
         resolutionMarker: resolutionMarker as boolean | null,
       };
     },
-    readInviteWagerState: async () => {
-      throw new Error("unexpected-invite-wager-read");
-    },
-    readInviteWagerPresence: async () => {
-      throw new Error("unexpected-invite-wager-read");
-    },
     sendProposal: (key, input, signal) =>
       transact(key, (current) => sendProposalDecision(current, input), signal),
     acceptProposal: (key, input, signal) =>

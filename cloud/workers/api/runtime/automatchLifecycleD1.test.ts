@@ -195,11 +195,6 @@ function client(
     wagers: {
       readWager: async () => null,
       readWagerSnapshot: async () => ({ wager: null, resolutionMarker: null }),
-      readInviteWagerState: async () => [],
-      readInviteWagerPresence: async () => ({
-        wagerMatchIds: [],
-        resolutionMatchIds: [],
-      }),
     },
     readProfileOwnershipSnapshot: async (query) => ownership(query),
     applyWagerTransferOnce: async () => {
