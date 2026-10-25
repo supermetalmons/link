@@ -20,7 +20,6 @@ import {
   readWagerProposal,
   readWagerCount,
   readWagerRemovalReceipt,
-  type DecodedWager,
   type WagerProposal,
   type WagerRemovalReceipt,
 } from "./wagerModel.ts";
@@ -35,6 +34,7 @@ import type {
 import { withGameSessionMutationLease } from "./gameSessionMutationRunner.ts";
 import { resolveInviteActor } from "./inviteAccess.ts";
 import { ensureWagerAgreementLineageReady } from "./wagerAgreementLineage.ts";
+import { observeProposalWrite } from "./wagerProposalWrite.ts";
 import {
   getLoginProfileId,
   requireProfileOwnershipSnapshot,
@@ -464,29 +464,29 @@ async function sendWagerProposalUnlocked(
     return { ok: false, reason: "insufficient-materials" };
   }
 
-  let wagerAfter: DecodedWager | null = null;
-  await mutation.refreshLease();
-  try {
-    const result = await repository.wagerWriter.sendProposal(
-      wagerKey,
-      {
-        playerUid: participants.playerUid,
-        opponentUid: participants.opponentUid,
-        material: request.material,
-        opponentAdjustmentOperationId,
-        opponentProposal,
-        reservedCount,
-        operationId,
-        now: now(),
-        reservationOperationId,
-        selfAdjustmentOperationId,
-      },
-      mutation.createCriticalPhaseSignal(),
-    );
-    wagerAfter = result.value;
-  } catch {
-    wagerAfter = await repository.wagers.readWager(wagerKey);
-  }
+  const { wager: wagerAfter } = await observeProposalWrite({
+    refreshLease: () => mutation.refreshLease(),
+    command: async () => {
+      const result = await repository.wagerWriter.sendProposal(
+        wagerKey,
+        {
+          playerUid: participants.playerUid,
+          opponentUid: participants.opponentUid,
+          material: request.material,
+          opponentAdjustmentOperationId,
+          opponentProposal,
+          reservedCount,
+          operationId,
+          now: now(),
+          reservationOperationId,
+          selfAdjustmentOperationId,
+        },
+        mutation.createCriticalPhaseSignal(),
+      );
+      return result.value;
+    },
+    readback: () => repository.wagers.readWager(wagerKey),
+  });
   const agreementOperation = wagerAfter?.agreementOperation.value;
   const removalOperations =
     wagerAfter?.proposalRemovalOperations.value?.entries;
@@ -688,35 +688,35 @@ async function acceptWagerProposalUnlocked(
 
   const ownMaterial = ownProposal?.material ?? "";
   const ownCount = readWagerCount(ownProposal);
-  let wagerAfter: DecodedWager | null = null;
-  await mutation.refreshLease();
-  try {
-    const result = await repository.wagerWriter.acceptProposal(
-      wagerKey,
-      {
-        playerUid: participants.playerUid,
-        opponentUid: participants.opponentUid,
-        operationId,
-        material,
-        proposedCount,
-        opponentProposalOperationId,
-        opponentReservationOperationId,
-        hasOwnProposal: Boolean(ownProposal),
-        ownMaterial,
-        ownCount,
-        ownProposalOperationId,
-        ownReservationOperationId,
-        acceptedCount: reservation.acceptedCount,
-        now: now(),
-        proposerAdjustmentOperationId,
-        reservationOperationId,
-      },
-      mutation.createCriticalPhaseSignal(),
-    );
-    wagerAfter = result.value;
-  } catch {
-    wagerAfter = await repository.wagers.readWager(wagerKey);
-  }
+  const { wager: wagerAfter } = await observeProposalWrite({
+    refreshLease: () => mutation.refreshLease(),
+    command: async () => {
+      const result = await repository.wagerWriter.acceptProposal(
+        wagerKey,
+        {
+          playerUid: participants.playerUid,
+          opponentUid: participants.opponentUid,
+          operationId,
+          material,
+          proposedCount,
+          opponentProposalOperationId,
+          opponentReservationOperationId,
+          hasOwnProposal: Boolean(ownProposal),
+          ownMaterial,
+          ownCount,
+          ownProposalOperationId,
+          ownReservationOperationId,
+          acceptedCount: reservation.acceptedCount,
+          now: now(),
+          proposerAdjustmentOperationId,
+          reservationOperationId,
+        },
+        mutation.createCriticalPhaseSignal(),
+      );
+      return result.value;
+    },
+    readback: () => repository.wagers.readWager(wagerKey),
+  });
   const agreementOperation = wagerAfter?.agreementOperation.value;
   const agreement = wagerAfter?.agreed.value?.agreement;
   if (agreementOperation?.raw.id !== operationId || !agreement) {
@@ -765,29 +765,32 @@ async function removeProposal(
   ) {
     throw new Error("wager-removal-operation-invalid");
   }
-  let wagerAfter: DecodedWager | null;
-  await mutation.refreshLease();
-  try {
-    const result = await repository.wagerWriter.removeProposal(
-      wagerKey,
-      {
-        proposalUid,
-        operationId,
-        expectedReservationOperationId,
-      },
-      mutation.createCriticalPhaseSignal(),
-    );
-    if (result.decision === "proposal-invalid") {
-      throw new Error("wager-removal-operation-invalid");
-    }
-    wagerAfter = result.value;
-  } catch {
-    wagerAfter = await repository.wagers.readWager(wagerKey);
-    if (!readWagerRemovalReceipt(wagerAfter, operationId)) {
-      throw new Error("wager-removal-unavailable");
-    }
+  const observation = await observeProposalWrite({
+    refreshLease: () => mutation.refreshLease(),
+    command: async () => {
+      const result = await repository.wagerWriter.removeProposal(
+        wagerKey,
+        {
+          proposalUid,
+          operationId,
+          expectedReservationOperationId,
+        },
+        mutation.createCriticalPhaseSignal(),
+      );
+      if (result.decision === "proposal-invalid") {
+        throw new Error("wager-removal-operation-invalid");
+      }
+      return result.value;
+    },
+    readback: () => repository.wagers.readWager(wagerKey),
+  });
+  if (
+    observation.source === "readback" &&
+    !readWagerRemovalReceipt(observation.wager, operationId)
+  ) {
+    throw new Error("wager-removal-unavailable");
   }
-  return readWagerRemovalReceipt(wagerAfter, operationId);
+  return readWagerRemovalReceipt(observation.wager, operationId);
 }
 
 export async function removeWagerProposal(

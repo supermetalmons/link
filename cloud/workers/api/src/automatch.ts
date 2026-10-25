@@ -21,10 +21,10 @@ import {
   buildPendingAutomatchPlan,
   matchedAutomatchResponse,
   pendingAutomatchResponse,
-  profileOrFallback,
 } from "./automatch/plans.ts";
 import {
   AUTOMATCH_CANCELLATION_RECONCILE_TIMEOUT_MS,
+  AUTOMATCH_OWNER_LOGIN_UID_LIMIT,
   AUTOMATCH_TOTAL_TIMEOUT_MS,
 } from "./automatch/policy.ts";
 import { enqueueAutomatchProjections } from "./automatch/projections.ts";
@@ -33,6 +33,7 @@ import {
   buildAutomatchReplayTasks,
   matchesAutomatchReceiptRequest,
 } from "./automatch/receipts.ts";
+import { selectAutomatchAttempt } from "./automatch/selection.ts";
 import type {
   AutomatchDependencies,
   AutomatchReceipt,
@@ -41,7 +42,6 @@ import type {
   StartAutomatchOperationRequest,
   SuccessfulStartAutomatchResponse,
 } from "./automatch/types.ts";
-import { getDisplayNameFromAddress } from "../../../runtime/telegramDisplay.js";
 import { AuthApiFailure } from "./authErrors.ts";
 import { isAutomatchQueueSelectionConflict } from "./automatchQueueD1.ts";
 import {
@@ -58,7 +58,6 @@ import {
   getLoginProfileId,
   getOwnershipProfile,
   getProfileLoginUids,
-  loginsShareProfile,
   profileOwnershipUnavailable,
   requireProfileOwnershipSnapshot,
   type ProfileOwnershipSnapshot,
@@ -66,6 +65,7 @@ import {
 
 export { cancelQueuedAutomatch } from "./automatch/cancellation.ts";
 export { AUTOMATCH_TOTAL_TIMEOUT_MS } from "./automatch/policy.ts";
+export { getFirstQueuedAutomatch } from "./automatch/selection.ts";
 export {
   createAutomatchProfileGameProjectionTask,
   createAutomatchProjectionTask,
@@ -78,7 +78,6 @@ const MAX_AUTOMATCH_SELECTION_ATTEMPTS = 32;
 const AUTOMATCH_OWNER_LOCK_MIN_RETRY_MS = 25;
 const AUTOMATCH_OWNER_LOCK_MAX_RETRY_MS = 1_000;
 const AUTOMATCH_UID_LOOKUP_LIMIT = 2;
-const AUTOMATCH_OWNER_LOGIN_UID_LIMIT = 512;
 
 function normalizeString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -121,21 +120,6 @@ function compareQueuedAutomatches(
     finiteNumber(right.data.timestamp) - finiteNumber(left.data.timestamp) ||
     compareStrings(left.inviteId, right.inviteId)
   );
-}
-
-export function getFirstQueuedAutomatch(
-  value: Record<string, AutomatchEntryRead> | null,
-): QueuedAutomatch | null {
-  const queue = value;
-  if (!queue) {
-    return null;
-  }
-  const first = Object.entries(queue)[0];
-  if (!first) {
-    return null;
-  }
-  const [inviteId, data] = first;
-  return { inviteId, data: data.record || emptyAutomatchEntryFields() };
 }
 
 function getQueuedAutomatchesForUid(
@@ -547,248 +531,165 @@ async function persistExistingAutomatchReceipt(
   );
 }
 
-async function attemptAutomatch(
+async function runAutomatchCandidateAttempts(
   identity: RequestIdentity,
   request: StartAutomatchOperationRequest,
   requester: AutomatchRequesterSnapshot,
   repository: AutomatchRepository,
   random: RandomSource,
   signal: AbortSignal,
-  retryCount: number,
   dependencies: AutomatchDependencies,
 ): Promise<StartAutomatchResponse> {
-  if (signal.aborted) {
-    throw new Error("automatch-operation-timeout");
-  }
-  if (retryCount > MAX_AUTOMATCH_RETRY_COUNT) {
-    return { ok: false };
-  }
+  for (let retryCount = 0; ; retryCount++) {
+    if (signal.aborted) {
+      throw new Error("automatch-operation-timeout");
+    }
+    if (retryCount > MAX_AUTOMATCH_RETRY_COUNT) {
+      return { ok: false };
+    }
 
-  const queued = getFirstQueuedAutomatch(
-    await measureAutomatchPhase("selection", () =>
-      repository.readFirstAutomatchEntry(signal),
-    ),
-  );
-  let profile = profileOrFallback(requester.profile, request);
-  const existingUid = queued ? normalizeString(queued.data.uid) : "";
-  if (queued && existingUid !== identity.uid) {
-    const pairOwnership = await measureAutomatchPhase("ownership", () =>
-      requireProfileOwnershipSnapshot(repository, {
-        loginUids: [identity.uid, existingUid],
-        profileIds: [],
-      }),
-    );
-    const existingProfileId = getLoginProfileId(pairOwnership, existingUid);
-    const existingLoginUids = existingProfileId
-      ? getProfileLoginUids(pairOwnership, existingProfileId)
-      : [existingUid];
-    if (existingLoginUids.length > AUTOMATCH_OWNER_LOGIN_UID_LIMIT) {
-      throw profileOwnershipUnavailable();
-    }
-    const existingSurvivor = await convergeOwnedQueuedAutomatches(
-      existingLoginUids,
-      repository,
-      signal,
-      dependencies,
-    );
-    if (!existingSurvivor) {
-      return attemptAutomatch(
-        identity,
-        request,
-        requester,
+    const selection = await selectAutomatchAttempt(
+      { requesterUid: identity.uid, request, requester, signal },
+      {
         repository,
-        random,
-        signal,
-        retryCount + 1,
-        dependencies,
-      );
-    }
-    if (loginsShareProfile(pairOwnership, identity.uid, existingUid)) {
+        convergeOwnedQueues: (loginUids, selectionSignal) =>
+          convergeOwnedQueuedAutomatches(
+            loginUids,
+            repository,
+            selectionSignal,
+            dependencies,
+          ),
+      },
+    );
+    if (selection.kind === "reselect") continue;
+    if (selection.kind === "reuse-owned") {
       const existing = await persistExistingAutomatchReceipt(
         identity,
         request,
-        existingSurvivor.inviteId,
-        existingLoginUids,
+        selection.inviteId,
+        selection.ownerUids,
         repository,
         signal,
         dependencies,
       );
       if (existing) return existing;
-      return attemptAutomatch(
-        identity,
-        request,
-        requester,
-        repository,
-        random,
-        signal,
-        retryCount + 1,
-        dependencies,
-      );
+      continue;
     }
-    if (existingSurvivor.inviteId !== queued.inviteId) {
-      return attemptAutomatch(
-        identity,
-        request,
-        requester,
-        repository,
-        random,
-        signal,
-        retryCount + 1,
-        dependencies,
-      );
-    }
-    const profileId = getLoginProfileId(pairOwnership, identity.uid);
-    profile = profileOrFallback(
-      profileId
-        ? getOwnershipProfile(pairOwnership, profileId)?.profile || null
-        : null,
-      request,
-    );
-  }
-  const hasProfile = profile.profileId !== "";
-  const emojiId = hasProfile ? profile.emoji : request.emojiId;
-  const aura = (hasProfile ? profile.aura : request.aura) || null;
-  const name = getDisplayNameFromAddress(
-    profile.username,
-    profile.eth,
-    profile.sol,
-    profile.rating,
-    emojiId,
-  );
 
-  if (!queued) {
-    const { response, changes, profileGameProjectionTask, projectionTask } =
-      buildPendingAutomatchPlan(
+    if (selection.kind === "create-pending") {
+      const {
+        profile,
+        display: { emojiId, aura, name },
+      } = selection;
+      const { response, changes, profileGameProjectionTask, projectionTask } =
+        buildPendingAutomatchPlan(
+          {
+            requesterUid: identity.uid,
+            request,
+            profile,
+            emojiId,
+            aura,
+            name,
+            random,
+          },
+          dependencies.createProjectionRequestId || (() => crypto.randomUUID()),
+        );
+      await commitAutomatchWithLease(
         {
-          requesterUid: identity.uid,
-          request,
-          profile,
-          emojiId,
-          aura,
-          name,
-          random,
+          inviteId: response.inviteId,
+          leaseOperationId: profileGameProjectionTask.requestId,
+          selectionConflict: "rethrow",
+          prepare: async () => ({ response, changes }),
+          commit: (changes) => repository.commitSessionChanges(changes, signal),
+          reconcile: (expected) =>
+            didCommitAutomatchReceipt(
+              identity.uid,
+              request,
+              expected,
+              repository,
+            ),
         },
-        dependencies.createProjectionRequestId || (() => crypto.randomUUID()),
+        dependencies,
       );
-    await commitAutomatchWithLease(
+      await enqueueAutomatchProjections(
+        projectionTask,
+        profileGameProjectionTask,
+        dependencies,
+      );
+      markAutomatchOutcome("pending");
+      return response;
+    }
+
+    const {
+      queued,
+      existingUid,
+      display: { emojiId, aura, name },
+    } = selection;
+    const {
+      response: matchedResponse,
+      changes,
+      profileGameProjectionTask,
+      projectionTask,
+      inviteChange,
+    } = buildMatchedAutomatchPlan(
       {
-        inviteId: response.inviteId,
+        requesterUid: identity.uid,
+        request,
+        queued,
+        existingUid,
+        emojiId,
+        aura,
+        name,
+      },
+      dependencies.createProjectionRequestId || (() => crypto.randomUUID()),
+    );
+    const matchResult = await commitAutomatchWithLease(
+      {
+        inviteId: queued.inviteId,
         leaseOperationId: profileGameProjectionTask.requestId,
         selectionConflict: "rethrow",
-        prepare: async () => ({ response, changes }),
+        prepare: async () => {
+          const [currentQueueValue, currentInviteValue] = await Promise.all([
+            repository.readAutomatchEntry(queued.inviteId, signal),
+            repository.readInviteMetadata(queued.inviteId, signal),
+          ]);
+          const currentInvite = readInviteDocument(currentInviteValue);
+          const participants = inviteTrimmedParticipants(currentInvite);
+          if (
+            normalizeString(currentQueueValue.record?.uid) !== existingUid ||
+            participants.hostId !== existingUid ||
+            participants.guestId
+          ) {
+            return null;
+          }
+          inviteChange.value = mergeInviteAutomatchOperation(
+            inviteChange.value,
+            currentInvite,
+            identity.uid,
+            request.operationId,
+          );
+          return { response: matchedResponse, changes };
+        },
         commit: (changes) => repository.commitSessionChanges(changes, signal),
-        reconcile: (expected) =>
+        reconcile: (response) =>
           didCommitAutomatchReceipt(
             identity.uid,
             request,
-            expected,
+            response,
             repository,
           ),
       },
       dependencies,
     );
+    if (!matchResult) continue;
     await enqueueAutomatchProjections(
       projectionTask,
       profileGameProjectionTask,
       dependencies,
     );
-    markAutomatchOutcome("pending");
-    return response;
+    markAutomatchOutcome("matched");
+    return matchedResponse;
   }
-
-  if (existingUid === identity.uid) {
-    const existing = await persistExistingAutomatchReceipt(
-      identity,
-      request,
-      queued.inviteId,
-      [identity.uid],
-      repository,
-      signal,
-      dependencies,
-    );
-    if (existing) return existing;
-    return attemptAutomatch(
-      identity,
-      request,
-      requester,
-      repository,
-      random,
-      signal,
-      retryCount + 1,
-      dependencies,
-    );
-  }
-
-  const {
-    response: matchedResponse,
-    changes,
-    profileGameProjectionTask,
-    projectionTask,
-    inviteChange,
-  } = buildMatchedAutomatchPlan(
-    {
-      requesterUid: identity.uid,
-      request,
-      queued,
-      existingUid,
-      emojiId,
-      aura,
-      name,
-    },
-    dependencies.createProjectionRequestId || (() => crypto.randomUUID()),
-  );
-  const matchResult = await commitAutomatchWithLease(
-    {
-      inviteId: queued.inviteId,
-      leaseOperationId: profileGameProjectionTask.requestId,
-      selectionConflict: "rethrow",
-      prepare: async () => {
-        const [currentQueueValue, currentInviteValue] = await Promise.all([
-          repository.readAutomatchEntry(queued.inviteId, signal),
-          repository.readInviteMetadata(queued.inviteId, signal),
-        ]);
-        const currentInvite = readInviteDocument(currentInviteValue);
-        const participants = inviteTrimmedParticipants(currentInvite);
-        if (
-          normalizeString(currentQueueValue.record?.uid) !== existingUid ||
-          participants.hostId !== existingUid ||
-          participants.guestId
-        ) {
-          return null;
-        }
-        inviteChange.value = mergeInviteAutomatchOperation(
-          inviteChange.value,
-          currentInvite,
-          identity.uid,
-          request.operationId,
-        );
-        return { response: matchedResponse, changes };
-      },
-      commit: (changes) => repository.commitSessionChanges(changes, signal),
-      reconcile: (response) =>
-        didCommitAutomatchReceipt(identity.uid, request, response, repository),
-    },
-    dependencies,
-  );
-  if (!matchResult) {
-    return attemptAutomatch(
-      identity,
-      request,
-      requester,
-      repository,
-      random,
-      signal,
-      retryCount + 1,
-      dependencies,
-    );
-  }
-  await enqueueAutomatchProjections(
-    projectionTask,
-    profileGameProjectionTask,
-    dependencies,
-  );
-  markAutomatchOutcome("matched");
-  return matchedResponse;
 }
 
 async function startAutomatchForCurrentOwner(
@@ -841,14 +742,13 @@ async function startAutomatchForCurrentOwner(
         );
         if (existing) return existing;
       }
-      return attemptAutomatch(
+      return runAutomatchCandidateAttempts(
         identity,
         request,
         requester,
         repository,
         dependencies.random || secureRandom,
         signal,
-        0,
         dependencies,
       );
     },

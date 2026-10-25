@@ -3637,6 +3637,139 @@ test("bounds failed guest verification to four total attempts", async () => {
   assert.equal(writes.length, 0);
 });
 
+for (const reason of [
+  "missing-survivor",
+  "replacement-survivor",
+  "missing-owned-receipt",
+] as const) {
+  test(`bounds ${reason} reselection to four candidate reads`, async () => {
+    const controller = new AbortController();
+    const selectedUid =
+      reason === "missing-owned-receipt" ? identity.uid : "host-uid";
+    const value = repository();
+    let selections = 0;
+    let candidateConvergences = 0;
+    let preparations = 0;
+    let dispatches = 0;
+    value.readFirstAutomatchEntry = async (signal) => {
+      assert.equal(signal, controller.signal);
+      selections++;
+      return decodeAutomatchEntries({ auto_selected: { uid: selectedUid } });
+    };
+    value.automatchPersistence.readQueuedByLogins = async (uids, signal) => {
+      assert.equal(signal, controller.signal);
+      if (uids.includes(identity.uid)) return {};
+      candidateConvergences++;
+      return reason === "replacement-survivor"
+        ? decodeAutomatchEntries({ auto_replacement: { uid: selectedUid } }) ||
+            {}
+        : {};
+    };
+    value.readAutomatchEntry = async () =>
+      decodeAutomatchEntry({ uid: selectedUid });
+    value.readInviteMetadata = async () => {
+      preparations++;
+      return null;
+    };
+    value.commitSessionChanges = async () => assert.fail("unexpected-commit");
+
+    assert.deepEqual(
+      await startAutomatch(identity, request(), value, {
+        signal: controller.signal,
+        random: () => assert.fail("unexpected-randomness"),
+        createProjectionRequestId: () =>
+          assert.fail("unexpected-projection-id"),
+        enqueueProfileGameProjection: async () => {
+          dispatches++;
+        },
+        enqueueTelegramProjection: async () => {
+          dispatches++;
+        },
+      }),
+      { ok: false },
+    );
+    assert.equal(selections, 4);
+    assert.equal(
+      candidateConvergences,
+      reason === "missing-owned-receipt" ? 0 : 4,
+    );
+    assert.equal(preparations, reason === "missing-owned-receipt" ? 4 : 0);
+    assert.equal(dispatches, 0);
+  });
+}
+
+test("checks cancellation after the fourth failed preparation and preserves ID-before-lease ordering", async () => {
+  const controller = new AbortController();
+  const inviteId = "auto_final_attempt";
+  const entry = {
+    uid: "host-uid",
+    hostColor: "white",
+    password: "password",
+    gameVariant: "Classic",
+  };
+  const value = repository();
+  const { mutationLocks } = coordinationFor(value);
+  const acquire = mutationLocks.acquire;
+  const events: string[] = [];
+  let selections = 0;
+  let preparations = 0;
+  let projectionIds = 0;
+  let dispatches = 0;
+  mutationLocks.acquire = async (lock, ownerId, nowMs) => {
+    if (lock.lockId === inviteId) events.push(`lease:${lock.operationId}`);
+    await acquire(lock, ownerId, nowMs);
+  };
+  value.readFirstAutomatchEntry = async (signal) => {
+    assert.equal(signal, controller.signal);
+    selections++;
+    return decodeAutomatchEntries({ [inviteId]: entry });
+  };
+  value.automatchPersistence.readQueuedByLogins = async (uids) =>
+    uids.includes("host-uid")
+      ? decodeAutomatchEntries({ [inviteId]: entry }) || {}
+      : {};
+  value.readAutomatchEntry = async () => decodeAutomatchEntry(entry);
+  value.readInviteMetadata = async () => {
+    if (++preparations === 4) controller.abort(new Error("caller-aborted"));
+    return retainedInviteSourceFixture({
+      hostId: "host-uid",
+      guestId: "racing-guest",
+    });
+  };
+  value.commitSessionChanges = async () => assert.fail("unexpected-commit");
+
+  await assert.rejects(
+    startAutomatch(identity, request(), value, {
+      signal: controller.signal,
+      random: () => assert.fail("unexpected-match-randomness"),
+      createProjectionRequestId: () => {
+        const id = `attempt-${++projectionIds}`;
+        events.push(`id:${id}`);
+        return id;
+      },
+      enqueueProfileGameProjection: async () => {
+        dispatches++;
+      },
+      enqueueTelegramProjection: async () => {
+        dispatches++;
+      },
+    }),
+    (error) =>
+      error instanceof Error && error.message === "automatch-operation-timeout",
+  );
+  assert.deepEqual(
+    { selections, preparations, projectionIds, dispatches },
+    { selections: 4, preparations: 4, projectionIds: 4, dispatches: 0 },
+  );
+  assert.deepEqual(
+    events,
+    [1, 2, 3, 4].flatMap((attempt) => [
+      `id:attempt-${attempt}`,
+      `lease:attempt-${attempt}`,
+    ]),
+  );
+});
+
 test("reconciles a committed match after an ambiguous patch failure", async () => {
   let writes = 0;
   let committed = false;

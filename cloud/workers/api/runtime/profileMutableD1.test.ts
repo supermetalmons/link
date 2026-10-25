@@ -4,6 +4,7 @@ import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   CanonicalProfileConflict,
+  CanonicalProfileCorruption,
   commitCanonicalPlan,
   type CanonicalCommitPlan,
   type CanonicalProfileSnapshot,
@@ -137,7 +138,13 @@ type Observation = {
   rows: Record<string, unknown>[];
 };
 
-function observeDatabase(database: D1Database) {
+function observeDatabase(
+  database: D1Database,
+  mapReadRow?: (
+    row: Record<string, unknown>,
+    statementIndex: number,
+  ) => Record<string, unknown>,
+) {
   const calls: Observation[] = [];
   const originals = new WeakMap<D1PreparedStatement, D1PreparedStatement>();
   const descriptions = new WeakMap<
@@ -156,7 +163,9 @@ function observeDatabase(database: D1Database) {
             wrap(target.bind(...bound), query, bound);
         if (property === "first")
           return async () => {
-            const result = await target.first<Record<string, unknown>>();
+            const stored = await target.first<Record<string, unknown>>();
+            const result =
+              stored && mapReadRow ? mapReadRow(stored, 0) : stored;
             calls.push({
               queries: [query],
               bindings: [values],
@@ -188,11 +197,19 @@ function observeDatabase(database: D1Database) {
         return (query: string) => wrap(target.prepare(query), query);
       if (property === "batch")
         return async (statements: D1PreparedStatement[]) => {
-          const result = await target.batch<Record<string, unknown>>(
+          const stored = await target.batch<Record<string, unknown>>(
             statements.map(
               (statement) => originals.get(statement) || statement,
             ),
           );
+          const result = mapReadRow
+            ? stored.map((entry, statementIndex) => ({
+                ...entry,
+                results: entry.results.map((row) =>
+                  mapReadRow(row, statementIndex),
+                ),
+              }))
+            : stored;
           calls.push({
             queries: statements.map(
               (statement) => descriptions.get(statement)?.query || "",
@@ -477,6 +494,10 @@ describe("narrow profile mutation compatibility", () => {
     expect(pair.opponent?.profile.profileId).toBe(first.profileId);
     expect(observed.calls).toHaveLength(1);
     expect(observed.calls[0].queries).toHaveLength(2);
+    expect(observed.calls[0].bindings).toEqual([
+      [second.loginUid],
+      [first.loginUid],
+    ]);
     observed.calls.length = 0;
     const resolved = await resolveMutableProfiles(observed.database, [
       second.profileId,
@@ -493,6 +514,108 @@ describe("narrow profile mutation compatibility", () => {
     expect(observed.calls).toHaveLength(1);
     expect(observed.calls[0].queries).toHaveLength(4);
   });
+
+  it("returns null only for missing logins in single and ordered paired reads", async () => {
+    const existing = await createProfile();
+    const missingLoginUid = `missing-mutable-login-${crypto.randomUUID()}`;
+    const observed = observeDatabase(db);
+    await expect(
+      readMutableProfileMutationByLogin(observed.database, missingLoginUid),
+    ).resolves.toBeNull();
+    expect(observed.calls).toHaveLength(1);
+    expect(observed.calls[0].queries).toHaveLength(1);
+    expect(observed.calls[0].bindings).toEqual([[missingLoginUid]]);
+
+    for (const [missingPlayer, missingOpponent] of [
+      [true, false],
+      [false, true],
+      [true, true],
+      [false, false],
+    ]) {
+      observed.calls.length = 0;
+      const playerLoginUid = missingPlayer
+        ? missingLoginUid
+        : existing.loginUid;
+      const opponentLoginUid = missingOpponent
+        ? missingLoginUid
+        : existing.loginUid;
+      const pair = await readMutableRatingProfiles(observed.database, {
+        playerLoginUid,
+        opponentLoginUid,
+      });
+      expect(pair.player?.profile.profileId ?? null).toBe(
+        missingPlayer ? null : existing.profileId,
+      );
+      expect(pair.opponent?.profile.profileId ?? null).toBe(
+        missingOpponent ? null : existing.profileId,
+      );
+      expect(pair.player?.owner.loginUid ?? null).toBe(
+        missingPlayer ? null : playerLoginUid,
+      );
+      expect(pair.opponent?.owner.loginUid ?? null).toBe(
+        missingOpponent ? null : opponentLoginUid,
+      );
+      expect(observed.calls).toHaveLength(1);
+      expect(observed.calls[0].queries).toHaveLength(2);
+      expect(observed.calls[0].bindings).toEqual([
+        [playerLoginUid],
+        [opponentLoginUid],
+      ]);
+    }
+  });
+
+  it.each([
+    ["dangling owner", { profile_id: null, payload_json: null }],
+    ["owner login mismatch", { canonical_owner_login_uid: "another-login" }],
+    [
+      "owner profile mismatch",
+      { canonical_owner_profile_id: "another-profile" },
+    ],
+    [
+      "retiring profile",
+      { state: "retiring", merged_into_profile_id: "another-profile" },
+    ],
+    [
+      "unexpected redirect",
+      { canonical_merge_source_profile_id: "another-profile" },
+    ],
+  ] as const)(
+    "rejects a %s through single and paired mutable reads",
+    async (_label, changes) => {
+      const corrupt = await createProfile();
+      const healthy = await createProfile();
+      for (const role of ["single", "player", "opponent"] as const) {
+        const index = role === "opponent" ? 1 : 0;
+        const observed = observeDatabase(db, (row, statementIndex) =>
+          statementIndex === index ? { ...row, ...changes } : row,
+        );
+        const playerLoginUid =
+          role === "opponent" ? healthy.loginUid : corrupt.loginUid;
+        const opponentLoginUid =
+          role === "opponent" ? corrupt.loginUid : healthy.loginUid;
+        await expect(
+          role === "single"
+            ? readMutableProfileMutationByLogin(
+                observed.database,
+                corrupt.loginUid,
+              )
+            : readMutableRatingProfiles(observed.database, {
+                playerLoginUid,
+                opponentLoginUid,
+              }),
+        ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+        expect(observed.calls).toHaveLength(1);
+        expect(observed.calls[0].queries).toHaveLength(
+          role === "single" ? 1 : 2,
+        );
+        expect(observed.calls[0].bindings).toEqual(
+          role === "single"
+            ? [[corrupt.loginUid]]
+            : [[playerLoginUid], [opponentLoginUid]],
+        );
+      }
+    },
+  );
 
   it("requires the original revision and increments revision for a no-op field patch", async () => {
     const { profileId, loginUid } = await createProfile({ old: true });

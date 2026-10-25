@@ -16,8 +16,7 @@ import {
   type CanonicalSortKey,
 } from "./profileCanonicalD1.ts";
 import {
-  CANONICAL_OWNED_PROFILE_COLUMNS,
-  CANONICAL_OWNED_PROFILE_FROM,
+  prepareCanonicalOwnedProfileRead,
   parseCanonicalOwnedProfileRow,
   type CanonicalOwnedProfileSnapshot,
 } from "./profileCanonical/ownedProfile.ts";
@@ -180,24 +179,11 @@ export function commitCanonicalProfileUpdate(
   });
 }
 
-function canonicalProfileMutationStatement(
-  db: D1Database,
-  loginUid: string,
-): D1PreparedStatement {
-  return db
-    .prepare(
-      `SELECT ${CANONICAL_OWNED_PROFILE_COLUMNS}
-       ${CANONICAL_OWNED_PROFILE_FROM}
-       WHERE owner.login_uid = ?`,
-    )
-    .bind(loginUid);
-}
-
 export async function readCanonicalProfileMutationByLogin(
   db: D1Database,
   loginUid: string,
 ): Promise<CanonicalProfileMutationSnapshot | null> {
-  const row = await canonicalProfileMutationStatement(db, loginUid).first<
+  const row = await prepareCanonicalOwnedProfileRead(db, loginUid).first<
     Record<string, unknown>
   >();
   return parseCanonicalOwnedProfileRow(row, loginUid);
@@ -214,7 +200,7 @@ export async function readCanonicalRatingProfiles(
   opponent: CanonicalProfileMutationSnapshot | null;
 }> {
   const statements = [playerLoginUid, opponentLoginUid].map((loginUid) =>
-    canonicalProfileMutationStatement(db, loginUid),
+    prepareCanonicalOwnedProfileRead(db, loginUid),
   );
   const [player, opponent] =
     await db.batch<Record<string, unknown>>(statements);

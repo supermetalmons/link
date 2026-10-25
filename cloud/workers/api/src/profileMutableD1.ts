@@ -1,5 +1,7 @@
-import { parseCanonicalLoginOwnerRow } from "./profileCanonical/auth.ts";
-import { CANONICAL_OWNED_PROFILE_FROM } from "./profileCanonical/ownedProfile.ts";
+import {
+  prepareCanonicalOwnedProfileRead,
+  parseCanonicalOwnedProfileRowWith,
+} from "./profileCanonical/ownedProfile.ts";
 import {
   materializeCanonicalProfile,
   materializeCanonicalProfileFields,
@@ -10,12 +12,11 @@ import {
   mutableProfileValue,
   parseMutableProfileRow,
 } from "./profileCanonical/mutableProfiles.ts";
-import {
-  CanonicalProfileCorruption,
-  type CanonicalLoginOwnerSnapshot,
-  type CanonicalMutableProfileSnapshot,
-  type CanonicalMutation,
-  type CanonicalSortKey,
+import type {
+  CanonicalLoginOwnerSnapshot,
+  CanonicalMutableProfileSnapshot,
+  CanonicalMutation,
+  CanonicalSortKey,
 } from "./profileCanonical/types.ts";
 
 export type { CanonicalMutableProfileSnapshot } from "./profileCanonical/types.ts";
@@ -37,57 +38,20 @@ export type MutableProfileMutation = Extract<
   { kind: "patch-profile-fields" | "patch-active-profile" }
 >;
 
-function mutableOwnedProfileStatement(
-  db: D1Database,
-  loginUid: string,
-): D1PreparedStatement {
-  return db
-    .prepare(
-      `SELECT ${mutableProfileColumns("profile")},
-         owner.login_uid AS canonical_owner_login_uid,
-         owner.profile_id AS canonical_owner_profile_id,
-         owner.revision AS canonical_owner_revision,
-         owner.created_at_ms AS canonical_owner_created_at_ms,
-         owner.updated_at_ms AS canonical_owner_updated_at_ms,
-         mapping.source_profile_id AS canonical_merge_source_profile_id
-       ${CANONICAL_OWNED_PROFILE_FROM}
-       WHERE owner.login_uid = ?`,
-    )
-    .bind(loginUid);
-}
-
-function parseMutableOwnedProfileRow(
-  row: Record<string, unknown> | null | undefined,
-  loginUid: string,
-): CanonicalOwnedMutableProfileSnapshot | null {
-  if (!row) return null;
-  const owner = parseCanonicalLoginOwnerRow({
-    login_uid: row.canonical_owner_login_uid,
-    profile_id: row.canonical_owner_profile_id,
-    revision: row.canonical_owner_revision,
-    created_at_ms: row.canonical_owner_created_at_ms,
-    updated_at_ms: row.canonical_owner_updated_at_ms,
-  });
-  const profile = parseMutableProfileRow(row);
-  if (
-    owner.loginUid !== loginUid ||
-    owner.profileId !== profile.profileId ||
-    profile.state !== "active" ||
-    row.canonical_merge_source_profile_id !== null
-  ) {
-    throw new CanonicalProfileCorruption();
-  }
-  return { owner, profile };
-}
-
 export async function readMutableProfileMutationByLogin(
   db: D1Database,
   loginUid: string,
 ): Promise<CanonicalOwnedMutableProfileSnapshot | null> {
-  const row = await mutableOwnedProfileStatement(db, loginUid).first<
-    Record<string, unknown>
-  >();
-  return parseMutableOwnedProfileRow(row, loginUid);
+  const row = await prepareCanonicalOwnedProfileRead(
+    db,
+    loginUid,
+    mutableProfileColumns("profile"),
+  ).first<Record<string, unknown>>();
+  return parseCanonicalOwnedProfileRowWith(
+    row,
+    loginUid,
+    parseMutableProfileRow,
+  );
 }
 
 export async function readMutableRatingProfiles(
@@ -102,14 +66,23 @@ export async function readMutableRatingProfiles(
 }> {
   const [player, opponent] = await db.batch<Record<string, unknown>>(
     [playerLoginUid, opponentLoginUid].map((loginUid) =>
-      mutableOwnedProfileStatement(db, loginUid),
+      prepareCanonicalOwnedProfileRead(
+        db,
+        loginUid,
+        mutableProfileColumns("profile"),
+      ),
     ),
   );
   return {
-    player: parseMutableOwnedProfileRow(player.results[0], playerLoginUid),
-    opponent: parseMutableOwnedProfileRow(
+    player: parseCanonicalOwnedProfileRowWith(
+      player.results[0],
+      playerLoginUid,
+      parseMutableProfileRow,
+    ),
+    opponent: parseCanonicalOwnedProfileRowWith(
       opponent.results[0],
       opponentLoginUid,
+      parseMutableProfileRow,
     ),
   };
 }

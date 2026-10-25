@@ -12,6 +12,7 @@ import {
   isWagerProposalSendResponse,
 } from "@mons/shared/wagers";
 import { AuthApiFailure } from "../src/authErrors.ts";
+import { decodeWager } from "../src/wagerModel.ts";
 import type { RequestIdentity } from "../src/requestIdentity.ts";
 import type { TestGameplayRepository as GameplayRepository } from "./wagerFrozenTestUtils.ts";
 import type {
@@ -22,6 +23,7 @@ import {
   acceptWagerProposal as acceptWagerProposalImpl,
   consumeWagerReservationOperation,
   createWagerReservationOperationId,
+  removeProposal as removeProposalRecord,
   removeWagerProposal as removeWagerProposalImpl,
   resolveWagerParticipantProfiles,
   resolveWagerParticipantUids,
@@ -2762,3 +2764,291 @@ test("rejects non-participants and sanitizes material release failures", async (
     },
   ]);
 });
+
+async function proposalWriteFixture(operation: "send" | "accept") {
+  const guestProposal = await modernProposal("guest", "dust", 3);
+  const state: { wager: unknown; frozen: Record<string, unknown> } = {
+    wager:
+      operation === "accept" ? { proposals: { guest: guestProposal } } : null,
+    frozen: {
+      host: createEmptyMaterials(),
+      guest:
+        operation === "accept"
+          ? installSendReservation(
+              { ...createEmptyMaterials(), dust: 3 },
+              guestProposal,
+            )
+          : createEmptyMaterials(),
+    },
+  };
+  const frozenWrites: string[] = [];
+  const value = repository({
+    readState: async (path) => {
+      if (path === "invites/invite") {
+        return { hostId: "host", guestId: "guest" };
+      }
+      if (path.startsWith("reservations/")) {
+        return state.frozen[path.split("/")[1]];
+      }
+      return state.wager;
+    },
+    transactState: async (path, update) => {
+      if (path.startsWith("reservations/")) {
+        const uid = path.split("/")[1];
+        frozenWrites.push(uid);
+        const result = applyMiningTransaction(update, state.frozen[uid]);
+        if (result.committed) state.frozen[uid] = result.value;
+        return result;
+      }
+      const result = applyTransaction(update, state.wager);
+      if (result.committed) state.wager = result.value;
+      return result;
+    },
+  });
+  return {
+    repository: value,
+    state,
+    frozenWrites,
+    run(dependencies: Partial<WagerProposalDependencies> = {}) {
+      const request = { inviteId: "invite", matchId: "match" };
+      return operation === "send"
+        ? sendWagerProposal(
+            identity,
+            { ...request, material: "dust", count: 3 },
+            value,
+            dependencies,
+          )
+        : acceptWagerProposal(identity, request, value, dependencies);
+    },
+  };
+}
+
+for (const operation of ["send", "accept"] as const) {
+  test(`${operation} retains its reservation when the wager command and readback both fail`, async () => {
+    const fixture = await proposalWriteFixture(operation);
+    const value = fixture.repository;
+    const writeFailure = new Error("wager-write-unconfirmed");
+    const readFailure = new Error("wager-readback-unavailable");
+    const commandSignals: Array<AbortSignal | undefined> = [];
+    const phaseSignals: AbortSignal[] = [];
+    const readbackSignals: Array<AbortSignal | undefined> = [];
+    let writes = 0;
+    const failWrite = async (
+      _key: unknown,
+      _input: unknown,
+      signal?: AbortSignal,
+    ): Promise<never> => {
+      writes++;
+      commandSignals.push(signal);
+      throw writeFailure;
+    };
+    if (operation === "send") value.wagerWriter.sendProposal = failWrite;
+    else value.wagerWriter.acceptProposal = failWrite;
+    const read = value.wagers.readWager;
+    value.wagers.readWager = async (key, signal) => {
+      if (writes > 0) {
+        readbackSignals.push(signal);
+        throw readFailure;
+      }
+      return read(key, signal);
+    };
+
+    await assert.rejects(
+      fixture.run({
+        createCriticalPhaseSignal: () => {
+          const signal = new AbortController().signal;
+          phaseSignals.push(signal);
+          return signal;
+        },
+      }),
+      (error) => error === readFailure,
+    );
+    assert.equal(writes, 1);
+    assert.equal(phaseSignals.length, 2);
+    assert.deepEqual(commandSignals, [phaseSignals[1]]);
+    assert.notEqual(phaseSignals[0], phaseSignals[1]);
+    assert.deepEqual(readbackSignals, [undefined]);
+    assert.deepEqual(fixture.frozenWrites, ["host"]);
+    assert.equal(materialsOnly(fixture.state.frozen.host).dust, 3);
+    const reservation = await value.wagerFrozen.read(
+      identity.uid,
+      await createWagerReservationOperationId(
+        operation,
+        "invite",
+        "match",
+        identity.uid,
+      ),
+    );
+    assert.equal(reservation.operation.status, "active");
+  });
+}
+
+test("accept reconciles a committed agreement after losing its command response without releasing materials", async () => {
+  const fixture = await proposalWriteFixture("accept");
+  const value = fixture.repository;
+  const accept = value.wagerWriter.acceptProposal;
+  const read = value.wagers.readWager;
+  const readbackSignals: Array<AbortSignal | undefined> = [];
+  let writes = 0;
+  let needsReadback = false;
+  value.wagerWriter.acceptProposal = async (...args) => {
+    writes++;
+    await accept(...args);
+    needsReadback = true;
+    throw new Error("accept-response-lost");
+  };
+  value.wagers.readWager = async (key, signal) => {
+    if (needsReadback) {
+      needsReadback = false;
+      readbackSignals.push(signal);
+    }
+    return read(key, signal);
+  };
+
+  assert.deepEqual(await fixture.run(), { ok: true, count: 3 });
+  assert.deepEqual(await fixture.run(), { ok: true, count: 3 });
+  assert.equal(writes, 1);
+  assert.deepEqual(readbackSignals, [undefined]);
+  assert.deepEqual(fixture.frozenWrites, ["host"]);
+  assert.equal(materialsOnly(fixture.state.frozen.host).dust, 3);
+  assert.equal(materialsOnly(fixture.state.frozen.guest).dust, 3);
+});
+
+for (const failureStage of ["lease", "signal"] as const) {
+  test(`removal ${failureStage} failure preserves the write recovery boundary`, async () => {
+    const proposal = await modernProposal("host", "dust", 2);
+    const operationId = await createOperationId(
+      "cancel",
+      "invite",
+      "match",
+      "host",
+    );
+    const receipt = {
+      proposalOperationId: proposal.operationId,
+      reservationOperationId: proposal.reservationOperationId,
+    };
+    const recovered = decodeWager({
+      proposalRemovalOperations: { [operationId]: receipt },
+    });
+    const value = repository();
+    const failure = new Error(`${failureStage}-unavailable`);
+    const events: string[] = [];
+    const readbackSignals: Array<AbortSignal | undefined> = [];
+    let reads = 0;
+    let writes = 0;
+    value.wagers.readWager = async (_key, signal) => {
+      events.push("read");
+      if (++reads === 1) return null;
+      readbackSignals.push(signal);
+      return recovered;
+    };
+    value.wagerWriter.removeProposal = async () => {
+      writes++;
+      return { committed: false, value: null };
+    };
+    const result = removeProposalRecord(
+      value,
+      "invite",
+      "match",
+      "host",
+      operationId,
+      proposal.reservationOperationId,
+      {
+        refreshLease: async () => {
+          events.push("refresh");
+          if (failureStage === "lease") throw failure;
+        },
+        createCriticalPhaseSignal: () => {
+          events.push("signal");
+          throw failure;
+        },
+      },
+    );
+
+    if (failureStage === "lease") {
+      await assert.rejects(result, (error) => error === failure);
+      assert.deepEqual(events, ["read", "refresh"]);
+      assert.deepEqual(readbackSignals, []);
+    } else {
+      assert.deepEqual((await result)?.raw, receipt);
+      assert.deepEqual(events, ["read", "refresh", "signal", "read"]);
+      assert.deepEqual(readbackSignals, [undefined]);
+    }
+    assert.equal(writes, 0);
+  });
+}
+
+for (const outcome of [
+  "missing",
+  "invalid-recovered",
+  "invalid-unconfirmed",
+] as const) {
+  test(`removal ${outcome} distinguishes command absence from unconfirmed recovery`, async () => {
+    const proposal = await modernProposal("host", "dust", 2);
+    const operationId = await createOperationId(
+      "cancel",
+      "invite",
+      "match",
+      "host",
+    );
+    const receipt = {
+      proposalOperationId: proposal.operationId,
+      reservationOperationId: proposal.reservationOperationId,
+    };
+    const recovered = decodeWager({
+      proposalRemovalOperations: { [operationId]: receipt },
+    });
+    const value = repository();
+    const events: string[] = [];
+    const controller = new AbortController();
+    const commandSignals: Array<AbortSignal | undefined> = [];
+    let reads = 0;
+    value.wagers.readWager = async () => {
+      events.push("read");
+      return ++reads > 1 && outcome === "invalid-recovered" ? recovered : null;
+    };
+    value.wagerWriter.removeProposal = async (_key, _input, signal) => {
+      events.push("command");
+      commandSignals.push(signal);
+      return {
+        committed: false,
+        decision:
+          outcome === "missing" ? "proposal-missing" : "proposal-invalid",
+        value: null,
+      };
+    };
+    const result = removeProposalRecord(
+      value,
+      "invite",
+      "match",
+      "host",
+      operationId,
+      proposal.reservationOperationId,
+      {
+        refreshLease: async () => {
+          events.push("refresh");
+        },
+        createCriticalPhaseSignal: () => {
+          events.push("signal");
+          return controller.signal;
+        },
+      },
+    );
+
+    if (outcome === "invalid-unconfirmed") {
+      await assert.rejects(result, /wager-removal-unavailable/);
+    } else if (outcome === "missing") {
+      assert.equal(await result, null);
+    } else {
+      assert.deepEqual((await result)?.raw, receipt);
+    }
+    assert.deepEqual(events, [
+      "read",
+      "refresh",
+      "signal",
+      "command",
+      ...(outcome === "missing" ? [] : ["read"]),
+    ]);
+    assert.deepEqual(commandSignals, [controller.signal]);
+  });
+}
