@@ -1,22 +1,11 @@
 import { createTimerHandle } from "./fixtures/timerHandle.mjs";
 import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
+import { registerTypeScriptTestHooks } from "./support/typescriptHooks.mjs";
 import test from "node:test";
 import { INVITE_WAGERS_MAX_MESSAGE_BYTES } from "@mons/shared/invite-wagers";
 
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (
-      context.parentURL?.endsWith(".ts") &&
-      (specifier.startsWith("./") || specifier.startsWith("../")) &&
-      !/\.[^/]+$/.test(specifier)
-    ) {
-      return nextResolve(`${specifier}.ts`, context);
-    }
-    return nextResolve(specifier, context);
-  },
-});
+registerTypeScriptTestHooks();
 
 const { InviteWagersChannel } =
   await import("../src/connection/inviteWagersChannel.ts");

@@ -1,7 +1,7 @@
 import { createTimerHandle } from "./fixtures/timerHandle.mjs";
 import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
+import { registerTypeScriptTestHooks } from "./support/typescriptHooks.mjs";
 import test from "node:test";
 import {
   isProfileEventPrizesResponse,
@@ -10,18 +10,7 @@ import {
 } from "@mons/shared/event-prizes";
 import { MAX_EVENT_READ_RESPONSE_BYTES } from "@mons/shared/events";
 
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (
-      context.parentURL?.endsWith(".ts") &&
-      (specifier.startsWith("./") || specifier.startsWith("../")) &&
-      !/\.[^/]+$/.test(specifier)
-    ) {
-      return nextResolve(`${specifier}.ts`, context);
-    }
-    return nextResolve(specifier, context);
-  },
-});
+registerTypeScriptTestHooks();
 
 const { readProfileEventPrizesViaApi } =
   await import("../src/services/profileEventPrizesApi.ts");

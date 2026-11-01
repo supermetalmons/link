@@ -10,13 +10,9 @@ exports.resolveRetryDeadlineAtMs =
   exports.buildSafeRetryState =
   exports.buildRateLimitBarrierAtMs =
   exports.buildErrorState =
-  exports.TELEGRAM_SAFE_RETRY_WINDOW_MS =
-  exports.TELEGRAM_SAFE_RETRY_MAX_DELAY_MS =
     void 0;
 const TELEGRAM_SAFE_RETRY_WINDOW_MS = 10 * 60 * 1000;
-exports.TELEGRAM_SAFE_RETRY_WINDOW_MS = TELEGRAM_SAFE_RETRY_WINDOW_MS;
 const TELEGRAM_SAFE_RETRY_MAX_DELAY_MS = 60_000;
-exports.TELEGRAM_SAFE_RETRY_MAX_DELAY_MS = TELEGRAM_SAFE_RETRY_MAX_DELAY_MS;
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 const createTelegramLocalRetryBarrier = (initialRetryNotBeforeMs = 0) => {

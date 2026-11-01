@@ -2,7 +2,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.isEventProjectionPending = isEventProjectionPending;
-exports.isEventProjectionOutbox = isEventProjectionOutbox;
 exports.retainEventProjectionOutbox = retainEventProjectionOutbox;
 exports.createEventProfileGameProjectionRequest =
   createEventProfileGameProjectionRequest;

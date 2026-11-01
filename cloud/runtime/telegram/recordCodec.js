@@ -2,8 +2,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.readTelegramDesired = readTelegramDesired;
-exports.readTelegramSendEvidence = readTelegramSendEvidence;
-exports.readTelegramApplied = readTelegramApplied;
 exports.readTelegramRetryProof = readTelegramRetryProof;
 exports.readTelegramCleanup = readTelegramCleanup;
 exports.readTelegramDelivery = readTelegramDelivery;

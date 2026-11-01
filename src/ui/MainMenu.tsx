@@ -519,25 +519,23 @@ type MainMenuApi = {
 
 let mainMenuApi: MainMenuApi | null = null;
 
-export const closeMenuAndInfoIfAny = () => {
+const closeMenuAndInfoIfAny = () => {
   mainMenuApi?.close();
   closeTopRightPopover();
 };
 
-export const closeAllKindsOfPopups = () => {
+const closeAllKindsOfPopups = () => {
   closeProfilePopupIfAny();
   closeNavigationAndAppearancePopupIfAny();
   mainMenuApi?.close();
   closeTopRightPopover();
 };
 
-export const closeMenuAndInfoIfAllowedForEvent = (
-  event: TouchEvent | MouseEvent,
-) => {
+const closeMenuAndInfoIfAllowedForEvent = (event: TouchEvent | MouseEvent) => {
   mainMenuApi?.closeIfAllowedForEvent(event);
 };
 
-export function hasMainMenuPopupsVisible(): boolean {
+function hasMainMenuPopupsVisible(): boolean {
   return (mainMenuApi?.isOpen() ?? false) || hasTopRightPopoverVisible();
 }
 

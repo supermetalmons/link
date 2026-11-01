@@ -1,6 +1,18 @@
 "use strict";
 
-const core = require("../runtime/telegram/eventProjectionCore");
+const {
+  EVENT_TELEGRAM_PROJECTION_GUARD_FIELD,
+  EVENT_TELEGRAM_PROJECTION_LOCK_ROOT,
+  addEventTelegramProjectionGuard: addProjectionGuard,
+  buildEndedState,
+  buildEventSignature,
+  buildEventTelegramDispatches: buildDispatches,
+  buildEventTelegramProjection: buildProjection,
+  buildEventTelegramProjectionChanges,
+  isV2TelegramEvent,
+  loadEndedMatchResults,
+  renderUpcomingMessage,
+} = require("../runtime/telegram/eventProjectionCore");
 const {
   buildTelegramSendDesired,
   buildTelegramEditDesired,
@@ -110,11 +122,18 @@ const splitEventTelegramProjectionUpdates = ({ eventId, updates }) => {
   };
 };
 
-module.exports = {
-  ...core,
-  /** @param {Parameters<typeof core.buildEventTelegramProjection>[0]} input */
+module.exports = /** @type {const} */ ({
+  EVENT_TELEGRAM_PROJECTION_GUARD_FIELD,
+  EVENT_TELEGRAM_PROJECTION_LOCK_ROOT,
+  buildEndedState,
+  buildEventSignature,
+  buildEventTelegramProjectionChanges,
+  isV2TelegramEvent,
+  loadEndedMatchResults,
+  renderUpcomingMessage,
+  /** @param {Parameters<typeof buildProjection>[0]} input */
   buildEventTelegramProjection(input) {
-    return core.buildEventTelegramProjection({
+    return buildProjection({
       ...input,
       state:
         input.state == null
@@ -126,9 +145,9 @@ module.exports = {
       reminderMessage: messageFixture(input.reminderMessage),
     });
   },
-  /** @param {Parameters<typeof core.buildEventTelegramProjectionChanges>[0]} input */
+  /** @param {Parameters<typeof buildEventTelegramProjectionChanges>[0]} input */
   buildEventTelegramProjectionUpdates(input) {
-    return toUpdates(core.buildEventTelegramProjectionChanges(input));
+    return toUpdates(buildEventTelegramProjectionChanges(input));
   },
   /** @param {{updates: LegacyUpdates, guard?: ProjectionGuard | null}} input */
   addEventTelegramProjectionGuard({ updates, guard }) {
@@ -146,7 +165,7 @@ module.exports = {
       ),
     };
     const guarded = toUpdates(
-      core.addEventTelegramProjectionGuard({
+      addProjectionGuard({
         changes: /** @type {ProjectionChanges} */ (changes),
         guard,
       }),
@@ -158,11 +177,11 @@ module.exports = {
   splitEventTelegramProjectionUpdates,
   /** @param {{eventId: string, desiredUpdates: LegacyUpdates}} input */
   buildEventTelegramDispatches({ eventId, desiredUpdates }) {
-    return core.buildEventTelegramDispatches({
+    return buildDispatches({
       eventId,
       desiredChanges: /** @type {DesiredChange[]} */ (
         desiredChanges(desiredUpdates)
       ),
     });
   },
-};
+});

@@ -16,7 +16,6 @@ export {
   type AutomatchRoot,
   type AutomatchRecordSnapshot,
   type AutomatchRecordMutation,
-  type AutomatchRuntimeControl,
   type AutomatchWriteAdmission,
   type RecordRow,
 } from "./automatchD1/types.ts";

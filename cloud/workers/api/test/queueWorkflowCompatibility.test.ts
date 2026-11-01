@@ -8,7 +8,6 @@ import { retainEventProgressRecord } from "../../../runtime/eventProgressRecords
 import { validateEventProgressOutbox } from "../src/eventD1/validation.ts";
 import {
   buildEventProgressPlan,
-  buildRetainedEventProgressPlan,
   parseEventProgressOutbox,
 } from "../src/eventProgressCodec.ts";
 
@@ -224,7 +223,6 @@ test("retained Workflow transport preserves receiver and callee-before-plan read
 });
 
 test("progress plans use concrete data-epoch-one identities", async () => {
-  assert.equal(buildRetainedEventProgressPlan, buildEventProgressPlan);
   const plan = await buildEventProgressPlan(
     {
       eventId: "event",

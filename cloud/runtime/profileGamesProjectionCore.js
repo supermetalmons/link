@@ -5,8 +5,6 @@ exports.readExistingProjectionRecords =
   exports.createProfileGamesProjectionCore =
   exports.buildResolvedProfile =
   exports.buildInviteProjectionOwnerPlan =
-  exports.READ_RETRY_DELAY_MS =
-  exports.READ_RETRY_ATTEMPTS =
     void 0;
 const profileGameProjectionRecords_js_1 = require("./profileGameProjectionRecords.js");
 const invite_records_1 = require("@mons/shared/invite-records");
@@ -16,9 +14,7 @@ const navigation_1 = require("@mons/shared/navigation");
 const ids_1 = require("@mons/shared/ids");
 const gameProjectionModel_js_1 = require("./events/gameProjectionModel.js");
 const READ_RETRY_ATTEMPTS = 2;
-exports.READ_RETRY_ATTEMPTS = READ_RETRY_ATTEMPTS;
 const READ_RETRY_DELAY_MS = 25;
-exports.READ_RETRY_DELAY_MS = READ_RETRY_DELAY_MS;
 const delay = async (ms) => {
   const safeDelay = Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0;
   if (safeDelay > 0) {

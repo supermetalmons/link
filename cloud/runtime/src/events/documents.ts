@@ -53,9 +53,6 @@ export const readEventParticipantsDocument = (
 export const readEventRoundsDocument = (
   value: unknown,
 ): EventRoundsDocument | null => (isEventRounds(value) ? value : null);
-export const readEventMatchesDocument = (
-  value: unknown,
-): EventMatchesDocument | null => (isEventMatches(value) ? value : null);
 
 export function eventState(event: EventDocument | null | undefined) {
   return {
@@ -96,7 +93,6 @@ export function eventParticipantState(
     eliminatedByProfileId: participant?.eliminatedByProfileId,
   };
 }
-export const eventParticipantProjectionState = eventParticipantState;
 
 export function eventMatchState(match: EventMatchDocument | null | undefined) {
   return {

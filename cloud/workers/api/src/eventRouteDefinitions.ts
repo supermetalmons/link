@@ -42,7 +42,7 @@ import {
 } from "./eventParticipation.ts";
 import type { EventGameplayRepository } from "./eventRepository.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
-export type EventRequestBody =
+type EventRequestBody =
   | CreateEventRequest
   | DisqualifyEventMatchWinnersRequest
   | JoinEventRequest

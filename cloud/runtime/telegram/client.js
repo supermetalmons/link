@@ -3,24 +3,14 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.sendTelegramMessage =
   exports.sendTelegramMediaGroup =
-  exports.isKnownSafeTelegramSendError =
   exports.editTelegramMessage =
   exports.deleteTelegramMessage =
   exports.TELEGRAM_HTTP_TIMEOUT_MS =
-  exports.retainTelegramMediaGroupInput =
   exports.retainTelegramDeleteInput =
-  exports.retainTelegramEditInput =
-  exports.retainTelegramSendInput =
     void 0;
 const values_js_1 = require("./values.js");
-const retainTelegramSendInput = (value) => value;
-exports.retainTelegramSendInput = retainTelegramSendInput;
-const retainTelegramEditInput = (value) => value;
-exports.retainTelegramEditInput = retainTelegramEditInput;
 const retainTelegramDeleteInput = (value) => value;
 exports.retainTelegramDeleteInput = retainTelegramDeleteInput;
-const retainTelegramMediaGroupInput = (value) => value;
-exports.retainTelegramMediaGroupInput = retainTelegramMediaGroupInput;
 const TELEGRAM_API_ROOT = "https://api.telegram.org";
 const TELEGRAM_HTTP_TIMEOUT_MS = 10_000;
 exports.TELEGRAM_HTTP_TIMEOUT_MS = TELEGRAM_HTTP_TIMEOUT_MS;
@@ -74,7 +64,6 @@ const getTransportErrorCode = (error) => {
 };
 const isKnownSafeTelegramSendError = (error) =>
   TELEGRAM_SAFE_SEND_ERROR_CODES.has(getTransportErrorCode(error));
-exports.isKnownSafeTelegramSendError = isKnownSafeTelegramSendError;
 const isSendOperation = (operation) =>
   operation === "send" || operation === "send-media-group";
 const isNotModifiedDescription = (description) =>

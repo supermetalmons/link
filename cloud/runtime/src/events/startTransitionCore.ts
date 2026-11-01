@@ -60,7 +60,7 @@ import {
   profileOwnershipUnavailable,
   resolveOwnedProfileReferences,
 } from "./ownership.js";
-export type ScheduledEventTransitionResult = {
+type ScheduledEventTransitionResult = {
   didChange: boolean;
   updates: EventCommitPlan;
 };
@@ -92,10 +92,7 @@ export type ThirdPlaceReadinessOptions = {
       ownershipSnapshot: EventOwnershipSnapshot | null;
     }
 );
-export type ThirdPlaceReadinessInput = Omit<
-  MatchReadinessInput,
-  "ownershipSnapshot"
-> &
+type ThirdPlaceReadinessInput = Omit<MatchReadinessInput, "ownershipSnapshot"> &
   ThirdPlaceReadinessOptions;
 
 const normalizeString = (value: unknown) =>
@@ -1052,7 +1049,6 @@ export {
   buildFixedBracketState,
   buildScheduledEventDueUpdatesCore,
   createEmptyEventMatch,
-  createInviteForMatch,
   getSortedMatchKeys,
   getSortedRoundIndexes,
   hasThirdPlaceMatchField,

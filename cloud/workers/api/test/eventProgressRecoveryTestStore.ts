@@ -4,7 +4,7 @@ import type {
   EventProgressRecoverySnapshot,
   EventProgressRecoveryStore,
 } from "../src/eventProgressRecoveryD1.ts";
-import type { EventProgressSweepRepository } from "../src/eventProgress.ts";
+import type { EventProgressSweepRepository } from "../src/eventProgressRecovery.ts";
 
 export function createEventProgressRecoveryTestStore(
   repository: EventProgressSweepRepository,

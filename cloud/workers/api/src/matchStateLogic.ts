@@ -14,14 +14,12 @@ import {
 } from "./matchClaimCodec.ts";
 import {
   canonicalMatchDocumentJson,
-  readMatchDocument,
   normalizeNewMatchDocument,
   readMoveMatch,
   writeMovedMatch,
   type MatchDocument,
 } from "./matchRecordCodec.ts";
 
-export const matchStateRecord = readMatchDocument;
 export const normalizeCreatedMatchState = normalizeNewMatchDocument;
 
 export function decideMatchStateMove(

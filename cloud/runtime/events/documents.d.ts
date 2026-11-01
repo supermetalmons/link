@@ -45,9 +45,6 @@ export declare const readEventParticipantsDocument: (
 export declare const readEventRoundsDocument: (
   value: unknown,
 ) => EventRoundsDocument | null;
-export declare const readEventMatchesDocument: (
-  value: unknown,
-) => EventMatchesDocument | null;
 export declare function eventState(event: EventDocument | null | undefined): {
   eventId: string | undefined;
   status: "ended" | "active" | "dismissed" | "scheduled" | undefined;
@@ -81,7 +78,6 @@ export declare function eventParticipantState(
   eliminatedRoundIndex: number | null | undefined;
   eliminatedByProfileId: string | null | undefined;
 };
-export declare const eventParticipantProjectionState: typeof eventParticipantState;
 export declare function eventMatchState(
   match: EventMatchDocument | null | undefined,
 ): {

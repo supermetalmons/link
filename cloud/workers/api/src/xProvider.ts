@@ -5,7 +5,7 @@ const X_USER_URL = "https://api.x.com/2/users/me?user.fields=username";
 const X_TIMEOUT_MS = 10_000;
 const MAX_X_BODY_BYTES = 64 * 1024;
 
-export type XAuthenticatedUser = {
+type XAuthenticatedUser = {
   id: string;
   username: string;
 };

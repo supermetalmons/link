@@ -1,6 +1,6 @@
 import { APPLICATION_DATA_EPOCH } from "@mons/shared/data-contract";
 
-export const APPLICATION_STORAGE_PREFIX = `mons:data:v${APPLICATION_DATA_EPOCH}:`;
+const APPLICATION_STORAGE_PREFIX = `mons:data:v${APPLICATION_DATA_EPOCH}:`;
 export const APPLICATION_RELOAD_MARKER = "__mons_link_data_reload__";
 
 export const applicationStorageKey = (key: string): string =>

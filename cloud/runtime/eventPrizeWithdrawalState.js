@@ -14,7 +14,6 @@ exports.normalizeSolanaAddress =
   exports.decideWithdrawalClaim =
   exports.decodeAdminSecretKey =
   exports.buildWithdrawalCompletion =
-  exports.WITHDRAWAL_LEASE_MS =
   exports.EVENT_PRIZE_ADMIN_WALLET =
     void 0;
 const records_js_1 = require("./eventPrizes/records.js");
@@ -70,7 +69,6 @@ const event_prizes_1 = require("@mons/shared/event-prizes");
 const EVENT_PRIZE_ADMIN_WALLET = "Ay1mgqJr6WmihsSYdMZ1dkHL5r25N7VhCGk7NpCJcPGi";
 exports.EVENT_PRIZE_ADMIN_WALLET = EVENT_PRIZE_ADMIN_WALLET;
 const WITHDRAWAL_LEASE_MS = 5 * 60 * 1000;
-exports.WITHDRAWAL_LEASE_MS = WITHDRAWAL_LEASE_MS;
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 const BASE58_ALPHABET =

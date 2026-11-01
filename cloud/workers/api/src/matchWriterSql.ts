@@ -1,4 +1,4 @@
-export const MATCH_WRITER_TABLES = [
+const MATCH_WRITER_TABLES = [
   "match_state_records_canonical",
   "match_state_claims_canonical",
   "match_state_revisions_canonical",

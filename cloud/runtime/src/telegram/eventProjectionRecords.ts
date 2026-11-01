@@ -57,7 +57,7 @@ function key(value: unknown): value is string {
 function integer(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
-export function isEventTelegramProjectionGuard(
+function isEventTelegramProjectionGuard(
   value: unknown,
 ): value is Required<EventTelegramProjectionGuard> {
   return (
@@ -70,7 +70,7 @@ export function isEventTelegramProjectionGuard(
     key(value.ownerUid)
   );
 }
-export function isStartedMatchLines(
+function isStartedMatchLines(
   value: unknown,
 ): value is RetainedStartedMatchLines {
   return (
@@ -80,7 +80,7 @@ export function isStartedMatchLines(
     )
   );
 }
-export function isEventTelegramEndedResults(
+function isEventTelegramEndedResults(
   value: unknown,
 ): value is EventTelegramEndedResultsDocument {
   return (
@@ -99,7 +99,7 @@ export function isEventTelegramEndedResults(
     )
   );
 }
-export function isEventTelegramProjectionDocument(
+function isEventTelegramProjectionDocument(
   value: unknown,
 ): value is EventTelegramProjectionStateDocument {
   if (
@@ -175,12 +175,7 @@ export function createEmptyEventTelegramProjectionDocument(
     eventTelegramProjectionGuard: null,
   });
 }
-export function retainStartedMatchLines(
-  value: unknown,
-): RetainedStartedMatchLines {
-  if (!isStartedMatchLines(value)) invalid();
-  return structuredClone(value);
-}
+
 export function retainEventTelegramEndedResults(
   value: unknown,
 ): EventTelegramEndedResultsDocument {

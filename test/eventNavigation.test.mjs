@@ -1,6 +1,6 @@
 import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
+import { registerTypeScriptTestHooks } from "./support/typescriptHooks.mjs";
 import test from "node:test";
 
 /**
@@ -14,16 +14,9 @@ const harnessKey = Symbol.for("mons.eventNavigation.testHarnesses");
 Object.assign(globalThis, { [harnessKey]: harnesses });
 let nextHarnessId = 0;
 
-registerHooks({
+registerTypeScriptTestHooks({
   resolve(specifier, context, nextResolve) {
     const parent = context.parentURL ? new URL(context.parentURL) : null;
-    if (
-      parent?.pathname.endsWith(".ts") &&
-      (specifier.startsWith("./") || specifier.startsWith("../")) &&
-      !/\.[^/]+$/.test(specifier)
-    ) {
-      specifier += ".ts";
-    }
     const result = nextResolve(specifier, context);
     const scenario = parent?.searchParams.get("eventNavigationTest");
     if (

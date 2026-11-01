@@ -14,7 +14,6 @@ import type {
   TelegramRetryResult,
   TelegramRetryState,
 } from "./deliveryRetryTypes.js";
-import type { TelegramDesired } from "./desiredStateCore.js";
 import type { RetainedDesiredView } from "./desiredRecords.js";
 import type {
   TelegramMessageDocument,
@@ -84,19 +83,9 @@ export type DeliveryStatus =
   | "terminal"
   | "uncertain";
 export type CleanupStatus = "pending" | "processing" | "retryable";
-export type DeliveryLease = {
+type DeliveryLease = {
   leaseOwner: string;
   leaseExpiresAtMs: number;
-};
-export type SendInFlight = {
-  attemptId: string;
-  revision: string;
-  destination: TelegramDesired["destination"];
-  chatId: string;
-  instanceKey?: string;
-  contentHash?: string;
-  startedAtMs: number;
-  apiGateOwner: string;
 };
 export type DeliveryTransition =
   | {
@@ -179,7 +168,6 @@ export type ProofInput = TelegramProofInput;
 export type ExactRetryInput =
   TelegramExactRetryInput | RetainedTelegramExactRetryInput;
 export declare const normalizeString: (value: unknown) => string;
-export declare const hashValue: (value: unknown) => string;
 declare class RetrySnapshot<
   T extends TelegramDeliveryDocument | TelegramCleanupDocument,
 > {
@@ -297,7 +285,7 @@ export declare const ensureCommitted: <
 export declare const validateDesiredForDelivery: (
   desired: unknown,
 ) => desired is TelegramDesiredDocument;
-export type DesiredRetryInput = DesiredContext & {
+type DesiredRetryInput = DesiredContext & {
   result: TelegramRetryFailure;
   safeRejectedAttemptId?: string;
   currentDelivery: Partial<TelegramDeliveryDocument> | DeliverySnapshot;

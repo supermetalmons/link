@@ -1,8 +1,5 @@
 import { PROJECTION_RECOVERY_PAGE_SIZE } from "../projectionRecoveryPages.ts";
-export {
-  infrastructureRetryDelaySeconds as profileGameProjectionRetryDelaySeconds,
-  MAX_INFRASTRUCTURE_RETRY_DELAY_SECONDS as MAX_PROFILE_GAME_PROJECTION_RETRY_DELAY_SECONDS,
-} from "../queueRetry.ts";
+export { infrastructureRetryDelaySeconds as profileGameProjectionRetryDelaySeconds } from "../queueRetry.ts";
 
 export const PROFILE_GAME_PROJECTION_SWEEP_LIMIT =
   PROJECTION_RECOVERY_PAGE_SIZE;

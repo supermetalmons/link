@@ -4,16 +4,12 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.shouldProjectRatingTelegramUpdate =
   exports.resolveAutomatchTelegramLifecycle =
   exports.renderMatchedAutomatchTelegramText =
-  exports.normalizeString =
   exports.mergeRatingResultFragment =
-  exports.isEventRatingUpdate =
   exports.getAutomatchResultFragments =
   exports.evaluateAutomatchProjectionUpdate =
   exports.buildAutomatchTelegramProjection =
   exports.buildAutomatchProjectionGuard =
-  exports.AUTOMATCH_PROJECTION_GUARD_VERSION =
     void 0;
-exports.retainAutomatchTelegramSource = retainAutomatchTelegramSource;
 const automatchRecords_js_1 = require("../automatchRecords.js");
 const invite_records_1 = require("@mons/shared/invite-records");
 const values_js_1 = require("./values.js");
@@ -30,10 +26,8 @@ function sourceEvidence(value) {
   return value;
 }
 const AUTOMATCH_PROJECTION_GUARD_VERSION = 1;
-exports.AUTOMATCH_PROJECTION_GUARD_VERSION = AUTOMATCH_PROJECTION_GUARD_VERSION;
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-exports.normalizeString = normalizeString;
 const normalizeGeneration = (value) =>
   typeof value === "number" && Number.isInteger(value) && value >= 0
     ? value
@@ -272,7 +266,6 @@ const isEventRatingUpdate = (ratingUpdate) =>
   (ratingUpdate.isEventMatch === true ||
     ratingUpdate.eventOwned === true ||
     normalizeString(ratingUpdate.eventId) !== "");
-exports.isEventRatingUpdate = isEventRatingUpdate;
 const shouldProjectRatingTelegramUpdate = (ratingUpdate) =>
   !!ratingUpdate &&
   ratingUpdate.telegramDeliveryVersion ===

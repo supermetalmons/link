@@ -85,7 +85,7 @@ type EventSyncLog = {
   didChange?: boolean;
   durationMs?: number;
 };
-export type EventRuntimeCode =
+type EventRuntimeCode =
   | "aborted"
   | "failed-precondition"
   | "invalid-argument"
@@ -93,7 +93,7 @@ export type EventRuntimeCode =
   | "permission-denied"
   | "unauthenticated"
   | "unavailable";
-export type EventRuntimeRequest = {
+type EventRuntimeRequest = {
   auth: {
     uid: string;
   } | null;
@@ -101,16 +101,16 @@ export type EventRuntimeRequest = {
 };
 export type EventProgressOutboxRecord =
   import("./eventProgressRecords.js").EventProgressPendingRecord;
-export type EventRuntimeCreateResult = {
+type EventRuntimeCreateResult = {
   ok: true;
   eventId: string;
   event: EventData;
 };
-export type EventRuntimePostponeResult = EventRuntimeCreateResult & {
+type EventRuntimePostponeResult = EventRuntimeCreateResult & {
   postponeByMinutes: number;
   startAtMs: number;
 };
-export type EventRuntimeSyncResult =
+type EventRuntimeSyncResult =
   | {
       ok: true;
       eventId: string;
@@ -127,7 +127,7 @@ export type EventRuntimeSyncResult =
       event?: EventData | null;
       didChange?: never;
     };
-export type EventRuntimeDisqualifyResult = EventRuntimeSyncResult & {
+type EventRuntimeDisqualifyResult = EventRuntimeSyncResult & {
   didDisqualify: boolean;
   matchKey: string;
 };
@@ -1166,4 +1166,4 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
   };
 };
 
-export { createEventRuntime, EventRuntimeError };
+export { createEventRuntime };

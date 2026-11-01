@@ -12,7 +12,6 @@ import {
 } from "./eventPrizeProjectionState.js";
 declare const EVENT_PRIZE_ADMIN_WALLET =
   "Ay1mgqJr6WmihsSYdMZ1dkHL5r25N7VhCGk7NpCJcPGi";
-declare const WITHDRAWAL_LEASE_MS: number;
 declare const normalizeSolanaAddress: (value: unknown) => string;
 declare const decodeAdminSecretKey: (value: unknown) => Uint8Array | null;
 declare const isWithdrawalRecordOwnedByRequest: (
@@ -55,7 +54,7 @@ export type WithdrawalClaimInput = {
   leaseId: string;
   nowMs: number;
 };
-export type WithdrawalClaimDecision = {
+type WithdrawalClaimDecision = {
   kind:
     | "completed"
     | "forbidden"
@@ -81,7 +80,6 @@ declare const decideWithdrawalClaim: ({
 }: WithdrawalClaimInput) => WithdrawalClaimDecision;
 export {
   EVENT_PRIZE_ADMIN_WALLET,
-  WITHDRAWAL_LEASE_MS,
   buildWithdrawalCompletion,
   decodeAdminSecretKey,
   decideWithdrawalClaim,

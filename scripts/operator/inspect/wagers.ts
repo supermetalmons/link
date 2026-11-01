@@ -167,9 +167,4 @@ function createSqlDependencies(run: SqlRunner, now = Date.now): Dependencies {
   };
 }
 
-export {
-  inspectWagers,
-  type Dependencies,
-  createSqlDependencies,
-  parseActivation,
-};
+export { inspectWagers, createSqlDependencies };

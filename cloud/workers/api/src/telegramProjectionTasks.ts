@@ -4,7 +4,6 @@ import { isSafeOperationId } from "./operationIds.ts";
 export const TELEGRAM_PROJECTION_QUEUE_NAME =
   "mons-link-telegram-projection-data1";
 export const TELEGRAM_PROJECTION_SCHEMA_VERSION = 1;
-export const AUTOMATCH_TELEGRAM_PROJECTION_SCHEMA_VERSION = 2;
 
 export type AutomatchTelegramProjectionTask = {
   kind: "automatch-telegram-projection";

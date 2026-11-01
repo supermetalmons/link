@@ -7,8 +7,8 @@ import {
 } from "@mons/shared/invite-records";
 import type { RecomputeInviteProjectionOptions } from "../profileGamesProjectionCore.js";
 import { getNavigationSortBucket } from "@mons/shared/navigation";
-export type ProjectionProfile = ProjectionProfileDocument;
-export type ProjectionInvite = InviteDocument;
+type ProjectionProfile = ProjectionProfileDocument;
+type ProjectionInvite = InviteDocument;
 type InviteProjectionInput = {
   inviteId: string;
   inviteData: ProjectionInvite | null;

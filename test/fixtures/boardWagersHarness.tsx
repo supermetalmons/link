@@ -9,7 +9,8 @@ import type {
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
-import BoardComponent, * as boardUi from "../../src/ui/BoardComponent";
+import BoardComponent from "../../src/ui/BoardComponent";
+import * as boardUi from "../../src/game/boardUiPort";
 import {
   createEmptyPlayerInfoOverlayState,
   getBoardPlayerInfoOverlayState,

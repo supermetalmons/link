@@ -13,20 +13,6 @@ const MAX_TIMESTAMP_MS = 253402300799999;
 const normalizeString = (value: unknown) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : null;
 
-const normalizeFiniteNumberOrNull = (value: unknown) => {
-  const numeric =
-    typeof value === "number"
-      ? value
-      : typeof value === "string" && value.trim() !== ""
-        ? Number(value)
-        : NaN;
-  if (!Number.isFinite(numeric)) {
-    return null;
-  }
-  const normalized = Math.floor(numeric);
-  return normalized > 0 ? normalized : null;
-};
-
 const mapEventStatusToNavigationStatus = (status: unknown) => {
   if (status === "active") {
     return "active";
@@ -118,6 +104,5 @@ export {
   getListSortAtMs,
   getOwnerProfileIds,
   mapEventStatusToNavigationStatus,
-  normalizeFiniteNumberOrNull,
   normalizeString,
 };

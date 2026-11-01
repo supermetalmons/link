@@ -1,4 +1,3 @@
-import { createGuardedOperatorRunner } from "./operator/guardedSql.ts";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -6,35 +5,25 @@ import {
   AUTOMATCH_QUEUE_INVALID_COLUMNS,
   AUTOMATCH_QUEUE_SCHEMA_OBJECTS,
 } from "../cloud/workers/api/src/automatchQueueSql.ts";
-import { resolveCloudflareToken, type SqlRunner } from "./operator/runtime.ts";
+import {
+  createWranglerRunner,
+  resolveCloudflareToken,
+  type SqlRunner,
+} from "./operator/runtime.ts";
 
 const DATABASE = "mons-link-profile-games";
-const VERSION_PATTERN =
-  /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
-type Arguments =
-  | { operation: "inspect" }
-  | { operation: "activate"; candidateVersionId: string };
+type Arguments = { operation: "inspect" };
 
 type Dependencies = {
   run: SqlRunner;
   log(value: Record<string, unknown>): void;
-  now?: () => number;
 };
 
 export function parseArgs(argv: string[]): Arguments {
   if (argv.length === 1 && argv[0] === "--inspect")
     return { operation: "inspect" };
-  if (
-    argv.length === 3 &&
-    argv[0] === "--activate" &&
-    argv[1] === "--candidate-version-id" &&
-    VERSION_PATTERN.test(argv[2]!)
-  )
-    return { operation: "activate", candidateVersionId: argv[2]! };
-  throw new Error(
-    "use --inspect or --activate --candidate-version-id <promoted-compatible-version-id>",
-  );
+  throw new Error("use --inspect");
 }
 
 export async function manageAutomatchQueue(
@@ -43,7 +32,7 @@ export async function manageAutomatchQueue(
 ): Promise<void> {
   const control = (
     await dependencies.run(
-      "SELECT backend, state, epoch, freeze_generation, metadata_json FROM automatch_runtime_control WHERE singleton = 1",
+      "SELECT backend, state, epoch, freeze_generation FROM automatch_runtime_control WHERE singleton = 1",
       DATABASE,
     )
   )[0];
@@ -64,29 +53,10 @@ export async function manageAutomatchQueue(
   const missing = AUTOMATCH_QUEUE_SCHEMA_OBJECTS.filter(
     (name) => !names.has(name),
   );
-  let metadata: unknown = null;
-  if (control.metadata_json !== null) {
-    if (typeof control.metadata_json !== "string")
-      throw new Error("automatch queue metadata is unavailable");
-    metadata = JSON.parse(control.metadata_json) as unknown;
-    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata))
-      throw new Error("automatch queue metadata must be an object");
-  }
-  const mode =
-    metadata &&
-    typeof metadata === "object" &&
-    "queueSelection" in metadata &&
-    metadata.queueSelection === "fifo"
-      ? "fifo"
-      : "legacy";
   if (missing.length) {
-    if (args.operation === "activate")
-      throw new Error(
-        "automatch queue schema is incomplete; inspect before activation",
-      );
     dependencies.log({
-      operation: "inspect",
-      mode,
+      operation: args.operation,
+      mode: "fifo",
       missingSchemaObjects: missing,
     });
     return;
@@ -98,56 +68,18 @@ export async function manageAutomatchQueue(
   const valid = AUTOMATCH_QUEUE_INVALID_COLUMNS.every(
     (column) => audit[column] === 0,
   );
-  if (args.operation === "inspect") {
-    dependencies.log({
-      operation: "inspect",
-      mode,
-      state: control.state,
-      valid,
-      audit,
-    });
-    return;
-  }
-  if (!valid || control.state !== "active")
-    throw new Error(
-      "automatch queue must be active with a valid projection before activation",
-    );
-  const nowMs = (dependencies.now || Date.now)();
-  if (!Number.isSafeInteger(nowMs) || nowMs < 0)
-    throw new Error("invalid automatch queue activation timestamp");
-  const activated = await dependencies.run(
-    `UPDATE automatch_runtime_control
-     SET metadata_json = json_set(COALESCE(metadata_json, '{}'),
-       '$.queueSelection', 'fifo', '$.queueSelectionCandidateVersionId', ?,
-       '$.queueSelectionActivatedAtMs', ?)
-     WHERE singleton = 1 AND backend = 'd1' AND state = 'active'
-       AND epoch = ? AND freeze_generation = ?
-       AND (metadata_json IS NULL OR json_type(metadata_json) = 'object')
-       AND EXISTS (SELECT 1 FROM (${AUTOMATCH_QUEUE_AUDIT_SQL})
-         WHERE ${AUTOMATCH_QUEUE_INVALID_COLUMNS.map((column) => `${column} = 0`).join(" AND ")})
-     RETURNING json_extract(metadata_json, '$.queueSelection') AS mode`,
-    DATABASE,
-    [
-      args.candidateVersionId,
-      nowMs,
-      Number(control.epoch),
-      Number(control.freeze_generation),
-    ],
-  );
-  if (activated.length !== 1 || activated[0]!.mode !== "fifo")
-    throw new Error(
-      "automatch queue activation was not confirmed; inspect current state",
-    );
   dependencies.log({
-    operation: "activate",
+    operation: args.operation,
     mode: "fifo",
-    candidateVersionId: args.candidateVersionId,
+    state: control.state,
+    valid,
+    audit,
   });
 }
 
 export async function execute(
   argv = process.argv.slice(2),
-  createRunner: typeof createGuardedOperatorRunner = createGuardedOperatorRunner,
+  createRunner: typeof createWranglerRunner = createWranglerRunner,
 ): Promise<void> {
   const args = parseArgs(argv);
   await manageAutomatchQueue(args, {

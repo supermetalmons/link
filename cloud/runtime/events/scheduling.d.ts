@@ -18,10 +18,6 @@ type Signature_resolveScheduledDateTimeStartAtMs = (
   request: unknown,
   nowMs?: number,
 ) => number;
-declare class EventSchedulingError extends Error {
-  code: "invalid-argument";
-  constructor(code: "invalid-argument", message: string);
-}
 declare const parseScheduledDateParts: Signature_parseScheduledDateParts;
 declare const parseScheduledTimeParts: Signature_parseScheduledTimeParts;
 declare const hasDateTimeScheduleRequest: Signature_hasDateTimeScheduleRequest;
@@ -29,7 +25,6 @@ declare const resolveRequestedScheduleTimezone: Signature_resolveRequestedSchedu
 declare const resolveScheduledDateTimeStartAtMs: Signature_resolveScheduledDateTimeStartAtMs;
 declare const assertScheduledStartWindow: Signature_assertScheduledStartWindow;
 export {
-  EventSchedulingError,
   assertScheduledStartWindow,
   hasDateTimeScheduleRequest,
   parseScheduledDateParts,

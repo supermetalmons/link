@@ -59,7 +59,7 @@ type EventFieldCommand<K extends EventField> = {
 export type EventFieldMutation = {
   [K in EventField]: EventFieldCommand<K>;
 }[EventField];
-export type EventProfileGameOutboxFieldValues = {
+type EventProfileGameOutboxFieldValues = {
   schemaVersion: 1;
   status: "pending";
   requestId: string;
@@ -67,7 +67,7 @@ export type EventProfileGameOutboxFieldValues = {
   reason: string | null;
   deadAtMs: number | null;
 };
-export type EventProfileGameOutboxFieldMutation = {
+type EventProfileGameOutboxFieldMutation = {
   [K in keyof EventProfileGameOutboxFieldValues]: {
     kind: "profile-game-outbox-field";
     eventId: string;

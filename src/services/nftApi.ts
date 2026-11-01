@@ -13,7 +13,7 @@ const NFT_API_URL =
 const NFT_API_ERROR_MESSAGE = "NFT inventory is unavailable.";
 const NFT_API_TIMEOUT_MS = 15_000;
 
-export type { NftApiResponse, NftCount } from "@mons/shared/nfts";
+export type { NftApiResponse } from "@mons/shared/nfts";
 
 function createNftApiError(): Error {
   return new Error(NFT_API_ERROR_MESSAGE);

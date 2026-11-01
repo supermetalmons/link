@@ -2,7 +2,7 @@ import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
 import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
 import {
   matchTestPort,
-  legacySessionClient,
+  legacySessionChanges,
 } from "../test/gameSessionTestPorts.ts";
 import { createLegacyInviteSourceD1Store as createInviteSourceD1Store } from "../test/legacyInviteSourceFixture.ts";
 import { env } from "cloudflare:workers";
@@ -25,7 +25,7 @@ import {
   readInviteSourceControl,
   releaseInviteSourceAdmission,
 } from "../src/inviteSourceD1.ts";
-import { createAutomatchPersistenceCompatibility as createAutomatchPersistence } from "../src/automatchPersistence.ts";
+import { createAutomatchPersistence } from "../src/automatchPersistence.ts";
 import { isAutomatchRevisionConflict } from "../src/automatchD1.ts";
 import { classifyD1Failure } from "../src/d1Failure.ts";
 import { observeD1FailureDatabase } from "./d1FailureTestUtils.ts";
@@ -502,9 +502,9 @@ describe("canonical invite source", () => {
       },
     };
     const coordinator = createAutomatchPersistence(db, matchTestPort(raw));
-    await expect(
-      legacySessionClient(coordinator.rawClient).getPath("invites/one"),
-    ).rejects.toThrow("invite-source-backend-retired");
+    await expect(coordinator.client.readInviteMetadata("one")).rejects.toThrow(
+      "invite-source-backend-retired",
+    );
     expect(sourceReads).toBe(0);
     await activate();
     const store = createInviteSourceD1Store(db);
@@ -522,26 +522,20 @@ describe("canonical invite source", () => {
         100,
       ),
     );
-    expect(
-      await legacySessionClient(coordinator.rawClient).getPath(
-        "invites/one/hostId",
-      ),
-    ).toBe("canonical");
+    expect((await coordinator.client.readInviteMetadata("one"))?.hostId).toBe(
+      "canonical",
+    );
     expect(await coordinator.client.readInviteMetadata("one")).toEqual(
       inviteDocumentFixture({ hostId: "canonical", password: "secret" }),
     );
-    expect(
-      await legacySessionClient(coordinator.rawClient).getPath(
-        "invites/missing",
-      ),
-    ).toBeNull();
+    expect(await coordinator.client.readInviteMetadata("missing")).toBeNull();
     expect(sourceReads).toBe(0);
     await db
       .prepare("DELETE FROM invite_source_control WHERE singleton = 1")
       .run();
-    await expect(
-      legacySessionClient(coordinator.rawClient).getPath("invites/one"),
-    ).rejects.toThrow("invite-source-control-unavailable");
+    await expect(coordinator.client.readInviteMetadata("one")).rejects.toThrow(
+      "invite-source-control-unavailable",
+    );
     expect(sourceReads).toBe(0);
     await db
       .prepare(
@@ -755,13 +749,13 @@ describe("canonical invite source", () => {
       );
       for (let attempt = 0; attempt < 2; attempt++) {
         if (operation === "patch") {
-          await legacySessionClient(coordinator.rawClient).patchRoot({
-            "automatch/one": { uid: "host" },
-          });
+          await coordinator.client.commitSessionChanges(
+            legacySessionChanges({
+              "automatch/one": { uid: "host" },
+            }),
+          );
           expect(
-            await legacySessionClient(coordinator.rawClient).getPath(
-              "automatch/one",
-            ),
+            await coordinator.client.readAutomatchEntry("one"),
           ).toMatchObject({
             uid: "host",
           });

@@ -39,7 +39,7 @@ import type {
   ProfileLinkProjectionResult,
 } from "./types.ts";
 
-export function validRatingProjectionRecord(
+function validRatingProjectionRecord(
   operationId: string,
   update: Awaited<
     ReturnType<RatingProfileGameProjectionRepository["readRatingUpdate"]>
@@ -157,7 +157,7 @@ export async function processAutomatchProfileGameProjection(
   );
 }
 
-export async function settleEventProfileGameProjectionOutbox(
+async function settleEventProfileGameProjectionOutbox(
   task: EventProfileGameProjectionTask,
   state: EventProfileProjectionState,
 ): Promise<boolean> {

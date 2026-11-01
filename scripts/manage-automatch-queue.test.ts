@@ -52,7 +52,6 @@ function fixture(queueSchema = true) {
     dependencies: {
       run,
       log: (value: Record<string, unknown>) => logs.push(value),
-      now: () => 1234,
     },
   };
 }
@@ -91,7 +90,7 @@ function seed(db: DatabaseSync, key = "ticket", timestamp: unknown = 10) {
   );
 }
 
-test("queue inspection and guarded activation use Wrangler OAuth without an environment token", () => {
+test("queue inspection uses Wrangler OAuth and only reads without an environment token", () => {
   const child = spawnSync(
     process.execPath,
     [
@@ -105,7 +104,6 @@ test("queue inspection and guarded activation use Wrangler OAuth without an envi
       import { syncBuiltinESMExports } from "node:module";
       import { readFileSync, readdirSync } from "node:fs";
       import { activateStrictLocalSchemaFixture } from "./scripts/test-fixtures/strict-local-schema.ts";
-      import { applicationWriteFenceSql } from "./cloud/runtime/application-fence.js";
       import { DatabaseSync } from "node:sqlite";
       let authCalls = 0;
       childProcess.spawnSync = (_command, args) => {
@@ -122,10 +120,8 @@ test("queue inspection and guarded activation use Wrangler OAuth without an envi
         db.exec(readFileSync(directory + "/" + name, "utf8"));
       }
       db.exec("UPDATE automatch_runtime_control SET backend = 'd1'");
-      db.exec(applicationWriteFenceSql("automatch_runtime_control"));
+      db.exec("PRAGMA query_only = ON");
       let parameterizedReads = 0;
-      let writes = 0;
-      let disposed = 0;
       globalThis.fetch = async (_url, init) => {
         assert.equal(init.headers.Authorization, "Bearer test-oauth-token");
         const { sql, params } = JSON.parse(init.body);
@@ -133,47 +129,14 @@ test("queue inspection and guarded activation use Wrangler OAuth without an envi
         if (params.length && sql.startsWith("SELECT")) parameterizedReads++;
         return Response.json({ success: true, result: [{ success: true, results: db.prepare(sql).all(...params) }] });
       };
-      const { createGuardedOperatorRunner } = await import("./scripts/operator/guardedSql.ts");
-      const createRunner = (options) => createGuardedOperatorRunner({
-        ...options,
-        openSession: async (binding) => {
-          assert.equal(binding, "PROFILE_GAMES_DB");
-          return {
-            transport: {
-              async readControl() {
-                return db.prepare("SELECT singleton, generation, data_epoch, phase, migration_id FROM application_data_control WHERE singleton=1").all();
-              },
-              async atomicBatch(target, statements) {
-                assert.equal(target, "PROFILE_GAMES_DB");
-                db.exec("BEGIN");
-                try {
-                  const result = statements.map(({ sql, bindings }) => {
-                    if (sql.startsWith("UPDATE automatch_runtime_control")) writes++;
-                    const rows = db.prepare(sql).all(...bindings);
-                    return { success: true, results: rows, meta: { changes: Number(db.prepare("SELECT changes() AS count").get().count) } };
-                  });
-                  db.exec("COMMIT");
-                  return result;
-                } catch (error) {
-                  db.exec("ROLLBACK");
-                  throw error;
-                }
-              },
-            },
-            async dispose() { disposed++; },
-          };
-        },
-      });
       const { execute } = await import(${JSON.stringify(new URL("./manage-automatch-queue.ts", import.meta.url).href)});
-      await execute(["--inspect"], createRunner);
-      await execute(["--activate", "--candidate-version-id", ${JSON.stringify(version)}], createRunner);
-      assert.equal(authCalls, 2);
-      assert.equal(parameterizedReads, 2);
-      assert.equal(writes, 1);
-      assert.equal(disposed, 1);
+      await assert.rejects(execute(["--activate", "--candidate-version-id", ${JSON.stringify(version)}]), /use --inspect/);
+      assert.equal(authCalls, 0);
+      await execute(["--inspect"]);
+      assert.equal(authCalls, 1);
+      assert.equal(parameterizedReads, 1);
       assert.equal(db.prepare("SELECT COUNT(*) AS count FROM application_write_context").get().count, 0);
       assert.equal(db.prepare("SELECT COUNT(*) AS count FROM application_data_admissions").get().count, 0);
-      assert.equal(JSON.parse(db.prepare("SELECT metadata_json FROM automatch_runtime_control").get().metadata_json).queueSelection, "fifo");
       db.close();
     `,
       directory,
@@ -186,17 +149,15 @@ test("queue inspection and guarded activation use Wrangler OAuth without an envi
   );
   assert.equal(child.status, 0, child.stderr);
   assert.doesNotMatch(child.stdout, /test-oauth-token/);
+  assert.equal(JSON.parse(child.stdout).mode, "fifo");
 });
 
 test("queue operator rejects invalid arguments before provider access", async () => {
   assert.deepEqual(parseArgs(["--inspect"]), { operation: "inspect" });
-  assert.deepEqual(
-    parseArgs(["--activate", "--candidate-version-id", version]),
-    { operation: "activate", candidateVersionId: version },
-  );
   for (const args of [
     [],
     ["--activate"],
+    ["--activate", "--candidate-version-id", version],
     ["--activate", "--candidate-version-id", "invalid"],
     ["--inspect", "--extra"],
   ]) {
@@ -204,19 +165,14 @@ test("queue operator rejects invalid arguments before provider access", async ()
   }
 });
 
-test("inspection reports missing canonical queue schema and activation fails closed", async () => {
+test("inspection reports missing canonical queue schema", async () => {
   const { db, logs, dependencies } = fixture(false);
   try {
     await manageAutomatchQueue({ operation: "inspect" }, dependencies);
-    assert.equal(logs[0]!.mode, "legacy");
+    assert.equal(logs[0]!.mode, "fifo");
     assert.ok(Array.isArray(logs[0]!.missingSchemaObjects));
-    await assert.rejects(
-      manageAutomatchQueue(
-        { operation: "activate", candidateVersionId: version },
-        dependencies,
-      ),
-      /schema is incomplete/,
-    );
+    assert.ok(logs[0]!.missingSchemaObjects.length > 0);
+    assert.equal(logs[0]!.valid, undefined);
   } finally {
     db.close();
   }
@@ -245,99 +201,71 @@ test("canonical queue inspection succeeds after source entries and journals are 
   }
 });
 
-test("activation preserves metadata and sets FIFO only after a valid live audit", async () => {
+test("inspection reports FIFO independently of retained selection metadata", async () => {
   const { db, dependencies, logs } = fixture();
   try {
     seed(db);
-    await manageAutomatchQueue(
-      { operation: "activate", candidateVersionId: version },
-      dependencies,
-    );
-    const metadata = JSON.parse(
-      String(
+    for (const metadata of [
+      null,
+      '{"retained":"keep"}',
+      '{"queueSelection":"legacy"}',
+      '{"queueSelection":"fifo"}',
+    ]) {
+      db.prepare("UPDATE automatch_runtime_control SET metadata_json = ?").run(
+        metadata,
+      );
+      await manageAutomatchQueue({ operation: "inspect" }, dependencies);
+      assert.equal(logs.at(-1)!.mode, "fifo");
+      assert.equal(logs.at(-1)!.valid, true);
+      assert.equal(
         db.prepare("SELECT metadata_json FROM automatch_runtime_control").get()
           ?.metadata_json,
-      ),
-    );
-    assert.deepEqual(metadata, {
-      retained: "keep",
-      queueSelection: "fifo",
-      queueSelectionCandidateVersionId: version,
-      queueSelectionActivatedAtMs: 1234,
-    });
-    assert.equal(logs[0]!.mode, "fifo");
-    await manageAutomatchQueue({ operation: "inspect" }, dependencies);
-    assert.equal(logs[1]!.valid, true);
+        metadata,
+      );
+    }
   } finally {
     db.close();
   }
 });
 
-test("missing canonical projection rows and frozen control block activation", async () => {
-  for (const mutate of [
-    (db: DatabaseSync) => {
-      seed(db);
-      db.exec("DELETE FROM automatch_live_tickets_canonical");
-    },
-    (db: DatabaseSync) =>
-      db.exec("UPDATE automatch_runtime_control SET state = 'frozen'"),
-  ]) {
-    const { db, dependencies } = fixture();
-    try {
-      mutate(db);
-      await assert.rejects(
-        manageAutomatchQueue(
-          { operation: "activate", candidateVersionId: version },
-          dependencies,
-        ),
-        /active with a valid projection/,
-      );
-      assert.equal(
-        db
-          .prepare(
-            "SELECT json_extract(metadata_json, '$.queueSelection') AS mode FROM automatch_runtime_control",
-          )
-          .get()?.mode,
-        null,
-      );
-    } finally {
-      db.close();
-    }
-  }
-});
-
-test("activation rechecks integrity in the update when a source changes after inspection", async () => {
-  const { db, dependencies } = fixture();
+test("inspection reports missing projection rows without repairing them", async () => {
+  const { db, dependencies, logs } = fixture();
   try {
-    const run: SqlRunner = async (sql, database, bindings) => {
-      if (sql.startsWith("UPDATE automatch_runtime_control")) {
-        seed(db, "late-ticket", 10);
-        db.exec("DELETE FROM automatch_live_tickets_canonical");
-      }
-      return dependencies.run(sql, database, bindings);
-    };
-    await assert.rejects(
-      manageAutomatchQueue(
-        { operation: "activate", candidateVersionId: version },
-        { ...dependencies, run },
-      ),
-      /not confirmed/,
-    );
+    seed(db);
+    db.exec("DELETE FROM automatch_live_tickets_canonical");
+    await manageAutomatchQueue({ operation: "inspect" }, dependencies);
+    assert.equal(logs[0]!.valid, false);
     assert.equal(
       db
         .prepare(
-          "SELECT json_extract(metadata_json, '$.queueSelection') AS mode FROM automatch_runtime_control",
+          "SELECT COUNT(*) AS count FROM automatch_live_tickets_canonical",
         )
-        .get()?.mode,
-      null,
+        .get()?.count,
+      0,
     );
   } finally {
     db.close();
   }
 });
 
-test("activation rejects an unrecoverable canonical pending enqueue", async () => {
-  const { db, dependencies } = fixture();
+test("inspection reports frozen control without changing it", async () => {
+  const { db, dependencies, logs } = fixture();
+  try {
+    db.exec("UPDATE automatch_runtime_control SET state = 'frozen'");
+    await manageAutomatchQueue({ operation: "inspect" }, dependencies);
+    assert.equal(logs[0]!.state, "frozen");
+    assert.equal(logs[0]!.valid, true);
+    assert.equal(
+      db.prepare("SELECT state FROM automatch_runtime_control").get()?.state,
+      "frozen",
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test("inspection reports an unrecoverable canonical pending enqueue", async () => {
+  const { db, dependencies, logs } = fixture();
   try {
     const value = automatchEntry({
       uid: "pending-uid",
@@ -373,19 +301,14 @@ test("activation rejects an unrecoverable canonical pending enqueue", async () =
     db.prepare(
       "INSERT INTO game_session_transitions_canonical (transition_id,invite_id,payload_json,status,created_at_ms,updated_at_ms) VALUES ('pending','pending-invite',?,'pending',20,20)",
     ).run(payload);
-    await assert.rejects(
-      manageAutomatchQueue(
-        { operation: "activate", candidateVersionId: version },
-        dependencies,
-      ),
-      /active with a valid projection/,
-    );
+    await manageAutomatchQueue({ operation: "inspect" }, dependencies);
+    assert.equal(logs[0]!.valid, false);
   } finally {
     db.close();
   }
 });
 
-test("canonical queue storage rejects malformed timestamps before activation", () => {
+test("canonical queue storage rejects malformed timestamps", () => {
   const { db } = fixture();
   try {
     const value = automatchEntry({

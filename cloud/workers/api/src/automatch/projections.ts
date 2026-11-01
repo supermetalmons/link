@@ -29,7 +29,7 @@ export function createAutomatchProfileGameProjectionTask(
   );
 }
 
-export async function enqueueAutomatchProjection(
+async function enqueueAutomatchProjection(
   task: AutomatchTelegramProjectionTask,
   dependencies: AutomatchDependencies,
 ): Promise<void> {
@@ -52,7 +52,7 @@ export async function enqueueAutomatchProjection(
   }
 }
 
-export async function enqueueAutomatchProfileGameProjection(
+async function enqueueAutomatchProfileGameProjection(
   task: AutomatchProfileGameProjectionTask,
   dependencies: AutomatchDependencies,
 ): Promise<void> {

@@ -4,8 +4,6 @@ Run commands from the repository root. See the [architecture and command map](..
 
 The [data boundary inventory](data-boundaries.md) records persistence and transport contracts, compatibility requirements, and validation coverage.
 
-Routine compatible releases keep canonical writes and Queue delivery active. Prepare validated candidates, promote exact versions, and verify affected behavior. There is no overall release time limit and no verification-only wait or observation window longer than 60 seconds. Maintenance controls require a concrete schema, compatibility, lifecycle, or incident reason.
-
 ## Canonical data
 
 `PROFILE_DB.profile_login_owners_canonical` is the sole source for login-to-profile ownership, including merge targets. Unreadable or inconsistent ownership fails closed. Profiles, ratings, recovery, wagers, and transaction guards live in profile D1; browser sessions and intents live in auth-state D1.
@@ -175,8 +173,6 @@ Execution reserves 10 call-budget units per start plus 40 per eligible announcem
 Scheduled-event recovery, persisted progress outboxes, and rating recovery run independently with reserved concurrency of ten, five, and five records respectively. Each sweep serializes work targeting the same Workflow ID and retains its write admission until every recovery task settles.
 
 Scheduled-start recovery ensures each outbox in one atomic D1 batch under the sweep's existing admission, then dispatches the returned snapshot. Existing JSON, reconciliation deadlines, and concurrent winners remain intact. New Workflow instances are inspected directly from the creation result; duplicate creation results still use the existing lookup fallback when dispatch needs an instance. Announcement mutations retain their canonical repair and first-queued timestamp behavior.
-
-The combined Cron regression test fills urgent discovery, the background page, persisted progress and rating lanes, auth recovery, event and game-session transitions, and projection scans. Every background event is reminder-eligible, and scheduled Workflows start errored or terminated. Assertions verify the executed prefix and untouched deferred work. Real local D1 work runs alongside recording Queue/Workflow bindings and local invite Durable Objects. A shared 10,000-call test budget counts D1, Workflow, Queue, and Durable Object calls separately from SQL statements, and the tested workload must remain below 9,500 calls. Separate deadline tests cover reminders and prizes behind 800 ordinary events and 100 reminders scheduled across consecutive sweeps with a distant background cursor.
 
 Progress-outbox recovery uses `event_progress_outboxes_canonical.next_reconcile_at_ms`, independently of the stored outbox JSON and Workflow parameters. A confirmed waiting Workflow more than ten minutes before execution is checked again at the earlier of one hour later or ten minutes before execution. Other nonterminal states, unconfirmed or recreated instances, and provider failures remain eligible at the next five-minute Cron boundary. Initial producer dispatch remains immediate after durable persistence.
 

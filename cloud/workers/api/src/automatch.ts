@@ -63,12 +63,6 @@ import {
 export { cancelQueuedAutomatch } from "./automatch/cancellation.ts";
 export { AUTOMATCH_TOTAL_TIMEOUT_MS } from "./automatch/policy.ts";
 export { getFirstQueuedAutomatch } from "./automatch/selection.ts";
-export {
-  createAutomatchProfileGameProjectionTask,
-  createAutomatchProjectionTask,
-  enqueueAutomatchProfileGameProjection,
-  enqueueAutomatchProjection,
-} from "./automatch/projections.ts";
 
 const MAX_AUTOMATCH_RETRY_COUNT = 3;
 const MAX_AUTOMATCH_SELECTION_ATTEMPTS = 32;
@@ -178,7 +172,7 @@ async function didClearOwnedQueuedAutomatches(
   }
 }
 
-export async function readAutomatchRequesterSnapshot(
+async function readAutomatchRequesterSnapshot(
   uid: string,
   repository: AutomatchRepository,
   logFailure: () => void = () => undefined,
@@ -838,7 +832,6 @@ export async function startAutomatch(
 export { emptyAutomatchProfile } from "./automatch/plans.ts";
 export type {
   AutomatchDependencies,
-  AutomatchRequesterSnapshot,
   QueuedAutomatch,
   StartAutomatchOperationRequest,
 } from "./automatch/types.ts";

@@ -1,24 +1,5 @@
 import { canonicalReceiptJson, sha256Hex } from "../src/canonicalJson.ts";
 import { isCanonicalLoginUid, isSafeRecordKey } from "../src/recordKeys.ts";
-import type {
-  MatchStateClaimTimerRequest,
-  MatchStateMoveRequest,
-  MatchStateStartTimerRequest,
-  MatchStateSurrenderRequest,
-} from "../src/matchStateTypes.ts";
-import type {
-  MatchStateCreateWireRequest,
-  MatchStateEventEffectsWireRequest,
-} from "../src/matchStateWire.ts";
-
-export type TimerWriterMutation =
-  | { kind: "create"; request: MatchStateCreateWireRequest }
-  | { kind: "move"; request: MatchStateMoveRequest }
-  | { kind: "surrender"; request: MatchStateSurrenderRequest }
-  | { kind: "start-timer"; request: MatchStateStartTimerRequest }
-  | { kind: "claim-timer"; request: MatchStateClaimTimerRequest }
-  | { kind: "event-effects"; request: MatchStateEventEffectsWireRequest }
-  | { kind: "alarm"; request: { objectId: string } };
 
 export type TimerHandoffIdentity = {
   schemaVersion: 1;
@@ -65,50 +46,6 @@ export type TimerHandoffAcknowledgement = TimerHandoffIdentity & {
   deletionAckDigest: string;
 };
 
-export type TimerHandoffBegin = TimerHandoffIdentity & {
-  expectedRevision: number;
-};
-
-export type TimerHandoffEmptyIdentity = {
-  schemaVersion: 1;
-  cleanupId: string;
-  handoffId: string;
-  objectId: string;
-};
-
-export type TimerHandoffEmptyReceipt = TimerHandoffEmptyIdentity & {
-  kind: "empty-local-layout";
-  revision: number;
-  routingDigest: string;
-  receiptDigest: string;
-};
-
-export type TimerHandoffPhase =
-  "open" | "draining" | "copying" | "copied" | "sealing-empty";
-
-export type TimerHandoffInspection = {
-  schemaVersion: 1;
-  inviteId: string | null;
-  objectId: string;
-  revision: number;
-  phase: TimerHandoffPhase;
-  handoffId: string | null;
-  ownership: TimerHandoffOwnership[];
-  pendingWriters: {
-    writerId: string;
-    revision: number;
-    incarnation: string;
-    kind: string;
-    mutationId: string;
-    inputDigest: string;
-    outcome: "unknown" | "committed" | "completed" | "failed";
-    currentIncarnation: boolean;
-  }[];
-  receipt: TimerHandoffCopyReceipt | null;
-  acknowledgement: TimerHandoffAcknowledgement | null;
-  emptySeal: TimerHandoffEmptyReceipt | null;
-};
-
 function invalid(): never {
   throw new TypeError("invalid-timer-handoff-record");
 }
@@ -144,7 +81,7 @@ function integer(value: unknown, minimum = 0): number {
   return value as number;
 }
 
-export function timerHandoffDigest(value: unknown): string {
+function timerHandoffDigest(value: unknown): string {
   if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value))
     return invalid();
   return value;
@@ -171,11 +108,6 @@ export function parseTimerHandoffIdentity(
   value: unknown,
 ): TimerHandoffIdentity {
   return identity(object(value, IDENTITY_FIELDS));
-}
-
-export function parseTimerHandoffBegin(value: unknown): TimerHandoffBegin {
-  const row = object(value, [...IDENTITY_FIELDS, "expectedRevision"]);
-  return { ...identity(row), expectedRevision: integer(row.expectedRevision) };
 }
 
 export function parseTimerHandoffOwnership(
@@ -372,56 +304,5 @@ export function parseTimerHandoffAcknowledgement(
     snapshotDigest: timerHandoffDigest(row.snapshotDigest),
     receiptDigest: timerHandoffDigest(row.receiptDigest),
     deletionAckDigest: timerHandoffDigest(row.deletionAckDigest),
-  };
-}
-
-export function parseTimerHandoffEmptyIdentity(
-  value: unknown,
-): TimerHandoffEmptyIdentity {
-  const row = object(value, [
-    "schemaVersion",
-    "cleanupId",
-    "handoffId",
-    "objectId",
-  ]);
-  if (
-    row.schemaVersion !== 1 ||
-    typeof row.objectId !== "string" ||
-    !/^[a-f0-9]{64}$/.test(row.objectId)
-  )
-    return invalid();
-  return {
-    schemaVersion: 1,
-    cleanupId: key(row.cleanupId),
-    handoffId: key(row.handoffId),
-    objectId: row.objectId,
-  };
-}
-
-export function parseTimerHandoffEmptyReceipt(
-  value: unknown,
-): TimerHandoffEmptyReceipt {
-  const row = object(value, [
-    "schemaVersion",
-    "cleanupId",
-    "handoffId",
-    "objectId",
-    "kind",
-    "revision",
-    "routingDigest",
-    "receiptDigest",
-  ]);
-  if (row.kind !== "empty-local-layout") return invalid();
-  return {
-    ...parseTimerHandoffEmptyIdentity({
-      schemaVersion: row.schemaVersion,
-      cleanupId: row.cleanupId,
-      handoffId: row.handoffId,
-      objectId: row.objectId,
-    }),
-    kind: "empty-local-layout",
-    revision: integer(row.revision, 1),
-    routingDigest: timerHandoffDigest(row.routingDigest),
-    receiptDigest: timerHandoffDigest(row.receiptDigest),
   };
 }

@@ -9,8 +9,7 @@ export const APPLICATION_DATABASE_BINDINGS = [
 
 export type ApplicationDatabaseBinding =
   (typeof APPLICATION_DATABASE_BINDINGS)[number];
-export type ApplicationDataPhase =
-  "active" | "closing" | "closed" | "verifying";
+type ApplicationDataPhase = "active" | "closing" | "closed" | "verifying";
 export type ApplicationDataControl = {
   generation: number;
   dataEpoch: 0 | 1;

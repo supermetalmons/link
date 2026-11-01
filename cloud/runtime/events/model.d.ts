@@ -10,7 +10,6 @@ export type {
   EventDocument as EventData,
   EventParticipantDocument as EventParticipant,
   EventMatchDocument as EventMatch,
-  EventRoundDocument as EventRound,
   EventRoundsDocument as EventRounds,
   EventParticipantsDocument as EventParticipants,
 } from "./documents.js";

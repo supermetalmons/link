@@ -6,7 +6,7 @@ import type {
   EventRuntimeStore,
 } from "../../../runtime/eventCommands.js";
 import type { EventLeaseRecord } from "../../../runtime/eventLeases.js";
-import { createWorkflowEventRuntime } from "../src/eventProgress.ts";
+import { createWorkflowEventRuntime } from "../src/eventProgressWorkflowRunner.ts";
 import type { EventGameplayRepository } from "../src/eventRepository.ts";
 import {
   createEventRuntimeStore,

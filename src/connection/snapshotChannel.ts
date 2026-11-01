@@ -11,11 +11,11 @@ export type SnapshotDelivery = {
   requestGeneration: number;
 };
 
-export const SNAPSHOT_RECONNECT_DELAYS_MS = [
+const SNAPSHOT_RECONNECT_DELAYS_MS = [
   500, 1_000, 2_000, 4_000, 8_000, 15_000,
 ] as const;
-export const SNAPSHOT_HEARTBEAT_INTERVAL_MS = 30_000;
-export const SNAPSHOT_HEARTBEAT_TIMEOUT_MS = 10_000;
+const SNAPSHOT_HEARTBEAT_INTERVAL_MS = 30_000;
+const SNAPSHOT_HEARTBEAT_TIMEOUT_MS = 10_000;
 const HTTP_ERROR_DELAYS_MS = [5_000, 10_000, 20_000, 30_000] as const;
 
 type Timer = ReturnType<typeof setTimeout>;

@@ -29,9 +29,6 @@ import type {
 import { SESSION_TIMESTAMP } from "./sessionValueOperations.ts";
 import { assertInviteNotRetired } from "./retiredInvites.ts";
 
-const GAME_SESSION_MUTATION_RECEIPT_ROOT = "gameplayMutationReceipts";
-const GAME_SESSION_MUTATION_RECEIPT_EXPIRATION_ROOT =
-  "gameplayMutationReceiptExpirations";
 const GAME_SESSION_MUTATION_RECEIPT_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const GAME_SESSION_MUTATION_RECEIPT_SWEEP_LIMIT = 1000;
 
@@ -412,9 +409,4 @@ export async function sweepGameSessionMutationReceipts(
   );
 }
 
-export {
-  GAME_SESSION_MUTATION_RECEIPT_EXPIRATION_ROOT,
-  GAME_SESSION_MUTATION_RECEIPT_RETENTION_MS,
-  GAME_SESSION_MUTATION_RECEIPT_ROOT,
-  GAME_SESSION_MUTATION_RECEIPT_SWEEP_LIMIT,
-};
+export { GAME_SESSION_MUTATION_RECEIPT_SWEEP_LIMIT };

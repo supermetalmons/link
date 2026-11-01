@@ -16,7 +16,6 @@ export {
   ratingWriteRow,
   canonicalRatingProjectionFields,
   buildCanonicalRatingProjectionMutation,
-  ratingProjectionColumns,
   ratingProjectionWriteRow,
 } from "./accountingRecords.ts";
 

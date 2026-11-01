@@ -54,7 +54,7 @@ function sameGameFields(
   );
 }
 
-export function timerTerminal(pair: TimerPair): boolean {
+function timerTerminal(pair: TimerPair): boolean {
   return (
     pair.player.status === "surrendered" ||
     pair.opponent.status === "surrendered" ||
@@ -64,7 +64,7 @@ export function timerTerminal(pair: TimerPair): boolean {
   );
 }
 
-export function assertTimerTurn(pair: TimerPair, claim = false): void {
+function assertTimerTurn(pair: TimerPair, claim = false): void {
   if (timerTerminal(pair)) fail("game is already over.");
   if (!pair.game.historyValid) fail("something is wrong with the moves.");
   if (pair.game.activeColor !== pair.opponent.color) {

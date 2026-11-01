@@ -9,7 +9,7 @@ import {
 } from "./taskKinds.js";
 export type TelegramTaskKind =
   "desired" | "manual-recovery" | "pending-delete" | "rate-limit-proof";
-export type TelegramTaskFields = {
+type TelegramTaskFields = {
   schemaVersion: 1;
   dataEpoch: 1;
   messageKey: string;

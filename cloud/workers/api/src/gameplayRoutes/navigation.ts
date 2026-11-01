@@ -20,7 +20,7 @@ import {
 import { readProfileGamesPage } from "../profileGamesD1.ts";
 import { defineGameplayRoute, validateBody } from "./definition.ts";
 
-export async function resolveProfileId(
+async function resolveProfileId(
   identity: RequestIdentity,
   repository: GameplayRepository,
 ): Promise<string> {

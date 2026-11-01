@@ -14,6 +14,7 @@ import { isEmojiId } from "@mons/shared/appearance";
 
 export type ShinyCardUpdateSource = "default" | "inventory";
 
+/** @knipExternal Imported by the generated type probe in test/shinyCardEditTypes.test.mjs. */
 export type UndoIntent<T> =
   { readonly kind: "record"; readonly value: T } | { readonly kind: "skip" };
 

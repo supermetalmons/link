@@ -34,7 +34,7 @@ export type EventOwnershipSnapshot = Readonly<{
     Readonly<{ profile: EventOwnershipProfile; revision: number }>
   >;
 }>;
-export type EventOwnershipResolutionSnapshot = Pick<
+type EventOwnershipResolutionSnapshot = Pick<
   EventOwnershipSnapshot,
   "canonicalProfileIdByProfileId" | "loginOwnerByUid"
 > &

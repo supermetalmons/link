@@ -2,7 +2,7 @@ import type { EventPrizeDefinition } from "@mons/shared/event-prizes";
 import { BRACKET_MATCH_H, BRACKET_MATCH_W } from "./bracketGeometry";
 
 export const BRACKET_AVATAR_PX = 28;
-export const BRACKET_THIRD_PLACE_SCALE = 0.86;
+const BRACKET_THIRD_PLACE_SCALE = 0.86;
 export const BRACKET_THIRD_PLACE_MATCH_W = Math.round(
   BRACKET_MATCH_W * BRACKET_THIRD_PLACE_SCALE,
 );
@@ -19,9 +19,9 @@ export const CONTENT_AREA_PADDING_PX = 16;
 export const WINNER_PODIUM_AVATAR_PX = 34;
 export const WINNER_PODIUM_COLUMN_W = 70;
 export const WINNER_PODIUM_COLUMN_GAP = 10;
-export const WINNER_PODIUM_PRIMARY_BAR_H = 36;
-export const WINNER_PODIUM_SECONDARY_BAR_H = 30;
-export const WINNER_PODIUM_TERTIARY_BAR_H = 24;
+const WINNER_PODIUM_PRIMARY_BAR_H = 36;
+const WINNER_PODIUM_SECONDARY_BAR_H = 30;
+const WINNER_PODIUM_TERTIARY_BAR_H = 24;
 export const WINNER_PODIUM_AVATAR_OVERLAP = 10;
 export const WINNER_PODIUM_GAP_FROM_BRACKET = 10;
 export const WINNER_PODIUM_AVATAR_UPLIFT_PX = 3;

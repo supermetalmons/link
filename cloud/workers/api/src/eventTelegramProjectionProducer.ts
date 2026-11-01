@@ -10,8 +10,6 @@ import type { PreparedEventMutation } from "./eventMutationCommit.ts";
 import { EVENT_TELEGRAM_PROJECTION_SCHEMA_VERSION } from "./telegramProjectionOutbox.ts";
 import type { EventTelegramProjectionRequest } from "./telegramProjectionOutbox.ts";
 
-export { EVENT_TELEGRAM_PROJECTION_SCHEMA_VERSION } from "./telegramProjectionOutbox.ts";
-
 type ProducerDependencies = {
   createRequestId?: () => string;
   enqueue?: (task: EventTelegramProjectionTask) => Promise<unknown>;
@@ -113,5 +111,3 @@ export function prepareEventTelegramProjection(
     },
   };
 }
-
-export { eventIdsFromUpdates };

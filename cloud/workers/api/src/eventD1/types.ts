@@ -37,10 +37,8 @@ export type EventLeaseGuard = {
 };
 
 export type {
-  EventIntentUpdates,
   EventIntentEffects,
   EventInviteSourceMutation,
-  EventTransitionDraftInput,
   EventTransitionIntent,
 } from "../../../../runtime/eventTransitionRecords.js";
 
@@ -138,7 +136,7 @@ export type TelegramProjectionState = {
   state: EventTelegramProjectionStateDocument;
 };
 
-export type TelegramProjectionSnapshot = {
+type TelegramProjectionSnapshot = {
   eventId: string;
   current: TelegramProjectionState | null;
 };

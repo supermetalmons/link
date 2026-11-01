@@ -225,7 +225,7 @@ export const FightCloudWrap = styled.div`
 `;
 
 export const EventAvatarImage = styled(GameEmojiImage)``;
-export const EventAvatarPlaceholder = styled(GameEmojiPlaceholder)`
+const EventAvatarPlaceholder = styled(GameEmojiPlaceholder)`
   background: transparent;
 `;
 export const EventAvatarQuestionSlot = styled(EventAvatarPlaceholder)`

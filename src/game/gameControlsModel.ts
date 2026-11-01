@@ -13,10 +13,6 @@ export type GameControlsContext = {
   selectedPuzzleId: string | null;
 };
 
-export type GameControlsViewContext = GameControlsContext & {
-  currentInviteEventId: string | null;
-};
-
 export type GameControlsPresentation = {
   gameControls: GameControlsState;
   endMatchVisible: boolean;

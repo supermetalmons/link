@@ -714,21 +714,3 @@ export type CanonicalCommitPlan = {
   expectations: readonly CanonicalExpectation[];
   mutations: readonly CanonicalMutation[];
 };
-
-type CanonicalLifecycleMutation = Extract<
-  CanonicalMutation,
-  {
-    kind:
-      | "insert-active-profile"
-      | "update-active-profile"
-      | "patch-active-profile"
-      | "patch-profile-fields"
-      | "retire-profile-with-redirect"
-      | "delete-retired-profile";
-  }
->;
-
-export type CanonicalSingleMutation = Exclude<
-  CanonicalMutation,
-  CanonicalLifecycleMutation
->;

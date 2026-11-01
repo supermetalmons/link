@@ -657,4 +657,4 @@ export async function handleAuthMutation(
   }
 }
 
-export { isExpiredFlow, validateSiweLocation };
+export { validateSiweLocation };

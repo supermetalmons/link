@@ -28,7 +28,7 @@ import {
 } from "./eventPresentation";
 import type { EventPrizeSelection } from "./useEventPrizeSelection";
 
-export type DisplayedEventPrize = {
+type DisplayedEventPrize = {
   prize: EventPrizeDefinition;
   assignment: EventPrizeAssignment | null;
 };

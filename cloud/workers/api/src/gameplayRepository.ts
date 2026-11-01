@@ -31,11 +31,11 @@ import {
 
 const MAX_WAGER_TRANSFER_TRANSACTION_ATTEMPTS = 5;
 
-export type NavigationGameDocument = {
+type NavigationGameDocument = {
   status: string | null;
 };
 
-export type NavigationGameDeleteResult = "deleted" | "missing";
+type NavigationGameDeleteResult = "deleted" | "missing";
 
 export type WagerTransferInput = {
   appliedAtMs: number;

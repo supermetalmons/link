@@ -6,12 +6,9 @@ import type {
   WithdrawalSubmissionEvidence,
 } from "./records.js";
 
-export type WithdrawalClaimCommand = Omit<
-  WithdrawalClaimInput,
-  "current" | "nowMs"
->;
+type WithdrawalClaimCommand = Omit<WithdrawalClaimInput, "current" | "nowMs">;
 
-export type WithdrawalTransactionResult = TransactionResult<WithdrawalDocument>;
+type WithdrawalTransactionResult = TransactionResult<WithdrawalDocument>;
 
 export type WithdrawalRecord = {
   read(): Promise<WithdrawalDocument | null>;

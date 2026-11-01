@@ -9,7 +9,7 @@ const BRACKET_CONNECTOR_W = 40;
 const BRACKET_COMPACT_CONNECTOR_W = 18;
 const BRACKET_CORNER_R = 10;
 
-export type ClassicBracketMatchPosition = {
+type ClassicBracketMatchPosition = {
   x: number;
   y: number;
   key: string;
@@ -18,7 +18,7 @@ export type ClassicBracketMatchPosition = {
   height: number;
 };
 
-export type ClassicBracketConnector = {
+type ClassicBracketConnector = {
   d: string;
   isBlocked: boolean;
   crossX: number | null;
@@ -41,13 +41,13 @@ export type ThirdPlaceMatchLayout = {
   match: EventMatch;
 };
 
-export type BracketMatchLayout = {
+type BracketMatchLayout = {
   width: number;
   height: number;
   useCompactEntry: boolean;
 };
 
-export const getBracketMatchLayout = (
+const getBracketMatchLayout = (
   roundIndex: number,
   totalRounds: number,
 ): BracketMatchLayout => {
@@ -58,7 +58,7 @@ export const getBracketMatchLayout = (
   };
 };
 
-export const getBracketMatchTop = (
+const getBracketMatchTop = (
   depthIndex: number,
   matchIndex: number,
   matchHeight: number,
@@ -67,7 +67,7 @@ export const getBracketMatchTop = (
   return Math.round((slotSpan - matchHeight) / 2 + matchIndex * slotSpan);
 };
 
-export const getBracketMatchCenterY = (
+const getBracketMatchCenterY = (
   depthIndex: number,
   matchIndex: number,
   matchHeight: number,
@@ -77,11 +77,11 @@ export const getBracketMatchCenterY = (
   );
 };
 
-export const getClassicConnectorMidX = (x1: number, x2: number): number => {
+const getClassicConnectorMidX = (x1: number, x2: number): number => {
   return x1 + (x2 - x1) / 2;
 };
 
-export const buildClassicElbowConnectorPath = (
+const buildClassicElbowConnectorPath = (
   x1: number,
   y1: number,
   x2: number,
@@ -113,7 +113,7 @@ export const buildClassicElbowConnectorPath = (
   ].join("");
 };
 
-export const buildClassicTopBottomEntryConnectorPath = (
+const buildClassicTopBottomEntryConnectorPath = (
   x1: number,
   y1: number,
   x2: number,
@@ -137,7 +137,7 @@ export const buildClassicTopBottomEntryConnectorPath = (
   ].join("");
 };
 
-export const getClassicElbowConnectorCrossPoint = (
+const getClassicElbowConnectorCrossPoint = (
   x1: number,
   y1: number,
   x2: number,
@@ -167,7 +167,7 @@ export const getClassicElbowConnectorCrossPoint = (
   };
 };
 
-export const getClassicTopBottomEntryConnectorCrossPoint = (
+const getClassicTopBottomEntryConnectorCrossPoint = (
   x1: number,
   y1: number,
   x2: number,

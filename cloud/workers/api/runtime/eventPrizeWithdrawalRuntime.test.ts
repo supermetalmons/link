@@ -7,7 +7,7 @@ import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import {
   buildEventPrizeWithdrawalOperationId,
   type EventPrizeWithdrawalWorkflowInput,
-} from "../src/eventPrizeWithdrawal.ts";
+} from "../src/eventPrizeWithdrawal/contracts.ts";
 import {
   runEventPrizeWithdrawalWorkflow,
   runAdmittedEventPrizeWithdrawalWorkflow,

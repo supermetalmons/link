@@ -12,7 +12,6 @@ exports.setMatchSlotParticipant =
   exports.hasThirdPlaceMatchField =
   exports.getSortedRoundIndexes =
   exports.getSortedMatchKeys =
-  exports.createInviteForMatch =
   exports.createEmptyEventMatch =
   exports.buildScheduledEventDueUpdatesCore =
   exports.buildFixedBracketState =
@@ -330,7 +329,6 @@ const createInviteForMatch = async ({
   });
   return true;
 };
-exports.createInviteForMatch = createInviteForMatch;
 const reconcileThirdPlaceMatchReadiness = async ({
   eventId,
   rounds,

@@ -3,7 +3,7 @@ export type TelegramFetch = (
   input: string,
   init: RequestInit,
 ) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
-export type TelegramTransportOptions = {
+type TelegramTransportOptions = {
   token?: string;
   fetchImpl?: TelegramFetch;
   timeoutMs?: number;
@@ -30,22 +30,14 @@ export type TelegramMediaGroupInput = TelegramTransportOptions & {
   silent?: boolean;
   hasSpoiler?: boolean;
 };
-export type RetainedTelegramSendInput = TelegramSendInput;
-export type RetainedTelegramEditInput = TelegramEditInput;
+type RetainedTelegramSendInput = TelegramSendInput;
+type RetainedTelegramEditInput = TelegramEditInput;
 export type RetainedTelegramDeleteInput = TelegramDeleteInput;
-export type RetainedTelegramMediaGroupInput = TelegramMediaGroupInput;
-export const retainTelegramSendInput = (
-  value: TelegramSendInput,
-): TelegramSendInput => value;
-export const retainTelegramEditInput = (
-  value: TelegramEditInput,
-): TelegramEditInput => value;
+type RetainedTelegramMediaGroupInput = TelegramMediaGroupInput;
+
 export const retainTelegramDeleteInput = (
   value: TelegramDeleteInput,
 ): TelegramDeleteInput => value;
-export const retainTelegramMediaGroupInput = (
-  value: TelegramMediaGroupInput,
-): TelegramMediaGroupInput => value;
 
 type RequestFields = {
   chatId?: unknown;
@@ -146,7 +138,7 @@ export type TelegramSendResult = TelegramFailure | TelegramSendSuccess;
 export type TelegramMediaGroupResult =
   TelegramFailure | TelegramMediaGroupSuccess;
 export type TelegramEditResult = TelegramFailure | TelegramEditSuccess;
-export type TelegramDeleteResult = TelegramFailure | TelegramDeleteSuccess;
+type TelegramDeleteResult = TelegramFailure | TelegramDeleteSuccess;
 export type TelegramResult = TelegramFailure | TelegramSuccess;
 export type TelegramClient = {
   sendTelegramMessage(
@@ -603,7 +595,6 @@ export {
   TELEGRAM_HTTP_TIMEOUT_MS,
   deleteTelegramMessage,
   editTelegramMessage,
-  isKnownSafeTelegramSendError,
   sendTelegramMediaGroup,
   sendTelegramMessage,
 };

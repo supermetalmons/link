@@ -1,7 +1,7 @@
 // Generated from src/events.ts. Run npm run generate:runtime.
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.EventRuntimeError = exports.createEventRuntime = void 0;
+exports.createEventRuntime = void 0;
 const requests_js_1 = require("./events/requests.js");
 const documents_js_1 = require("./events/documents.js");
 const lockManagerCore_js_1 = require("./events/lockManagerCore.js");
@@ -21,7 +21,6 @@ class EventRuntimeError extends Error {
     this.code = code;
   }
 }
-exports.EventRuntimeError = EventRuntimeError;
 const createEventRuntime = (dependencies) => {
   const state = dependencies.state;
   const readProfileOwnershipSnapshot =

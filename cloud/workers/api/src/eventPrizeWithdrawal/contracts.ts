@@ -22,7 +22,7 @@ export type EventPrizeWithdrawalWorkflowParams = {
   requesterUid: string;
 };
 
-export type EventPrizeWithdrawalPreflightParams = {
+type EventPrizeWithdrawalPreflightParams = {
   schemaVersion: 2;
   dataEpoch: 1;
   kind: "preflight";

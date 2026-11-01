@@ -15,8 +15,6 @@ import type {
   TelegramRetryState,
 } from "./deliveryRetryTypes.js";
 
-import type { TelegramDesired } from "./desiredStateCore.js";
-
 import type { RetainedDesiredView } from "./desiredRecords.js";
 import type {
   TelegramMessageDocument,
@@ -89,20 +87,11 @@ export type DeliveryStatus =
   | "terminal"
   | "uncertain";
 export type CleanupStatus = "pending" | "processing" | "retryable";
-export type DeliveryLease = {
+type DeliveryLease = {
   leaseOwner: string;
   leaseExpiresAtMs: number;
 };
-export type SendInFlight = {
-  attemptId: string;
-  revision: string;
-  destination: TelegramDesired["destination"];
-  chatId: string;
-  instanceKey?: string;
-  contentHash?: string;
-  startedAtMs: number;
-  apiGateOwner: string;
-};
+
 export type DeliveryTransition =
   | { status: "pending"; revision: string; attempts?: number }
   | ({
@@ -182,7 +171,7 @@ export type ExactRetryInput =
   TelegramExactRetryInput | RetainedTelegramExactRetryInput;
 export const normalizeString = (value: unknown): string =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-export const hashValue = (value: unknown): string =>
+const hashValue = (value: unknown): string =>
   crypto.createHash("sha256").update(String(value)).digest("hex");
 class RetrySnapshot<
   T extends TelegramDeliveryDocument | TelegramCleanupDocument,
@@ -484,7 +473,7 @@ export const ensureCommitted = <T extends { committed: boolean }>(
 export const validateDesiredForDelivery = (
   desired: unknown,
 ): desired is TelegramDesiredDocument => readTelegramDesired(desired) !== null;
-export type DesiredRetryInput = DesiredContext & {
+type DesiredRetryInput = DesiredContext & {
   result: TelegramRetryFailure;
   safeRejectedAttemptId?: string;
   currentDelivery: Partial<TelegramDeliveryDocument> | DeliverySnapshot;

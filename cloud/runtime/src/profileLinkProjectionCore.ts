@@ -298,11 +298,4 @@ const createProfileLinkProjectionCore: Signature_createProfileLinkProjectionCore
     };
   };
 
-export {
-  PROFILE_LINK_CATCHUP_CONCURRENCY,
-  PROFILE_LINK_CATCHUP_MAX_INVITES,
-  PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP,
-  PROFILE_LINK_CATCHUP_TIMEOUT_MS,
-  createProfileLinkProjectionCore,
-  processWithConcurrency,
-};
+export { createProfileLinkProjectionCore, processWithConcurrency };

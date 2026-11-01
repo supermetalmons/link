@@ -5,7 +5,7 @@ function forbidden(): never {
   throw new Error("application-read-only-operation");
 }
 
-export function readOnlyApplicationDatabase(database: D1Database): D1Database {
+function readOnlyApplicationDatabase(database: D1Database): D1Database {
   const statements = new WeakMap<D1PreparedStatement, D1PreparedStatement>();
   const wrapStatement = (
     statement: D1PreparedStatement,

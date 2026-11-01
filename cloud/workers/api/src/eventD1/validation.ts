@@ -44,7 +44,7 @@ function hasControlCharacter(value: string): boolean {
   });
 }
 
-export function isJsonValue(value: unknown, depth = 0): boolean {
+function isJsonValue(value: unknown, depth = 0): boolean {
   if (depth > 64) return false;
   if (
     value === null ||

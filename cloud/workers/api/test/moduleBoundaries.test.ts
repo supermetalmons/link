@@ -6,17 +6,9 @@ import typescript from "typescript";
 import * as entrypoint from "../src/workerHandler.ts";
 import { extractIdFromJsonUri } from "../src/helius.ts";
 import { handleFetch, handleRequest } from "../src/router.ts";
-import * as eventProgress from "../src/eventProgress.ts";
-import * as eventProgressCodec from "../src/eventProgressCodec.ts";
-import * as eventProgressDispatch from "../src/eventProgressDispatch.ts";
-import * as eventProgressRecovery from "../src/eventProgressRecovery.ts";
-import * as eventProgressWorkflowRunner from "../src/eventProgressWorkflowRunner.ts";
-import { createEventRuntimeStore } from "../src/workerEventRuntime.ts";
+
 import * as eventRepository from "../src/eventRepository.ts";
-import * as eventPrizeWithdrawal from "../src/eventPrizeWithdrawal.ts";
-import * as eventPrizeWithdrawalContracts from "../src/eventPrizeWithdrawal/contracts.ts";
-import * as eventPrizeWithdrawalRuntime from "../src/eventPrizeWithdrawal/runtime.ts";
-import * as eventPrizeWithdrawalRoute from "../src/eventPrizeWithdrawal/route.ts";
+
 import * as authRecovery from "../src/authRecovery.ts";
 import * as authRecoveryJobs from "../src/authRecovery/jobs.ts";
 import * as authRecoveryDispatch from "../src/authRecovery/dispatch.ts";
@@ -54,38 +46,6 @@ test("event repositories retain their public factory and recovery exports", () =
     "createEventStateRepository",
     "recoverEventTransitionIntents",
   ]);
-});
-
-test("prize withdrawal retains its exact public facade and function identities", () => {
-  const expected = {
-    buildEventPrizeWithdrawalOperationId:
-      eventPrizeWithdrawalContracts.buildEventPrizeWithdrawalOperationId,
-    parseEventPrizeWithdrawalWorkflowParams:
-      eventPrizeWithdrawalContracts.parseEventPrizeWithdrawalWorkflowParams,
-    toEventPrizeApiFailure:
-      eventPrizeWithdrawalContracts.toEventPrizeApiFailure,
-    createEventPrizeRuntimeDependencies:
-      eventPrizeWithdrawalRuntime.createEventPrizeRuntimeDependencies,
-    createEventPrizeExecutionProfileReader:
-      eventPrizeWithdrawalRuntime.createEventPrizeExecutionProfileReader,
-    executeEventPrizeWithdrawal:
-      eventPrizeWithdrawalRuntime.executeEventPrizeWithdrawal,
-    resolveEventPrizeWithdrawalExecutionParams:
-      eventPrizeWithdrawalRuntime.resolveEventPrizeWithdrawalExecutionParams,
-    EVENT_PRIZE_WITHDRAWAL_PATH:
-      eventPrizeWithdrawalRoute.EVENT_PRIZE_WITHDRAWAL_PATH,
-    EVENT_PRIZE_WITHDRAWAL_STATUS_PATH:
-      eventPrizeWithdrawalRoute.EVENT_PRIZE_WITHDRAWAL_STATUS_PATH,
-    handleEventPrizeWithdrawalRoute:
-      eventPrizeWithdrawalRoute.handleEventPrizeWithdrawalRoute,
-  };
-  assert.deepEqual(
-    Object.keys(eventPrizeWithdrawal).sort(),
-    Object.keys(expected).sort(),
-  );
-  for (const name of Object.keys(expected) as (keyof typeof expected)[]) {
-    assert.strictEqual(eventPrizeWithdrawal[name], expected[name], name);
-  }
 });
 
 test("event transition coordination stays independent of repository factories", () => {
@@ -259,7 +219,6 @@ test("gameplay route runtimes keep event and rating dependencies scoped", () => 
       ),
     );
     for (const dependency of [
-      "eventProgress.ts",
       "eventProgressRecovery.ts",
       "eventProgressWorkflowRunner.ts",
       "eventRepository.ts",
@@ -307,7 +266,6 @@ for (const module of [
   "automatch",
   "automatchD1",
   "eventD1",
-  "eventPrizeWithdrawal",
   "authIdentityCanonical",
   "profileGameProjection",
   "authRecovery",
@@ -338,6 +296,30 @@ for (const module of [
   });
 }
 
+test("prize withdrawal modules have no runtime cycles", () => {
+  const internalRoot = resolve(
+    import.meta.dirname,
+    "../src/eventPrizeWithdrawal",
+  );
+  const internals = new Set(
+    ["contracts.ts", "runtime.ts", "route.ts"].flatMap((entry) =>
+      reachableRuntimeFiles(resolve(internalRoot, entry)).filter((path) =>
+        path.startsWith(`${internalRoot}/`),
+      ),
+    ),
+  );
+  for (const path of internals) {
+    for (const specifier of runtimeSpecifiers(path)) {
+      const dependency = resolveRuntimeImport(path, specifier);
+      if (dependency !== null)
+        assert.ok(
+          !reachableRuntimeFiles(dependency).includes(path),
+          relative(repositoryRoot, path),
+        );
+    }
+  }
+});
+
 test("withdrawal Workflows do not depend on HTTP or admission orchestration", () => {
   const sourceRoot = resolve(import.meta.dirname, "../src");
   const reachable = new Set(
@@ -346,7 +328,6 @@ test("withdrawal Workflows do not depend on HTTP or admission orchestration", ()
     ),
   );
   for (const dependency of [
-    "eventPrizeWithdrawal.ts",
     "eventPrizeWithdrawal/route.ts",
     "eventPrizeWithdrawal/admission.ts",
   ]) {
@@ -357,11 +338,9 @@ test("withdrawal Workflows do not depend on HTTP or admission orchestration", ()
 test("prize request dependencies cannot reach withdrawal execution or Solana SDKs", () => {
   const sourceRoot = resolve(import.meta.dirname, "../src");
   const forbiddenWorkerModules = new Set(
-    [
-      "eventPrizeWithdrawal.ts",
-      "eventPrizeWithdrawal/runtime.ts",
-      "eventPrizeWithdrawalWorkflow.ts",
-    ].map((path) => resolve(sourceRoot, path)),
+    ["eventPrizeWithdrawal/runtime.ts", "eventPrizeWithdrawalWorkflow.ts"].map(
+      (path) => resolve(sourceRoot, path),
+    ),
   );
   for (const entry of [
     "router.ts",
@@ -444,57 +423,11 @@ test("event Workflow execution, announcement scheduling and dispatch do not depe
   }
 });
 
-test("event progress internals stay independent of their facade and recovery stays independent of Workflow execution", () => {
+test("event progress recovery stays independent of Workflow execution", () => {
   const sourceRoot = resolve(import.meta.dirname, "../src");
-  const facade = resolve(sourceRoot, "eventProgress.ts");
   const recovery = resolve(sourceRoot, "eventProgressRecovery.ts");
   const runner = resolve(sourceRoot, "eventProgressWorkflowRunner.ts");
-  for (const entry of [
-    "eventProgressRecovery.ts",
-    "eventProgressWorkflowRunner.ts",
-    "eventProgressCodec.ts",
-    "eventProgressDispatch.ts",
-  ]) {
-    assert.ok(
-      !reachableRuntimeFiles(resolve(sourceRoot, entry)).includes(facade),
-      entry,
-    );
-  }
   assert.ok(!reachableRuntimeFiles(recovery).includes(runner));
-});
-
-test("event progress retains its exact public facade and function identities", () => {
-  const expected = {
-    buildEventProgressPlan: eventProgressCodec.buildEventProgressPlan,
-    parseEventProgressOutbox: eventProgressCodec.parseEventProgressOutbox,
-    parseEventProgressParams: eventProgressCodec.parseEventProgressParams,
-    ensureEventProgressWorkflow:
-      eventProgressDispatch.ensureEventProgressWorkflow,
-    removeOutbox: eventProgressDispatch.removeOutbox,
-    createEventRuntimeStore,
-    sweepEventProgress: eventProgressRecovery.sweepEventProgress,
-    createWorkflowEventRuntime:
-      eventProgressWorkflowRunner.createWorkflowEventRuntime,
-    runEventProgressWorkflow:
-      eventProgressWorkflowRunner.runEventProgressWorkflow,
-    InvalidEventProgressPayloadError:
-      eventProgressWorkflowRunner.InvalidEventProgressPayloadError,
-    EventProgressRetryableError:
-      eventProgressWorkflowRunner.EventProgressRetryableError,
-    EVENT_PROGRESS_TIMEOUT_MS:
-      eventProgressWorkflowRunner.EVENT_PROGRESS_TIMEOUT_MS,
-    EVENT_PROGRESS_WORKER_UID:
-      eventProgressWorkflowRunner.EVENT_PROGRESS_WORKER_UID,
-    EVENT_PROGRESS_OUTBOX_ROOT: "eventProgressOutbox",
-    EVENT_PROGRESS_OUTBOX_DEAD_ROOT: "eventProgressOutboxDead",
-  };
-  assert.deepEqual(
-    Object.keys(eventProgress).sort(),
-    Object.keys(expected).sort(),
-  );
-  for (const name of Object.keys(expected) as (keyof typeof expected)[]) {
-    assert.strictEqual(eventProgress[name], expected[name], name);
-  }
 });
 
 const repositoryRoot = resolve(import.meta.dirname, "../../../..");

@@ -1,13 +1,8 @@
 // Generated from src/automatchRecords.ts. Run npm run generate:runtime.
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.isAutomatchEntryRecord = isAutomatchEntryRecord;
-exports.isAutomatchTelegramSourceRecord = isAutomatchTelegramSourceRecord;
-exports.isGameplayEffectsState = isGameplayEffectsState;
 exports.isAutomatchReceiptRecord = isAutomatchReceiptRecord;
 exports.isGameSessionMutationReceiptRecord = isGameSessionMutationReceiptRecord;
-exports.isMutationReceiptExpirationRecord = isMutationReceiptExpirationRecord;
-exports.isHistoricalMatchDescriptorWrite = isHistoricalMatchDescriptorWrite;
 exports.isAutomatchTelegramOutboxRecord = isAutomatchTelegramOutboxRecord;
 exports.isAutomatchProfileOutboxRecord = isAutomatchProfileOutboxRecord;
 exports.parseAutomatchRecord = parseAutomatchRecord;

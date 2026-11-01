@@ -3,7 +3,6 @@ import type {
   EventMatchView,
   EventRoundView,
   EventPrizeAssignmentView,
-  EventPrizeAssignmentsView,
   EventView,
 } from "@mons/shared/events";
 import {
@@ -55,7 +54,6 @@ export interface RematchSeriesDescriptor {
 
 export type HistoricalMatchPair = SharedHistoricalMatchPair;
 
-export type NavigationItemStatus = SharedNavigationStatus;
 export type NavigationGameStatus = Exclude<SharedNavigationStatus, "dismissed">;
 export type NavigationGameItem = SharedNavigationGameItem;
 export type NavigationEventItem = SharedNavigationEventItem;
@@ -71,11 +69,9 @@ export type EventParticipant = EventParticipantView;
 export type EventMatch = EventMatchView;
 export type EventRound = EventRoundView;
 export type EventPrizeAssignment = EventPrizeAssignmentView;
-export type EventPrizeAssignments = EventPrizeAssignmentsView;
 export type EventRecord = EventView;
 
 export type EventPrizeId = SharedEventPrizeId;
-export type EventPrizePlace = 1 | 2 | 3;
 export type ProfileEventPrizes = Record<string, EventPrizeAssignment>;
 export type EventPrizeWithdrawalResponse =
   EventPrizeWithdrawalCompletedResponse;

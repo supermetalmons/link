@@ -380,7 +380,7 @@ export function parseEventInvite(value: unknown): EventInviteDocument {
   return structuredClone(invite);
 }
 
-export function parseEventMatchCreation(value: unknown): MatchCreationRecord {
+function parseEventMatchCreation(value: unknown): MatchCreationRecord {
   const row = exact(value, [
     "schemaVersion",
     "version",
@@ -419,7 +419,7 @@ export function parseEventMatchCreation(value: unknown): MatchCreationRecord {
     timer: { state: "idle" },
   };
 }
-export function parseEventTimerClaim(value: unknown): ClaimedTimerWrite {
+function parseEventTimerClaim(value: unknown): ClaimedTimerWrite {
   if (!isTimerClaim(value) || value.status !== "claimed") invalid();
   return structuredClone(value);
 }

@@ -98,7 +98,7 @@ function normalizeString(value: unknown): string {
 function validOperationId(value: unknown): value is string {
   return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 }
-export function transitionWagerProposal(
+function transitionWagerProposal(
   current: DecodedWager | null,
   input: {
     material: MiningMaterialName;

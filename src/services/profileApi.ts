@@ -170,8 +170,4 @@ export function updateProfileCustomizationViaApi(
   );
 }
 
-export {
-  PROFILE_API_MAX_RESPONSE_BYTES,
-  PROFILE_API_ROOT,
-  PROFILE_API_TIMEOUT_MS,
-};
+export { PROFILE_API_MAX_RESPONSE_BYTES };

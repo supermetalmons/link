@@ -6,7 +6,6 @@ import type {
   SubmitMoveResponse,
 } from "@mons/shared/game-sessions";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import { StateRepositoryFailure } from "../test/stateRepositoryTestTypes.ts";
 import { submitMove } from "../src/matchMove.ts";
 
 const request: SubmitMoveRequest = {
@@ -120,7 +119,7 @@ test("move preserves canonical timer outcomes and infrastructure uncertainty", a
     new AuthApiFailure(409, "failed-precondition", "match-move-finished"),
     new AuthApiFailure(409, "failed-precondition", "match-move-blocked"),
     new AuthApiFailure(409, "aborted", "move-chain-conflict"),
-    new StateRepositoryFailure(),
+    new Error("canonical-store-unavailable"),
   ]) {
     const h = harness({ failure });
     await assert.rejects(h.run(), (error) => error === failure);

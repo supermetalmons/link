@@ -5,21 +5,11 @@ import {
   canonicalParticipant,
 } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
+import { registerTypeScriptTestHooks } from "./support/typescriptHooks.mjs";
 import test from "node:test";
 import { eventSnapshotEtag } from "@mons/shared/events";
 
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (
-      context.parentURL?.endsWith(".ts") &&
-      (specifier.startsWith("./") || specifier.startsWith("../")) &&
-      !/\.[^/]+$/.test(specifier)
-    )
-      return nextResolve(`${specifier}.ts`, context);
-    return nextResolve(specifier, context);
-  },
-});
+registerTypeScriptTestHooks();
 
 const { EventClient } = await import("../src/connection/eventClient.ts");
 const { createUserBoundAuthTokenProvider } =

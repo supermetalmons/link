@@ -91,9 +91,4 @@ const sendTelegramCommand = async (
   return payload;
 };
 
-export {
-  TELEGRAM_BRIDGE_TIMEOUT_MS,
-  TELEGRAM_COMMAND_BRIDGE_URL,
-  sendTelegramCommand,
-  signTelegramBridgeRequest,
-};
+export { sendTelegramCommand };

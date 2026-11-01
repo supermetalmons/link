@@ -5,12 +5,6 @@ import {
 import type { TransactionDecision } from "../../../runtime/transactions.js";
 import { isSafeRecordKey } from "./recordKeys.ts";
 
-export function salvageEventCleanupOwnerProfileIds(value: unknown): string[] {
-  const record = retainEventProjectionOutbox("profile-game", value);
-  return record.status === "pending"
-    ? Object.keys(record.cleanupOwnerProfileIds ?? {})
-    : [];
-}
 export type EventProfileProjectionRepair = {
   eventId: string;
   safeEventId: boolean;

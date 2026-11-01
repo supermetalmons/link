@@ -60,5 +60,3 @@ export function syncOwnProfileMiningState(profile: PlayerProfile): void {
   resetPendingOwnProfileMiningState();
   applyOwnProfileMiningState(decision.mining);
 }
-
-export { resetPendingOwnProfileMiningState } from "../utils/playerMetadataCache";

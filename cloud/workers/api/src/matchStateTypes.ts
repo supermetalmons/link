@@ -1,14 +1,10 @@
 import type {
   SubmitMoveRequest,
-  SubmitMoveResponse,
   SurrenderMatchRequest,
-  SurrenderMatchResponse,
 } from "@mons/shared/game-sessions";
 import type {
   ClaimMatchVictoryByTimerRequest,
-  ClaimMatchVictoryByTimerResponse,
   StartMatchTimerRequest,
-  StartMatchTimerResponse,
 } from "@mons/shared/timers";
 
 import type {
@@ -21,7 +17,6 @@ import type {
 } from "./matchClaimCodec.ts";
 
 export type MatchStateRecord = import("./matchRecordCodec.ts").MatchDocument;
-export type MatchStateJson = RetainedMatchValue;
 
 export type MatchStateAuthority = { inviteId: string; epoch: number };
 
@@ -118,19 +113,4 @@ export type MatchStateEventEffectsRequest = MatchStateAuthority & {
     opponentId: string;
     claim: TimerClaimDocument;
   }>;
-};
-
-export type MatchStateOperations = {
-  readRecord(input: MatchStateRecordRequest): RetainedMatchValue;
-  readRecords(input: MatchStateRecordsRequest): RetainedMatchValue[];
-  readPair(input: MatchStatePairRequest): MatchStatePair;
-  createRecords(input: MatchStateCreateRequest): MatchStateCreateResult;
-  move(input: MatchStateMoveRequest): SubmitMoveResponse;
-  surrender(input: MatchStateSurrenderRequest): SurrenderMatchResponse;
-  startTimer(
-    input: MatchStateStartTimerRequest,
-  ): Promise<StartMatchTimerResponse>;
-  claimTimer(
-    input: MatchStateClaimTimerRequest,
-  ): Promise<ClaimMatchVictoryByTimerResponse>;
 };

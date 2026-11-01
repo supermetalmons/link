@@ -20,15 +20,7 @@ type EventSyncLog = {
   didChange?: boolean;
   durationMs?: number;
 };
-export type EventRuntimeCode =
-  | "aborted"
-  | "failed-precondition"
-  | "invalid-argument"
-  | "not-found"
-  | "permission-denied"
-  | "unauthenticated"
-  | "unavailable";
-export type EventRuntimeRequest = {
+type EventRuntimeRequest = {
   auth: {
     uid: string;
   } | null;
@@ -36,16 +28,16 @@ export type EventRuntimeRequest = {
 };
 export type EventProgressOutboxRecord =
   import("./eventProgressRecords.js").EventProgressPendingRecord;
-export type EventRuntimeCreateResult = {
+type EventRuntimeCreateResult = {
   ok: true;
   eventId: string;
   event: EventData;
 };
-export type EventRuntimePostponeResult = EventRuntimeCreateResult & {
+type EventRuntimePostponeResult = EventRuntimeCreateResult & {
   postponeByMinutes: number;
   startAtMs: number;
 };
-export type EventRuntimeSyncResult =
+type EventRuntimeSyncResult =
   | {
       ok: true;
       eventId: string;
@@ -62,7 +54,7 @@ export type EventRuntimeSyncResult =
       event?: EventData | null;
       didChange?: never;
     };
-export type EventRuntimeDisqualifyResult = EventRuntimeSyncResult & {
+type EventRuntimeDisqualifyResult = EventRuntimeSyncResult & {
   didDisqualify: boolean;
   matchKey: string;
 };
@@ -116,9 +108,5 @@ type Signature_createEventRuntime = (dependencies: {
   random?: () => number;
   sleep(milliseconds: number): Promise<void>;
 }) => EventRuntime;
-declare class EventRuntimeError extends Error {
-  code: EventRuntimeCode;
-  constructor(code: EventRuntimeCode, message: string);
-}
 declare const createEventRuntime: Signature_createEventRuntime;
-export { createEventRuntime, EventRuntimeError };
+export { createEventRuntime };

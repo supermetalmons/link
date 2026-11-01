@@ -58,13 +58,8 @@ var __importStar =
   })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.renderUpcomingMessage =
-  exports.renderStartedMessage =
-  exports.renderEndedMessage =
-  exports.parseProjectionState =
   exports.loadEndedMatchResults =
   exports.isV2TelegramEvent =
-  exports.formatPtEtUtcLine =
-  exports.buildStartedState =
   exports.buildEventTelegramProjectionChanges =
   exports.buildEventTelegramProjection =
   exports.buildEventTelegramDispatches =
@@ -73,7 +68,6 @@ exports.renderUpcomingMessage =
   exports.addEventTelegramProjectionGuard =
   exports.EVENT_TELEGRAM_PROJECTION_LOCK_ROOT =
   exports.EVENT_TELEGRAM_PROJECTION_GUARD_FIELD =
-  exports.EVENT_TELEGRAM_DELIVERY_VERSION =
     void 0;
 const eventProjectionRecords_js_1 = require("./eventProjectionRecords.js");
 const documents_js_1 = require("../events/documents.js");
@@ -96,7 +90,6 @@ const EVENT_TELEGRAM_PROJECTION_GUARD_FIELD = "eventTelegramProjectionGuard";
 exports.EVENT_TELEGRAM_PROJECTION_GUARD_FIELD =
   EVENT_TELEGRAM_PROJECTION_GUARD_FIELD;
 const EVENT_TELEGRAM_DELIVERY_VERSION = 2;
-exports.EVENT_TELEGRAM_DELIVERY_VERSION = EVENT_TELEGRAM_DELIVERY_VERSION;
 const EVENT_URL_ROOT = "https://mons.link/event";
 const EVENT_STATUS_SCHEDULED = "scheduled";
 const EVENT_STATUS_ENDED = "ended";
@@ -169,7 +162,6 @@ const formatPtEtUtcLine = (startAtMs) => {
   const utc = formatTimeInZone(startAtMs, "UTC");
   return `${pt} PT / ${et} ET / ${utc} UTC`;
 };
-exports.formatPtEtUtcLine = formatPtEtUtcLine;
 const getParticipantsByProfileId = (eventData) => {
   const participantsByProfileId = new Map();
   for (const { profileId, participant } of (0,
@@ -383,7 +375,6 @@ const renderStartedMessage = (
   }
   return lines.join("\n");
 };
-exports.renderStartedMessage = renderStartedMessage;
 const renderEndedMessage = (
   eventId,
   matchLines,
@@ -399,13 +390,11 @@ const renderEndedMessage = (
   }
   return lines.join("\n");
 };
-exports.renderEndedMessage = renderEndedMessage;
 const parseProjectionState = (raw) =>
   raw === undefined || raw === null
     ? (0,
       eventProjectionRecords_js_2.createEmptyEventTelegramProjectionDocument)()
     : (0, eventProjectionRecords_js_2.readEventTelegramProjectionDocument)(raw);
-exports.parseProjectionState = parseProjectionState;
 const buildStartedState = (eventId, eventData, rawState) => {
   const state = parseProjectionState(rawState);
   const participantsByProfileId = getParticipantsByProfileId(eventData);
@@ -460,7 +449,6 @@ const buildStartedState = (eventId, eventData, rawState) => {
     appendedCount,
   };
 };
-exports.buildStartedState = buildStartedState;
 const buildEndedState = (
   eventId,
   rawEventData,

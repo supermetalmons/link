@@ -4,7 +4,6 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.waitForSubmittedTransactionStatus =
   exports.sendAndConfirmSubmittedTransaction =
   exports.isDefinitiveSubmittedTransactionFailure =
-  exports.getSubmittedTransactionSignature =
   exports.deserializePersistedSubmittedTransaction =
   exports.buildSubmittedTransaction =
     void 0;
@@ -144,7 +143,6 @@ const getSubmittedTransactionSignature = (submitted) => {
   }
   return transactionSignature;
 };
-exports.getSubmittedTransactionSignature = getSubmittedTransactionSignature;
 const readSubmittedTransactionStatus = async ({
   umi,
   transactionSignature,

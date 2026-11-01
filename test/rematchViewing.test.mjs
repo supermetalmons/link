@@ -1,6 +1,6 @@
 import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
+import { registerTypeScriptTestHooks } from "./support/typescriptHooks.mjs";
 import test from "node:test";
 import { Color, Game } from "mons-rules";
 
@@ -10,18 +10,7 @@ import { Color, Game } from "mons-rules";
  * guestMatch: import("@mons/shared/game-sessions").GameSessionMatch;
  * }} FixturePair */
 
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (
-      context.parentURL?.endsWith(".ts") &&
-      specifier.startsWith("./") &&
-      !/\.[^/]+$/.test(specifier)
-    ) {
-      return nextResolve(`${specifier}.ts`, context);
-    }
-    return nextResolve(specifier, context);
-  },
-});
+registerTypeScriptTestHooks();
 
 const { createRematchViewing } = await import("../src/game/rematchViewing.ts");
 

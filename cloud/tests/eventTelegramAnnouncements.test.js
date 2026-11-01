@@ -1977,11 +1977,9 @@ test("the runtime projector persists the ended post through the guarded channel"
   );
   assert.equal(desired.operation, "send");
   assert.equal(desired.text, projection.state.endedText);
-  assert.ok(desired[EVENT_TELEGRAM_PROJECTION_GUARD_FIELD]);
-  assert.equal(
-    desired[EVENT_TELEGRAM_PROJECTION_GUARD_FIELD].messageKey,
-    `event:${EVENT_ID}:ended`,
-  );
+  const desiredGuard = desired[EVENT_TELEGRAM_PROJECTION_GUARD_FIELD];
+  assert.ok(desiredGuard);
+  assert.equal(desiredGuard.messageKey, `event:${EVENT_ID}:ended`);
   assert.equal((await projector(EVENT_ID, NOW_MS)).action, "unchanged");
   assert.equal(scoreLoadCount, 1);
 });
@@ -2183,12 +2181,10 @@ test("projection locking stays isolated from the domain lock and commits desired
   const upcomingDesired = textDesired(
     updates[`telegramMessages/event:${EVENT_ID}:upcoming/desired`],
   );
-  assert.ok(upcomingDesired[EVENT_TELEGRAM_PROJECTION_GUARD_FIELD]);
+  const upcomingGuard = upcomingDesired[EVENT_TELEGRAM_PROJECTION_GUARD_FIELD];
+  assert.ok(upcomingGuard);
   assert.equal(upcomingDesired.operation, "send");
-  assert.equal(
-    upcomingDesired[EVENT_TELEGRAM_PROJECTION_GUARD_FIELD].messageKey,
-    `event:${EVENT_ID}:upcoming`,
-  );
+  assert.equal(upcomingGuard.messageKey, `event:${EVENT_ID}:upcoming`);
   assert.equal(
     storedFields(database.read(`${EVENT_LOCK_ROOT}/${EVENT_ID}`)).lockId,
     domainLock.lockId,

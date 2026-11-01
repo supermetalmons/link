@@ -4308,10 +4308,26 @@ function preloadParticleEffects() {
   if (particleEffectsLoading) return particleEffectsLoading;
 
   particleEffectsLoading = import("./particle-effects")
-    .then((module) => {
-      particleEffects = module;
-      return module;
-    })
+    .then(
+      ({
+        indicateElectricHit,
+        showPurpleBubbles,
+        indicateBombExplosion,
+        indicateFlameGround,
+        indicateSpiritAction,
+        indicateWaterSplash,
+      }) => {
+        particleEffects = {
+          indicateElectricHit,
+          showPurpleBubbles,
+          indicateBombExplosion,
+          indicateFlameGround,
+          indicateSpiritAction,
+          indicateWaterSplash,
+        };
+        return particleEffects;
+      },
+    )
     .catch((error) => {
       console.error("Failed to load particle effects:", error);
       throw error;

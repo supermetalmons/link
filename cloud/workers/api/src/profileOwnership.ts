@@ -11,7 +11,7 @@ export type ProfileOwnershipQuery = Readonly<{
   profileIds: readonly string[];
 }>;
 
-export type ProfileOwnershipLogin = Readonly<{
+type ProfileOwnershipLogin = Readonly<{
   profileId: string;
   revision: number;
 }>;

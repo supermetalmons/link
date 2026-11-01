@@ -35,7 +35,7 @@ export type ParsedFrozenOperation = OperationBase &
       }
     | { kind: FrozenDeltaOperationKind }
   );
-export type FrozenOperationRecord = ParsedFrozenOperation;
+
 export type StoredFrozenOperation =
   | { schemaVersion: 1; status: "consumed" }
   | { schemaVersion: 1; status: "active"; operation: ParsedFrozenOperation };

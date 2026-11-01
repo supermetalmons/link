@@ -20,16 +20,15 @@ type EventProjectionRequestMap = {
   "profile-game": EventProfileGameProjectionRequest;
   telegram: EventTelegramProjectionRequest;
 };
-export type EventProjectionDeadLetter<Kind extends EventProjectionOutboxKind> =
-  {
-    schemaVersion: 2;
-    status: "dead";
-    requestId: string;
-    reason: "invalid-record";
-    deadAtMs: number;
-    sourceDigest: string;
-    originalRecord: EventProjectionRequestMap[Kind] | null;
-  };
+type EventProjectionDeadLetter<Kind extends EventProjectionOutboxKind> = {
+  schemaVersion: 2;
+  status: "dead";
+  requestId: string;
+  reason: "invalid-record";
+  deadAtMs: number;
+  sourceDigest: string;
+  originalRecord: EventProjectionRequestMap[Kind] | null;
+};
 export type EventProjectionOutboxDocument<
   Kind extends EventProjectionOutboxKind,
 > = EventProjectionRequestMap[Kind] | EventProjectionDeadLetter<Kind>;
@@ -97,7 +96,7 @@ export function isEventProjectionPending<
     value.updatedAtMs >= value.firstQueuedAtMs
   );
 }
-export function isEventProjectionOutbox<Kind extends EventProjectionOutboxKind>(
+function isEventProjectionOutbox<Kind extends EventProjectionOutboxKind>(
   kind: Kind,
   value: unknown,
 ): value is EventProjectionOutboxDocument<Kind> {

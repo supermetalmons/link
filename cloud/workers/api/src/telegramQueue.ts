@@ -25,10 +25,7 @@ import {
   type TelegramStorageMode,
 } from "./telegramD1.ts";
 import { ackQueueMessage, retryQueueMessage } from "./queueMessage.ts";
-import {
-  infrastructureRetryDelaySeconds,
-  MAX_INFRASTRUCTURE_RETRY_DELAY_SECONDS,
-} from "./queueRetry.ts";
+import { infrastructureRetryDelaySeconds } from "./queueRetry.ts";
 
 const MAX_QUEUE_DELAY_SECONDS = 24 * 60 * 60;
 const MIN_DISPATCH_INTERVAL_MS = 1_000;
@@ -189,11 +186,6 @@ export async function handleTelegramQueue(
 }
 
 export {
-  MAX_INFRASTRUCTURE_RETRY_DELAY_SECONDS,
-  MAX_QUEUE_DELAY_SECONDS,
-  MIN_DISPATCH_INTERVAL_MS,
-  TELEGRAM_FROZEN_RETRY_SECONDS,
-  createRetryScheduler,
   infrastructureRetryDelaySeconds,
   logicalDelaySeconds,
   type TelegramTaskPayload,

@@ -19,7 +19,7 @@ export type MatchSocketAttachment = {
   role: SocketRole;
   actorUid: string | null;
 } & SocketSession;
-export type ReactionSocketAttachment = {
+type ReactionSocketAttachment = {
   channel: "reaction";
   schemaVersion: 2;
   matchId: string;

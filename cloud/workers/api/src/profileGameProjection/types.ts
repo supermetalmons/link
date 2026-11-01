@@ -17,7 +17,7 @@ export type ProfileLinkProjectionResult = Pick<
   ProfileLinkProjectionSummary,
   "didHitInviteCap" | "nextMatchCursor"
 >;
-export type ProfileGameProjectionState = Pick<
+type ProfileGameProjectionState = Pick<
   GameplayRepository,
   | "readInviteMetadata"
   | "readAutomatchEntry"
@@ -38,7 +38,7 @@ export type EventProfileProjectionState = Pick<
   | "transactEventLease"
 >;
 
-export type ProfileLinkProjectionJobs = Pick<
+type ProfileLinkProjectionJobs = Pick<
   ProfileLinkCatchupStore,
   | "read"
   | "scanDue"
@@ -97,7 +97,7 @@ export type ProfileLinkProcessingJobs = Pick<
   "read" | "advance" | "settle" | "settleMissing"
 >;
 
-export type ProfileLinkRecoveryJobs = Pick<
+type ProfileLinkRecoveryJobs = Pick<
   ProfileLinkProjectionJobs,
   "scanDuePage" | "quarantineInvalidEntry" | "claimDispatch"
 >;

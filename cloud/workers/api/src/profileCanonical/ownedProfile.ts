@@ -19,10 +19,7 @@ const CANONICAL_OWNER_COLUMNS = `owner.login_uid AS canonical_owner_login_uid,
   owner.updated_at_ms AS canonical_owner_updated_at_ms,
   mapping.source_profile_id AS canonical_merge_source_profile_id`;
 
-export const CANONICAL_OWNED_PROFILE_COLUMNS = `profile.*,
-  ${CANONICAL_OWNER_COLUMNS}`;
-
-export const CANONICAL_OWNED_PROFILE_FROM = `FROM profile_login_owners_canonical AS owner
+const CANONICAL_OWNED_PROFILE_FROM = `FROM profile_login_owners_canonical AS owner
   LEFT JOIN profile_records_canonical AS profile
     ON profile.profile_id = owner.profile_id
   LEFT JOIN profile_merge_targets_canonical AS mapping

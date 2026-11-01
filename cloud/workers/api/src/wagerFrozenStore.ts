@@ -15,11 +15,11 @@ export type WagerFrozenSnapshot = {
   operation: FrozenOperationState;
 };
 
-export type WagerFrozenDecision =
+type WagerFrozenDecision =
   | { commit: false; decision: string }
   | { decision?: string; value: WagerFrozenSnapshot };
 
-export type WagerFrozenTransactionResult = {
+type WagerFrozenTransactionResult = {
   committed: boolean;
   decision?: string;
   value: WagerFrozenSnapshot;

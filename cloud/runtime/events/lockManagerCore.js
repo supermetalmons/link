@@ -1,9 +1,7 @@
 // Generated from src/events/lockManagerCore.ts. Run npm run generate:runtime.
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.resolveLockKind =
-  exports.getOwnershipDecision =
-  exports.createEventLockManagerCore =
+exports.createEventLockManagerCore =
   exports.EVENT_LOCK_TTL_MS =
   exports.EVENT_LOCK_REFRESH_INTERVAL_MS =
     void 0;
@@ -36,7 +34,6 @@ const resolveLockKind = (value = "event") => {
     throw new TypeError("invalid event lease kind");
   return value;
 };
-exports.resolveLockKind = resolveLockKind;
 const toFiniteInteger = (value, fallback = 0) => {
   const numeric = typeof value === "number" ? value : Number(value);
   return Number.isFinite(numeric) ? Math.floor(numeric) : fallback;
@@ -57,7 +54,6 @@ const getOwnershipDecision = (current, lockHandle, nowMs) => {
   }
   return "owned";
 };
-exports.getOwnershipDecision = getOwnershipDecision;
 const createEventLockManagerCore = (dependencies) => {
   if (!dependencies || typeof dependencies.transactEventLease !== "function") {
     throw new TypeError("transactEventLease is required");

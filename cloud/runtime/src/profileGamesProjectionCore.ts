@@ -799,8 +799,6 @@ const createProfileGamesProjectionCore: Signature_createProfileGamesProjectionCo
   };
 
 export {
-  READ_RETRY_ATTEMPTS,
-  READ_RETRY_DELAY_MS,
   buildInviteProjectionOwnerPlan,
   buildResolvedProfile,
   createProfileGamesProjectionCore,

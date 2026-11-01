@@ -25,7 +25,7 @@ export const MON_REL_X = 0.63;
 export const MON_REL_Y = 0.275;
 export const MON_HEIGHT_FRAC = 0.15;
 export const MON_BASELINE_Y_OFFSET = 0.03;
-export const MON_BOUNDS_WIDTH_FRAC = 0.115;
+const MON_BOUNDS_WIDTH_FRAC = 0.115;
 export const MON_BOUNDS_X_SHIFT = 0.0675;
 export const MON_FRAME_COUNT = 4;
 

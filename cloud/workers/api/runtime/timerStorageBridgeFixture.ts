@@ -15,7 +15,6 @@ import {
   type TimerHandoffOwnership,
   type TimerHandoffSnapshot,
 } from "./timerHandoffReceiptFixture.ts";
-import { isSafeRecordKey } from "../src/recordKeys.ts";
 
 type Database = Pick<D1Database, "prepare" | "batch">;
 type HandoffRow = {
@@ -31,17 +30,6 @@ type HandoffRow = {
   copy_receipt_digest: string | null;
   acknowledgement_json: string | null;
 };
-
-export const UNFENCED_MATCH_TIMER_SQL = `NOT EXISTS (
-  SELECT 1 FROM timer_storage_handoff_owners timer_owner
-  WHERE timer_owner.actor_uid = match_timer_starts_canonical.player_id
-    AND timer_owner.match_id = match_timer_starts_canonical.match_id
-) AND NOT EXISTS (
-  SELECT 1 FROM match_state_routes_canonical timer_route
-  JOIN timer_storage_handoffs timer_handoff ON timer_handoff.invite_id = timer_route.invite_id
-  WHERE timer_route.actor_uid = match_timer_starts_canonical.player_id
-    AND timer_route.match_id = match_timer_starts_canonical.match_id
-)`;
 
 const ACTIVE_CONTROL_SQL = `EXISTS (
   SELECT 1 FROM application_data_control
@@ -353,137 +341,4 @@ export async function completeTimerHandoffD1(
       ),
   ]);
   return acknowledgement;
-}
-
-export async function readTimerHandoffAcknowledgement(
-  db: Database,
-  input: TimerHandoffCopyReceipt,
-): Promise<TimerHandoffAcknowledgement | null> {
-  const receipt = await verifiedReceipt(input);
-  const row = await readHandoff(db, receipt.handoffId);
-  if (!row || row.phase !== "local") return null;
-  same(JSON.parse(row.copy_receipt_json ?? "null"), receipt);
-  const acknowledgement = parseTimerHandoffAcknowledgement(
-    JSON.parse(row.acknowledgement_json ?? "null"),
-  );
-  const { deletionAckDigest, ...payload } = acknowledgement;
-  if ((await hashTimerHandoff(payload)) !== deletionAckDigest) invalid();
-  same(payload, {
-    ...rowIdentity(row),
-    ownershipDigest: receipt.ownershipDigest,
-    snapshotDigest: receipt.snapshotDigest,
-    receiptDigest: receipt.receiptDigest,
-  });
-  return acknowledgement;
-}
-
-export type EmptyTimerHandoffRoutingEvidence = {
-  schemaVersion: 1;
-  generation: 3;
-  dataEpoch: 1;
-  routeEpoch: number;
-  inviteIds: string[];
-  routeCount: number;
-  timerCount: number;
-  unroutedTimerCount: 0;
-  routingDigest: string;
-};
-
-const EMPTY_ROUTING_PAGE_SIZE = 256;
-const MAX_EMPTY_ROUTING_INVITES = 20_000;
-const INVITE_COUNT_SQL = `(SELECT COUNT(DISTINCT invite_id) FROM match_state_routes_canonical WHERE kind = 'durable')`;
-
-export async function readEmptyTimerHandoffRoutingEvidence(
-  db: Database,
-): Promise<EmptyTimerHandoffRoutingEvidence> {
-  const initialCount = await db
-    .prepare(`SELECT ${INVITE_COUNT_SQL} AS count`)
-    .first<number>("count");
-  if (
-    initialCount === null ||
-    !Number.isSafeInteger(initialCount) ||
-    initialCount < 0 ||
-    initialCount > MAX_EMPTY_ROUTING_INVITES
-  )
-    invalid();
-  const pageCount = Math.min(
-    Math.ceil(MAX_EMPTY_ROUTING_INVITES / EMPTY_ROUTING_PAGE_SIZE),
-    Math.ceil(initialCount / EMPTY_ROUTING_PAGE_SIZE) + 1,
-  );
-  const statements = [
-    guard(
-      db,
-      `${ACTIVE_CONTROL_SQL} AND ${INVITE_COUNT_SQL} <= ? AND ${INVITE_COUNT_SQL} <= ?
-      AND NOT EXISTS (SELECT 1 FROM match_state_routes_canonical
-        WHERE kind = 'durable' AND epoch != (SELECT epoch FROM match_state_control WHERE singleton = 1))`,
-      MAX_EMPTY_ROUTING_INVITES,
-      pageCount * EMPTY_ROUTING_PAGE_SIZE,
-    ),
-    ...Array.from({ length: pageCount }, (_, page) =>
-      db
-        .prepare(
-          "SELECT DISTINCT invite_id FROM match_state_routes_canonical WHERE kind = 'durable' ORDER BY invite_id LIMIT ? OFFSET ?",
-        )
-        .bind(EMPTY_ROUTING_PAGE_SIZE, page * EMPTY_ROUTING_PAGE_SIZE),
-    ),
-    db.prepare(`SELECT
-      (SELECT epoch FROM match_state_control WHERE singleton = 1) AS route_epoch,
-      ${INVITE_COUNT_SQL} AS invite_count,
-      (SELECT COUNT(*) FROM match_state_routes_canonical WHERE kind = 'durable') AS route_count,
-      (SELECT COUNT(*) FROM match_timer_starts_canonical) AS timer_count,
-      (SELECT COUNT(*) FROM match_timer_starts_canonical timer WHERE NOT EXISTS (
-        SELECT 1 FROM match_state_routes_canonical player
-        JOIN match_state_routes_canonical opponent ON opponent.match_id = player.match_id AND opponent.invite_id = player.invite_id
-        WHERE player.actor_uid = timer.player_id AND player.match_id = timer.match_id AND player.kind = 'durable'
-          AND opponent.actor_uid = timer.opponent_id AND opponent.kind = 'durable'
-          AND player.epoch = (SELECT epoch FROM match_state_control WHERE singleton = 1)
-          AND opponent.epoch = player.epoch
-      )) AS unrouted_timer_count`),
-  ];
-  const results = await db.batch<Record<string, unknown>>(statements);
-  if (results.length !== statements.length) invalid();
-  const counts = results.at(-1)?.results[0];
-  if (!counts) invalid();
-  const integer = (field: string, minimum = 0): number => {
-    const value = counts[field];
-    if (
-      typeof value !== "number" ||
-      !Number.isSafeInteger(value) ||
-      value < minimum
-    )
-      invalid();
-    return value;
-  };
-  const routeEpoch = integer("route_epoch", 1);
-  const inviteCount = integer("invite_count");
-  const routeCount = integer("route_count");
-  const timerCount = integer("timer_count");
-  if (integer("unrouted_timer_count") !== 0)
-    throw new Error("empty-timer-handoff-unrouted-timers");
-  const inviteIds: string[] = [];
-  for (const page of results.slice(1, -1)) {
-    if (page.results.length > EMPTY_ROUTING_PAGE_SIZE) invalid();
-    for (const row of page.results) {
-      if (typeof row.invite_id !== "string" || !isSafeRecordKey(row.invite_id))
-        invalid();
-      inviteIds.push(row.invite_id);
-    }
-  }
-  if (
-    inviteIds.length !== inviteCount ||
-    inviteIds.length > MAX_EMPTY_ROUTING_INVITES ||
-    new Set(inviteIds).size !== inviteCount
-  )
-    invalid();
-  const evidence = {
-    schemaVersion: 1 as const,
-    generation: 3 as const,
-    dataEpoch: 1 as const,
-    routeEpoch,
-    inviteIds,
-    routeCount,
-    timerCount,
-    unroutedTimerCount: 0 as const,
-  };
-  return { ...evidence, routingDigest: await hashTimerHandoff(evidence) };
 }

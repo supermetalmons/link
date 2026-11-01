@@ -640,16 +640,7 @@ export async function ensureParticipantMatch(
 
 export { nextRematchIndex } from "./gameSessionRematchPolicy.ts";
 export {
-  acquireGameSessionMutationLease,
-  enforceGameSessionMutationRateLimit,
   GameSessionMutationLeaseReleaseFailure,
-  refreshGameSessionMutationLease,
-  releaseGameSessionMutationLease,
   sweepGameSessionMutationReceipts,
-  withGameSessionMutationLease,
-  GAME_SESSION_MUTATION_RECEIPT_EXPIRATION_ROOT,
-  GAME_SESSION_MUTATION_RECEIPT_RETENTION_MS,
-  GAME_SESSION_MUTATION_RECEIPT_ROOT,
-  GAME_SESSION_MUTATION_RECEIPT_SWEEP_LIMIT,
 } from "./gameSessionMutationRunner.ts";
 export type { GameSessionMutationDependencies };

@@ -114,15 +114,11 @@ type Signature_readExistingProjectionRecords = (input: {
     version: number;
   }>
 >;
-declare const READ_RETRY_ATTEMPTS = 2;
-declare const READ_RETRY_DELAY_MS = 25;
 declare const readExistingProjectionRecords: Signature_readExistingProjectionRecords;
 declare const buildResolvedProfile: Signature_buildResolvedProfile;
 declare const buildInviteProjectionOwnerPlan: Signature_buildInviteProjectionOwnerPlan;
 declare const createProfileGamesProjectionCore: Signature_createProfileGamesProjectionCore;
 export {
-  READ_RETRY_ATTEMPTS,
-  READ_RETRY_DELAY_MS,
   buildInviteProjectionOwnerPlan,
   buildResolvedProfile,
   createProfileGamesProjectionCore,

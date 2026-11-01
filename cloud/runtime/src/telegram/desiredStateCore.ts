@@ -24,10 +24,6 @@ export type TelegramDeleteDesiredInput = {
   destination: string;
   sourceRevision: string | number;
 };
-export type TelegramDesiredInput =
-  | TelegramSendDesiredInput
-  | TelegramEditDesiredInput
-  | TelegramDeleteDesiredInput;
 
 type DesiredIdentity = {
   eventTelegramProjectionGuard?: EventTelegramProjectionGuard & {
@@ -51,7 +47,7 @@ export type TelegramEditDesired = TextDesired & {
   operation: "edit";
   ifMissing: "send" | "skip";
 };
-export type TelegramDeleteDesired = DesiredIdentity & { operation: "delete" };
+type TelegramDeleteDesired = DesiredIdentity & { operation: "delete" };
 export type TelegramDesired =
   TelegramSendDesired | TelegramEditDesired | TelegramDeleteDesired;
 
@@ -269,9 +265,7 @@ const resolveTelegramDestination = (
 };
 
 export {
-  TELEGRAM_DESTINATIONS,
   TELEGRAM_MESSAGE_ROOT,
-  TELEGRAM_SCHEMA_VERSION,
   buildTelegramDeleteDesired,
   buildTelegramEditDesired,
   buildTelegramSendDesired,

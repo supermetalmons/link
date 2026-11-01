@@ -20,7 +20,7 @@ const CANONICAL_TABLE_NAMES = [
   "match_state_event_receipts_canonical",
 ];
 
-export const CANONICAL_INVITE_ROOM_SCHEMA = `CREATE TABLE IF NOT EXISTS match_state_records_canonical (
+const CANONICAL_INVITE_ROOM_SCHEMA = `CREATE TABLE IF NOT EXISTS match_state_records_canonical (
   player_id TEXT NOT NULL CHECK (player_id IS NULL OR (player_id != '' AND instr(player_id, '/') = 0)),
   match_id TEXT NOT NULL CHECK (match_id IS NULL OR (match_id != '' AND instr(match_id, '/') = 0)),
   value_json TEXT NOT NULL CHECK (
@@ -210,7 +210,7 @@ export function ensureCanonicalInviteRoomSchema(
   });
 }
 
-export const LOCAL_TIMER_STORAGE_GUARDS = `
+const LOCAL_TIMER_STORAGE_GUARDS = `
 CREATE TRIGGER IF NOT EXISTS match_state_timer_cohorts_local_insert
 BEFORE INSERT ON match_state_timer_cohorts_canonical
 WHEN NEW.mode != 'local'

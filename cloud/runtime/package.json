@@ -10,7 +10,6 @@
   },
   "dependencies": {
     "@mons/shared": "file:shared",
-    "bs58": "^6.0.0",
     "mons-rules": "0.4.11"
   },
   "private": true

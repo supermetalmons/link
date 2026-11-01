@@ -40,9 +40,6 @@ import {
 } from "./shinyCardModels";
 import { CARD_MONS, ShinyCardSession } from "./shinyCardSession";
 
-export { showsShinyCardSomewhere } from "./shinyCardUiPort";
-export type { ActiveInventoryItemSelection } from "./shinyCardUiPort";
-
 const defaultCardBgIndex = 30;
 const INVENTORY_ONLY_BG_ID = 100;
 const INVENTORY_ONLY_STICKER_TYPE = "big-mon-top-right";
@@ -73,37 +70,36 @@ const isInventoryOnlyEmojiId = (
   return isInventoryEmojiId(emojiId, swagpackStart);
 };
 
-export const getActiveInventoryItemSelection =
-  (): ActiveInventoryItemSelection => {
-    const storedEmojiId = storage.getPlayerEmojiId(1);
-    const specialIds = new Set<number>();
+const getActiveInventoryItemSelection = (): ActiveInventoryItemSelection => {
+  const storedEmojiId = storage.getPlayerEmojiId(1);
+  const specialIds = new Set<number>();
 
-    if (
-      royalAguapwoshiDrainerIndex >= 0 &&
-      getMonsIndexes(false, null)[CARD_MONS[MonType.DRAINER].index] ===
-        royalAguapwoshiDrainerIndex
-    ) {
-      specialIds.add(0);
-    }
-    if (
-      storage.getCardBackgroundId(defaultCardBgIndex) === INVENTORY_ONLY_BG_ID
-    ) {
-      specialIds.add(1);
-    }
-    if (
-      getStoredOwnStickers()[INVENTORY_ONLY_STICKER_TYPE] ===
-      INVENTORY_ONLY_STICKER_NAME
-    ) {
-      specialIds.add(2);
-    }
+  if (
+    royalAguapwoshiDrainerIndex >= 0 &&
+    getMonsIndexes(false, null)[CARD_MONS[MonType.DRAINER].index] ===
+      royalAguapwoshiDrainerIndex
+  ) {
+    specialIds.add(0);
+  }
+  if (
+    storage.getCardBackgroundId(defaultCardBgIndex) === INVENTORY_ONLY_BG_ID
+  ) {
+    specialIds.add(1);
+  }
+  if (
+    getStoredOwnStickers()[INVENTORY_ONLY_STICKER_TYPE] ===
+    INVENTORY_ONLY_STICKER_NAME
+  ) {
+    specialIds.add(2);
+  }
 
-    return {
-      avatarId: isInventoryOnlyEmojiId(storedEmojiId)
-        ? storedEmojiId - swagpackStart
-        : null,
-      specialIds,
-    };
+  return {
+    avatarId: isInventoryOnlyEmojiId(storedEmojiId)
+      ? storedEmojiId - swagpackStart
+      : null,
+    specialIds,
   };
+};
 
 const getUndoUpdateSource = (entry: ShinyCardUndoEntry): UpdateSource => {
   return getShinyCardUndoUpdateSource(entry, {
@@ -115,7 +111,7 @@ const getUndoUpdateSource = (entry: ShinyCardUndoEntry): UpdateSource => {
   });
 };
 
-export const showShinyCard = async (
+const showShinyCard = async (
   profile: PlayerProfile | null,
   displayName: string,
   isOtherPlayer: boolean,
@@ -168,12 +164,12 @@ export const showShinyCard = async (
   }
 };
 
-export const hideShinyCard = (): void => {
+const hideShinyCard = (): void => {
   activeSession?.dispose();
   setShinyCardVisible(false);
 };
 
-export const updateShinyCardDisplayName = (displayName: string): void => {
+const updateShinyCardDisplayName = (displayName: string): void => {
   getOwnSession()?.updateDisplayName(displayName);
 };
 
@@ -296,7 +292,7 @@ function undoLastEdit(): void {
   updateUndoButton();
 }
 
-export function setOwnershipVerifiedSpecialItem(id: number) {
+function setOwnershipVerifiedSpecialItem(id: number) {
   switch (id) {
     case 0: {
       if (royalAguapwoshiDrainerIndex < 0) {
@@ -343,7 +339,7 @@ export function setOwnershipVerifiedSpecialItem(id: number) {
   }
 }
 
-export function setOwnershipVerifiedIdCardEmoji(id: number, aura: Aura) {
+function setOwnershipVerifiedIdCardEmoji(id: number, aura: Aura) {
   if (!isInventoryOnlyEmojiId(id) || !isAura(aura)) {
     return;
   }

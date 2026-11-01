@@ -34,7 +34,7 @@ const MAX_D1_TRANSACTION_ATTEMPTS = 25;
 export type TelegramStorageMode = "d1" | "frozen";
 
 export type { TelegramAnnouncementAttempt } from "./telegramAnnouncementRecords.ts";
-export { decodeAnnouncement } from "./telegramAnnouncementRows.ts";
+
 export type { TelegramAnnouncementRecord } from "./telegramAnnouncementRows.ts";
 
 export type TelegramAnnouncementRepository = {

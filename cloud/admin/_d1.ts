@@ -7,8 +7,8 @@ const CONFIG_PATH = resolve(
   import.meta.dirname,
   "../workers/api/wrangler.jsonc",
 );
-export const DATABASE_BINDING = "PROFILE_DB";
-export const MAX_RESPONSE_BYTES = 1024 * 1024;
+const DATABASE_BINDING = "PROFILE_DB";
+const MAX_RESPONSE_BYTES = 1024 * 1024;
 const ADDRESS_PAGE_SIZE = 500;
 const MAX_ADDRESS_PAGES = 10_000;
 
@@ -19,7 +19,7 @@ export type D1Query = (
   sql: string,
   params?: readonly D1Value[],
 ) => Promise<D1Row[]>;
-export type ProfileAddress = { method: "eth" | "sol"; value: string };
+type ProfileAddress = { method: "eth" | "sol"; value: string };
 export type LeaderboardMetric = "gp" | "mp";
 type LeaderboardProfile = {
   id: string;
@@ -91,7 +91,7 @@ export function cloudflareToken(
   return configured;
 }
 
-export async function boundedText(response: Response): Promise<string> {
+async function boundedText(response: Response): Promise<string> {
   const declared = Number(response.headers.get("Content-Length"));
   if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
     await response.body?.cancel();
@@ -212,7 +212,7 @@ export function isReadOnlySql(sql: unknown): sql is string {
   );
 }
 
-export function parseGameplayEmoji(value: unknown): number {
+function parseGameplayEmoji(value: unknown): number {
   if (!isEmojiId(value)) throw new Error("Invalid canonical gameplay emoji.");
   return value;
 }

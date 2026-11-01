@@ -19,7 +19,7 @@ export type TelegramSendEvidence = {
 export type TelegramAppliedDocument = TelegramAppliedReceiptWrite & {
   recoveredAtMs?: number;
 };
-export type TelegramRecoveryDocument = TelegramManualRecoveryWrite;
+
 export type TelegramApiGateDocument = TelegramApiGateWrite;
 export type TelegramRetryProofDocument = TelegramRetryProofWrite;
 export type TelegramRetryDocument = Partial<TelegramRetryState> & {
@@ -116,7 +116,7 @@ export type TelegramApiGateWrite = {
   pendingDeleteId?: string;
 };
 
-export type TelegramRetryProofWrite = TelegramRetryState & {
+type TelegramRetryProofWrite = TelegramRetryState & {
   owner: string;
   retryNotBeforeMs: number;
   revision: string;
@@ -198,16 +198,7 @@ export function apiGateDocument(
 ): TelegramApiGateDocument {
   return value;
 }
-export function appliedDocument(
-  value: TelegramAppliedDocument,
-): TelegramAppliedDocument {
-  return value;
-}
-export function desiredDocument(
-  value: TelegramDesiredDocument,
-): TelegramDesiredDocument {
-  return value;
-}
+
 export function sendEvidenceDocument(
   value: TelegramSendEvidence,
 ): TelegramSendEvidence {
@@ -276,14 +267,7 @@ export function updateTelegramMessage(
 ): TelegramMessageDocument {
   return { ...current, ...fields };
 }
-export function omitTelegramMessageFields(
-  current: TelegramMessageDocument,
-  fields: readonly (keyof TelegramMessageFields)[],
-): TelegramMessageDocument {
-  const output = { ...current };
-  for (const field of fields) delete output[field];
-  return output;
-}
+
 export function updateTelegramControl(
   current: TelegramControlDocument,
   fields: TelegramControlFields,

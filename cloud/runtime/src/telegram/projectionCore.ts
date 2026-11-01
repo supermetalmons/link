@@ -14,8 +14,8 @@ import type {
 import { createHash } from "node:crypto";
 import { parseInviteMatchIndex } from "../shared/rematches.js";
 import { TELEGRAM_AUTOMATCH_VERSION } from "./automatchSource.js";
-export type AutomatchTelegramSourceDocument = AutomatchTelegramSourceRecord;
-export type TelegramRatingProjectionInput = {
+type AutomatchTelegramSourceDocument = AutomatchTelegramSourceRecord;
+type TelegramRatingProjectionInput = {
   telegramDeliveryVersion: 2 | null;
   status: "processing" | "done" | "blocked";
   isEventMatch: boolean;
@@ -26,7 +26,7 @@ export type TelegramRatingProjectionInput = {
   updateRatingMessage: string | null;
   completedAtMs: number | null;
 };
-export function retainAutomatchTelegramSource(
+function retainAutomatchTelegramSource(
   value: unknown,
 ): AutomatchTelegramSourceDocument | null {
   return parseAutomatchRecord("telegramAutomatches", value);
@@ -36,7 +36,7 @@ function sourceEvidence(
 ): AutomatchTelegramSourceDocument | null {
   return value;
 }
-export type AutomatchLifecycle = "pending" | "matched" | "canceled";
+type AutomatchLifecycle = "pending" | "matched" | "canceled";
 export type AutomatchTelegramProjection = {
   operation: "send" | "edit";
   lifecycle: AutomatchLifecycle;
@@ -51,11 +51,11 @@ export type AutomatchTelegramProjection = {
   resultDigests: Record<string, string>;
   sourceRevision: string;
 };
-export type ProjectionDecision = {
+type ProjectionDecision = {
   allowed: boolean;
   reason: string;
 };
-export type RatingProjectionMerge = {
+type RatingProjectionMerge = {
   changed: boolean;
   source: AutomatchTelegramSourceDocument | null;
   reason: "inserted" | "duplicate" | "skipped";
@@ -398,14 +398,11 @@ const mergeRatingResultFragment: (
 };
 
 export {
-  AUTOMATCH_PROJECTION_GUARD_VERSION,
   buildAutomatchProjectionGuard,
   buildAutomatchTelegramProjection,
   evaluateAutomatchProjectionUpdate,
   getAutomatchResultFragments,
-  isEventRatingUpdate,
   mergeRatingResultFragment,
-  normalizeString,
   renderMatchedAutomatchTelegramText,
   resolveAutomatchTelegramLifecycle,
   shouldProjectRatingTelegramUpdate,

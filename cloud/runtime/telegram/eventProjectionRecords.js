@@ -1,17 +1,12 @@
 // Generated from src/telegram/eventProjectionRecords.ts. Run npm run generate:runtime.
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.isEventTelegramProjectionGuard = isEventTelegramProjectionGuard;
-exports.isStartedMatchLines = isStartedMatchLines;
-exports.isEventTelegramEndedResults = isEventTelegramEndedResults;
-exports.isEventTelegramProjectionDocument = isEventTelegramProjectionDocument;
 exports.readEventTelegramProjectionDocument =
   readEventTelegramProjectionDocument;
 exports.createEventTelegramProjectionDocument =
   createEventTelegramProjectionDocument;
 exports.createEmptyEventTelegramProjectionDocument =
   createEmptyEventTelegramProjectionDocument;
-exports.retainStartedMatchLines = retainStartedMatchLines;
 exports.retainEventTelegramEndedResults = retainEventTelegramEndedResults;
 exports.copyStartedMatchLines = copyStartedMatchLines;
 exports.withEventTelegramProjectionGuard = withEventTelegramProjectionGuard;
@@ -144,10 +139,6 @@ function createEmptyEventTelegramProjectionDocument(updatedAtMs = 0) {
     updatedAtMs,
     eventTelegramProjectionGuard: null,
   });
-}
-function retainStartedMatchLines(value) {
-  if (!isStartedMatchLines(value)) invalid();
-  return structuredClone(value);
 }
 function retainEventTelegramEndedResults(value) {
   if (!isEventTelegramEndedResults(value)) invalid();

@@ -320,7 +320,6 @@ const sendAndConfirmSubmittedTransaction = async ({
 export {
   buildSubmittedTransaction,
   deserializePersistedSubmittedTransaction,
-  getSubmittedTransactionSignature,
   isDefinitiveSubmittedTransactionFailure,
   sendAndConfirmSubmittedTransaction,
   waitForSubmittedTransactionStatus,

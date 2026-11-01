@@ -6,7 +6,6 @@ import type {
   TransactionDecision,
   TransactionResult,
 } from "../src/repositoryContracts.ts";
-import { validateTelegramTransactionDecision } from "../src/telegramTransaction.ts";
 import { publicMatchFixture } from "./matchRecordFixture.ts";
 import {
   canonicalAutomatchFixture,
@@ -547,89 +546,6 @@ export function gameplayTestPort(
 ): GameSessionPort & GameSessionRecoveryContext & MatchStatePort {
   const raw = rawGameplayTestPort(state);
   return { ...matchTestPort(state), ...createTypedGameSessionPort(raw) };
-}
-
-export function legacySessionClient(port: RawGameSessionPort): StateRepository {
-  return {
-    async getPath(path, query, signal) {
-      const [root, id, field, ...nested] = path.split("/");
-      let value: unknown;
-      let fields: string[];
-      if (root === "automatch" && !id)
-        return query?.orderBy === "uid"
-          ? port.listAutomatchEntriesByLogin(
-              String(query.equalTo),
-              query.limitToFirst || 2,
-              signal,
-            )
-          : port.readFirstAutomatchEntry(signal);
-      if (!id) throw new Error("retired-source-path");
-      if (root === "invites") {
-        value = await port.readInviteMetadata(id, signal);
-        fields = field ? [field, ...nested] : [];
-      } else if (root === "automatch") {
-        value = await port.readAutomatchEntry(id, signal);
-        fields = field ? [field, ...nested] : [];
-      } else if (root === "gameplayMutationReceipts") {
-        value = await port.readMutationReceipt(id, signal);
-        fields = field ? [field, ...nested] : [];
-      } else if (root === "telegramAutomatches") {
-        value = await port.readAutomatchTelegramSource(id, signal);
-        fields = field ? [field, ...nested] : [];
-      } else if (root === "telegramProjectionOutbox" && field) {
-        value = await port.readAutomatchTelegramOutbox(field, signal);
-        fields = nested;
-      } else if (root === "profileGameProjectionOutbox" && field) {
-        value = await port.readAutomatchProfileOutbox(field, signal);
-        fields = nested;
-      } else throw new Error("retired-source-path");
-      for (const key of fields)
-        value =
-          value && typeof value === "object"
-            ? ((value as Record<string, unknown>)[key] ?? null)
-            : null;
-      return value;
-    },
-    patchRoot: (updates, signal) =>
-      port.commitSessionChanges(legacySessionChanges(updates), signal),
-    transactPath(path, update, signal) {
-      const [root, id, field] = path.split("/");
-      function decision<Root extends AutomatchRecordRoot>(
-        root: Root,
-        current: AutomatchRecordMap[Root] | null,
-      ): TransactionDecision<AutomatchRecordMap[Root]> {
-        const result = validateTelegramTransactionDecision(update(current));
-        return result.commit === false
-          ? result
-          : {
-              value: canonicalAutomatchFixture(root, result.value),
-              ...(result.decision === undefined
-                ? {}
-                : { decision: result.decision }),
-            };
-      }
-      if (root === "telegramAutomatches" && id)
-        return port.transactAutomatchTelegramSource(
-          id,
-          (current) => decision("telegramAutomatches", current),
-          signal,
-        );
-      if (root === "telegramProjectionOutbox" && field)
-        return port.transactAutomatchTelegramOutbox(
-          field,
-          (current) => decision("telegramProjectionOutbox/automatch", current),
-          signal,
-        );
-      if (root === "profileGameProjectionOutbox" && field)
-        return port.transactAutomatchProfileOutbox(
-          field,
-          (current) =>
-            decision("profileGameProjectionOutbox/automatch", current),
-          signal,
-        );
-      throw new Error("retired-source-path");
-    },
-  };
 }
 
 export type LegacyGameplayTestMethods = {

@@ -8,7 +8,6 @@ import { normalizeTaskPayload } from "../../../runtime/telegram/taskIdentity.js"
 import {
   createTelegramBridgeSignature,
   hasValidTelegramBridgeSignature,
-  MAX_TIMESTAMP_SKEW_SECONDS,
 } from "./telegramBridgeAuth.ts";
 import { readTelegramStorageMode } from "./telegramD1.ts";
 const MAX_BRIDGE_BODY_BYTES = 8 * 1024;
@@ -125,9 +124,4 @@ export async function handleTelegramBridge(
   return bridgeResponse(410, "telegram-command-required");
 }
 
-export {
-  createTelegramBridgeSignature,
-  MAX_BRIDGE_BODY_BYTES,
-  MAX_TIMESTAMP_SKEW_SECONDS,
-  parseInitialTask,
-};
+export { createTelegramBridgeSignature };

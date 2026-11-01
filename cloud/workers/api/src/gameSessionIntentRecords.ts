@@ -15,7 +15,7 @@ import { isSafeRecordKey } from "./recordKeys.ts";
 import { canonicalJson } from "./canonicalJson.ts";
 
 type JsonRecord = Record<string, unknown>;
-export type IntentAutomatchMutation = {
+type IntentAutomatchMutation = {
   [Root in AutomatchRecordRoot]: {
     current: {
       root: Root;
@@ -26,7 +26,7 @@ export type IntentAutomatchMutation = {
     value: AutomatchRecordMap[Root] | null;
   };
 }[AutomatchRecordRoot];
-export type IntentInviteMutation = {
+type IntentInviteMutation = {
   current: { inviteId: string; revision: number; value: InviteDocument | null };
   value: InviteDocument;
 };

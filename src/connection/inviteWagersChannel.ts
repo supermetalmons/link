@@ -18,12 +18,6 @@ import {
 
 export type InviteWagersDelivery = SnapshotDelivery;
 
-export {
-  SNAPSHOT_RECONNECT_DELAYS_MS as INVITE_WAGERS_RECONNECT_DELAYS_MS,
-  SNAPSHOT_HEARTBEAT_INTERVAL_MS as INVITE_WAGERS_HEARTBEAT_INTERVAL_MS,
-  SNAPSHOT_HEARTBEAT_TIMEOUT_MS as INVITE_WAGERS_HEARTBEAT_TIMEOUT_MS,
-} from "./snapshotChannel";
-
 type InviteWagersChannelDependencies = Pick<
   SnapshotChannelDependencies<InviteWagersSnapshot, ReadInviteWagersResponse>,
   | "createSocket"

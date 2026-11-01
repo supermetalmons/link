@@ -1,12 +1,12 @@
 "use strict";
-const core = require("../runtime/telegram/desiredStateCore");
 const {
   TELEGRAM_MESSAGE_ROOT,
   validateTelegramMessageKey,
   buildTelegramSendDesired,
   buildTelegramEditDesired,
   buildTelegramDeleteDesired,
-} = core;
+  resolveTelegramDestination,
+} = require("../runtime/telegram/desiredStateCore");
 /**
  * @template {import("../runtime/telegram/desiredStateCore").TelegramDesired} Desired
  * @param {unknown} messageKey
@@ -31,7 +31,11 @@ const buildTelegramDeleteUpdates = ({ messageKey, ...desiredInput }) =>
   buildDesiredUpdates(messageKey, buildTelegramDeleteDesired(desiredInput));
 
 module.exports = {
-  ...core,
+  validateTelegramMessageKey,
+  buildTelegramSendDesired,
+  buildTelegramEditDesired,
+  buildTelegramDeleteDesired,
+  resolveTelegramDestination,
   buildTelegramSendUpdates,
   buildTelegramEditUpdates,
   buildTelegramDeleteUpdates,

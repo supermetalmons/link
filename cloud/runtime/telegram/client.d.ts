@@ -7,7 +7,7 @@ export type TelegramFetch = (
   status: number;
   json(): Promise<unknown>;
 }>;
-export type TelegramTransportOptions = {
+type TelegramTransportOptions = {
   token?: string;
   fetchImpl?: TelegramFetch;
   timeoutMs?: number;
@@ -34,22 +34,13 @@ export type TelegramMediaGroupInput = TelegramTransportOptions & {
   silent?: boolean;
   hasSpoiler?: boolean;
 };
-export type RetainedTelegramSendInput = TelegramSendInput;
-export type RetainedTelegramEditInput = TelegramEditInput;
+type RetainedTelegramSendInput = TelegramSendInput;
+type RetainedTelegramEditInput = TelegramEditInput;
 export type RetainedTelegramDeleteInput = TelegramDeleteInput;
-export type RetainedTelegramMediaGroupInput = TelegramMediaGroupInput;
-export declare const retainTelegramSendInput: (
-  value: TelegramSendInput,
-) => TelegramSendInput;
-export declare const retainTelegramEditInput: (
-  value: TelegramEditInput,
-) => TelegramEditInput;
+type RetainedTelegramMediaGroupInput = TelegramMediaGroupInput;
 export declare const retainTelegramDeleteInput: (
   value: TelegramDeleteInput,
 ) => TelegramDeleteInput;
-export declare const retainTelegramMediaGroupInput: (
-  value: TelegramMediaGroupInput,
-) => TelegramMediaGroupInput;
 export type TelegramFailure = {
   ok: false;
   classification: "missing" | "retryable" | "terminal" | "uncertain";
@@ -91,7 +82,7 @@ export type TelegramSendResult = TelegramFailure | TelegramSendSuccess;
 export type TelegramMediaGroupResult =
   TelegramFailure | TelegramMediaGroupSuccess;
 export type TelegramEditResult = TelegramFailure | TelegramEditSuccess;
-export type TelegramDeleteResult = TelegramFailure | TelegramDeleteSuccess;
+type TelegramDeleteResult = TelegramFailure | TelegramDeleteSuccess;
 export type TelegramResult = TelegramFailure | TelegramSuccess;
 export type TelegramClient = {
   sendTelegramMessage(
@@ -105,7 +96,6 @@ export type TelegramClient = {
   ): Promise<TelegramDeleteResult>;
 };
 declare const TELEGRAM_HTTP_TIMEOUT_MS = 10000;
-declare const isKnownSafeTelegramSendError: (error: unknown) => boolean;
 declare const sendTelegramMessage: (
   input: TelegramSendInput | RetainedTelegramSendInput,
 ) => Promise<TelegramSendResult>;
@@ -122,7 +112,6 @@ export {
   TELEGRAM_HTTP_TIMEOUT_MS,
   deleteTelegramMessage,
   editTelegramMessage,
-  isKnownSafeTelegramSendError,
   sendTelegramMediaGroup,
   sendTelegramMessage,
 };

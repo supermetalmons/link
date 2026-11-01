@@ -7,13 +7,6 @@ import {
   type EventTelegramProjectionStateDocument,
 } from "./eventProjectionRecords.js";
 export type { EventTelegramProjectionGuard } from "./eventProjectionRecords.js";
-type ProjectionState = EventTelegramProjectionStateDocument;
-type StartedState = {
-  text: string | null;
-  startedMatchKeys: string[];
-  startedMatchLinesByKey: Record<string, string>;
-  appendedCount: number;
-};
 type EndedState = {
   text: string;
   matchLines: string[];
@@ -70,9 +63,7 @@ declare const EVENT_TELEGRAM_PROJECTION_LOCK_ROOT =
   "eventTelegramProjectionLocks";
 declare const EVENT_TELEGRAM_PROJECTION_GUARD_FIELD =
   "eventTelegramProjectionGuard";
-declare const EVENT_TELEGRAM_DELIVERY_VERSION = 2;
-declare const formatPtEtUtcLine: (startAtMs: number) => string;
-export type EventTelegramRatingResultSource = {
+type EventTelegramRatingResultSource = {
   status: "processing" | "done" | "blocked";
   inviteId: string;
   matchId: string;
@@ -102,23 +93,6 @@ declare const renderUpcomingMessage: (
   nowMs?: number,
   heading?: "sunday mons soon" | "join sunday mons" | "upcoming event",
 ) => string | null;
-declare const renderStartedMessage: (
-  eventId: string,
-  matchLines?: string[],
-  heading?: "event started" | "sunday mons starting now!",
-) => string;
-declare const renderEndedMessage: (
-  eventId: string,
-  matchLines?: string[],
-  placementLines?: string[],
-  heading?: "event complete" | "good games",
-) => string;
-declare const parseProjectionState: (raw: unknown) => ProjectionState;
-declare const buildStartedState: (
-  eventId: string,
-  eventData: unknown,
-  rawState?: unknown,
-) => StartedState;
 declare const buildEndedState: (
   eventId: string,
   eventData: unknown,
@@ -150,7 +124,6 @@ declare const buildEventTelegramDispatches: (input: {
   revision: string;
 }>;
 export {
-  EVENT_TELEGRAM_DELIVERY_VERSION,
   EVENT_TELEGRAM_PROJECTION_GUARD_FIELD,
   EVENT_TELEGRAM_PROJECTION_LOCK_ROOT,
   addEventTelegramProjectionGuard,
@@ -159,12 +132,7 @@ export {
   buildEventTelegramDispatches,
   buildEventTelegramProjection,
   buildEventTelegramProjectionChanges,
-  buildStartedState,
-  formatPtEtUtcLine,
   isV2TelegramEvent,
   loadEndedMatchResults,
-  parseProjectionState,
-  renderEndedMessage,
-  renderStartedMessage,
   renderUpcomingMessage,
 };

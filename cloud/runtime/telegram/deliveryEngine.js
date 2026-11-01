@@ -57,20 +57,9 @@ var __importStar =
     };
   })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.validateTelegramMessageKey =
-  exports.resolveTelegramDestination =
-  exports.createTelegramLocalRetryBarrier =
+exports.createTelegramLocalRetryBarrier =
   exports.createTelegramDeliveryEngine =
   exports.buildTelegramSendDesired =
-  exports.buildTelegramEditDesired =
-  exports.buildTelegramDeleteDesired =
-  exports.TELEGRAM_SCHEMA_VERSION =
-  exports.TELEGRAM_SAFE_RETRY_WINDOW_MS =
-  exports.TELEGRAM_SAFE_RETRY_MAX_DELAY_MS =
-  exports.TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND =
-  exports.TELEGRAM_MESSAGE_ROOT =
-  exports.TELEGRAM_LEASE_TTL_MS =
-  exports.TELEGRAM_DESTINATIONS =
     void 0;
 const records_js_1 = require("./records.js");
 const crypto = __importStar(require("node:crypto"));
@@ -79,18 +68,6 @@ const deliveryCleanup_js_1 = require("./deliveryCleanup.js");
 const deliveryControl_js_1 = require("./deliveryControl.js");
 const deliveryDesired_js_1 = require("./deliveryDesired.js");
 const deliveryPolicy_js_1 = require("./deliveryPolicy.js");
-Object.defineProperty(exports, "TELEGRAM_SAFE_RETRY_MAX_DELAY_MS", {
-  enumerable: true,
-  get: function () {
-    return deliveryPolicy_js_1.TELEGRAM_SAFE_RETRY_MAX_DELAY_MS;
-  },
-});
-Object.defineProperty(exports, "TELEGRAM_SAFE_RETRY_WINDOW_MS", {
-  enumerable: true,
-  get: function () {
-    return deliveryPolicy_js_1.TELEGRAM_SAFE_RETRY_WINDOW_MS;
-  },
-});
 Object.defineProperty(exports, "createTelegramLocalRetryBarrier", {
   enumerable: true,
   get: function () {
@@ -100,63 +77,14 @@ Object.defineProperty(exports, "createTelegramLocalRetryBarrier", {
 const deliveryRecovery_js_1 = require("./deliveryRecovery.js");
 const deliveryState_js_1 = require("./deliveryState.js");
 const desiredStateCore_js_1 = require("./desiredStateCore.js");
-Object.defineProperty(exports, "TELEGRAM_DESTINATIONS", {
-  enumerable: true,
-  get: function () {
-    return desiredStateCore_js_1.TELEGRAM_DESTINATIONS;
-  },
-});
-Object.defineProperty(exports, "TELEGRAM_MESSAGE_ROOT", {
-  enumerable: true,
-  get: function () {
-    return desiredStateCore_js_1.TELEGRAM_MESSAGE_ROOT;
-  },
-});
-Object.defineProperty(exports, "TELEGRAM_SCHEMA_VERSION", {
-  enumerable: true,
-  get: function () {
-    return desiredStateCore_js_1.TELEGRAM_SCHEMA_VERSION;
-  },
-});
-Object.defineProperty(exports, "buildTelegramDeleteDesired", {
-  enumerable: true,
-  get: function () {
-    return desiredStateCore_js_1.buildTelegramDeleteDesired;
-  },
-});
-Object.defineProperty(exports, "buildTelegramEditDesired", {
-  enumerable: true,
-  get: function () {
-    return desiredStateCore_js_1.buildTelegramEditDesired;
-  },
-});
 Object.defineProperty(exports, "buildTelegramSendDesired", {
   enumerable: true,
   get: function () {
     return desiredStateCore_js_1.buildTelegramSendDesired;
   },
 });
-Object.defineProperty(exports, "resolveTelegramDestination", {
-  enumerable: true,
-  get: function () {
-    return desiredStateCore_js_1.resolveTelegramDestination;
-  },
-});
-Object.defineProperty(exports, "validateTelegramMessageKey", {
-  enumerable: true,
-  get: function () {
-    return desiredStateCore_js_1.validateTelegramMessageKey;
-  },
-});
 const taskKinds_js_1 = require("./taskKinds.js");
-Object.defineProperty(exports, "TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND", {
-  enumerable: true,
-  get: function () {
-    return taskKinds_js_1.TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND;
-  },
-});
 const TELEGRAM_LEASE_TTL_MS = 60_000;
-exports.TELEGRAM_LEASE_TTL_MS = TELEGRAM_LEASE_TTL_MS;
 const moduleRetryBarrier = (0,
 deliveryPolicy_js_1.createTelegramLocalRetryBarrier)();
 const createTelegramDeliveryEngine = ({

@@ -9,8 +9,6 @@ import { createTelegramCleanupDelivery } from "./deliveryCleanup.js";
 import { createTelegramDeliveryControl } from "./deliveryControl.js";
 import { createTelegramDesiredDelivery } from "./deliveryDesired.js";
 import {
-  TELEGRAM_SAFE_RETRY_MAX_DELAY_MS,
-  TELEGRAM_SAFE_RETRY_WINDOW_MS,
   createTelegramLocalRetryBarrier,
   normalizeRetrySequence,
 } from "./deliveryPolicy.js";
@@ -26,14 +24,8 @@ import type {
   TelegramReconcileInput,
 } from "./deliveryTypes.js";
 import {
-  TELEGRAM_DESTINATIONS,
-  TELEGRAM_MESSAGE_ROOT,
-  TELEGRAM_SCHEMA_VERSION,
-  buildTelegramDeleteDesired,
-  buildTelegramEditDesired,
   buildTelegramSendDesired,
   resolveTelegramDestination,
-  validateTelegramMessageKey,
 } from "./desiredStateCore.js";
 import {
   TELEGRAM_DESIRED_TASK_KIND,
@@ -41,12 +33,8 @@ import {
   TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND,
 } from "./taskKinds.js";
 export type {
-  TelegramApiGateResult,
-  TelegramEngineOptions,
   TelegramEngineResult,
-  TelegramReconcileInput,
   TelegramRepository,
-  TelegramRetrySchedule,
   TelegramRetryScheduler,
 } from "./deliveryTypes.js";
 
@@ -279,18 +267,7 @@ const createTelegramDeliveryEngine: (input: TelegramEngineOptions) => {
 };
 
 export {
-  TELEGRAM_DESTINATIONS,
-  TELEGRAM_LEASE_TTL_MS,
-  TELEGRAM_MESSAGE_ROOT,
-  TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND,
-  TELEGRAM_SAFE_RETRY_MAX_DELAY_MS,
-  TELEGRAM_SAFE_RETRY_WINDOW_MS,
-  TELEGRAM_SCHEMA_VERSION,
-  buildTelegramDeleteDesired,
-  buildTelegramEditDesired,
   buildTelegramSendDesired,
   createTelegramDeliveryEngine,
   createTelegramLocalRetryBarrier,
-  resolveTelegramDestination,
-  validateTelegramMessageKey,
 };

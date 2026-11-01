@@ -103,7 +103,7 @@ export function digest(value: unknown): Promise<string> {
   return sha256Hex(canonical(value));
 }
 
-export function eventInviteSourceUpdates(effects: readonly EventEffect[]) {
+function eventInviteSourceUpdates(effects: readonly EventEffect[]) {
   return effects.flatMap((command) =>
     command.kind === "invite"
       ? [{ inviteId: command.inviteId, value: command.value }]
@@ -125,7 +125,7 @@ export function eventIntentDigestInput(intent: IntentPayload) {
   };
 }
 
-export function parseEventInviteMutations(
+function parseEventInviteMutations(
   value: unknown,
 ): EventInviteSourceMutation[] {
   if (!Array.isArray(value) || value.length > MAX_EVENT_PARTICIPANTS) invalid();
@@ -191,9 +191,7 @@ export function eventIntentPayloadDigest(
 ): Promise<string> {
   return digest(eventIntentDigestInput(intent));
 }
-export function preparedEventEffects(
-  effects: EventIntentEffects,
-): PreparedEffect[] {
+function preparedEventEffects(effects: EventIntentEffects): PreparedEffect[] {
   return effects.filter(
     (command): command is PreparedEffect => command.kind !== "invite",
   );

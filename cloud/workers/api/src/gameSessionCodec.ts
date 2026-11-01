@@ -109,8 +109,8 @@ export function encodeSessionChanges(
   return updates;
 }
 
-export const GAME_SESSION_CREATION_FIELD = "sessionCreation";
-export const GAME_SESSION_TRANSITION_FIELD = "sessionTransition";
+const GAME_SESSION_CREATION_FIELD = "sessionCreation";
+const GAME_SESSION_TRANSITION_FIELD = "sessionTransition";
 type JsonRecord = Record<string, unknown>;
 function fail(code: string): never {
   throw new GameSessionTransitionFailure(code);

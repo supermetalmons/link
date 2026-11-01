@@ -16,7 +16,7 @@ import type {
   MatchStatePair,
 } from "./matchStateTypes.ts";
 
-export type MatchStateCreationWire = Omit<MatchStateCreation, "value"> & {
+type MatchStateCreationWire = Omit<MatchStateCreation, "value"> & {
   value: MatchDocument;
 };
 export type MatchStateCreateWireRequest = Omit<

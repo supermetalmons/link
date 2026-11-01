@@ -29,10 +29,7 @@ import {
   type RuntimeOptions,
 } from "./context.ts";
 
-export type {
-  EventPrizeGameplayRepository,
-  RuntimeOptions,
-} from "./context.ts";
+export type { RuntimeOptions } from "./context.ts";
 
 export type EventPrizeRuntimeDependencies = EventPrizeContext &
   Pick<WithdrawalRuntimeDependencies, "createEventPrizeUmi">;

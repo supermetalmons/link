@@ -15,15 +15,18 @@ import test from "node:test";
 import { buildEventAnnouncementPlan } from "../src/eventPrizeAnnouncementSchedule.ts";
 import {
   buildEventProgressPlan,
-  EVENT_PROGRESS_OUTBOX_DEAD_ROOT,
+  type EventProgressWorkflowParams,
+} from "../src/eventProgressCodec.ts";
+import {
   EventProgressRetryableError,
   runEventProgressWorkflow,
+} from "../src/eventProgressWorkflowRunner.ts";
+import {
   sweepEventProgress as runEventProgressSweep,
   type EventProgressRatingRepository,
   type EventProgressSweepRepository,
   type EventProgressSweepDependencies,
-  type EventProgressWorkflowParams,
-} from "../src/eventProgress.ts";
+} from "../src/eventProgressRecovery.ts";
 import {
   SCHEDULED_EVENT_RECOVERY_PAGE_SIZE,
   SCHEDULED_EVENT_RECOVERY_URGENT_LIMIT,
@@ -46,6 +49,7 @@ import {
   EVENT_ANNOUNCEMENT_KINDS,
   eventAnnouncementRunAtMs,
 } from "../src/eventAnnouncementKinds.ts";
+const EVENT_PROGRESS_OUTBOX_DEAD_ROOT = "eventProgressOutboxDead";
 type OutboxFixtureRecord = Record<string, unknown>;
 const invalidProgressIdentity: EventProgressPendingRecord = {
   schemaVersion: 2,

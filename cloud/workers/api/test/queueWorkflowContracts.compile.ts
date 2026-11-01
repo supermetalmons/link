@@ -18,7 +18,6 @@ import type {
 import type { EventStore } from "../src/eventStoreContracts.ts";
 import {
   buildEventProgressPlan,
-  buildRetainedEventProgressPlan,
   type EventProgressWorkflowParams,
 } from "../src/eventProgressCodec.ts";
 import type { EventPrizeWithdrawalWorkflowInput } from "../src/eventPrizeWithdrawal/contracts.ts";
@@ -174,7 +173,7 @@ export function workflowFamilies(
   env.EVENT_PROGRESS_WORKFLOW.create({ params: retained });
   // @ts-expect-error Fresh progress builders reject arbitrary parameter fields.
   buildEventProgressPlan({ eventId: 3, sourceKey: "source", reason: "reason" });
-  buildRetainedEventProgressPlan({
+  buildEventProgressPlan({
     eventId: "event",
     sourceKey: "source",
     reason: "reason",

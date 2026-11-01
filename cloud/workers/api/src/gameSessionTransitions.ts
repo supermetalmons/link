@@ -38,12 +38,7 @@ import {
   readInviteSourceControl,
   releaseInviteSourceAdmission,
 } from "./inviteSourceD1.ts";
-export {
-  GAME_SESSION_CREATION_FIELD,
-  GAME_SESSION_TRANSITION_FIELD,
-  GameSessionTransitionFailure,
-  gameSessionOperationResource,
-} from "./gameSessionCodec.ts";
+export { gameSessionOperationResource } from "./gameSessionCodec.ts";
 
 export const GAME_SESSION_TRANSITION_SWEEP_LIMIT = 10;
 export const GAME_SESSION_TRANSITION_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;

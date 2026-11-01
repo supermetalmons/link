@@ -22,12 +22,8 @@ import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 import type { WorkerExecutionContext } from "./sessionAuth.ts";
 import { WagerClientUpdateRequired } from "./wagerReservationRuntime.ts";
 export { cancelAutomatch } from "./gameplayRoutes/automatch.ts";
-export {
-  removeNavigationGame,
-  resolveProfileId,
-} from "./gameplayRoutes/navigation.ts";
+export { removeNavigationGame } from "./gameplayRoutes/navigation.ts";
 export type { GameplayRouteDependencies } from "./gameplayRoutes/runtime.ts";
-export { isSafeRecordKey, MAX_RECORD_KEY_BYTES } from "./recordKeys.ts";
 
 const gameplayRoutes: ReadonlyMap<string, GameplayRoute> = new Map(
   [

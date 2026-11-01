@@ -45,8 +45,7 @@ export type PendingRatingEventProgress = {
 export type RatingRecoveryProjectionKind =
   "event-progress" | "profile-game" | "telegram";
 
-export type RatingRecoveryQuarantineReason =
-  "invalid-operation-id" | "invalid-record";
+type RatingRecoveryQuarantineReason = "invalid-operation-id" | "invalid-record";
 
 export type InvalidRatingRecoveryEntry = {
   kind: "invalid";

@@ -9,11 +9,13 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { decodeEventUpdates } from "../test/eventLegacyFixtureCodec.ts";
 import {
   buildEventProgressPlan,
-  ensureEventProgressWorkflow,
-  sweepEventProgress,
   type EventProgressPlan,
+} from "../src/eventProgressCodec.ts";
+import { ensureEventProgressWorkflow } from "../src/eventProgressDispatch.ts";
+import {
+  sweepEventProgress,
   type EventProgressSweepRepository,
-} from "../src/eventProgress.ts";
+} from "../src/eventProgressRecovery.ts";
 import { createEventStateRepository } from "../src/eventRepository.ts";
 import {
   acquireEventWriteAdmission,

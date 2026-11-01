@@ -2,24 +2,14 @@ import { inviteDocumentFixture } from "../cloud/workers/api/test/inviteDocumentF
 import { canonicalMatch, required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { registerHooks } from "node:module";
+import { registerTypeScriptTestHooks } from "./support/typescriptHooks.mjs";
 import { setImmediate } from "node:timers/promises";
 import { Game } from "mons-rules";
 import { MoveDelivery } from "../src/connection/moveDelivery.ts";
 import { submitMove } from "../cloud/workers/api/src/matchMove.ts";
 import { decideMatchStateMove } from "../cloud/workers/api/src/matchStateLogic.ts";
 
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (
-      context.parentURL?.endsWith(".ts") &&
-      (specifier.startsWith("./") || specifier.startsWith("../")) &&
-      !/\.[^/]+$/.test(specifier)
-    )
-      return nextResolve(`${specifier}.ts`, context);
-    return nextResolve(specifier, context);
-  },
-});
+registerTypeScriptTestHooks();
 
 const scope = {
   loginUid: "actor",

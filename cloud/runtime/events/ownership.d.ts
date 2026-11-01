@@ -28,7 +28,7 @@ export type EventOwnershipSnapshot = Readonly<{
     }>
   >;
 }>;
-export type EventOwnershipResolutionSnapshot = Pick<
+type EventOwnershipResolutionSnapshot = Pick<
   EventOwnershipSnapshot,
   "canonicalProfileIdByProfileId" | "loginOwnerByUid"
 > &

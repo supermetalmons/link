@@ -24,7 +24,7 @@ import {
   startMatchTimer,
   type MatchTimerRecord,
 } from "../src/matchTimer.ts";
-import { buildEventProgressPlan } from "../src/eventProgress.ts";
+import { buildEventProgressPlan } from "../src/eventProgressCodec.ts";
 
 type TimerRepository = Pick<
   GameplayRepository,

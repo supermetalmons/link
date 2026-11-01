@@ -36,18 +36,6 @@ export type EventTelegramProjectionStateDocument = {
 export type EventTelegramProjectionStateWrite =
   EventTelegramProjectionStateDocument;
 export type EventTelegramTextField = "upcomingText" | "reminderText";
-export declare function isEventTelegramProjectionGuard(
-  value: unknown,
-): value is Required<EventTelegramProjectionGuard>;
-export declare function isStartedMatchLines(
-  value: unknown,
-): value is RetainedStartedMatchLines;
-export declare function isEventTelegramEndedResults(
-  value: unknown,
-): value is EventTelegramEndedResultsDocument;
-export declare function isEventTelegramProjectionDocument(
-  value: unknown,
-): value is EventTelegramProjectionStateDocument;
 export declare function readEventTelegramProjectionDocument(
   value: unknown,
 ): EventTelegramProjectionStateDocument;
@@ -57,9 +45,6 @@ export declare function createEventTelegramProjectionDocument(
 export declare function createEmptyEventTelegramProjectionDocument(
   updatedAtMs?: number,
 ): EventTelegramProjectionStateDocument;
-export declare function retainStartedMatchLines(
-  value: unknown,
-): RetainedStartedMatchLines;
 export declare function retainEventTelegramEndedResults(
   value: unknown,
 ): EventTelegramEndedResultsDocument;

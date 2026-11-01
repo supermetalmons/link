@@ -157,8 +157,6 @@ const buildErrorState = (
 };
 
 export {
-  TELEGRAM_SAFE_RETRY_MAX_DELAY_MS,
-  TELEGRAM_SAFE_RETRY_WINDOW_MS,
   buildErrorState,
   buildRateLimitBarrierAtMs,
   buildSafeRetryState,

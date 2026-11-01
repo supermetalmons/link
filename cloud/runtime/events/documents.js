@@ -20,8 +20,6 @@ exports.cloneEventMatch =
   exports.plainEventParticipants =
   exports.eventParticipantJoinedOrder =
   exports.eventCurrentRoundIndex =
-  exports.eventParticipantProjectionState =
-  exports.readEventMatchesDocument =
   exports.readEventRoundsDocument =
   exports.readEventParticipantsDocument =
   exports.readEventRoundDocument =
@@ -82,9 +80,6 @@ exports.readEventParticipantsDocument = readEventParticipantsDocument;
 const readEventRoundsDocument = (value) =>
   (0, event_views_js_1.isEventRounds)(value) ? value : null;
 exports.readEventRoundsDocument = readEventRoundsDocument;
-const readEventMatchesDocument = (value) =>
-  (0, event_views_js_1.isEventMatches)(value) ? value : null;
-exports.readEventMatchesDocument = readEventMatchesDocument;
 function eventState(event) {
   return {
     eventId: event?.eventId,
@@ -121,7 +116,6 @@ function eventParticipantState(participant) {
     eliminatedByProfileId: participant?.eliminatedByProfileId,
   };
 }
-exports.eventParticipantProjectionState = eventParticipantState;
 function eventMatchState(match) {
   return {
     matchKey: match?.matchKey,

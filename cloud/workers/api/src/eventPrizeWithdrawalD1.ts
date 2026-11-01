@@ -10,18 +10,14 @@ import {
   withdrawalStorageUpdatedAtMs,
   type WithdrawalDocument,
 } from "../../../runtime/eventPrizes/records.js";
-import type {
-  WithdrawalRecord,
-  WithdrawalStore,
-} from "../../../runtime/eventPrizes/types.js";
+import type { WithdrawalStore } from "../../../runtime/eventPrizes/types.js";
 import type { WithdrawalStorage } from "../../../runtime/eventPrizes/storage.js";
 import { createWithdrawalRecordCommands } from "../../../runtime/eventPrizes/withdrawalRepository.js";
 const MAX_TRANSACTION_ATTEMPTS = 12;
 
 export type EventPrizeWithdrawalStorageMode = "d1" | "frozen";
 
-export type EventPrizeWithdrawalRecord = WithdrawalRecord;
-export type EventPrizeWithdrawalReplacement = {
+type EventPrizeWithdrawalReplacement = {
   eventId: string;
   prizeId: string;
   value: WithdrawalDocument | null;

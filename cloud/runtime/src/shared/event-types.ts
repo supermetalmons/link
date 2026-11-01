@@ -105,7 +105,7 @@ export type EventRoundRecord = EventRoundFields &
   );
 export type EventRoundView = EventRoundRecord;
 
-export type EventPrizePlace = 1 | 2 | 3;
+type EventPrizePlace = 1 | 2 | 3;
 
 export type EventPrizeAssignmentView = EventPrizeAssignmentWireRecord;
 

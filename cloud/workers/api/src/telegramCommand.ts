@@ -22,10 +22,7 @@ import type { TelegramRepository } from "../../../runtime/telegram/deliveryEngin
 import { refreshSundayMonsReminder } from "./eventReminderProjection.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import { readBoundedBody } from "./http.ts";
-import {
-  hasValidTelegramBridgeSignature,
-  MAX_TIMESTAMP_SKEW_SECONDS,
-} from "./telegramBridgeAuth.ts";
+import { hasValidTelegramBridgeSignature } from "./telegramBridgeAuth.ts";
 import {
   buildInitialTelegramDeliveryTask,
   enqueueInitialTelegramDelivery,
@@ -450,5 +447,3 @@ export async function handleTelegramCommand(
     return commandResponse(503, { ok: false, error: "unavailable" });
   }
 }
-
-export { MAX_TIMESTAMP_SKEW_SECONDS, parseCommand };

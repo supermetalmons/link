@@ -5,10 +5,6 @@ import type {
   MatchStatePairRequest,
 } from "../src/matchStateTypes.ts";
 export {
-  StateRepositoryFailure,
-  StateRepositoryPermissionDenied,
-} from "../src/stateCompatibility.ts";
-export {
   SESSION_TIMESTAMP as STATE_SERVER_TIMESTAMP,
   sessionIncrement as stateIncrement,
 } from "../src/sessionValueOperations.ts";

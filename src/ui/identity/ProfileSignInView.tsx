@@ -71,8 +71,6 @@ import {
   type SignInButtonVisualProps,
 } from "./signInButtonStyles";
 
-export { signInButtonVisualStyles } from "./signInButtonStyles";
-
 configureLogoutUiLock({
   setAuthStatus: setAuthStatusGlobally,
   performCleanup: (options) => {

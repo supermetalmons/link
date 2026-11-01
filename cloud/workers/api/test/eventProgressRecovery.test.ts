@@ -5,7 +5,7 @@ import test from "node:test";
 import type { WorkflowInstanceStatus } from "cloudflare:workers";
 import { buildEventProgressPlan } from "../src/eventProgressCodec.ts";
 import { dispatchOutboxPlan } from "../src/eventProgressDispatch.ts";
-import type { EventProgressSweepRepository } from "../src/eventProgress.ts";
+import type { EventProgressSweepRepository } from "../src/eventProgressRecovery.ts";
 import { createEventProgressRecoveryTestStore } from "./eventProgressRecoveryTestStore.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 

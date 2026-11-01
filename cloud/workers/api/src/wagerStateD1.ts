@@ -2,7 +2,7 @@ import { isSafeRecordKey } from "./recordKeys.ts";
 import { classifyD1Failure } from "./d1Failure.ts";
 import { parseWagerRecord, type WagerRecord } from "./wagerModel.ts";
 
-export const WAGER_STATE_WRITER_EPOCH = 1;
+const WAGER_STATE_WRITER_EPOCH = 1;
 
 export type WagerStateKey = {
   inviteId: string;

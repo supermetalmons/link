@@ -375,5 +375,3 @@ async function applyAdmittedInviteEventEffects(
     await releaseInviteSourceAdmission(db, admission);
   }
 }
-
-export { eventInviteSourceUpdates } from "./eventTransitionCodec.ts";

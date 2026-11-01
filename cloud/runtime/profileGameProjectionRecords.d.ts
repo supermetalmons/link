@@ -12,7 +12,6 @@ export {
 export type ProfileGameProjectionDocument = ProfileGameProjectionRecord;
 export type GameProjectionWrite = GameProjectionRecord;
 export type EventProjectionPayloadWrite = EventProjectionRecord;
-export type ProfileGameProjectionWrite = ProfileGameProjectionRecord;
 export type ProjectionProfileDocument = {
   eth: string;
   sol: string;

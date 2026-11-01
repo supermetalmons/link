@@ -20,17 +20,13 @@ import {
   type ParsedFrozenOperation,
   type ReservationOperationKind,
 } from "./wagerFrozenRecords.ts";
-export { wagerReferencesReservationOperation } from "./wagerModel.ts";
+
 export {
   createOperationId,
   createWagerReservationOperationId,
   operationFingerprint,
-  parseFrozenOperation,
-  type FrozenOperationState,
   type ParsedFrozenOperation,
   type FrozenDeltaOperationKind,
-  type ReservationOperationKind,
-  type WagerFrozenOperationKind,
 } from "./wagerFrozenRecords.ts";
 
 export type WagerMutationContext = {

@@ -51,7 +51,7 @@ export type ProfileLinkCatchupJob = {
   revision: number;
 };
 
-export type ProfileLinkCatchupQuarantineReason =
+type ProfileLinkCatchupQuarantineReason =
   "invalid-login-uid" | "invalid-record";
 
 export type ProfileLinkCatchupInvalidEntry = {
@@ -60,12 +60,12 @@ export type ProfileLinkCatchupInvalidEntry = {
   reason: ProfileLinkCatchupQuarantineReason;
 };
 
-export type ProfileLinkCatchupScanEntry =
+type ProfileLinkCatchupScanEntry =
   | { kind: "candidate"; value: ProfileLinkCatchupJob }
   | ProfileLinkCatchupInvalidEntry
   | { kind: "failure"; error: unknown };
 
-export type ProfileLinkCatchupQuarantineResult = {
+type ProfileLinkCatchupQuarantineResult = {
   loginUidHex: string;
   revisionHex: string;
   reason: ProfileLinkCatchupQuarantineReason;

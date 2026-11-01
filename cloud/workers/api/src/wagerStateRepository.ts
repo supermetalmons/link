@@ -34,7 +34,7 @@ export type {
   WagerRecord,
   ModernProposalLineage,
 } from "./wagerStateCommands.ts";
-export type WagerReadSnapshot = {
+type WagerReadSnapshot = {
   wager: DecodedWager | null;
   resolutionMarker: boolean | null;
 };

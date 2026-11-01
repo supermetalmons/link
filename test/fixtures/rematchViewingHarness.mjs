@@ -1,17 +1,6 @@
-import { registerHooks } from "node:module";
+import { registerTypeScriptTestHooks } from "../support/typescriptHooks.mjs";
 
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (
-      context.parentURL?.endsWith(".ts") &&
-      specifier.startsWith("./") &&
-      !/\.[^/]+$/.test(specifier)
-    ) {
-      return nextResolve(`${specifier}.ts`, context);
-    }
-    return nextResolve(specifier, context);
-  },
-});
+registerTypeScriptTestHooks();
 
 const { createRematchViewing } =
   await import("../../src/game/rematchViewing.ts");

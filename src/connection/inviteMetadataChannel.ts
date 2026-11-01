@@ -15,12 +15,6 @@ import {
   type SnapshotChannelDependencies,
 } from "./snapshotChannel";
 
-export {
-  SNAPSHOT_RECONNECT_DELAYS_MS as INVITE_METADATA_RECONNECT_DELAYS_MS,
-  SNAPSHOT_HEARTBEAT_INTERVAL_MS as INVITE_METADATA_HEARTBEAT_INTERVAL_MS,
-  SNAPSHOT_HEARTBEAT_TIMEOUT_MS as INVITE_METADATA_HEARTBEAT_TIMEOUT_MS,
-} from "./snapshotChannel";
-
 type InviteMetadataChannelDependencies = Pick<
   SnapshotChannelDependencies<
     InviteMetadataSnapshot,

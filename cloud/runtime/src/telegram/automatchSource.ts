@@ -4,7 +4,7 @@ import type {
   SessionCounter,
 } from "../gameSessionChanges.js";
 import type { AutomatchTelegramSourceWrite } from "../automatchRecords.js";
-export interface AutomatchTelegramSourceInput {
+interface AutomatchTelegramSourceInput {
   inviteId: string;
   timestamp: SessionTimestamp;
 }

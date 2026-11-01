@@ -390,7 +390,6 @@ export async function updateRatings(
 export {
   FEB_CHALLENGE_END_UTC,
   FEB_CHALLENGE_START_UTC,
-  RATING_UPDATE_LEASE_MS,
   buildRatingPlan,
   readMatchRecord,
   resolveRatingResult,

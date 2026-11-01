@@ -28,7 +28,7 @@ function isDatabaseBinding(
   return APPLICATION_DATABASE_BINDINGS.some((binding) => binding === property);
 }
 
-export function applicationExecutionEnv(
+function applicationExecutionEnv(
   env: Env,
   admission: ApplicationAdmission | (() => ApplicationAdmission),
 ): Env {

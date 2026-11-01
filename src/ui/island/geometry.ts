@@ -96,7 +96,7 @@ export const DISMISS_ALLOWED_TRIANGLE_B: [Point, Point, Point] = [
   { x: 0.6977, y: 1 },
 ];
 
-export const NO_WALK_TETRAGON: Point[] = [
+const NO_WALK_TETRAGON: Point[] = [
   { x: 0.0745, y: 0.2636 },
   { x: 0.4116, y: 0.4467 },
   { x: 0.4079, y: 0.6358 },
@@ -121,7 +121,7 @@ export const SMALLER_SMOOTH_CYCLING_ELLIPSE: SplitEllipse = {
   ryBottom: 0.1492,
 };
 
-export const SMOOTH_CYCLING_ELLIPSE: SplitEllipse = {
+const SMOOTH_CYCLING_ELLIPSE: SplitEllipse = {
   cx: 0.4982,
   cy: 0.1928,
   rx: 0.36,
@@ -138,7 +138,7 @@ const SAFE_POINT_AREA_ELLIPSE_RADIUS_FRAC_Y = 0.36;
 const smoothEllipseMetrics = createSplitEllipseMetrics(SMOOTH_CYCLING_ELLIPSE);
 const holeCentroid = getPolygonCentroid(NO_WALK_TETRAGON);
 
-export function getPolygonBounds(points: Point[]) {
+function getPolygonBounds(points: Point[]) {
   let minX = 1;
   let maxX = 0;
   let minY = 1;
@@ -188,7 +188,7 @@ export function pointInPolygon(x: number, y: number, polygon: Point[]) {
   return inside;
 }
 
-export function getPolygonCentroid(polygon: Point[]): Point {
+function getPolygonCentroid(polygon: Point[]): Point {
   if (polygon.length === 0) return { x: 0.5, y: 0.5 };
   let x = 0;
   let y = 0;
@@ -226,7 +226,7 @@ export function isInsideSmoothEllipse(x: number, y: number) {
   return dx * dx * smoothEllipseMetrics.invRxSq + dy * dy * invRySq <= 1;
 }
 
-export function projectToSmoothEllipse(x: number, y: number): Point {
+function projectToSmoothEllipse(x: number, y: number): Point {
   const dx = x - SMOOTH_CYCLING_ELLIPSE.cx;
   const dy = y - SMOOTH_CYCLING_ELLIPSE.cy;
   const invRySq = pickInvRySq(dy);
@@ -265,7 +265,7 @@ export function isInsideHole(x: number, y: number) {
   return pointInPolygon(x, y, NO_WALK_TETRAGON);
 }
 
-export function projectOutsideHole(point: Point): Point | null {
+function projectOutsideHole(point: Point): Point | null {
   if (NO_WALK_TETRAGON.length === 0) return null;
   let best: (Point & { d2: number }) | null = null;
   for (let index = 0; index < NO_WALK_TETRAGON.length; index += 1) {

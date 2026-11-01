@@ -3,14 +3,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildEventPrizeWithdrawalOperationId,
+  parseEventPrizeWithdrawalWorkflowParams,
+  type EventPrizeWithdrawalWorkflowInput,
+} from "../src/eventPrizeWithdrawal/contracts.ts";
+import {
   createEventPrizeRuntimeDependencies,
   createEventPrizeExecutionProfileReader,
   executeEventPrizeWithdrawal,
-  handleEventPrizeWithdrawalRoute,
-  parseEventPrizeWithdrawalWorkflowParams,
   resolveEventPrizeWithdrawalExecutionParams,
-  type EventPrizeWithdrawalWorkflowInput,
-} from "../src/eventPrizeWithdrawal.ts";
+} from "../src/eventPrizeWithdrawal/runtime.ts";
+import { handleEventPrizeWithdrawalRoute } from "../src/eventPrizeWithdrawal/route.ts";
 import { createEventPrizeContext } from "../src/eventPrizeWithdrawal/context.ts";
 import type { EventPrizeWithdrawalStore } from "../src/eventPrizeWithdrawalD1.ts";
 import { createWithdrawalRecordCommands } from "../../../runtime/eventPrizes/withdrawalRepository.js";

@@ -54,7 +54,7 @@ import { reportRecoveryFailure } from "./recoveryReporting.ts";
 const EVENT_TELEGRAM_PROJECTION_OWNER_UID = "event-telegram-projector";
 const EVENT_PROJECTION_SWEEP_LIMIT = 100;
 
-export type EventProjectionSweepCandidate = {
+type EventProjectionSweepCandidate = {
   snapshot: EventProjectionRecoverySnapshot<"telegram">;
   task: EventTelegramProjectionTask;
   updatedAtMs: number;
@@ -323,7 +323,7 @@ export async function processEventProjectionTask(
   });
 }
 
-export function eventProjectionSweepEntries(
+function eventProjectionSweepEntries(
   snapshots: readonly EventProjectionRecoverySnapshot<"telegram">[],
 ): EventProjectionSweepEntry[] {
   const records = Object.fromEntries(
@@ -348,7 +348,7 @@ export function eventProjectionSweepEntries(
   });
 }
 
-export async function claimEventProjectionSweepCandidate(
+async function claimEventProjectionSweepCandidate(
   writer: Pick<EventProjectionRecoveryWriter<"telegram">, "claim">,
   candidate: EventProjectionSweepCandidate,
   nowMs: number,
@@ -434,9 +434,3 @@ export async function sweepEventTelegramProjections(
     return sentCount;
   });
 }
-
-export {
-  EVENT_PROJECTION_SWEEP_LIMIT,
-  parseEventProjectionOutbox,
-  settleEventOutbox,
-};

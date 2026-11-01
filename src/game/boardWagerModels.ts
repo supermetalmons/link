@@ -61,7 +61,7 @@ export type WagerIconLayout = {
   maxY: number;
 };
 
-export const getWagerMaterialUrl = (name: MaterialName): string =>
+const getWagerMaterialUrl = (name: MaterialName): string =>
   `${MATERIAL_BASE_URL}/${name}.webp`;
 
 export const createWagerPile = (): WagerPile => ({
@@ -91,7 +91,7 @@ export const computeWagerStackHeights = (
   return heights;
 };
 
-export const getWagerStackTallOrder = (stackCount: number): number[] => {
+const getWagerStackTallOrder = (stackCount: number): number[] => {
   if (stackCount <= 1) return [0];
   if (stackCount === 2) return [0, 1];
   if (stackCount === 3) return [1, 0, 2];
@@ -169,10 +169,7 @@ export const syncWagerPileIcons = (
   pile.frames = [];
 };
 
-export const wagerRectsEqual = (
-  a?: WagerPileRect,
-  b?: WagerPileRect,
-): boolean =>
+const wagerRectsEqual = (a?: WagerPileRect, b?: WagerPileRect): boolean =>
   a === b ||
   (!!a && !!b && a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h);
 
@@ -183,7 +180,7 @@ export const wagerRectIsVisible = (
 export const wagerPileHiddenByLayout = (pile: WagerPile | null): boolean =>
   !!pile && pile.count > 0 && !!pile.rect && !wagerRectIsVisible(pile.rect);
 
-export const wagerSlotLayoutEqual = (
+const wagerSlotLayoutEqual = (
   a?: WagerSlotLayout,
   b?: WagerSlotLayout,
 ): boolean =>

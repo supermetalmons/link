@@ -2,7 +2,7 @@ import { required, canonicalMatch } from "./fixtures/canonicalData.mjs";
 import { createWagerClientHarness } from "./wagerClientHarness.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { registerHooks } from "node:module";
+import { registerTypeScriptTestHooks } from "./support/typescriptHooks.mjs";
 import test from "node:test";
 import ts from "typescript";
 import {
@@ -26,18 +26,7 @@ import {
   selectInviteMatch,
 } from "../cloud/runtime/shared/rematches.js";
 
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (
-      context.parentURL?.endsWith(".ts") &&
-      (specifier.startsWith("./") || specifier.startsWith("../")) &&
-      !/\.[^/]+$/.test(specifier)
-    ) {
-      return nextResolve(`${specifier}.ts`, context);
-    }
-    return nextResolve(specifier, context);
-  },
-});
+registerTypeScriptTestHooks();
 
 const { batchGameControlsUpdates } =
   await import("../src/game/gameControlsStore.ts");

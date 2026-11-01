@@ -1,0 +1,99 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "workspaces": {
+    ".": {
+      "entry": [
+        "src/bootstrap.ts!",
+        "src/game/automoveWorker.ts!",
+        "test/*.test.mjs",
+        "test/*.browser.mjs",
+        "scripts/*.test.ts",
+        "cloud/tests/*.test.js",
+        "scripts/runtime-generation.ts!",
+        "scripts/publish-cloudflare-workflows.ts!",
+        "scripts/smoke-cloudflare-api.ts!",
+        "scripts/smoke-cloudflare-reactions.ts!",
+        "scripts/smoke-cloudflare-wagers.ts!",
+        "scripts/smoke-cloudflare-invite-metadata.ts!",
+        "scripts/smoke-cloudflare-invite-lifecycle.ts!",
+        "scripts/manage-wager-reservations.ts!",
+        "scripts/manage-events.ts!",
+        "scripts/manage-match-state.ts!",
+        "scripts/manage-profile-canonical.ts!",
+        "scripts/manage-event-prize-withdrawals.ts!",
+        "scripts/deploy-cloudflare.ts!",
+        "scripts/manage-automatch-state.ts!",
+        "scripts/manage-automatch-queue.ts!",
+        "scripts/manage-invite-source.ts!",
+        "scripts/inspect-state.ts!",
+        "scripts/typecheck-coverage.ts!",
+        "test/fixtures/eventModalHarness.tsx",
+        "test/fixtures/eventPrizeSelectionHarness.tsx",
+        "test/fixtures/eventCreateFormHarness.tsx",
+        "test/fixtures/boardWagersHarness.tsx",
+        "test/fixtures/shinyCardHarness.ts",
+        "test/fixtures/walletAuthHarness.tsx",
+        "test/fixtures/leaderboardHarness.tsx",
+        "test/fixtures/boardWagersEnvironment.tsx",
+        "test/fixtures/shinyCardEnvironment.ts",
+        "test/fixtures/walletAuthEnvironment.ts",
+        "test/fixtures/eventModalEnvironment.ts",
+        "test/fixtures/eventPrizeSelectionEnvironment.ts",
+        "test/fixtures/leaderboardEnvironment.ts",
+        "scripts/event-social-metadata.ts!"
+      ],
+      "project": [
+        "src/**/*.{ts,tsx}!",
+        "test/**/*.{mjs,ts,tsx}",
+        "scripts/**/*.ts!",
+        "!scripts/**/*.test.ts!",
+        "!scripts/test-fixtures/**!",
+        "scripts/**/*.test.ts",
+        "scripts/test-fixtures/**/*.ts",
+        "types/**/*.d.ts",
+        "cloud/tests/**/*.js",
+        "*.config.{mts,mjs}"
+      ],
+      "paths": {
+        "/src/*": ["./src/*"]
+      }
+    },
+    "cloud/runtime": {
+      "entry": [],
+      "project": ["src/**/*.ts!"]
+    },
+    "cloud/runtime/shared": {
+      "entry": [],
+      "project": []
+    },
+    "cloud/admin": {
+      "entry": [
+        "topGpWithEmojis.ts!",
+        "topMpWithEmojis.ts!",
+        "recoverTelegramDelivery.ts!",
+        "shootingStarAlert.ts!",
+        "listAddresses.ts!"
+      ],
+      "project": ["*.ts!"]
+    },
+    "cloud/workers/api": {
+      "entry": [
+        "src/index.ts!",
+        "test/*.test.ts",
+        "test/*.compile.ts",
+        "runtime/**/*.test.ts"
+      ],
+      "project": [
+        "src/**/*.ts!",
+        "test/**/*.ts",
+        "runtime/**/*.ts",
+        "vitest.config.ts",
+        "worker-configuration.d.ts"
+      ],
+      "vitest": {
+        "config": ["vitest.config.ts"]
+      }
+    }
+  },
+  "tags": ["-knipExternal"]
+}

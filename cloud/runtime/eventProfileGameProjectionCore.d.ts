@@ -18,7 +18,7 @@ export type EventProjectionSourceFence = {
   eventId: string;
   generation: number;
 };
-export type EventProjectionOwnershipSnapshot = Readonly<{
+type EventProjectionOwnershipSnapshot = Readonly<{
   canonicalProfileIdByProfileId: ReadonlyMap<string, string | null>;
   loginOwnerByUid: ReadonlyMap<
     string,
@@ -39,7 +39,7 @@ export type EventProfileGameProjectionRepository = {
     profileIds: string[];
   }): Promise<EventProjectionOwnershipSnapshot>;
 };
-export type EventProjectionResult = {
+type EventProjectionResult = {
   deleted: number;
   ownerProfileIds: string[];
   written: number;
@@ -70,11 +70,5 @@ type Signature_createEventProfileGameProjectionCore = (dependencies: {
     }
   >;
 };
-declare const READ_RETRY_ATTEMPTS = 2;
-declare const READ_RETRY_DELAY_MS = 25;
 declare const createEventProfileGameProjectionCore: Signature_createEventProfileGameProjectionCore;
-export {
-  READ_RETRY_ATTEMPTS,
-  READ_RETRY_DELAY_MS,
-  createEventProfileGameProjectionCore,
-};
+export { createEventProfileGameProjectionCore };

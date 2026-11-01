@@ -239,7 +239,7 @@ const collectActiveMatchEntries = (rawEventData: unknown): MatchEntry[] => {
   );
 };
 
-export type EventTelegramRatingResultSource = {
+type EventTelegramRatingResultSource = {
   status: "processing" | "done" | "blocked";
   inviteId: string;
   matchId: string;
@@ -963,7 +963,6 @@ const buildEventTelegramDispatches: (input: {
   });
 
 export {
-  EVENT_TELEGRAM_DELIVERY_VERSION,
   EVENT_TELEGRAM_PROJECTION_GUARD_FIELD,
   EVENT_TELEGRAM_PROJECTION_LOCK_ROOT,
   addEventTelegramProjectionGuard,
@@ -972,12 +971,7 @@ export {
   buildEventTelegramDispatches,
   buildEventTelegramProjection,
   buildEventTelegramProjectionChanges,
-  buildStartedState,
-  formatPtEtUtcLine,
   isV2TelegramEvent,
   loadEndedMatchResults,
-  parseProjectionState,
-  renderEndedMessage,
-  renderStartedMessage,
   renderUpcomingMessage,
 };

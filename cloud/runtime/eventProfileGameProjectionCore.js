@@ -1,19 +1,14 @@
 // Generated from src/eventProfileGameProjectionCore.ts. Run npm run generate:runtime.
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.createEventProfileGameProjectionCore =
-  exports.READ_RETRY_DELAY_MS =
-  exports.READ_RETRY_ATTEMPTS =
-    void 0;
+exports.createEventProfileGameProjectionCore = void 0;
 const profileGameProjectionRecords_js_1 = require("./profileGameProjectionRecords.js");
 const documents_js_1 = require("./events/documents.js");
 const navigation_1 = require("@mons/shared/navigation");
 const ownership_js_1 = require("./events/ownership.js");
 const eventProjectionModel_js_1 = require("./events/eventProjectionModel.js");
 const READ_RETRY_ATTEMPTS = 2;
-exports.READ_RETRY_ATTEMPTS = READ_RETRY_ATTEMPTS;
 const READ_RETRY_DELAY_MS = 25;
-exports.READ_RETRY_DELAY_MS = READ_RETRY_DELAY_MS;
 const defaultWait = (milliseconds) =>
   new Promise((resolve) => {
     setTimeout(resolve, milliseconds);

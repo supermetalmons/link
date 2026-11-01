@@ -29,22 +29,6 @@ export function uniqueStoredLoginUids(...values: unknown[]): string[] {
   return [...result];
 }
 
-export function uniqueStrings(...values: unknown[]): string[] {
-  const result = new Set<string>();
-  for (const value of values) {
-    if (!Array.isArray(value)) {
-      continue;
-    }
-    for (const item of value) {
-      const normalized = cleanString(item);
-      if (normalized) {
-        result.add(normalized);
-      }
-    }
-  }
-  return [...result];
-}
-
 export function authMutationsDisabled(value: unknown): boolean {
   return value === "true";
 }

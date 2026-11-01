@@ -306,7 +306,7 @@ export function buildCanonicalRatingProjectionMutation(
     : { kind: "update-rating-projection", projection, value };
 }
 
-export function ratingProjectionColumns(
+function ratingProjectionColumns(
   value: CanonicalRatingUpdateValue,
   projection: CanonicalRatingProjectionKind,
 ): Record<string, D1Value> {

@@ -62,20 +62,16 @@ exports.validateTelegramMessageKey =
   exports.buildTelegramSendDesired =
   exports.buildTelegramEditDesired =
   exports.buildTelegramDeleteDesired =
-  exports.TELEGRAM_SCHEMA_VERSION =
   exports.TELEGRAM_MESSAGE_ROOT =
-  exports.TELEGRAM_DESTINATIONS =
     void 0;
 const crypto = __importStar(require("node:crypto"));
 const TELEGRAM_MESSAGE_ROOT = "telegramMessages";
 exports.TELEGRAM_MESSAGE_ROOT = TELEGRAM_MESSAGE_ROOT;
 const TELEGRAM_SCHEMA_VERSION = 2;
-exports.TELEGRAM_SCHEMA_VERSION = TELEGRAM_SCHEMA_VERSION;
 const TELEGRAM_DESTINATIONS = Object.freeze({
   community: "community",
   events: "events",
 });
-exports.TELEGRAM_DESTINATIONS = TELEGRAM_DESTINATIONS;
 const INVALID_RECORD_KEY_PATTERN = /[.#$/[\]\u0000-\u001f\u007f]/;
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";

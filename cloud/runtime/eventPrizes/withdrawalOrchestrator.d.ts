@@ -1,7 +1,7 @@
 // Generated from src/eventPrizes/withdrawalOrchestrator.ts. Run npm run generate:runtime.
 import type { WithdrawalRuntimeDependencies } from "./solanaTypes.js";
 import { validatePrizeAssignment } from "./assignmentValidation.js";
-export type WithdrawalCompletedResponse = {
+type WithdrawalCompletedResponse = {
   ok: true;
   status: "completed";
   eventId: string;

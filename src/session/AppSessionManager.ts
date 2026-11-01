@@ -262,6 +262,7 @@ const runTransition = async (
   }
 };
 
+/** @knipExternal Imported by browser-injected fixtures in test/bottomControls.browser.mjs. */
 export const transition = async (
   target: RouteState,
   options?: SessionTransitionOptions,

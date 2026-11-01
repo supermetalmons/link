@@ -1,6 +1,6 @@
 import { AuthApiFailure } from "./authErrors.ts";
 
-export type WagerReservationStorageMode = "frozen" | "d1";
+type WagerReservationStorageMode = "frozen" | "d1";
 
 export type WagerReservationControl = {
   storageMode: WagerReservationStorageMode;

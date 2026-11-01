@@ -1,20 +1,6 @@
 import { canonicalEvent } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
 import test from "node:test";
-
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (
-      context.parentURL?.endsWith(".ts") &&
-      (specifier.startsWith("./") || specifier.startsWith("../")) &&
-      !/\.[^/]+$/.test(specifier)
-    ) {
-      return nextResolve(`${specifier}.ts`, context);
-    }
-    return nextResolve(specifier, context);
-  },
-});
 
 const {
   decodeEventView,
@@ -22,16 +8,6 @@ const {
   normalizeEventPrizeId,
 } = await import("@mons/shared/events");
 const { mapProfileGameProjection } = await import("@mons/shared/navigation");
-const { normalizeFiniteNumber, normalizeString, normalizeStringOrNull } =
-  await import("../src/connection/valueNormalizers.ts");
-
-test("normalizes primitive stored values", () => {
-  assert.equal(normalizeString("value"), "value");
-  assert.equal(normalizeString(2), "");
-  assert.equal(normalizeStringOrNull(""), null);
-  assert.equal(normalizeFiniteNumber("12.9"), 12);
-  assert.equal(normalizeFiniteNumber("bad", 7), 7);
-});
 
 test("maps navigation games with canonical appearance values", () => {
   assert.deepEqual(

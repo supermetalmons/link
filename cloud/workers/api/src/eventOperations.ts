@@ -68,7 +68,7 @@ function isAuthErrorCode(value: string): value is AuthErrorCode {
   ].includes(value);
 }
 
-export function toEventApiFailure(error: unknown): AuthApiFailure {
+function toEventApiFailure(error: unknown): AuthApiFailure {
   if (error instanceof AuthApiFailure) {
     return error;
   }

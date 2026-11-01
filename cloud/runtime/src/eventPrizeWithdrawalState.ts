@@ -180,7 +180,7 @@ export type WithdrawalClaimInput = {
   nowMs: number;
 };
 
-export type WithdrawalClaimDecision = {
+type WithdrawalClaimDecision = {
   kind:
     | "completed"
     | "forbidden"
@@ -292,7 +292,6 @@ const decideWithdrawalClaim = ({
 
 export {
   EVENT_PRIZE_ADMIN_WALLET,
-  WITHDRAWAL_LEASE_MS,
   buildWithdrawalCompletion,
   decodeAdminSecretKey,
   decideWithdrawalClaim,

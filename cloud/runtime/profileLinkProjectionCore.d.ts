@@ -58,10 +58,6 @@ type Signature_createProfileLinkProjectionCore = (dependencies: {
     sourceUpdatedAtMs?: number;
   }): Promise<ProfileLinkProjectionSummary | null>;
 };
-declare const PROFILE_LINK_CATCHUP_MAX_INVITES = 20;
-declare const PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP = 1;
-declare const PROFILE_LINK_CATCHUP_CONCURRENCY = 3;
-declare const PROFILE_LINK_CATCHUP_TIMEOUT_MS = 50000;
 declare const processWithConcurrency: <T>(
   items: readonly T[],
   concurrency: number,
@@ -69,11 +65,4 @@ declare const processWithConcurrency: <T>(
   shouldContinue?: () => boolean,
 ) => Promise<void>;
 declare const createProfileLinkProjectionCore: Signature_createProfileLinkProjectionCore;
-export {
-  PROFILE_LINK_CATCHUP_CONCURRENCY,
-  PROFILE_LINK_CATCHUP_MAX_INVITES,
-  PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP,
-  PROFILE_LINK_CATCHUP_TIMEOUT_MS,
-  createProfileLinkProjectionCore,
-  processWithConcurrency,
-};
+export { createProfileLinkProjectionCore, processWithConcurrency };

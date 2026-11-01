@@ -55,4 +55,4 @@ async function inspectMatchPresentations(
   });
 }
 
-export { inspectMatchPresentations, type Dependencies };
+export { inspectMatchPresentations };

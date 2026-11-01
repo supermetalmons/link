@@ -348,7 +348,6 @@ const assertScheduledStartWindow: Signature_assertScheduledStartWindow = (
 };
 
 export {
-  EventSchedulingError,
   assertScheduledStartWindow,
   hasDateTimeScheduleRequest,
   parseScheduledDateParts,

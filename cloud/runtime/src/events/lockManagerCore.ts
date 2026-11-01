@@ -3,10 +3,10 @@ import type {
   EventLeaseKind,
   EventLeaseRecord,
 } from "../eventLeases.js";
-export type EventLockTransactionDecision =
+type EventLockTransactionDecision =
   | { commit: false; decision?: string }
   | { value: EventLeaseRecord | null; decision?: string };
-export type EventLockTransactionResult = {
+type EventLockTransactionResult = {
   committed: boolean;
   decision?: string;
   value: EventLeaseRecord | null;
@@ -339,6 +339,4 @@ export {
   EVENT_LOCK_REFRESH_INTERVAL_MS,
   EVENT_LOCK_TTL_MS,
   createEventLockManagerCore,
-  getOwnershipDecision,
-  resolveLockKind,
 };

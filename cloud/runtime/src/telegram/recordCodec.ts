@@ -5,6 +5,7 @@ import type {
   TelegramControlDocument,
   TelegramDeliveryDocument,
   TelegramMessageDocument,
+  TelegramOrphanedDelete,
   TelegramRetryProofDocument,
   TelegramSendEvidence,
 } from "./records.js";
@@ -105,9 +106,7 @@ export function readTelegramDesired(value: unknown): TelegramDesired | null {
     : null;
 }
 
-export function readTelegramSendEvidence(
-  value: unknown,
-): TelegramSendEvidence | null {
+function readTelegramSendEvidence(value: unknown): TelegramSendEvidence | null {
   if (
     !object(value) ||
     !keys(value, [
@@ -137,9 +136,7 @@ export function readTelegramSendEvidence(
   return value as TelegramSendEvidence;
 }
 
-export function readTelegramApplied(
-  value: unknown,
-): TelegramAppliedDocument | null {
+function readTelegramApplied(value: unknown): TelegramAppliedDocument | null {
   if (
     !object(value) ||
     !keys(value, [
@@ -564,8 +561,8 @@ export function requireTelegramTransaction(
 
 export function requireTelegramOrphanedDelete(
   value: unknown,
-): import("./records.js").TelegramOrphanedDelete {
+): TelegramOrphanedDelete {
   if (!orphanedDelete(value))
     throw new TypeError("invalid-telegram-orphaned-delete");
-  return value as import("./records.js").TelegramOrphanedDelete;
+  return value as TelegramOrphanedDelete;
 }

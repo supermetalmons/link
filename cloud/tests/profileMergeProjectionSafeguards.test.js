@@ -4,6 +4,9 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const { decodeAutomatchEntry } = require("../runtime/automatchRecords");
 const {
+  isProfileGameProjectionRecord,
+} = require("../runtime/profileGameProjectionRecords");
+const {
   createEventProfileGameProjectionCore,
 } = require("../runtime/eventProfileGameProjectionCore");
 const {
@@ -309,11 +312,7 @@ const runInviteProjection = async ({
           profileIds.flatMap((profileId) => {
             const data = projections[profileId];
             if (data === null || data === undefined) return [];
-            assert.ok(
-              require("../runtime/profileGameProjectionRecords").isProfileGameProjectionRecord(
-                data,
-              ),
-            );
+            assert.ok(isProfileGameProjectionRecord(data));
             currentVersions[profileId] ||= 1;
             return [[profileId, { data, version: currentVersions[profileId] }]];
           }),

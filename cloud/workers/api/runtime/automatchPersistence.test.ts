@@ -2,13 +2,13 @@ import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
 import { matchCreationFixture as readMatchCreationInput } from "../test/matchRecordFixture.ts";
 import {
   matchTestPort,
-  legacySessionClient,
+  legacySessionChanges,
 } from "../test/gameSessionTestPorts.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createAutomatchPersistenceCompatibility as createAutomatchPersistence } from "../src/automatchPersistence.ts";
+import { createAutomatchPersistence } from "../src/automatchPersistence.ts";
 import { createGameSessionMutationLockStore } from "../src/gameplayCoordinationD1.ts";
 import type { StateRepository } from "../test/stateRepositoryTestTypes.ts";
 import { validateTelegramTransactionDecision } from "../src/telegramTransaction.ts";
@@ -73,25 +73,16 @@ function persistence(
   database = db,
   onCommitted?: (inviteId: string) => Promise<void>,
 ) {
-  const persistence = createAutomatchPersistence(
-    database,
-    matchTestPort(client),
-    {
-      ...(onCommitted === undefined ? {} : { onCommitted }),
-      async prepareMatchPresentations(creations) {
-        return creations.map((creation) => ({
-          ...creation,
-          seedDigest: "a".repeat(64),
-          provenance: "creation" as const,
-        }));
-      },
+  return createAutomatchPersistence(database, matchTestPort(client), {
+    ...(onCommitted === undefined ? {} : { onCommitted }),
+    async prepareMatchPresentations(creations) {
+      return creations.map((creation) => ({
+        ...creation,
+        seedDigest: "a".repeat(64),
+        provenance: "creation" as const,
+      }));
     },
-  );
-  return {
-    ...persistence,
-    typedClient: persistence.client,
-    client: legacySessionClient(persistence.rawClient),
-  };
+  });
 }
 
 describe("automatch persistence integration", () => {
@@ -138,31 +129,33 @@ describe("automatch persistence integration", () => {
     const locks = runtime.decorateLocks(createGameSessionMutationLockStore(db));
     const lock = { lockId: `${fixtureInviteId}`, operationId: "operation-one" };
     await locks.acquire(lock, "owner", Date.now());
-    await runtime.client.patchRoot({
-      [`invites/${fixtureInviteId}`]: { hostId: "host", guestId: null },
-      [`players/host/matches/${fixtureInviteId}`]: {
-        fen: "initial",
-        flatMovesString: "",
-        color: "white",
-      },
-      [`automatch/${fixtureInviteId}`]: {
-        uid: "host",
-        timestamp: { ".sv": "timestamp" },
-      },
-      "gameplayMutationReceipts/operation-one": {
-        inviteId: `${fixtureInviteId}`,
-        requesterUid: "host",
-        response: { ok: true },
-      },
-      [`profileGameProjectionOutbox/automatch/${fixtureInviteId}`]: {
-        requestId: "operation-one",
-        status: "pending",
-      },
-    });
+    await runtime.client.commitSessionChanges(
+      legacySessionChanges({
+        [`invites/${fixtureInviteId}`]: { hostId: "host", guestId: null },
+        [`players/host/matches/${fixtureInviteId}`]: {
+          fen: "initial",
+          flatMovesString: "",
+          color: "white",
+        },
+        [`automatch/${fixtureInviteId}`]: {
+          uid: "host",
+          timestamp: { ".sv": "timestamp" },
+        },
+        "gameplayMutationReceipts/operation-one": {
+          inviteId: `${fixtureInviteId}`,
+          requesterUid: "host",
+          response: { ok: true },
+        },
+        [`profileGameProjectionOutbox/automatch/${fixtureInviteId}`]: {
+          requestId: "operation-one",
+          status: "pending",
+        },
+      }),
+    );
     await locks.release(lock, "owner");
     expect(raw.patches).toEqual([]);
     expect(
-      await runtime.client.getPath(`automatch/${fixtureInviteId}`),
+      await runtime.client.readAutomatchEntry(fixtureInviteId),
     ).toMatchObject({
       uid: "host",
     });
@@ -173,20 +166,18 @@ describe("automatch persistence integration", () => {
       sessionCreation: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
     expect(
-      await runtime.client.getPath(`invites/${fixtureInviteId}`),
+      await runtime.client.readInviteMetadata(fixtureInviteId),
     ).toMatchObject({
       hostId: "host",
     });
     expect(raw.values.has(`invites/${fixtureInviteId}`)).toBe(false);
-    const result = await runtime.client.transactPath(
-      `profileGameProjectionOutbox/automatch/${fixtureInviteId}`,
-      () => ({ value: null, decision: "cleared" }),
+    const acknowledged = await runtime.client.acknowledgeAutomatchProfileOutbox(
+      fixtureInviteId,
+      "operation-one",
     );
-    expect(result.committed).toBe(true);
+    expect(acknowledged).toBe(true);
     expect(
-      await runtime.client.getPath(
-        `profileGameProjectionOutbox/automatch/${fixtureInviteId}`,
-      ),
+      (await runtime.client.readAutomatchProfileOutbox(fixtureInviteId)).value,
     ).toBeNull();
     expect(
       await db
@@ -211,10 +202,12 @@ describe("automatch persistence integration", () => {
     const lock = { lockId: `${fixtureInviteId}`, operationId: "operation-one" };
     const nextLock = { ...lock, operationId: "operation-two" };
     await locks.acquire(lock, "owner", Date.now());
-    const commit = runtime.client.patchRoot({
-      [`invites/${fixtureInviteId}`]: { hostId: "host" },
-      [`automatch/${fixtureInviteId}`]: { uid: "host" },
-    });
+    const commit = runtime.client.commitSessionChanges(
+      legacySessionChanges({
+        [`invites/${fixtureInviteId}`]: { hostId: "host" },
+        [`automatch/${fixtureInviteId}`]: { uid: "host" },
+      }),
+    );
     let release: Promise<void> | undefined;
     try {
       expect(
@@ -229,7 +222,7 @@ describe("automatch persistence integration", () => {
       await base.acquire(nextLock, "next-owner", Date.now());
       expect(notified).toBe(false);
       expect(
-        await runtime.client.getPath(`invites/${fixtureInviteId}`),
+        await runtime.client.readInviteMetadata(fixtureInviteId),
       ).toMatchObject({
         hostId: "host",
       });
@@ -255,7 +248,7 @@ describe("automatch persistence integration", () => {
           .first<number>("n"),
       );
       observedInvites.push(
-        await runtime.client.getPath(`invites/${fixtureInviteId}`),
+        await runtime.client.readInviteMetadata(fixtureInviteId),
       );
     });
     const locks = runtime.decorateLocks(createGameSessionMutationLockStore(db));
@@ -266,14 +259,18 @@ describe("automatch persistence integration", () => {
     };
     await locks.acquire(outer, "outer-owner", Date.now());
     await locks.acquire(inner, "inner-owner", Date.now());
-    await runtime.client.patchRoot({
-      [`invites/${fixtureInviteId}`]: { hostId: "host" },
-      [`automatch/${fixtureInviteId}`]: { uid: "host" },
-    });
-    await runtime.client.patchRoot({
-      [`invites/${fixtureInviteId}/hostRematches`]: "1",
-      [`automatch/${fixtureInviteId}`]: { uid: "host" },
-    });
+    await runtime.client.commitSessionChanges(
+      legacySessionChanges({
+        [`invites/${fixtureInviteId}`]: { hostId: "host" },
+        [`automatch/${fixtureInviteId}`]: { uid: "host" },
+      }),
+    );
+    await runtime.client.commitSessionChanges(
+      legacySessionChanges({
+        [`invites/${fixtureInviteId}/hostRematches`]: "1",
+        [`automatch/${fixtureInviteId}`]: { uid: "host" },
+      }),
+    );
     expect(notifications).toEqual([]);
     await locks.release(inner, "inner-owner");
     expect(notifications).toEqual([]);
@@ -309,10 +306,12 @@ describe("automatch persistence integration", () => {
           operationId: "operation-one",
         };
         await locks.acquire(lock, "owner", Date.now());
-        await runtime.client.patchRoot({
-          [`invites/${fixtureInviteId}`]: { hostId: "host" },
-          [`automatch/${fixtureInviteId}`]: { uid: "host" },
-        });
+        await runtime.client.commitSessionChanges(
+          legacySessionChanges({
+            [`invites/${fixtureInviteId}`]: { hostId: "host" },
+            [`automatch/${fixtureInviteId}`]: { uid: "host" },
+          }),
+        );
         expect(notifications).toEqual([]);
         if (releaseFails) {
           await expect(locks.release(lock, "owner")).rejects.toBe(releaseError);
@@ -355,19 +354,21 @@ describe("automatch persistence integration", () => {
     const lock = { lockId: `${fixtureInviteId}`, operationId: "operation-one" };
     await locks.acquire(lock, "owner", Date.now());
     await expect(
-      runtime.client.patchRoot({
-        [`invites/${fixtureInviteId}`]: { hostId: "host" },
-        [`players/host/matches/${fixtureInviteId}`]: {
-          fen: "initial",
-          flatMovesString: "",
-          color: "white",
-        },
-        [`automatch/${fixtureInviteId}`]: { uid: "host" },
-        "gameplayMutationReceipts/operation-one": {
-          inviteId: `${fixtureInviteId}`,
-          requesterUid: "host",
-        },
-      }),
+      runtime.client.commitSessionChanges(
+        legacySessionChanges({
+          [`invites/${fixtureInviteId}`]: { hostId: "host" },
+          [`players/host/matches/${fixtureInviteId}`]: {
+            fen: "initial",
+            flatMovesString: "",
+            color: "white",
+          },
+          [`automatch/${fixtureInviteId}`]: { uid: "host" },
+          "gameplayMutationReceipts/operation-one": {
+            inviteId: `${fixtureInviteId}`,
+            requesterUid: "host",
+          },
+        }),
+      ),
     ).rejects.toThrow("connection-lost");
     await locks.release(lock, "owner");
     expect(notifications).toEqual([]);
@@ -393,8 +394,8 @@ describe("automatch persistence integration", () => {
       flatMovesString: "move",
     });
     expect(
-      await runtime.client.getPath("gameplayMutationReceipts/operation-one"),
-    ).toMatchObject({ requesterUid: "host" });
+      await runtime.client.readGameSessionMutationReceipt("operation-one"),
+    ).toMatchObject({ kind: "valid", value: { requesterUid: "host" } });
     expect(
       await db
         .prepare(
@@ -413,9 +414,11 @@ describe("automatch persistence integration", () => {
       )
       .run();
     await expect(
-      runtime.client.patchRoot({
-        [`automatch/${fixtureInviteId}`]: { uid: "host" },
-      }),
+      runtime.client.commitSessionChanges(
+        legacySessionChanges({
+          [`automatch/${fixtureInviteId}`]: { uid: "host" },
+        }),
+      ),
     ).rejects.toMatchObject({
       status: 503,
       message: "automatch-persistence-frozen",
@@ -460,23 +463,25 @@ describe("automatch persistence integration", () => {
       const raw = memoryState();
       const runtime = persistence(raw.client);
       await expect(
-        runtime.client.getPath(`invites/${fixtureInviteId}`),
+        runtime.client.readInviteMetadata(fixtureInviteId),
       ).rejects.toThrow(
         backend === "automatch"
           ? "automatch-control-unavailable"
           : "backend-retired",
       );
       await expect(
-        runtime.client.patchRoot({
-          [`automatch/${fixtureInviteId}`]: { uid: "host" },
-        }),
+        runtime.client.commitSessionChanges(
+          legacySessionChanges({
+            [`automatch/${fixtureInviteId}`]: { uid: "host" },
+          }),
+        ),
       ).rejects.toThrow(
         backend === "automatch"
           ? "automatch-control-unavailable"
           : "backend-retired",
       );
       await expect(
-        runtime.typedClient.projectionRecovery.repairInvalidAutomatchProfileOutbox(
+        runtime.client.projectionRecovery.repairInvalidAutomatchProfileOutbox(
           `${fixtureInviteId}`,
           100,
           () => "repair",
@@ -521,7 +526,7 @@ describe("automatch persistence integration", () => {
     const raw = memoryState();
     const runtime = persistence(raw.client);
     await expect(
-      runtime.typedClient.commitSessionChanges([
+      runtime.client.commitSessionChanges([
         {
           kind: "invite-merge",
           inviteId: `${fixtureInviteId}`,
@@ -529,9 +534,9 @@ describe("automatch persistence integration", () => {
         },
       ]),
     ).rejects.toThrow("invite-source-transition-required");
-    expect(runtime.typedClient).not.toHaveProperty("getPath");
-    expect(runtime.typedClient).not.toHaveProperty("patchRoot");
-    expect(runtime.typedClient).not.toHaveProperty("transactPath");
+    expect(runtime.client).not.toHaveProperty("getPath");
+    expect(runtime.client).not.toHaveProperty("patchRoot");
+    expect(runtime.client).not.toHaveProperty("transactPath");
     expect(raw.values.size).toBe(0);
   });
 

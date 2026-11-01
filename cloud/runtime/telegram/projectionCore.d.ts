@@ -5,8 +5,8 @@ import type {
   TelegramAutomatchProjectionGuardWrite,
   TelegramMessageDocument,
 } from "./records.js";
-export type AutomatchTelegramSourceDocument = AutomatchTelegramSourceRecord;
-export type TelegramRatingProjectionInput = {
+type AutomatchTelegramSourceDocument = AutomatchTelegramSourceRecord;
+type TelegramRatingProjectionInput = {
   telegramDeliveryVersion: 2 | null;
   status: "processing" | "done" | "blocked";
   isEventMatch: boolean;
@@ -17,10 +17,7 @@ export type TelegramRatingProjectionInput = {
   updateRatingMessage: string | null;
   completedAtMs: number | null;
 };
-export declare function retainAutomatchTelegramSource(
-  value: unknown,
-): AutomatchTelegramSourceDocument | null;
-export type AutomatchLifecycle = "pending" | "matched" | "canceled";
+type AutomatchLifecycle = "pending" | "matched" | "canceled";
 export type AutomatchTelegramProjection = {
   operation: "send" | "edit";
   lifecycle: AutomatchLifecycle;
@@ -35,17 +32,15 @@ export type AutomatchTelegramProjection = {
   resultDigests: Record<string, string>;
   sourceRevision: string;
 };
-export type ProjectionDecision = {
+type ProjectionDecision = {
   allowed: boolean;
   reason: string;
 };
-export type RatingProjectionMerge = {
+type RatingProjectionMerge = {
   changed: boolean;
   source: AutomatchTelegramSourceDocument | null;
   reason: "inserted" | "duplicate" | "skipped";
 };
-declare const AUTOMATCH_PROJECTION_GUARD_VERSION = 1;
-declare const normalizeString: (value: unknown) => string;
 declare const resolveAutomatchTelegramLifecycle: (
   source: AutomatchTelegramSourceDocument | null,
   inviteData: InviteDocument | null,
@@ -74,9 +69,6 @@ declare const buildAutomatchTelegramProjection: (input: {
   source: AutomatchTelegramSourceDocument | null;
   inviteData: InviteDocument | null;
 }) => AutomatchTelegramProjection | null;
-declare const isEventRatingUpdate: (
-  ratingUpdate: TelegramRatingProjectionInput | null,
-) => boolean | null;
 declare const shouldProjectRatingTelegramUpdate: (
   ratingUpdate: TelegramRatingProjectionInput | null,
 ) => boolean;
@@ -85,14 +77,11 @@ declare const mergeRatingResultFragment: (
   ratingUpdate: TelegramRatingProjectionInput,
 ) => RatingProjectionMerge;
 export {
-  AUTOMATCH_PROJECTION_GUARD_VERSION,
   buildAutomatchProjectionGuard,
   buildAutomatchTelegramProjection,
   evaluateAutomatchProjectionUpdate,
   getAutomatchResultFragments,
-  isEventRatingUpdate,
   mergeRatingResultFragment,
-  normalizeString,
   renderMatchedAutomatchTelegramText,
   resolveAutomatchTelegramLifecycle,
   shouldProjectRatingTelegramUpdate,

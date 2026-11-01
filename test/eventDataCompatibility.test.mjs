@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
+import { registerTypeScriptTestHooks } from "./support/typescriptHooks.mjs";
 import test from "node:test";
 import { isEventSnapshotResponse } from "@mons/shared/events";
 import {
@@ -7,17 +7,7 @@ import {
   eventId,
 } from "./fixtures/eventDataCompatibility.mjs";
 
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (
-      context.parentURL?.endsWith(".ts") &&
-      (specifier.startsWith("./") || specifier.startsWith("../")) &&
-      !/\.[^/]+$/.test(specifier)
-    )
-      return nextResolve(`${specifier}.ts`, context);
-    return nextResolve(specifier, context);
-  },
-});
+registerTypeScriptTestHooks();
 
 const { validateEventAggregate } =
   await import("../cloud/workers/api/src/eventD1/validation.ts");

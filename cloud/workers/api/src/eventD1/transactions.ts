@@ -4,6 +4,10 @@ import {
 } from "../../../../runtime/eventProgressRecords.js";
 import type { EventProjectionOutboxDocument } from "../../../../runtime/eventProjectionOutboxRecords.js";
 import type { EventTelegramProjectionStateDocument } from "../../../../runtime/telegram/eventProjectionRecords.js";
+import type {
+  EventField,
+  EventFieldValues,
+} from "../../../../runtime/eventCommands.js";
 import {
   type EventD1Connection,
   type EventMutationOptions,
@@ -427,18 +431,13 @@ export function transactEventRecord(
   );
 }
 
-export function transactEventField<
-  K extends import("../../../../runtime/eventCommands.js").EventField,
->(
+export function transactEventField<K extends EventField>(
   db: EventD1Connection,
   eventId: string,
   field: K,
   updater: (
-    current:
-      import("../../../../runtime/eventCommands.js").EventFieldValues[K] | null,
-  ) => TransactionDecision<
-    import("../../../../runtime/eventCommands.js").EventFieldValues[K]
-  >,
+    current: EventFieldValues[K] | null,
+  ) => TransactionDecision<EventFieldValues[K]>,
   options: EventTransactionOptions,
 ) {
   return transactEventValue(
@@ -450,13 +449,8 @@ export function transactEventField<
       const snapshot = result.snapshot;
       return {
         value: cloneJson(snapshot.event?.[field] ?? null) as
-          | import("../../../../runtime/eventCommands.js").EventFieldValues[K]
-          | null,
-        mutation: (
-          value:
-            | import("../../../../runtime/eventCommands.js").EventFieldValues[K]
-            | null,
-        ): EventMutation =>
+          EventFieldValues[K] | null,
+        mutation: (value: EventFieldValues[K] | null): EventMutation =>
           ({ kind: "event-field", eventId, field, value }) as EventMutation,
         options: {
           eventSnapshot: snapshot,

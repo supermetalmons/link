@@ -29,30 +29,19 @@ Authenticate Wrangler locally or supply `CLOUDFLARE_API_TOKEN` through the proce
 
 ## Match timer storage
 
-The timer runtime uses invite Durable Object SQLite exclusively. Existing rooms require verified local layout version 2 and a local cohort for every match. Missing or incompatible state remains unavailable; fresh rooms establish the local layout before business writes. There is no timer-backend setting or D1 fallback.
-
-Preserve absolute deadlines, highest-turn markers, claims, and downstream effect receipts. Validate retry, takeback, eviction, terminal-claim replay, and writer-fence behavior locally, then use the routine release and affected invite-lifecycle checks. Promote only after the required layout receipts are verified across the approved existing-room scope. A rollback version must understand the verified local layout and writer guards; never restore an older timer backend or reset a stored deadline.
+See [canonical timer storage](#canonical-timer-storage) for local layout requirements, release checks, and retained evidence.
 
 ## Automatch queue selection
 
-The live-ticket and pending-enqueue projections in `PROFILE_GAMES_DB` are maintained by triggers from canonical automatch records and unchanged v2 journals. The persisted `automatch_runtime_control.metadata_json.queueSelection` flag controls selection; the absence of `fifo` retains legacy selection. Bootstrap response enrichment and committed-session notifications are always enabled independently of this flag.
+The live-ticket and pending-enqueue projections in `PROFILE_GAMES_DB` are maintained by triggers from canonical automatch records and session journals. Queue selection always uses FIFO; retained `automatch_runtime_control.metadata_json.queueSelection` values do not control the runtime. Bootstrap response enrichment and committed-session notifications are always enabled.
 
-Inspect projection integrity and the current selection mode read-only:
+Inspect projection integrity and control state read-only:
 
 ```sh
 npm run manage:automatch-queue -- --inspect
 ```
 
-If FIFO activation is required, verify that a compatible API version with conflict retries and journal recovery is serving 100% of traffic, then use its exact Version ID:
-
-```sh
-npm run manage:automatch-queue -- --activate --candidate-version-id <promoted-compatible-version-id>
-npm run manage:automatch-queue -- --inspect
-```
-
-Activation rechecks projection integrity in the statement that changes the flag. It preserves other metadata and requires active D1 authority with unchanged admission epochs. The Version ID records release evidence; the operator does not verify deployment itself. No empty queue, write freeze, or Queue pause is required. Resolve malformed or unrecoverable retained data without deleting evidence or rewriting payload digests.
-
-FIFO orders eligible tickets by `(enqueued_at_ms, invite_id)`. Prepared matches and cancellations remove tickets from consideration; receipt-only reservations and pending enqueues require targeted recovery. Preserve canonical records, journal payloads, receipts, tombstone revisions, tables, and triggers on rollback. Validate concurrency, replay, cancellation, and query plans locally; do not put smoke participants into the public matching queue.
+FIFO orders eligible tickets by `(enqueued_at_ms, invite_id)`. Prepared matches and cancellations remove tickets from consideration; receipt-only reservations and pending enqueues require targeted recovery. Resolve malformed or unrecoverable retained data without deleting evidence or rewriting payload digests. Preserve canonical records, journal payloads, receipts, tombstone revisions, tables, and triggers on rollback. Validate concurrency, replay, cancellation, and query plans locally; do not put smoke participants into the public matching queue.
 
 ## Canonical operators
 
@@ -141,15 +130,13 @@ This publication updates code for new instances and does not modify Queue delive
 
 ## Scheduled-event recovery
 
-Scheduled-start recovery uses the sweep's existing admission to create only a missing progress outbox and read its snapshot in one guarded batch. Existing outboxes and deadlines are preserved, and Workflow creation results avoid redundant provider lookups. Deadline-aware discovery requires the additive index described below; no bindings, Cron changes, write freezes, or Queue pauses are required. Validate busy combined recovery, deadline priority, and admission/provider edge cases locally:
+The current recovery behavior and budgets are documented in [cloud operations](../cloud/README.md#events-wagers-and-withdrawals). Canonical event migrations include the scheduled-announcement index. Validate busy combined recovery, deadline priority, and admission/provider edge cases locally:
 
 ```sh
 npm run test:api:runtime -- projectionRecoveryScheduledBudget.test.ts scheduledRecoveryDeadlines.test.ts eventScheduledRecoveryD1.test.ts eventProgressRecoveryD1.test.ts eventProgressDispatch.test.ts
 ```
 
-The combined fixture includes a reminder-heavy background page and bulk recreation of errored/terminated Workflows alongside busy auth, transitions, and projections. Discovery returns at most 800 urgent candidates, prioritizing imminent announcement deadlines and missing schedules before matching checkpointed outboxes. Execution reserves 10 units per start and 40 per eligible announcement from separate 4,500-unit urgent and 1,000-unit background budgets. The background cursor advances only over the attempted prefix, retaining deferred work. Use the routine candidate, promotion, and affected event verification steps; do not add a Cron observation wait.
-
-Changes to shared event/profile repositories may affect both owned Workflow definitions. Use the routine API release path and publish affected definitions. Verify authenticated current/ended event reads and affected metadata, wager, or gameplay behavior without adding an observation window.
+Changes to shared event/profile repositories may affect both owned Workflow definitions. Use the routine API release path and publish affected definitions. Verify authenticated current/ended event reads and affected metadata, wager, or gameplay behavior without adding a Cron observation wait.
 
 ## Wager settlement delivery
 
@@ -179,7 +166,9 @@ Keep API `workers_dev` and `preview_urls` disabled. Use the custom domain for ve
 
 ## Canonical timer storage
 
-Current timer starts and claims use the invite Durable Object's verified local layout. The API has no D1 timer backend, timer-storage selector, global timer-start sweep, or temporary cleanup ingress. Permanent writer guards and retained outcomes remain required after the storage transition. Existing rooms with missing or inconsistent layout evidence fail closed; do not recreate empty replacement tables or reset their metadata to force startup.
+Current timer starts and claims use the invite Durable Object's verified local layout version 2 and a local cohort for every match. Fresh rooms establish the layout atomically before business writes. The API has no D1 timer backend, timer-storage selector, global timer-start sweep, or temporary cleanup ingress. Permanent writer guards and retained outcomes remain required. Existing rooms with missing or inconsistent layout evidence fail closed; do not recreate empty replacement tables or reset their metadata to force startup.
+
+Preserve absolute deadlines, highest-turn markers, claims, and downstream effect receipts. Validate retry, takeback, eviction, terminal-claim replay, and writer-fence behavior locally, then use the routine release and affected invite-lifecycle checks. A rollback version must understand the verified local layout and writer guards; never restore an older timer backend or reset a stored deadline.
 
 Keep the protected source/schema comparisons, exact scope, copy acknowledgements or verified empty decisions, and post-retirement schema checks with the release evidence. Applied migrations and immutable ownership/receipt records remain preserved. Migration `0039_retire_canonical_timer_starts.sql` retires the former D1 timer table and deletion context only after its control, drain, and exact-schema checks pass; current local timer rows are outside that migration's scope.
 
@@ -368,8 +357,8 @@ Session signing keys, X credentials, Telegram credentials, Helius, and the prize
 
 Stage reviewed secret changes through versioned candidate operations, inspect the final candidate's binding names, then promote that exact version. Deleting a secret through a command that immediately deploys is not a substitute for candidate preparation. Never log secret values or remove shared user-level provider authentication.
 
-## Outstanding infrastructure retirement
+## Deferred Firebase cleanup
 
-The completed Firebase migration retains immutable evidence in D1 and its release record in Git history. No source archive or migration executor is needed for current operations.
+The [canonical cleanup report](../cloud/reports/canonical-cleanup-2026-11-01.md) records the completed migration, retained evidence, and deferred Firebase cleanup. Current operations do not use the completed migration executor.
 
-Google project `mons-link` (`390871694056`), including `mons-attester`, was last verified `ACTIVE` on September 11, 2026 after automatic approval review rejected project-wide deletion. Its decommissioning remains separate work: inspect [Google Cloud project settings](https://console.cloud.google.com/iam-admin/settings?project=mons-link), verify `DELETE_REQUESTED` after an authorized deletion, and repeat affected API checks. Repository cleanup does not establish that the project is shut down.
+The deferred scope is eligible obsolete data in Firebase project `mons-link`, pending account access. Project deletion is outside this cleanup. Preserve financial records, authentication and revocation state, recovery evidence, and protected archives. Repository cleanup does not establish the current state of external infrastructure.

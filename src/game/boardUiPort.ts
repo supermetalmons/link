@@ -34,7 +34,7 @@ export type BoardPlayerInfoOverlayState = {
   wagerLayoutRevision: number;
 };
 
-export const createEmptyPlayerInfoSlotState = (): BoardPlayerInfoSlotState => ({
+const createEmptyPlayerInfoSlotState = (): BoardPlayerInfoSlotState => ({
   visible: false,
   nameVisible: false,
   scoreText: "",
@@ -57,7 +57,7 @@ export const createEmptyPlayerInfoOverlayState =
     wagerLayoutRevision: 0,
   });
 
-export const playerInfoSlotStatesEqual = (
+const playerInfoSlotStatesEqual = (
   a: BoardPlayerInfoSlotState,
   b: BoardPlayerInfoSlotState,
 ): boolean =>

@@ -29,21 +29,21 @@ export type EventAutoRecoveryReason =
 
 export const PENDING_JOIN_POLL_INTERVAL_MS = 350;
 export const PENDING_JOIN_POLL_TIMEOUT_MS = 60_000;
-export const DEFAULT_NOW_REFRESH_MS = 30_000;
-export const POST_START_NOW_REFRESH_MS = 5_000;
-export const MAX_NOW_REFRESH_MS = 60_000;
-export const NOW_REFRESH_BOUNDARY_FUDGE_MS = 50;
+const DEFAULT_NOW_REFRESH_MS = 30_000;
+const POST_START_NOW_REFRESH_MS = 5_000;
+const MAX_NOW_REFRESH_MS = 60_000;
+const NOW_REFRESH_BOUNDARY_FUDGE_MS = 50;
 export const EVENT_AUTO_RECOVERY_DELAY_MS = 1_000;
 export const EVENT_AUTO_RECOVERY_MIN_GAP_MS = 6_000;
 export const EVENT_AUTO_RECOVERY_MAX_ATTEMPTS_PER_REASON = 2;
-export const MINUTE_MS = 60_000;
-export const HOUR_MS = 60 * MINUTE_MS;
-export const DAY_MS = 24 * HOUR_MS;
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
 
-export const formatRelativeStartUnit = (value: number, unit: string): string =>
+const formatRelativeStartUnit = (value: number, unit: string): string =>
   `${value} ${unit}${value === 1 ? "" : "s"}`;
 
-export const formatRelativeStartUnits = (
+const formatRelativeStartUnits = (
   primary: string,
   secondaryValue: number,
   secondaryUnit: string,
@@ -171,7 +171,7 @@ export const canSelectEventPrize = (
     isEventPrizeRevealOpen(event.status, event.startAtMs, nowMs)
   );
 
-export const getParticipantCount = (event: EventRecord | null): number => {
+const getParticipantCount = (event: EventRecord | null): number => {
   if (!event || !event.participants) {
     return 0;
   }
@@ -366,7 +366,7 @@ export const getEventAutoRecoveryReason = (
   return "active-should-end";
 };
 
-export const isProfileParticipatingInMatch = (
+const isProfileParticipatingInMatch = (
   match: EventMatch,
   profileId: string,
 ): boolean => {
@@ -375,7 +375,7 @@ export const isProfileParticipatingInMatch = (
   );
 };
 
-export const getMatchKeyIndex = (matchKey: string): number | null => {
+const getMatchKeyIndex = (matchKey: string): number | null => {
   return parseEventMatchKey(matchKey)?.matchIndex ?? null;
 };
 
@@ -440,7 +440,7 @@ export const getMatchSideData = (
   };
 };
 
-export const isKnownMatchSide = (side: MatchSideData): boolean => {
+const isKnownMatchSide = (side: MatchSideData): boolean => {
   const displayName = side.displayName?.trim();
   return (
     !!side.profileId ||
@@ -450,9 +450,7 @@ export const isKnownMatchSide = (side: MatchSideData): boolean => {
   );
 };
 
-export const getSingleKnownMatchSide = (
-  match: EventMatch,
-): MatchSide | null => {
+const getSingleKnownMatchSide = (match: EventMatch): MatchSide | null => {
   const hostKnown = isKnownMatchSide(getMatchSideData(match, "host"));
   const guestKnown = isKnownMatchSide(getMatchSideData(match, "guest"));
   if (hostKnown === guestKnown) {
@@ -593,7 +591,7 @@ export const getBracketMatchAction = (
   };
 };
 
-export type IndexedEventMatch = {
+type IndexedEventMatch = {
   roundIndex: number;
   matchIndex: number;
   match: EventMatch;
@@ -603,7 +601,7 @@ export const getEventMatchInviteId = (match: EventMatch): string => {
   return match.inviteId?.trim() ?? "";
 };
 
-export const isResolvedEventMatch = (match: EventMatch): boolean => {
+const isResolvedEventMatch = (match: EventMatch): boolean => {
   return (
     match.status === "host" ||
     match.status === "guest" ||
@@ -611,19 +609,15 @@ export const isResolvedEventMatch = (match: EventMatch): boolean => {
   );
 };
 
-export const isPendingInviteEventMatch = (match: EventMatch): boolean => {
+const isPendingInviteEventMatch = (match: EventMatch): boolean => {
   return match.status === "pending" && getEventMatchInviteId(match) !== "";
 };
 
-export const isActionablePendingInviteEventMatch = (
-  match: EventMatch,
-): boolean => {
+const isActionablePendingInviteEventMatch = (match: EventMatch): boolean => {
   return isPendingInviteEventMatch(match) && match.winnerDisqualified !== true;
 };
 
-export const getIndexedMatchesForRound = (
-  round: EventRound,
-): IndexedEventMatch[] => {
+const getIndexedMatchesForRound = (round: EventRound): IndexedEventMatch[] => {
   return getSortedMatches(round).map((match, sortedIndex) => ({
     roundIndex: round.roundIndex,
     matchIndex: parseEventMatchKey(match.matchKey)?.matchIndex ?? sortedIndex,
@@ -631,7 +625,7 @@ export const getIndexedMatchesForRound = (
   }));
 };
 
-export const getFirstPendingInviteMatch = (
+const getFirstPendingInviteMatch = (
   event: EventRecord | null,
 ): EventMatch | null => {
   if (!event) {
@@ -688,7 +682,7 @@ export const getActivePendingMatches = (
   return matches;
 };
 
-export const getRoundMatchByIndex = (
+const getRoundMatchByIndex = (
   round: EventRound,
   matchIndex: number,
 ): EventMatch | null => {
@@ -705,7 +699,7 @@ export const getRoundMatchByIndex = (
   return fallbackMatch;
 };
 
-export const findPendingInviteMatchInBranch = (
+const findPendingInviteMatchInBranch = (
   roundsByIndex: Map<number, EventRound>,
   roundIndex: number,
   matchIndex: number,
@@ -742,7 +736,7 @@ export const findPendingInviteMatchInBranch = (
   );
 };
 
-export const getAwaitedPendingInviteMatchForParticipant = (
+const getAwaitedPendingInviteMatchForParticipant = (
   event: EventRecord | null,
   profileId: string,
 ): EventMatch | null => {

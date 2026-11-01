@@ -10,10 +10,7 @@ import {
 } from "./leaderboardModels";
 import { useLeaderboard } from "./useLeaderboard";
 
-export {
-  resetLeaderboardCache,
-  type LeaderboardType,
-} from "./leaderboardCache";
+export { type LeaderboardType } from "./leaderboardCache";
 
 export const LEADERBOARD_TYPE_ICON_URLS = {
   rating: "https://cdn.lil.org/mons/icons/elo_2.webp",

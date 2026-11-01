@@ -21,7 +21,7 @@ import {
 
 type BindingValue = string | number | null;
 type Row = Record<string, unknown>;
-export type GuardedOperatorSession = {
+type GuardedOperatorSession = {
   transport: MaintenanceTransport;
   dispose(): Promise<void>;
 };

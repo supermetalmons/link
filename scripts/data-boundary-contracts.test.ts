@@ -84,10 +84,7 @@ const publicContracts: Record<string, readonly string[]> = {
     "EventProgressPendingRecord",
     "EventProgressDeadLetter",
   ],
-  "cloud/workers/api/src/eventProgressCodec.ts": [
-    "EventProgressPlan",
-    "RetainedEventProgressPlan",
-  ],
+  "cloud/workers/api/src/eventProgressCodec.ts": ["EventProgressPlan"],
   "cloud/workers/api/src/eventStoreContracts.ts": [
     "EventStore",
     "EventProgressOutboxWriter",

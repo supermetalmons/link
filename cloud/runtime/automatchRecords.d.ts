@@ -44,7 +44,7 @@ export type AutomatchEntryRead = AutomatchEntryRecord | null;
 export type AutomatchEntryWrite = Omit<AutomatchEntryRecord, "timestamp"> & {
   timestamp: SessionTimestamp;
 };
-export type AutomatchTelegramResult = {
+type AutomatchTelegramResult = {
   completedAtMs: number;
   text: string;
 };
@@ -69,17 +69,17 @@ export type AutomatchTelegramSourceWrite = Omit<
   createdAtMs: SessionTimestamp;
   updatedAtMs: SessionTimestamp;
 };
-export type RetiredGameplayEffects = {
+type RetiredGameplayEffects = {
   state: "retired";
   retiredAtMs: number;
   sourceDigest: string;
 };
-export type GameplayEffectsState =
+type GameplayEffectsState =
   | {
       state: "enabled";
     }
   | RetiredGameplayEffects;
-export type SuccessfulStartAutomatchResponse = Extract<
+type SuccessfulStartAutomatchResponse = Extract<
   StartAutomatchResponse,
   {
     ok: true;
@@ -150,11 +150,11 @@ export type GameSessionMutationReceiptWrite<
     completedAtMs: SessionTimestamp;
   };
 }[Kind];
-export type MutationReceiptRecord =
+type MutationReceiptRecord =
   AutomatchReceiptView | GameSessionMutationReceiptView;
 export type MutationReceiptWrite =
   AutomatchReceiptWrite | GameSessionMutationReceiptWrite;
-export type MutationReceiptExpirationRecord = {
+type MutationReceiptExpirationRecord = {
   schemaVersion: 1;
   completedAtMs: number;
 };
@@ -228,27 +228,12 @@ export type AutomatchRecordMap = {
   gameplayMutationReceipts: MutationReceiptRecord;
   gameplayMutationReceiptExpirations: MutationReceiptExpirationRecord;
 };
-export declare function isAutomatchEntryRecord(
-  value: unknown,
-): value is AutomatchEntryRecord;
-export declare function isAutomatchTelegramSourceRecord(
-  value: unknown,
-): value is AutomatchTelegramSourceRecord;
-export declare function isGameplayEffectsState(
-  value: unknown,
-): value is GameplayEffectsState;
 export declare function isAutomatchReceiptRecord(
   value: unknown,
 ): value is AutomatchReceiptView;
 export declare function isGameSessionMutationReceiptRecord(
   value: unknown,
 ): value is GameSessionMutationReceiptView;
-export declare function isMutationReceiptExpirationRecord(
-  value: unknown,
-): value is MutationReceiptExpirationRecord;
-export declare function isHistoricalMatchDescriptorWrite(
-  value: unknown,
-): value is HistoricalMatchDescriptorWrite;
 export declare function isAutomatchTelegramOutboxRecord(
   value: unknown,
 ): value is AutomatchTelegramOutboxRecord;

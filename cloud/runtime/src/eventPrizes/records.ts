@@ -6,8 +6,7 @@ import { isValidSolanaAddress } from "../shared/solana.js";
 
 export type WithdrawalStatus =
   "blocked" | "completed" | "processing" | "submitted";
-export type WithdrawalBlockReason =
-  "asset-owner-mismatch" | "canonical-data-cutover";
+type WithdrawalBlockReason = "asset-owner-mismatch" | "canonical-data-cutover";
 export type WithdrawalSubmissionEvidence = {
   transactionSignature: string;
   signedTransactionBase64: string;

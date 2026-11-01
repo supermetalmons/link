@@ -9,7 +9,6 @@ import { getMatchStateRpc } from "../src/matchStateRpc.ts";
 import type { InviteReactions } from "../src/inviteReactions.ts";
 import { MatchWriterStore } from "../src/matchWriterStore.ts";
 import { matchWriterWriteGuards } from "../src/matchWriterSql.ts";
-import { initializeApplicationObjectControl } from "../src/applicationObjectStorage.ts";
 import type { MatchStateEventEffectsWireRequest } from "../src/matchStateWire.ts";
 import { parseMatchStateEventEffects } from "../src/matchStateRequestCodec.ts";
 import { currentApplicationAdmission } from "../src/applicationExecution.ts";
@@ -159,22 +158,6 @@ export function runInCanonicalMatchWriterFixture<T>(
     if (!result) throw new Error("fixture-timer-writer-incomplete");
     return result.value;
   });
-}
-
-export async function runInExistingCanonicalMatchWriterFixture<T>(
-  room: Room,
-  work: (
-    instance: InviteReactions,
-    state: DurableObjectState,
-  ) => T | Promise<T>,
-): Promise<T> {
-  await activateCanonicalApplicationFixture();
-  await runInAdmittedRoom(room, async (_instance, state) => {
-    const admission = currentApplicationAdmission();
-    if (!admission) throw new Error("fixture-admission-missing");
-    await initializeApplicationObjectControl(state.storage, admission);
-  });
-  return runInCanonicalMatchWriterFixture(room, work);
 }
 
 export function canonicalMatchEnvironment(env: Env): Env {

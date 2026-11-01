@@ -167,7 +167,7 @@ export async function readProjectionOwnershipSnapshot(
   });
 }
 
-export async function readEventProjectionOwnershipSnapshot(
+async function readEventProjectionOwnershipSnapshot(
   profileDb: D1Database,
   query: CanonicalProfileOwnershipQuery,
 ) {

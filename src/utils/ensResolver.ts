@@ -7,7 +7,7 @@ let cacheGeneration = 0;
 
 export type EnsProfile = { name: string; avatar?: string | null };
 
-export const decodeEnsName = (value: unknown): string | null => {
+const decodeEnsName = (value: unknown): string | null => {
   if (!value || typeof value !== "object") {
     return null;
   }

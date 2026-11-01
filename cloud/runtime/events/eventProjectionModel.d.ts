@@ -3,7 +3,6 @@ import type { EventData, EventParticipants } from "./model.js";
 import "@mons/shared/navigation";
 declare const NAVIGATION_PARTICIPANT_PREVIEW_LIMIT = 6;
 declare const normalizeString: (value: unknown) => string | null;
-declare const normalizeFiniteNumberOrNull: (value: unknown) => number | null;
 declare const mapEventStatusToNavigationStatus: (
   status: unknown,
 ) => "ended" | "active" | "waiting" | "dismissed";
@@ -25,6 +24,5 @@ export {
   getListSortAtMs,
   getOwnerProfileIds,
   mapEventStatusToNavigationStatus,
-  normalizeFiniteNumberOrNull,
   normalizeString,
 };

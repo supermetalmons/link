@@ -14,7 +14,7 @@ import type {
 } from "../../../runtime/transactions.js";
 import type { EventOutboxReads } from "./eventOutboxReadRepository.ts";
 import type { EventSyncThrottleRecord } from "./eventD1.ts";
-export type EventLockGuard = {
+type EventLockGuard = {
   eventId: string;
   lockRoot: string;
   lockId: string;

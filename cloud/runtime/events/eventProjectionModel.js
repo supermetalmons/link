@@ -2,7 +2,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.normalizeString =
-  exports.normalizeFiniteNumberOrNull =
   exports.mapEventStatusToNavigationStatus =
   exports.getOwnerProfileIds =
   exports.getListSortAtMs =
@@ -18,20 +17,6 @@ const MAX_TIMESTAMP_MS = 253402300799999;
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : null;
 exports.normalizeString = normalizeString;
-const normalizeFiniteNumberOrNull = (value) => {
-  const numeric =
-    typeof value === "number"
-      ? value
-      : typeof value === "string" && value.trim() !== ""
-        ? Number(value)
-        : NaN;
-  if (!Number.isFinite(numeric)) {
-    return null;
-  }
-  const normalized = Math.floor(numeric);
-  return normalized > 0 ? normalized : null;
-};
-exports.normalizeFiniteNumberOrNull = normalizeFiniteNumberOrNull;
 const mapEventStatusToNavigationStatus = (status) => {
   if (status === "active") {
     return "active";

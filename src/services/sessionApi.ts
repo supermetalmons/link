@@ -31,7 +31,7 @@ import {
   type SessionEventBootstrapTarget,
   type SessionIdentityBootstrap,
 } from "@mons/shared/session-bootstrap";
-export type { SessionTokenResponse } from "@mons/shared/session-auth";
+
 export type SessionTokenResult = SessionTokenResponse & {
   accessDeadlineMs: number;
 };

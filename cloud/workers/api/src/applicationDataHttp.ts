@@ -37,7 +37,7 @@ export function applicationContractResponse(
   });
 }
 
-export function applicationReleaseResponse(
+function applicationReleaseResponse(
   request: Request,
   control: ApplicationDataControl,
 ): Response {

@@ -33,7 +33,7 @@ export type WagerRemovalReceipt = {
   proposalOperationId: string;
   reservationOperationId: string;
 };
-export type WagerResolution = {
+type WagerResolution = {
   winnerId: string;
   loserId: string;
   material: MiningMaterialName;
@@ -75,22 +75,19 @@ export type WagerSettlement = SettlementIdentity &
       }
     | { kind: "proposals"; failureReason: null }
   );
-export type PendingWagerSettlement = Extract<
-  WagerSettlement,
-  { state: "pending" }
->;
-export type CompletedWagerSettlement = Extract<
+type PendingWagerSettlement = Extract<WagerSettlement, { state: "pending" }>;
+type CompletedWagerSettlement = Extract<
   WagerSettlement,
   { state: "completed" }
 >;
-export const WAGER_BLOCK_REASONS = [
+const WAGER_BLOCK_REASONS = [
   "legacy-agreement-unsettled",
   "legacy-partial",
   "legacy-settlement-incomplete",
   "legacy-resolution-marker",
 ] as const;
-export type WagerBlockReason = (typeof WAGER_BLOCK_REASONS)[number];
-export type WagerBlock = {
+type WagerBlockReason = (typeof WAGER_BLOCK_REASONS)[number];
+type WagerBlock = {
   reason: WagerBlockReason;
   requiresManualReview: true;
   detectedAtMs: number;
@@ -98,7 +95,7 @@ export type WagerBlock = {
   knownResolution: WagerResolution | null;
   operationIds: string[];
 };
-export type WagerFields = {
+type WagerFields = {
   schemaVersion: 1;
   proposals: Record<string, WagerProposal>;
   proposedBy: Record<string, boolean>;
@@ -141,7 +138,6 @@ export type WagerRecord = WagerFields &
     | { state: "blocked"; blocked: WagerBlock }
   );
 export type DecodedWager = WagerRecord;
-export type WagerAgreementView = WagerAgreement;
 
 const record = (value: unknown): value is Record<string, unknown> =>
   value !== null &&
@@ -156,13 +152,13 @@ const exact = (
   record(value) &&
   Object.keys(value).length === keys.length &&
   keys.every((key) => Object.hasOwn(value, key));
-export const isWagerUid = (value: unknown): value is string =>
+const isWagerUid = (value: unknown): value is string =>
   typeof value === "string" &&
   value.length <= 128 &&
   normalizeRecordKey(value) === value;
-export const isWagerOperationId = (value: unknown): value is string =>
+const isWagerOperationId = (value: unknown): value is string =>
   typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
-export const isWagerAmount = (value: unknown): value is number =>
+const isWagerAmount = (value: unknown): value is number =>
   typeof value === "number" &&
   Number.isSafeInteger(value) &&
   value > 0 &&
@@ -175,7 +171,7 @@ const operationIds = (value: unknown, allowEmpty = false): value is string[] =>
   value.every(isWagerOperationId) &&
   new Set(value).size === value.length;
 
-export function isStoredWagerProposal(value: unknown): value is WagerProposal {
+function isStoredWagerProposal(value: unknown): value is WagerProposal {
   return (
     exact(value, [
       "material",
@@ -191,9 +187,7 @@ export function isStoredWagerProposal(value: unknown): value is WagerProposal {
     isWagerOperationId(value.reservationOperationId)
   );
 }
-export function isStoredWagerAgreement(
-  value: unknown,
-): value is WagerAgreement {
+function isStoredWagerAgreement(value: unknown): value is WagerAgreement {
   return (
     exact(value, [
       "material",
@@ -212,7 +206,7 @@ export function isStoredWagerAgreement(
     timestamp(value.acceptedAt)
   );
 }
-export function isWagerReservationAdjustment(
+function isWagerReservationAdjustment(
   value: unknown,
 ): value is ReservationAdjustment {
   return (
@@ -230,7 +224,7 @@ export function isWagerReservationAdjustment(
     value.delta < 0
   );
 }
-export function isWagerAgreementOperation(
+function isWagerAgreementOperation(
   value: unknown,
 ): value is WagerAgreementOperation {
   return (
@@ -256,7 +250,7 @@ export function isWagerAgreementOperation(
     operationIds(value.accepterReservationOperationIds)
   );
 }
-export function isWagerResolution(value: unknown): value is WagerResolution {
+function isWagerResolution(value: unknown): value is WagerResolution {
   return (
     exact(value, [
       "winnerId",
@@ -275,9 +269,7 @@ export function isWagerResolution(value: unknown): value is WagerResolution {
     timestamp(value.resolvedAt)
   );
 }
-export function isWagerRemovalReceipt(
-  value: unknown,
-): value is WagerRemovalReceipt {
+function isWagerRemovalReceipt(value: unknown): value is WagerRemovalReceipt {
   return (
     exact(value, ["proposalOperationId", "reservationOperationId"]) &&
     isWagerOperationId(value.proposalOperationId) &&
@@ -288,7 +280,7 @@ const release = (value: unknown): value is SettlementRelease =>
   exact(value, ["reservationOperationIds", "uid"]) &&
   isWagerUid(value.uid) &&
   operationIds(value.reservationOperationIds);
-export function isWagerSettlement(value: unknown): value is WagerSettlement {
+function isWagerSettlement(value: unknown): value is WagerSettlement {
   if (!record(value)) return false;
   const keys = [
     "version",

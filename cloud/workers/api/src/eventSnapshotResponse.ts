@@ -16,7 +16,7 @@ import {
   type ConditionalSnapshot,
 } from "./eventD1.ts";
 
-export const EVENT_SNAPSHOT_ENRICHMENT_TIMEOUT_MS = 1_000;
+const EVENT_SNAPSHOT_ENRICHMENT_TIMEOUT_MS = 1_000;
 
 export type EventSnapshotSeedDependencies = {
   readEventSnapshotSeed?: (eventId: string) => Promise<EventSnapshotSeed>;

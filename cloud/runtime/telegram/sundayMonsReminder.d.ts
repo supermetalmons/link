@@ -1,5 +1,5 @@
 // Generated from src/telegram/sundayMonsReminder.ts. Run npm run generate:runtime.
-export type SundayMonsReminder = {
+type SundayMonsReminder = {
   eventId: string;
   eventUrl: string;
   text: string;

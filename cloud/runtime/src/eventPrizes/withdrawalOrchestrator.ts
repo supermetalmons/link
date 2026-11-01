@@ -50,7 +50,7 @@ import {
   markWithdrawalBlocked,
 } from "./withdrawalRepository.js";
 
-export type WithdrawalCompletedResponse = {
+type WithdrawalCompletedResponse = {
   ok: true;
   status: "completed";
   eventId: string;

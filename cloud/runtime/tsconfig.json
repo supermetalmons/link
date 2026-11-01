@@ -11,6 +11,7 @@
     "noEmit": true,
     "declaration": true,
     "rootDir": "src",
+    "outDir": ".",
     "skipLibCheck": true,
     "types": ["node"],
     "paths": {
@@ -19,5 +20,6 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules"]
 }

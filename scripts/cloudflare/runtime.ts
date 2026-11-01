@@ -4,7 +4,7 @@ const { resolve } = require("node:path");
 
 export type SpawnResult = Pick<SpawnSyncReturns<Buffer>, "error" | "status">;
 export type ProcessEnvironment = Record<string, string | undefined>;
-export type CommandRuntime = {
+type CommandRuntime = {
   repoRoot: string;
   spawn: (
     command: string,

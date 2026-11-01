@@ -66,7 +66,6 @@ exports.validateDesiredForDelivery =
   exports.buildPendingDeleteId =
   exports.PendingDeleteSnapshot =
   exports.DeliverySnapshot =
-  exports.hashValue =
   exports.normalizeString =
     void 0;
 exports.preserveSendEvidence = preserveSendEvidence;
@@ -104,7 +103,6 @@ const normalizeString = (value) =>
 exports.normalizeString = normalizeString;
 const hashValue = (value) =>
   crypto.createHash("sha256").update(String(value)).digest("hex");
-exports.hashValue = hashValue;
 class RetrySnapshot {
   document;
   constructor(document = {}) {
@@ -294,12 +292,12 @@ function omitKeys(value, keys) {
   return output;
 }
 const buildPendingDeleteId = ({ chatId, messageId }) =>
-  (0, exports.hashValue)(
+  hashValue(
     `${(0, exports.normalizeString)(chatId)}:${Number(messageId)}`,
   ).slice(0, 32);
 exports.buildPendingDeleteId = buildPendingDeleteId;
 const buildApiGateOwner = (...parts) =>
-  `api_${(0, exports.hashValue)(parts.map((part) => String(part ?? "")).join(":"))}`;
+  `api_${hashValue(parts.map((part) => String(part ?? "")).join(":"))}`;
 exports.buildApiGateOwner = buildApiGateOwner;
 const resolvePendingDeleteId = (pendingDelete) => {
   const value =

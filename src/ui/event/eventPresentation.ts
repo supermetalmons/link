@@ -62,13 +62,13 @@ export type WinnerPodiumEntry = {
   participant: EventParticipant;
 };
 
-export const getParticipantIdentityKey = (
+const getParticipantIdentityKey = (
   participant: EventParticipant | null | undefined,
 ): string => {
   return participant?.profileId?.trim() || participant?.loginUid?.trim() || "";
 };
 
-export const getDisqualifiedParticipantIdentityKeys = (
+const getDisqualifiedParticipantIdentityKeys = (
   event: EventRecord | null,
   rounds: EventRound[],
 ): Set<string> => {
@@ -104,7 +104,7 @@ export const getDisqualifiedParticipantIdentityKeys = (
   return disqualifiedKeys;
 };
 
-export const isParticipantDisqualified = (
+const isParticipantDisqualified = (
   participant: EventParticipant | null | undefined,
   disqualifiedIdentityKeys: Set<string>,
 ): boolean => {
@@ -122,7 +122,7 @@ export const isParticipantDisqualified = (
   return false;
 };
 
-export const addParticipantIdentityKeys = (
+const addParticipantIdentityKeys = (
   identityKeys: Set<string>,
   participant: EventParticipant | null | undefined,
 ): void => {
@@ -143,7 +143,7 @@ export const addParticipantIdentityKeys = (
   }
 };
 
-export const hasAnyParticipantIdentityKey = (
+const hasAnyParticipantIdentityKey = (
   identityKeys: Set<string>,
   participant: EventParticipant | null | undefined,
 ): boolean => {
@@ -165,7 +165,7 @@ export const hasAnyParticipantIdentityKey = (
   return false;
 };
 
-export const getMatchSideForProfileId = (
+const getMatchSideForProfileId = (
   match: EventMatch,
   profileId: string | null | undefined,
 ): MatchSide | null => {
@@ -182,7 +182,7 @@ export const getMatchSideForProfileId = (
   return null;
 };
 
-export const resolveMatchParticipant = (
+const resolveMatchParticipant = (
   match: EventMatch,
   participantsById: Record<string, EventParticipant>,
   profileId: string | null | undefined,
@@ -202,9 +202,7 @@ export const resolveMatchParticipant = (
   return buildParticipantFromMatchSide(match, side, participantsById);
 };
 
-export const getResolvedMatchWinnerSide = (
-  match: EventMatch,
-): MatchSide | null => {
+const getResolvedMatchWinnerSide = (match: EventMatch): MatchSide | null => {
   if (match.status === "host") {
     return "host";
   }

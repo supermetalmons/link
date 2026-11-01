@@ -9,7 +9,7 @@ const databaseBindings = new Set<keyof Env>([
   "TELEGRAM_DB",
 ]);
 
-export type D1CallMetrics = {
+type D1CallMetrics = {
   calls: number;
   failedCalls: number;
   elapsedMs: number;

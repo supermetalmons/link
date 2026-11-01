@@ -4,7 +4,6 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.normalizeEventPrizeAssignments =
   exports.isEventPrizeId =
   exports.buildEventPrizeAssignments =
-  exports.EVENT_PRIZE_PLACES =
     void 0;
 const event_views_js_1 = require("./shared/event-views.js");
 const event_prizes_1 = require("@mons/shared/event-prizes");
@@ -15,7 +14,6 @@ Object.defineProperty(exports, "isEventPrizeId", {
   },
 });
 const EVENT_PRIZE_PLACES = Object.freeze([1, 2, 3]);
-exports.EVENT_PRIZE_PLACES = EVENT_PRIZE_PLACES;
 const normalizeEventPrizeAssignments = (value, eventId) => {
   if (!(0, event_views_js_1.isEventPrizeAssignments)(value, eventId)) {
     throw new TypeError("invalid-canonical-event-prizes");

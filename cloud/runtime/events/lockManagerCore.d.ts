@@ -4,7 +4,7 @@ import type {
   EventLeaseKind,
   EventLeaseRecord,
 } from "../eventLeases.js";
-export type EventLockTransactionDecision =
+type EventLockTransactionDecision =
   | {
       commit: false;
       decision?: string;
@@ -13,7 +13,7 @@ export type EventLockTransactionDecision =
       value: EventLeaseRecord | null;
       decision?: string;
     };
-export type EventLockTransactionResult = {
+type EventLockTransactionResult = {
   committed: boolean;
   decision?: string;
   value: EventLeaseRecord | null;
@@ -77,17 +77,9 @@ type Signature_createEventLockManagerCore = (dependencies: {
 }) => EventLockManager;
 declare const EVENT_LOCK_TTL_MS = 30000;
 declare const EVENT_LOCK_REFRESH_INTERVAL_MS = 10000;
-declare const resolveLockKind: (value?: EventLeaseKind) => EventLeaseKind;
-declare const getOwnershipDecision: (
-  current: EventLeaseRecord | null,
-  lockHandle: EventLockHandle,
-  nowMs: number,
-) => "missing" | "foreign" | "expired" | "owned";
 declare const createEventLockManagerCore: Signature_createEventLockManagerCore;
 export {
   EVENT_LOCK_REFRESH_INTERVAL_MS,
   EVENT_LOCK_TTL_MS,
   createEventLockManagerCore,
-  getOwnershipDecision,
-  resolveLockKind,
 };

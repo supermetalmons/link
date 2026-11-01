@@ -117,14 +117,6 @@ export function telegramRetryScheduleTime(
   return normalizeOptionalTimestamp(input.scheduleTimeMs);
 }
 
-export function retainedRateLimitProof(
-  value: unknown,
-): TelegramRetryProofDocument {
-  const proof = readTelegramRetryProof(value);
-  if (!proof) throw new TypeError("invalid-telegram-retry-proof");
-  return proof;
-}
-
 export function messageRateLimitProof(
   value: Partial<TelegramDeliveryDocument>,
   pending = false,

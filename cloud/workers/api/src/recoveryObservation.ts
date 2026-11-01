@@ -3,7 +3,7 @@ export type RecoveryKeyObservation = {
   keyType: "text" | "blob";
 };
 
-export type RecoveryFieldObservation = {
+type RecoveryFieldObservation = {
   storageType: "null" | "integer" | "real" | "text" | "blob";
   bytes: Uint8Array | null;
   realValue: number | null;

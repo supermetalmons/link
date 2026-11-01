@@ -56,7 +56,7 @@ export type AutomatchEntryRead = AutomatchEntryRecord | null;
 export type AutomatchEntryWrite = Omit<AutomatchEntryRecord, "timestamp"> & {
   timestamp: SessionTimestamp;
 };
-export type AutomatchTelegramResult = { completedAtMs: number; text: string };
+type AutomatchTelegramResult = { completedAtMs: number; text: string };
 export type AutomatchTelegramSourceRecord = {
   schemaVersion: 1;
   version: 2;
@@ -78,14 +78,13 @@ export type AutomatchTelegramSourceWrite = Omit<
   createdAtMs: SessionTimestamp;
   updatedAtMs: SessionTimestamp;
 };
-export type RetiredGameplayEffects = {
+type RetiredGameplayEffects = {
   state: "retired";
   retiredAtMs: number;
   sourceDigest: string;
 };
-export type GameplayEffectsState =
-  { state: "enabled" } | RetiredGameplayEffects;
-export type SuccessfulStartAutomatchResponse = Extract<
+type GameplayEffectsState = { state: "enabled" } | RetiredGameplayEffects;
+type SuccessfulStartAutomatchResponse = Extract<
   StartAutomatchResponse,
   { ok: true }
 >;
@@ -152,11 +151,11 @@ export type GameSessionMutationReceiptWrite<
     completedAtMs: SessionTimestamp;
   };
 }[Kind];
-export type MutationReceiptRecord =
+type MutationReceiptRecord =
   AutomatchReceiptView | GameSessionMutationReceiptView;
 export type MutationReceiptWrite =
   AutomatchReceiptWrite | GameSessionMutationReceiptWrite;
-export type MutationReceiptExpirationRecord = {
+type MutationReceiptExpirationRecord = {
   schemaVersion: 1;
   completedAtMs: number;
 };
@@ -264,9 +263,7 @@ function map<T>(
     Object.entries(value).every(([id, entry]) => key(id) && validate(entry))
   );
 }
-export function isAutomatchEntryRecord(
-  value: unknown,
-): value is AutomatchEntryRecord {
+function isAutomatchEntryRecord(value: unknown): value is AutomatchEntryRecord {
   return (
     exact(value, [
       "schemaVersion",
@@ -302,7 +299,7 @@ export function isAutomatchEntryRecord(
     isEmojiId(value.emojiId)
   );
 }
-export function isAutomatchTelegramSourceRecord(
+function isAutomatchTelegramSourceRecord(
   value: unknown,
 ): value is AutomatchTelegramSourceRecord {
   return (
@@ -348,9 +345,7 @@ export function isAutomatchTelegramSourceRecord(
     )
   );
 }
-export function isGameplayEffectsState(
-  value: unknown,
-): value is GameplayEffectsState {
+function isGameplayEffectsState(value: unknown): value is GameplayEffectsState {
   return exact(value, ["state"])
     ? value.state === "enabled"
     : exact(value, ["state", "retiredAtMs", "sourceDigest"]) &&
@@ -434,7 +429,7 @@ export function isGameSessionMutationReceiptRecord(
               : false;
   return valid && record(response) && response.inviteId === value.inviteId;
 }
-export function isMutationReceiptExpirationRecord(
+function isMutationReceiptExpirationRecord(
   value: unknown,
 ): value is MutationReceiptExpirationRecord {
   return (
@@ -443,7 +438,7 @@ export function isMutationReceiptExpirationRecord(
     integer(value.completedAtMs)
   );
 }
-export function isHistoricalMatchDescriptorWrite(
+function isHistoricalMatchDescriptorWrite(
   value: unknown,
 ): value is HistoricalMatchDescriptorWrite {
   return (

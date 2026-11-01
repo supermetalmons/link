@@ -4,29 +4,13 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.setMatchSlotParticipant =
   exports.setMatchSlotBlocked =
   exports.recomputeRoundStatuses =
-  exports.isMatchWinnerDisqualified =
-  exports.isMatchSlotBlocked =
-  exports.isMatchResolved =
-  exports.hasThirdPlaceMatchField =
-  exports.getSortedRoundIndexes =
-  exports.getSortedMatchKeys =
   exports.createEmptyEventMatch =
   exports.buildSeedToProfileId =
-  exports.assignWinnerToNextRound =
   exports.applyMatchResolution =
   exports.createEventBracketRuntime =
-  exports.resolveRoundMatchesWithConcurrency =
-  exports.resolveRoundMatchState =
-  exports.resolveEventPrizeAssignments =
-  exports.removeCompletedEventPrizeProjections =
-  exports.reconcileThirdPlaceMatchReadiness =
-  exports.reconcileProfileEventPrizeAssignments =
-  exports.reconcileBracketMatchReadiness =
   exports.rebuildParticipantStatesFromRounds =
   exports.getEventPrizePlacements =
-  exports.buildScheduledEventDueUpdates =
   exports.buildFixedBracketState =
-  exports.addEventPrizeAssignmentUpdates =
     void 0;
 const documents_js_1 = require("./documents.js");
 const eventCommands_js_1 = require("../eventCommands.js");
@@ -42,12 +26,6 @@ Object.defineProperty(exports, "applyMatchResolution", {
     return startTransitionCore_js_1.applyMatchResolution;
   },
 });
-Object.defineProperty(exports, "assignWinnerToNextRound", {
-  enumerable: true,
-  get: function () {
-    return startTransitionCore_js_1.assignWinnerToNextRound;
-  },
-});
 Object.defineProperty(exports, "buildSeedToProfileId", {
   enumerable: true,
   get: function () {
@@ -58,42 +36,6 @@ Object.defineProperty(exports, "createEmptyEventMatch", {
   enumerable: true,
   get: function () {
     return startTransitionCore_js_1.createEmptyEventMatch;
-  },
-});
-Object.defineProperty(exports, "getSortedMatchKeys", {
-  enumerable: true,
-  get: function () {
-    return startTransitionCore_js_1.getSortedMatchKeys;
-  },
-});
-Object.defineProperty(exports, "getSortedRoundIndexes", {
-  enumerable: true,
-  get: function () {
-    return startTransitionCore_js_1.getSortedRoundIndexes;
-  },
-});
-Object.defineProperty(exports, "hasThirdPlaceMatchField", {
-  enumerable: true,
-  get: function () {
-    return startTransitionCore_js_1.hasThirdPlaceMatchField;
-  },
-});
-Object.defineProperty(exports, "isMatchResolved", {
-  enumerable: true,
-  get: function () {
-    return startTransitionCore_js_1.isMatchResolved;
-  },
-});
-Object.defineProperty(exports, "isMatchSlotBlocked", {
-  enumerable: true,
-  get: function () {
-    return startTransitionCore_js_1.isMatchSlotBlocked;
-  },
-});
-Object.defineProperty(exports, "isMatchWinnerDisqualified", {
-  enumerable: true,
-  get: function () {
-    return startTransitionCore_js_1.isMatchWinnerDisqualified;
   },
 });
 Object.defineProperty(exports, "recomputeRoundStatuses", {
@@ -969,24 +911,7 @@ const createEventBracketRuntime = (dependencies = {}) => {
 };
 exports.createEventBracketRuntime = createEventBracketRuntime;
 const defaultRuntime = createEventBracketRuntime();
-((exports.addEventPrizeAssignmentUpdates =
-  defaultRuntime.addEventPrizeAssignmentUpdates),
-  (exports.buildFixedBracketState = defaultRuntime.buildFixedBracketState),
-  (exports.buildScheduledEventDueUpdates =
-    defaultRuntime.buildScheduledEventDueUpdates),
+((exports.buildFixedBracketState = defaultRuntime.buildFixedBracketState),
   (exports.getEventPrizePlacements = defaultRuntime.getEventPrizePlacements),
   (exports.rebuildParticipantStatesFromRounds =
-    defaultRuntime.rebuildParticipantStatesFromRounds),
-  (exports.reconcileBracketMatchReadiness =
-    defaultRuntime.reconcileBracketMatchReadiness),
-  (exports.reconcileProfileEventPrizeAssignments =
-    defaultRuntime.reconcileProfileEventPrizeAssignments),
-  (exports.reconcileThirdPlaceMatchReadiness =
-    defaultRuntime.reconcileThirdPlaceMatchReadiness),
-  (exports.removeCompletedEventPrizeProjections =
-    defaultRuntime.removeCompletedEventPrizeProjections),
-  (exports.resolveEventPrizeAssignments =
-    defaultRuntime.resolveEventPrizeAssignments),
-  (exports.resolveRoundMatchState = defaultRuntime.resolveRoundMatchState),
-  (exports.resolveRoundMatchesWithConcurrency =
-    defaultRuntime.resolveRoundMatchesWithConcurrency));
+    defaultRuntime.rebuildParticipantStatesFromRounds));

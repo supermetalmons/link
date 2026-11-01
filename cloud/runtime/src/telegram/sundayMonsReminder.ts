@@ -5,7 +5,7 @@ import {
   AUTOMATCH_WAITING_EMOJI_ID,
   getTelegramEmojiTag,
 } from "../telegramDisplay.js";
-export type SundayMonsReminder = {
+type SundayMonsReminder = {
   eventId: string;
   eventUrl: string;
   text: string;

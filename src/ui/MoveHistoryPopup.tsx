@@ -26,13 +26,6 @@ import {
   subscribeMoveHistoryPopupSelectionReset,
 } from "./controls/moveHistoryPopupStore";
 
-export {
-  isMoveHistoryPopupFollowingLatest,
-  subscribeMoveHistoryPopupReload,
-  triggerMoveHistoryPopupReload,
-  triggerMoveHistoryPopupSelectionReset,
-} from "./controls/moveHistoryPopupStore";
-
 const ITEM_HEIGHT = 24;
 const VISIBLE_ITEMS = 7;
 const PADDING_ITEMS = Math.floor(VISIBLE_ITEMS / 2);

@@ -25,7 +25,7 @@ export const normalizePersistedMoveHistory = (
   return typeof value === "string" ? value : null;
 };
 
-export const persistedMoveCount = (flatMovesString: string): number => {
+const persistedMoveCount = (flatMovesString: string): number => {
   return flatMovesString === "" ? 0 : flatMovesString.split("-").length;
 };
 
@@ -246,7 +246,7 @@ export const toMonsColor = (
   return undefined;
 };
 
-export const oppositeMonsColor = (
+const oppositeMonsColor = (
   color: MonsRules.Color | undefined,
 ): MonsRules.Color | undefined => {
   if (color === MonsRules.Color.White) {

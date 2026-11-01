@@ -14,7 +14,7 @@ import type {
   MatchReadinessInput,
   BuildGameSeed,
 } from "./model.js";
-export type ScheduledEventTransitionResult = {
+type ScheduledEventTransitionResult = {
   didChange: boolean;
   updates: EventCommitPlan;
 };
@@ -46,10 +46,7 @@ export type ThirdPlaceReadinessOptions = {
       ownershipSnapshot: EventOwnershipSnapshot | null;
     }
 );
-export type ThirdPlaceReadinessInput = Omit<
-  MatchReadinessInput,
-  "ownershipSnapshot"
-> &
+type ThirdPlaceReadinessInput = Omit<MatchReadinessInput, "ownershipSnapshot"> &
   ThirdPlaceReadinessOptions;
 declare const getSortedMatchKeys: (
   matchesByKey: object | null | undefined,
@@ -100,27 +97,6 @@ declare const assignWinnerToNextRound: ({
   participantsById: EventParticipants;
   winnerDisqualified?: boolean;
 }) => boolean;
-declare const createInviteForMatch: ({
-  eventId,
-  roundIndex,
-  matchKey,
-  match,
-  inviteUpdates,
-  random,
-  buildRandomGameSeed,
-  ownershipSnapshot,
-  useStoredMatchKey,
-}: {
-  eventId: string;
-  roundIndex: number | null;
-  matchKey: string;
-  match: EventMatch;
-  inviteUpdates: EventCommitPlan;
-  random?: () => number;
-  buildRandomGameSeed: BuildGameSeed;
-  ownershipSnapshot?: EventOwnershipSnapshot | null;
-  useStoredMatchKey?: boolean;
-}) => Promise<boolean>;
 declare const reconcileThirdPlaceMatchReadiness: ({
   eventId,
   rounds,
@@ -201,7 +177,6 @@ export {
   buildFixedBracketState,
   buildScheduledEventDueUpdatesCore,
   createEmptyEventMatch,
-  createInviteForMatch,
   getSortedMatchKeys,
   getSortedRoundIndexes,
   hasThirdPlaceMatchField,

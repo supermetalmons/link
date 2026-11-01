@@ -91,7 +91,6 @@ const buildEventPrizeAssignments = ({
 };
 
 export {
-  EVENT_PRIZE_PLACES,
   buildEventPrizeAssignments,
   isEventPrizeId,
   normalizeEventPrizeAssignments,

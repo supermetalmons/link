@@ -8,7 +8,6 @@ exports.readBarrierProofInput =
   exports.buildTelegramRetrySchedule =
     void 0;
 exports.telegramRetryScheduleTime = telegramRetryScheduleTime;
-exports.retainedRateLimitProof = retainedRateLimitProof;
 exports.messageRateLimitProof = messageRateLimitProof;
 exports.readRateLimitRetryState = readRateLimitRetryState;
 exports.rateLimitProofRetryAt = rateLimitProofRetryAt;
@@ -104,11 +103,6 @@ function telegramRetryScheduleTime(input) {
   return (0, taskIdentity_js_1.normalizeOptionalTimestamp)(
     input.scheduleTimeMs,
   );
-}
-function retainedRateLimitProof(value) {
-  const proof = (0, recordCodec_js_1.readTelegramRetryProof)(value);
-  if (!proof) throw new TypeError("invalid-telegram-retry-proof");
-  return proof;
 }
 function messageRateLimitProof(value, pending = false) {
   const source = pending

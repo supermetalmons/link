@@ -41,7 +41,7 @@ export type AuthIntentRecord = IntentBase &
       }
   );
 
-export type XFlowResult = Pick<AuthProfileResponse, "opId" | "profileId">;
+type XFlowResult = Pick<AuthProfileResponse, "opId" | "profileId">;
 type FlowBase = {
   dataEpoch: 1;
   callbackUri: string;
@@ -121,13 +121,13 @@ export type XFlowUpdate = Partial<
   >
 >;
 
-export function authStateText(value: unknown): string {
+function authStateText(value: unknown): string {
   if (typeof value !== "string" || value.length === 0)
     throw new AuthStateFailure();
   return value;
 }
 
-export function authStateInteger(value: unknown): number {
+function authStateInteger(value: unknown): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0)
     throw new AuthStateFailure();
   return value;
@@ -370,7 +370,7 @@ export function parseXRedirectFlow(value: unknown): XRedirectFlow {
   throw new AuthStateFailure();
 }
 
-export const AUTH_INTENT_COLUMNS = [
+const AUTH_INTENT_COLUMNS = [
   "data_epoch",
   "cancelled_at_ms",
   "consumed_at_ms",
@@ -383,7 +383,7 @@ export const AUTH_INTENT_COLUMNS = [
   "state",
   "uid",
 ] as const;
-export const X_FLOW_COLUMNS = [
+const X_FLOW_COLUMNS = [
   "data_epoch",
   "callback_uri",
   "code_challenge",

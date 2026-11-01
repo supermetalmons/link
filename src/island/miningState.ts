@@ -9,7 +9,7 @@ import type {
   PlayerMiningMaterials,
 } from "../connection/connectionModels";
 
-export const ROCK_VARIANT_COUNT = 27;
+const ROCK_VARIANT_COUNT = 27;
 
 export const isAnonymousProfile = (profileId: string): boolean =>
   profileId === "";

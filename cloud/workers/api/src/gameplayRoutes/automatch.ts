@@ -52,7 +52,7 @@ function createAutomatchRuntime(context: GameplayRequestContext) {
   return { ...context, automatchDependencies };
 }
 
-export function readAutomatchOperationId(
+function readAutomatchOperationId(
   request: Request,
 ): ApiQuery<"POST /automatch/start">["operationId"] {
   const values = new URL(request.url).searchParams.getAll(

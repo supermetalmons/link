@@ -8,12 +8,7 @@ import {
   type WagerSettlementResolution,
 } from "./wagerStateCommands.ts";
 import { readGameplayMatchPair } from "./gameplayMatchReads.ts";
-import {
-  MAX_MATCH_FEN_BYTES,
-  MAX_MATCH_HISTORY_BYTES,
-  MAX_MATCH_HISTORY_ENTRIES,
-  movesFromFlatString,
-} from "@mons/shared/match-protocol";
+import { movesFromFlatString } from "@mons/shared/match-protocol";
 import { parseInviteMatchIndex } from "@mons/shared/rematches";
 import type {
   WagerOutcomeResolveRequest,
@@ -571,9 +566,3 @@ export async function resolveWagerOutcome(
     ? { ok: true, reason: "no-wager", mining: await mining() }
     : { ok: true, mining: await mining() };
 }
-
-export {
-  MAX_MATCH_FEN_BYTES,
-  MAX_MATCH_HISTORY_BYTES,
-  MAX_MATCH_HISTORY_ENTRIES,
-};

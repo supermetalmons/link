@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 
-export const D1_BINDINGS = {
+const D1_BINDINGS = {
   "mons-link-profile-games": "PROFILE_GAMES_DB",
   "mons-link-auth-state": "AUTH_STATE_DB",
   "mons-link-telegram": "TELEGRAM_DB",

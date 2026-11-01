@@ -49,7 +49,7 @@ export type EventPrizeRequestDependencies = EventPrizeStatusDependencies &
     withdrawals: Pick<EventPrizeWithdrawalStore, "record">;
   };
 
-export type EventPrizeGameplayRepository = EventPrizeRepository;
+type EventPrizeGameplayRepository = EventPrizeRepository;
 
 export type RuntimeOptions = {
   now?: () => number;

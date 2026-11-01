@@ -32,7 +32,7 @@ export type InviteSourceSnapshot = {
   revision: number;
 };
 
-export type InviteSourceChange = {
+type InviteSourceChange = {
   inviteId: string;
   value: InviteDocument;
   operationIds?: Record<string, string>;
@@ -322,7 +322,7 @@ export function prepareInviteSourceSnapshotRead(
     .bind(inviteId);
 }
 
-export async function readInviteSourceSnapshot(
+async function readInviteSourceSnapshot(
   db: D1Database,
   inviteId: string,
   signal?: AbortSignal,

@@ -102,7 +102,7 @@ export function applyOwnershipPolicy<T>(operation: () => T): T {
   }
 }
 
-export function buildParticipant(
+function buildParticipant(
   profile: GameplayProfile,
   loginUid: string,
   joinedAtMs: number,

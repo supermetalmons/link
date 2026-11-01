@@ -12,9 +12,9 @@ import { buildEventAnnouncementPlan } from "../src/eventPrizeAnnouncementSchedul
 import { runEventAnnouncementWorkflow } from "../src/eventPrizeAnnouncementWorkflow.ts";
 import {
   buildEventProgressPlan,
-  InvalidEventProgressPayloadError,
   type EventProgressWorkflowParams,
-} from "../src/eventProgress.ts";
+} from "../src/eventProgressCodec.ts";
+import { InvalidEventProgressPayloadError } from "../src/eventProgressWorkflowRunner.ts";
 
 const EVENT_ID = "z3oj52Iiime";
 const RUN_AT_MS = 10_000_000;

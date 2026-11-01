@@ -10,7 +10,7 @@ import type {
   TelegramCommandAcceptedResponse,
 } from "../runtime/shared/api-contracts.js";
 
-export const MAX_BRIDGE_SECRET_BYTES = 8 * 1024;
+const MAX_BRIDGE_SECRET_BYTES = 8 * 1024;
 export type TelegramCommandSender = (
   command: TelegramCommandRequest,
 ) => Promise<TelegramCommandResponse>;

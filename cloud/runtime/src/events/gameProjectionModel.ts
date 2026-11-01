@@ -13,8 +13,8 @@ import { rematchSeriesEnded } from "@mons/shared/rematches";
 import { getNavigationSortBucket } from "@mons/shared/navigation";
 import { cropAddress } from "@mons/shared/profiles";
 import { isAutoInviteId } from "@mons/shared/ids";
-export type ProjectionProfile = ProjectionProfileDocument;
-export type ProjectionInvite = InviteDocument;
+type ProjectionProfile = ProjectionProfileDocument;
+type ProjectionInvite = InviteDocument;
 type InviteProjectionInput = {
   inviteId: string;
   inviteData: ProjectionInvite | null;

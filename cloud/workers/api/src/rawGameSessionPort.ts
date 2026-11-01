@@ -14,9 +14,8 @@ import type {
   TransactionDecision,
   TransactionResult,
 } from "./repositoryContracts.ts";
-export type { GameSessionChange } from "../../../runtime/gameSessionChanges.js";
 
-export type RawAutomatchProjectionPort = {
+type RawAutomatchProjectionPort = {
   readAutomatchTelegramSource(
     inviteId: string,
     signal?: AbortSignal,

@@ -90,7 +90,7 @@ export type TelegramEngineResult = {
   cleanup?: TelegramCleanupResult | TelegramCleanupOutcome;
   cleanupScheduled?: boolean;
 };
-export type TelegramCleanupOutcome =
+type TelegramCleanupOutcome =
   | "missing"
   | "stale"
   | "blocked-uncertain"
@@ -108,3 +108,4 @@ export type TelegramCleanupResult = Omit<
 > & {
   cleanup?: TelegramCleanupOutcome;
 };
+export {};

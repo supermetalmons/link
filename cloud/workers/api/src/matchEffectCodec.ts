@@ -1,6 +1,6 @@
 import {
-  buildRetainedEventProgressPlan,
-  type RetainedEventProgressPlan,
+  buildEventProgressPlan,
+  type EventProgressPlan,
 } from "./eventProgressCodec.ts";
 import type { MatchStateClaimTimerRequest } from "./matchStateTypes.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
@@ -169,10 +169,10 @@ export function matchEffectLogIdentity(effect: DueMatchEffect) {
 
 export function prepareMatchEffectProgress(
   effect: DueMatchEffect,
-): Promise<RetainedEventProgressPlan> | null {
+): Promise<EventProgressPlan> | null {
   return effect.eventId === null
     ? null
-    : buildRetainedEventProgressPlan(
+    : buildEventProgressPlan(
         {
           eventId: effect.eventId,
           sourceKey: effect.sourceKey,

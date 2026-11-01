@@ -16,15 +16,3 @@ export async function seedProfileArchiveFixture(
     .bind(profileId, JSON.stringify(value))
     .run();
 }
-
-export async function readProfileArchiveFixture(
-  db: D1Database,
-  profileId: string,
-): Promise<string | null> {
-  return db
-    .prepare(
-      "SELECT legacy_fields_json FROM profile_records WHERE profile_id = ?",
-    )
-    .bind(profileId)
-    .first<string>("legacy_fields_json");
-}

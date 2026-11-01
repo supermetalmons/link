@@ -49,4 +49,4 @@ async function inspectMatchDiscovery(
   dependencies.log({ operation: "status", control, counts });
 }
 
-export { inspectMatchDiscovery, type Dependencies };
+export { inspectMatchDiscovery };

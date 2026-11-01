@@ -6,7 +6,7 @@ export type TimerConfig = {
   requestDate: number;
 };
 
-export type GameControlsConfirmation = "none" | "resign" | "timer" | "claim";
+type GameControlsConfirmation = "none" | "resign" | "timer" | "claim";
 
 export type GameControlsState = {
   undo: { visible: boolean; enabled: boolean };

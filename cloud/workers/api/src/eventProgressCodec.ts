@@ -10,7 +10,6 @@ export type EventProgressPlan = {
   params: EventProgressWorkflowParams;
   workflowId: string;
 };
-export type RetainedEventProgressPlan = EventProgressPlan;
 type EventProgressInput = {
   eventId: string;
   sourceKey: string;
@@ -67,7 +66,6 @@ export async function buildEventProgressPlan(
     params: paramsFor(outboxId, outbox),
   };
 }
-export const buildRetainedEventProgressPlan = buildEventProgressPlan;
 export function workflowIdFromOutboxId(outboxId: string): string | null {
   return /^ep_[0-9a-f]{64}$/.test(outboxId)
     ? `data1_event-progress-${outboxId.slice(3)}`

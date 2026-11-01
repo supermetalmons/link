@@ -33,9 +33,6 @@ export declare const buildTelegramRetrySchedule: (
 export declare function telegramRetryScheduleTime(
   input: TelegramRetrySchedule | RetainedTelegramRetrySchedule,
 ): number;
-export declare function retainedRateLimitProof(
-  value: unknown,
-): TelegramRetryProofDocument;
 export declare function messageRateLimitProof(
   value: Partial<TelegramDeliveryDocument>,
   pending?: boolean,

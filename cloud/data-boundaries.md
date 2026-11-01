@@ -71,7 +71,7 @@ Invite sources use opaque documents with separate participant, access, rematch, 
 
 Automatch snapshots, writes, and recovery pages correlate each storage root with its record type. Named repair, claim, acknowledgement, and completion operations keep raw transactions inside compatibility adapters. Session and event intents retain opaque resource, mutation, effect, and creation payloads while fresh construction uses versioned contracts. Receipt response kinds, independent expiration revisions, retained extensions, validation timing, SQL ordering, source bytes, recovery budgets, and retry behavior are preserved.
 
-Telegram messages, control state, delivery evidence, cleanup queues, recovery requests, and projection state use opaque retained documents with named observations and transitions. Fresh provider requests, operation results, announcements, and retry schedules have concrete contracts. The transitions preserve uncertain send evidence, receipt-before-cleanup ordering, generation and lease fences, retained extensions, and proof reads across asynchronous boundaries. Shared event projection-outbox persistence is tracked with stage 9; progress Workflow persistence is tracked with stage 14.
+Telegram messages, control state, delivery evidence, cleanup queues, recovery requests, and projection state use opaque retained documents with named observations and transitions. Fresh provider requests, operation results, announcements, and retry schedules have concrete contracts. The transitions preserve uncertain send evidence, receipt-before-cleanup ordering, generation and lease fences, retained extensions, and proof reads across asynchronous boundaries.
 
 Profile-game, event, and profile-link projections use opaque retained documents and operation-specific observations. Fresh projection commands distinguish create, update, merge, and delete payloads and flags. Canonical profile legacy evidence, auth-operation metadata/results, and rating payloads retain their original identity and serialization order behind named compatibility views; fresh writes use concrete state contracts. Shared event projection outboxes correlate their stored kinds and expose named recovery operations while preserving malformed-row accounting, source-byte guards, SQL ordering, and lease behavior.
 
@@ -91,31 +91,10 @@ Event progress persistence distinguishes fresh pending records and dead letters 
 
 Scoped compile and source checks cover Queue family pairing, strict batch variance, fresh-versus-retained progress commands, opaque field access, private updater ports, and concrete Workflow inputs. The portable runtime export inventory must cover every generated module before checking each module's preserved value exports.
 
-## Sequential completion ledger
-
-Stages are integrated one at a time. The compatibility review and focused checks for one stage finish before implementation of the next begins.
-
-| Stage | Responsibility                                        | Status   |
-| ----- | ----------------------------------------------------- | -------- |
-| 1     | Inventory and compatibility baseline                  | Complete |
-| 2     | Event persistence, domain, transport and UI contracts | Complete |
-| 3     | Withdrawal records and transitions                    | Complete |
-| 4     | Canonical match persistence and RPC                   | Complete |
-| 5     | Timer claims and persisted effects                    | Complete |
-| 6     | Invite source records                                 | Complete |
-| 7     | Automatch, recovery outboxes and transition intents   | Complete |
-| 8     | Telegram persistence                                  | Complete |
-| 9     | Projections and canonical-profile legacy payloads     | Complete |
-| 10    | WebSocket persistence and resumed attachments         | Complete |
-| 11    | Endpoint-specific server/client contracts             | Complete |
-| 12    | Frontend wrappers and provider adapters               | Complete |
-| 13    | Browser persistence                                   | Complete |
-| 14    | Background message coverage and regression prevention | Complete |
-
 ## Validation
 
 Each changed boundary needs compatibility cases for its accepted representations, invalid outcomes, and write serialization. Assert decisions and observable output, not merely the new type definitions. Use compile-contract tests for endpoint pairing, write-state combinations, and repository return types.
 
-Run focused Node/Workers tests and the affected lint/typecheck commands for each stage. Portable source changes also require `npm run generate:runtime` and `npm run check:runtime`. Final integration requires `npm run check:all` and `npm run build`.
+Run focused Node/Workers tests and the affected lint/typecheck commands. Portable source changes also require `npm run generate:runtime` and `npm run check:runtime`. Integration validation uses `npm run check:all` and `npm run build`.
 
-No schema migration, stored-data rewrite, endpoint/protocol version change, OpenAPI publication, SDK, or third-party access is part of this work. Rendering-only types are outside this boundary inventory.
+Rendering-only types are outside this boundary inventory.

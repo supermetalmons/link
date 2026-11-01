@@ -93,7 +93,7 @@ export type EventBracketDependencies = {
     eventId: string,
   ): Promise<Record<string, WithdrawalDocument>>;
 };
-export type EventPrizePlacementsInput = {
+type EventPrizePlacementsInput = {
   event: EventData | null;
   rounds: EventRounds;
   participantsById: EventParticipants;
@@ -980,31 +980,15 @@ const defaultRuntime = createEventBracketRuntime();
 
 export type EventBracketRuntime = ReturnType<typeof createEventBracketRuntime>;
 export const {
-  addEventPrizeAssignmentUpdates,
   buildFixedBracketState,
-  buildScheduledEventDueUpdates,
   getEventPrizePlacements,
   rebuildParticipantStatesFromRounds,
-  reconcileBracketMatchReadiness,
-  reconcileProfileEventPrizeAssignments,
-  reconcileThirdPlaceMatchReadiness,
-  removeCompletedEventPrizeProjections,
-  resolveEventPrizeAssignments,
-  resolveRoundMatchState,
-  resolveRoundMatchesWithConcurrency,
 } = defaultRuntime;
 export {
   createEventBracketRuntime,
   applyMatchResolution,
-  assignWinnerToNextRound,
   buildSeedToProfileId,
   createEmptyEventMatch,
-  getSortedMatchKeys,
-  getSortedRoundIndexes,
-  hasThirdPlaceMatchField,
-  isMatchResolved,
-  isMatchSlotBlocked,
-  isMatchWinnerDisqualified,
   recomputeRoundStatuses,
   setMatchSlotBlocked,
   setMatchSlotParticipant,

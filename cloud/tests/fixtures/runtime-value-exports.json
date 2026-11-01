@@ -3,15 +3,10 @@
   "automatchRecords.js": [
     "decodeAutomatchEntries",
     "decodeAutomatchEntry",
-    "isAutomatchEntryRecord",
     "isAutomatchProfileOutboxRecord",
     "isAutomatchReceiptRecord",
     "isAutomatchTelegramOutboxRecord",
-    "isAutomatchTelegramSourceRecord",
     "isGameSessionMutationReceiptRecord",
-    "isGameplayEffectsState",
-    "isHistoricalMatchDescriptorWrite",
-    "isMutationReceiptExpirationRecord",
     "parseAutomatchRecord"
   ],
   "eventCommandCodec.js": [
@@ -19,11 +14,9 @@
     "parseEventEffect",
     "parseEventEffects",
     "parseEventInvite",
-    "parseEventMatchCreation",
     "parseEventMutation",
     "parseEventMutations",
-    "parseEventProgressCommandRecord",
-    "parseEventTimerClaim"
+    "parseEventProgressCommandRecord"
   ],
   "eventCommands.js": [
     "eventCommandIdentity",
@@ -34,7 +27,6 @@
   ],
   "eventLeases.js": [],
   "eventPrizeAwards.js": [
-    "EVENT_PRIZE_PLACES",
     "buildEventPrizeAssignments",
     "isEventPrizeId",
     "normalizeEventPrizeAssignments"
@@ -50,7 +42,6 @@
   ],
   "eventPrizeWithdrawalState.js": [
     "EVENT_PRIZE_ADMIN_WALLET",
-    "WITHDRAWAL_LEASE_MS",
     "buildWithdrawalCompletion",
     "decideWithdrawalClaim",
     "decodeAdminSecretKey",
@@ -125,7 +116,6 @@
   "eventPrizes/submittedTransactions.js": [
     "buildSubmittedTransaction",
     "deserializePersistedSubmittedTransaction",
-    "getSubmittedTransactionSignature",
     "isDefinitiveSubmittedTransactionFailure",
     "sendAndConfirmSubmittedTransaction",
     "waitForSubmittedTransactionStatus"
@@ -143,11 +133,7 @@
     "persistSubmittedTransaction",
     "releaseProcessingClaim"
   ],
-  "eventProfileGameProjectionCore.js": [
-    "READ_RETRY_ATTEMPTS",
-    "READ_RETRY_DELAY_MS",
-    "createEventProfileGameProjectionCore"
-  ],
+  "eventProfileGameProjectionCore.js": ["createEventProfileGameProjectionCore"],
   "eventProgressRecords.js": [
     "readEventProgressDeadLetter",
     "readEventProgressPending",
@@ -156,38 +142,21 @@
   "eventProjectionOutboxRecords.js": [
     "createEventProfileGameProjectionRequest",
     "createEventTelegramProjectionRequest",
-    "isEventProjectionOutbox",
     "isEventProjectionPending",
     "retainEventProjectionOutbox"
   ],
   "eventReads.js": [],
   "eventTransitionRecords.js": [],
-  "events.js": ["EventRuntimeError", "createEventRuntime"],
+  "events.js": ["createEventRuntime"],
   "events/bracket.js": [
-    "addEventPrizeAssignmentUpdates",
     "applyMatchResolution",
-    "assignWinnerToNextRound",
     "buildFixedBracketState",
-    "buildScheduledEventDueUpdates",
     "buildSeedToProfileId",
     "createEmptyEventMatch",
     "createEventBracketRuntime",
     "getEventPrizePlacements",
-    "getSortedMatchKeys",
-    "getSortedRoundIndexes",
-    "hasThirdPlaceMatchField",
-    "isMatchResolved",
-    "isMatchSlotBlocked",
-    "isMatchWinnerDisqualified",
     "rebuildParticipantStatesFromRounds",
     "recomputeRoundStatuses",
-    "reconcileBracketMatchReadiness",
-    "reconcileProfileEventPrizeAssignments",
-    "reconcileThirdPlaceMatchReadiness",
-    "removeCompletedEventPrizeProjections",
-    "resolveEventPrizeAssignments",
-    "resolveRoundMatchState",
-    "resolveRoundMatchesWithConcurrency",
     "setMatchSlotBlocked",
     "setMatchSlotParticipant"
   ],
@@ -218,7 +187,6 @@
     "eventParticipantEntries",
     "eventParticipantIsAbsent",
     "eventParticipantJoinedOrder",
-    "eventParticipantProjectionState",
     "eventParticipantState",
     "eventParticipants",
     "eventPlacementMatches",
@@ -238,7 +206,6 @@
     "plainEventParticipants",
     "readEventDocument",
     "readEventMatchDocument",
-    "readEventMatchesDocument",
     "readEventParticipantDocument",
     "readEventParticipantsDocument",
     "readEventRoundDocument",
@@ -256,7 +223,6 @@
     "getListSortAtMs",
     "getOwnerProfileIds",
     "mapEventStatusToNavigationStatus",
-    "normalizeFiniteNumberOrNull",
     "normalizeString"
   ],
   "events/gameProjectionModel.js": [
@@ -280,8 +246,6 @@
     "EVENT_LOCK_REFRESH_INTERVAL_MS",
     "EVENT_LOCK_TTL_MS",
     "createEventLockManagerCore",
-    "getOwnershipDecision",
-    "resolveLockKind",
     "withEventLease"
   ],
   "events/model.js": [],
@@ -310,7 +274,6 @@
     "eventRequestStartsInMinutes"
   ],
   "events/scheduling.js": [
-    "EventSchedulingError",
     "assertScheduledStartWindow",
     "hasDateTimeScheduleRequest",
     "parseScheduledDateParts",
@@ -325,7 +288,6 @@
     "buildScheduledEventDueUpdatesCore",
     "buildSeedToProfileId",
     "createEmptyEventMatch",
-    "createInviteForMatch",
     "getSortedMatchKeys",
     "getSortedRoundIndexes",
     "hasThirdPlaceMatchField",
@@ -343,13 +305,13 @@
     "buildEndedEventSyncPlan"
   ],
   "gameSessionChanges.js": [],
-  "gameVariants.js": ["buildGameSeedForStoredVariant", "buildRandomGameSeed"],
+  "gameVariants.js": ["buildRandomGameSeed"],
   "gameplay/matchReconstruction.js": [
     "buildOrderedMatchSubmissions",
     "buildOrderedMoveHistory"
   ],
   "matchOutcome.js": ["resolveMatchWinner"],
-  "monsRules.js": ["loadMonsRules", "movesFromFlatString"],
+  "monsRules.js": ["loadMonsRules"],
   "profileGameProjectionRecords.js": [
     "copyProjectionOwner",
     "createEventProjection",
@@ -369,18 +331,12 @@
     "retainProjectionProfile"
   ],
   "profileGamesProjectionCore.js": [
-    "READ_RETRY_ATTEMPTS",
-    "READ_RETRY_DELAY_MS",
     "buildInviteProjectionOwnerPlan",
     "buildResolvedProfile",
     "createProfileGamesProjectionCore",
     "readExistingProjectionRecords"
   ],
   "profileLinkProjectionCore.js": [
-    "PROFILE_LINK_CATCHUP_CONCURRENCY",
-    "PROFILE_LINK_CATCHUP_MAX_INVITES",
-    "PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP",
-    "PROFILE_LINK_CATCHUP_TIMEOUT_MS",
     "createProfileLinkProjectionCore",
     "processWithConcurrency"
   ],
@@ -915,7 +871,6 @@
     "normalizeClientXConsentSource",
     "normalizeServerXConsentSource"
   ],
-  "stateCompatibility.js": ["PROFILE_GAME_PROJECTION_SOURCE"],
   "telegram/automatchSource.js": [
     "TELEGRAM_AUTOMATCH_VERSION",
     "buildAutomatchTelegramLifecycleChanges",
@@ -927,11 +882,7 @@
     "TELEGRAM_HTTP_TIMEOUT_MS",
     "deleteTelegramMessage",
     "editTelegramMessage",
-    "isKnownSafeTelegramSendError",
     "retainTelegramDeleteInput",
-    "retainTelegramEditInput",
-    "retainTelegramMediaGroupInput",
-    "retainTelegramSendInput",
     "sendTelegramMediaGroup",
     "sendTelegramMessage"
   ],
@@ -959,24 +910,11 @@
     "recordDesiredRetryState"
   ],
   "telegram/deliveryEngine.js": [
-    "TELEGRAM_DESTINATIONS",
-    "TELEGRAM_LEASE_TTL_MS",
-    "TELEGRAM_MESSAGE_ROOT",
-    "TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND",
-    "TELEGRAM_SAFE_RETRY_MAX_DELAY_MS",
-    "TELEGRAM_SAFE_RETRY_WINDOW_MS",
-    "TELEGRAM_SCHEMA_VERSION",
-    "buildTelegramDeleteDesired",
-    "buildTelegramEditDesired",
     "buildTelegramSendDesired",
     "createTelegramDeliveryEngine",
-    "createTelegramLocalRetryBarrier",
-    "resolveTelegramDestination",
-    "validateTelegramMessageKey"
+    "createTelegramLocalRetryBarrier"
   ],
   "telegram/deliveryPolicy.js": [
-    "TELEGRAM_SAFE_RETRY_MAX_DELAY_MS",
-    "TELEGRAM_SAFE_RETRY_WINDOW_MS",
     "buildErrorState",
     "buildRateLimitBarrierAtMs",
     "buildSafeRetryState",
@@ -1012,7 +950,6 @@
     "deliveryDocument",
     "documentFields",
     "ensureCommitted",
-    "hashValue",
     "normalizeString",
     "omitKeys",
     "pendingDeleteDocument",
@@ -1029,9 +966,7 @@
   "telegram/deliveryTypes.js": [],
   "telegram/desiredRecords.js": ["acquiredDesiredView"],
   "telegram/desiredStateCore.js": [
-    "TELEGRAM_DESTINATIONS",
     "TELEGRAM_MESSAGE_ROOT",
-    "TELEGRAM_SCHEMA_VERSION",
     "buildTelegramDeleteDesired",
     "buildTelegramEditDesired",
     "buildTelegramSendDesired",
@@ -1055,7 +990,6 @@
     "isEventPrizeAnnouncementEvent"
   ],
   "telegram/eventProjectionCore.js": [
-    "EVENT_TELEGRAM_DELIVERY_VERSION",
     "EVENT_TELEGRAM_PROJECTION_GUARD_FIELD",
     "EVENT_TELEGRAM_PROJECTION_LOCK_ROOT",
     "addEventTelegramProjectionGuard",
@@ -1064,13 +998,8 @@
     "buildEventTelegramDispatches",
     "buildEventTelegramProjection",
     "buildEventTelegramProjectionChanges",
-    "buildStartedState",
-    "formatPtEtUtcLine",
     "isV2TelegramEvent",
     "loadEndedMatchResults",
-    "parseProjectionState",
-    "renderEndedMessage",
-    "renderStartedMessage",
     "renderUpcomingMessage"
   ],
   "telegram/eventProjectionRecords.js": [
@@ -1080,13 +1009,8 @@
     "deferEventTelegramProjectionTexts",
     "eventTelegramProjectionGeneration",
     "eventTelegramProjectionNeedsResults",
-    "isEventTelegramEndedResults",
-    "isEventTelegramProjectionDocument",
-    "isEventTelegramProjectionGuard",
-    "isStartedMatchLines",
     "readEventTelegramProjectionDocument",
     "retainEventTelegramEndedResults",
-    "retainStartedMatchLines",
     "withEventTelegramProjectionGuard"
   ],
   "telegram/messageProjectionRecords.js": [
@@ -1096,34 +1020,23 @@
     "replaceTelegramDesired"
   ],
   "telegram/projectionCore.js": [
-    "AUTOMATCH_PROJECTION_GUARD_VERSION",
     "buildAutomatchProjectionGuard",
     "buildAutomatchTelegramProjection",
     "evaluateAutomatchProjectionUpdate",
     "getAutomatchResultFragments",
-    "isEventRatingUpdate",
     "mergeRatingResultFragment",
-    "normalizeString",
     "renderMatchedAutomatchTelegramText",
     "resolveAutomatchTelegramLifecycle",
-    "retainAutomatchTelegramSource",
     "shouldProjectRatingTelegramUpdate"
   ],
-  "telegram/queueBridge.js": [
-    "TELEGRAM_BRIDGE_TIMEOUT_MS",
-    "TELEGRAM_COMMAND_BRIDGE_URL",
-    "sendTelegramCommand",
-    "signTelegramBridgeRequest"
-  ],
+  "telegram/queueBridge.js": ["sendTelegramCommand"],
   "telegram/recordCodec.js": [
-    "readTelegramApplied",
     "readTelegramCleanup",
     "readTelegramControlDocument",
     "readTelegramDelivery",
     "readTelegramDesired",
     "readTelegramMessageDocument",
     "readTelegramRetryProof",
-    "readTelegramSendEvidence",
     "requireTelegramMessageDocument",
     "requireTelegramOrphanedDelete",
     "requireTelegramTransaction"
@@ -1131,17 +1044,14 @@
   "telegram/records.js": [
     "AppliedMessageSnapshot",
     "apiGateDocument",
-    "appliedDocument",
     "clearTelegramApiGate",
     "controlDocument",
-    "desiredDocument",
     "messageAppliedDocument",
     "messageDeliveryDocument",
     "messageDesiredDocument",
     "messageDesiredRevision",
     "messageDocument",
     "messageRecoveryResultDocument",
-    "omitTelegramMessageFields",
     "readMessageApplied",
     "readTelegramControlDocument",
     "readTelegramMessageDocument",
@@ -1172,7 +1082,6 @@
     "readBarrierProofInput",
     "readRateLimitRetryState",
     "resumedRateLimitRetryInput",
-    "retainedRateLimitProof",
     "safeRetryProofIdentity",
     "telegramRetryScheduleTime"
   ],
@@ -1191,7 +1100,6 @@
   ],
   "telegram/taskKinds.js": [
     "TELEGRAM_DESIRED_TASK_KIND",
-    "TELEGRAM_MANUAL_RECOVERY_TASK_KIND",
     "TELEGRAM_PENDING_DELETE_TASK_KIND",
     "TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND",
     "TELEGRAM_TASK_KINDS"

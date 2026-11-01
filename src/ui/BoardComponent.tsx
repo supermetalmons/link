@@ -81,23 +81,6 @@ import type {
   WagerSlotLayoutBySide,
 } from "./boardPlayerInfoLayout";
 
-export type {
-  BoardInviteBotButtonLayout,
-  BoardPlayerInfoOverlayState,
-  BoardPlayerInfoSlotState,
-  BoardTimerColor,
-} from "../game/boardUiPort";
-
-export {
-  updateBoardComponentForBoardStyleChange,
-  setTopBoardOverlayVisible,
-  showRaibowAura,
-  updateAuraForAvatarElement,
-  updateWagerPlayerUids,
-  setBoardPlayerInfoOverlayState,
-} from "../game/boardUiPort";
-export { showVideoReaction } from "./controls/boardReactionPort";
-
 const PANGCHIU_BOARD_BACKGROUND_URL =
   "https://cdn.lil.org/mons/boards/backgrounds/pangchiu.jpg";
 

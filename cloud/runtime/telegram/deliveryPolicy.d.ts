@@ -5,8 +5,6 @@ import type {
   TelegramRetryFailure,
   TelegramRetryState,
 } from "./deliveryRetryTypes.js";
-declare const TELEGRAM_SAFE_RETRY_WINDOW_MS: number;
-declare const TELEGRAM_SAFE_RETRY_MAX_DELAY_MS = 60000;
 declare const createTelegramLocalRetryBarrier: (
   initialRetryNotBeforeMs?: number,
 ) => TelegramLocalRetryBarrier;
@@ -46,8 +44,6 @@ declare const buildErrorState: (
   nowMs: number,
 ) => TelegramDeliveryErrorState;
 export {
-  TELEGRAM_SAFE_RETRY_MAX_DELAY_MS,
-  TELEGRAM_SAFE_RETRY_WINDOW_MS,
   buildErrorState,
   buildRateLimitBarrierAtMs,
   buildSafeRetryState,

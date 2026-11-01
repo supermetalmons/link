@@ -1,4 +1,3 @@
-import type { QueueProducer } from "../queueProducers.ts";
 import { queueFor } from "../queueProducers.ts";
 import {
   readAutomatchProfileRecoveryEntries,
@@ -33,7 +32,6 @@ import {
   claimAndEnqueueProjectionTasks,
   collectProjectionRepairs,
   recoverAndEnqueueProjectionPages,
-  sendQueueTasks,
 } from "../projectionSweep.ts";
 import {
   PROFILE_GAME_PROJECTION_SWEEP_LIMIT,
@@ -49,7 +47,6 @@ import type {
   ProfileGameProjectionRecoveryDependencies,
   ProfileGameProjectionSweepResult,
 } from "./types.ts";
-export { salvageEventCleanupOwnerProfileIds } from "../eventProjectionRecoveryRecords.ts";
 
 type EventSweepCandidate = {
   snapshot: EventProjectionRecoverySnapshot<"profile-game">;
@@ -61,7 +58,7 @@ type EventSweepEntry =
   | { kind: "candidate"; value: EventSweepCandidate }
   | { eventId: string; kind: "invalid" };
 
-export function eventSweepEntries(
+function eventSweepEntries(
   snapshots: readonly EventProjectionRecoverySnapshot<"profile-game">[],
 ): EventSweepEntry[] {
   const records = Object.fromEntries(
@@ -148,7 +145,7 @@ export async function repairInvalidEventSweepEntry(
     : { kind: "removed" };
 }
 
-export function repairInvalidAutomatchSweepEntry(
+function repairInvalidAutomatchSweepEntry(
   state: AutomatchRecoveryState,
   inviteId: string,
   nowMs: number,
@@ -159,13 +156,6 @@ export function repairInvalidAutomatchSweepEntry(
     nowMs,
     createRequestId,
   );
-}
-
-export async function sendProfileGameProjectionTasks(
-  queue: Pick<QueueProducer<ProfileGameProjectionTask>, "sendBatch">,
-  tasks: ProfileGameProjectionTask[],
-): Promise<void> {
-  return sendQueueTasks(queue, tasks);
 }
 
 export async function sweepRatingProfileGameProjections(
@@ -638,5 +628,3 @@ export async function handleProfileGameProjectionSweep(
     ratingEnqueued: enqueued.rating,
   });
 }
-
-export { readAutomatchProfileRecoveryEntries as automatchSweepEntries } from "../automatchProjectionRecords.ts";

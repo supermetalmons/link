@@ -55,7 +55,6 @@ import {
 import {
   applyOwnershipPolicy,
   assertRemovalAllowed,
-  buildParticipant,
   buildRemovalPlan,
   finalizeJoin,
   inspectJoin,
@@ -827,11 +826,4 @@ export async function toggleEventPrizeSelection(
   );
 }
 
-export {
-  EVENT_LOCK_ATTEMPTS,
-  EVENT_LOCK_RETRY_DELAY_MS,
-  EVENT_OPERATION_TIMEOUT_MS,
-  EVENT_RECONCILIATION_TIMEOUT_MS,
-  buildParticipant,
-  participantCount,
-};
+export { EVENT_OPERATION_TIMEOUT_MS };

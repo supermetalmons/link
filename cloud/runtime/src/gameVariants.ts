@@ -16,11 +16,6 @@ const loadGameVariantHelpers = () => {
   return gameVariantHelpersPromise;
 };
 
-export const buildGameSeedForStoredVariant = async (value: unknown) => {
-  const gameVariantHelpers = await loadGameVariantHelpers();
-  return gameVariantHelpers.buildGameSeedForStoredVariant(value);
-};
-
 export const buildRandomGameSeed = async (random = Math.random) => {
   const gameVariantHelpers = await loadGameVariantHelpers();
   return gameVariantHelpers.buildRandomGameSeed(random);

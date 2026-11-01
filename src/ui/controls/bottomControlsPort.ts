@@ -4,11 +4,7 @@ import {
 } from "../../game/gameControlsStore";
 import type { PrimaryAction } from "./primaryAction";
 
-export {
-  primaryActionTypes,
-  PrimaryActionType,
-  type PrimaryAction,
-} from "./primaryAction";
+export { PrimaryActionType, type PrimaryAction } from "./primaryAction";
 
 export type CloseNavigationAndAppearancePopupOptions = {
   preserveNavigationSelection?: boolean;
@@ -174,6 +170,7 @@ export const showTimerButtonProgressing = (
     enableWhenTargetReached,
   );
 
+/** @knipExternal Called through the injected port in bottomControls.browser.mjs. */
 export const toggleReactionPicker = (): void => api?.toggleReactionPicker();
 
 export const enableTimerVictoryClaim = (): void => {

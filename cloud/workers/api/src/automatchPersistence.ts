@@ -47,13 +47,13 @@ import {
   measureAutomatchPhase,
 } from "./automatchTelemetry.ts";
 
-export class AutomatchPersistenceFrozen extends AuthApiFailure {
+class AutomatchPersistenceFrozen extends AuthApiFailure {
   constructor() {
     super(503, "unavailable", "automatch-persistence-frozen");
   }
 }
 
-export function createAutomatchPersistenceCompatibility(
+export function createAutomatchPersistence(
   db: D1Database,
   raw: MatchStatePort,
   {
@@ -436,7 +436,6 @@ export function createAutomatchPersistenceCompatibility(
 
   return {
     client: createTypedGameSessionPort(rawClient),
-    rawClient,
     async recoverLogins(loginUids: readonly string[], signal?: AbortSignal) {
       await recoverResources(
         loginUids.map((uid) => `automatch-login:${uid}`),
@@ -520,14 +519,6 @@ export function createAutomatchPersistenceCompatibility(
       };
     },
   };
-}
-
-export function createAutomatchPersistence(
-  ...args: Parameters<typeof createAutomatchPersistenceCompatibility>
-) {
-  const { rawClient: _rawClient, ...persistence } =
-    createAutomatchPersistenceCompatibility(...args);
-  return persistence;
 }
 
 export type AutomatchPersistence = ReturnType<

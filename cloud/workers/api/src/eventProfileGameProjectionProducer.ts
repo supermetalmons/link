@@ -33,7 +33,7 @@ type ProducerDependencies = {
   now?: () => number;
 };
 
-export function eventIdsFromProfileGameProjectionUpdates(
+function eventIdsFromProfileGameProjectionUpdates(
   updates: readonly EventCommand[],
 ): string[] {
   return [

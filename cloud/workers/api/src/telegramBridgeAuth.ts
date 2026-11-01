@@ -1,4 +1,4 @@
-export const MAX_TIMESTAMP_SKEW_SECONDS = 5 * 60;
+const MAX_TIMESTAMP_SKEW_SECONDS = 5 * 60;
 
 function decodeBase64Url(value: string): Uint8Array | null {
   if (!/^[A-Za-z0-9_-]{43}$/.test(value)) {

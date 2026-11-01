@@ -13,7 +13,7 @@ import type {
   SessionCounter,
   SessionTimestamp,
 } from "./automatchRecords.js";
-export type { InviteFieldChanges } from "./shared/invite-records.js";
+
 export type { SessionCounter, SessionTimestamp } from "./automatchRecords.js";
 export type TelegramSourceChanges = {
   lifecycle?: "pending" | "matched" | "canceled";

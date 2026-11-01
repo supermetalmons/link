@@ -8,8 +8,6 @@ exports.AppliedMessageSnapshot =
 exports.messageDocument = messageDocument;
 exports.controlDocument = controlDocument;
 exports.apiGateDocument = apiGateDocument;
-exports.appliedDocument = appliedDocument;
-exports.desiredDocument = desiredDocument;
 exports.sendEvidenceDocument = sendEvidenceDocument;
 exports.updateTelegramApplied = updateTelegramApplied;
 exports.messageDeliveryDocument = messageDeliveryDocument;
@@ -20,7 +18,6 @@ exports.messageRecoveryResultDocument = messageRecoveryResultDocument;
 exports.readMessageApplied = readMessageApplied;
 exports.telegramApiGateOwner = telegramApiGateOwner;
 exports.updateTelegramMessage = updateTelegramMessage;
-exports.omitTelegramMessageFields = omitTelegramMessageFields;
 exports.updateTelegramControl = updateTelegramControl;
 exports.clearTelegramApiGate = clearTelegramApiGate;
 var recordCodec_js_1 = require("./recordCodec.js");
@@ -43,12 +40,6 @@ function controlDocument(value) {
   return value ?? { schemaVersion: 1 };
 }
 function apiGateDocument(value) {
-  return value;
-}
-function appliedDocument(value) {
-  return value;
-}
-function desiredDocument(value) {
   return value;
 }
 function sendEvidenceDocument(value) {
@@ -100,11 +91,6 @@ function telegramApiGateOwner(value) {
 }
 function updateTelegramMessage(current, fields) {
   return { ...current, ...fields };
-}
-function omitTelegramMessageFields(current, fields) {
-  const output = { ...current };
-  for (const field of fields) delete output[field];
-  return output;
 }
 function updateTelegramControl(current, fields) {
   return { ...current, ...fields };

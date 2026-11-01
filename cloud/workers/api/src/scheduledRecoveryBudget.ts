@@ -4,10 +4,10 @@ import {
 } from "./eventAnnouncementKinds.ts";
 import type { ScheduledEventRecoveryCandidate } from "./eventScheduledRecoveryD1.ts";
 
-export const SCHEDULED_RECOVERY_URGENT_BUDGET = 4_500;
-export const SCHEDULED_RECOVERY_BACKGROUND_BUDGET = 1_000;
-export const SCHEDULED_RECOVERY_START_COST = 10;
-export const SCHEDULED_RECOVERY_ANNOUNCEMENT_COST = 40;
+const SCHEDULED_RECOVERY_URGENT_BUDGET = 4_500;
+const SCHEDULED_RECOVERY_BACKGROUND_BUDGET = 1_000;
+const SCHEDULED_RECOVERY_START_COST = 10;
+const SCHEDULED_RECOVERY_ANNOUNCEMENT_COST = 40;
 
 export function createScheduledRecoveryBudget(nowMs: number) {
   const remaining = {

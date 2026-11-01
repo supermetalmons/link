@@ -7,7 +7,6 @@ exports.resolveScheduledDateTimeStartAtMs =
   exports.parseScheduledDateParts =
   exports.hasDateTimeScheduleRequest =
   exports.assertScheduledStartWindow =
-  exports.EventSchedulingError =
     void 0;
 const events_1 = require("@mons/shared/events");
 class EventSchedulingError extends Error {
@@ -16,7 +15,6 @@ class EventSchedulingError extends Error {
     this.code = code;
   }
 }
-exports.EventSchedulingError = EventSchedulingError;
 const MIN_START_AHEAD_MS = events_1.MIN_STARTS_IN_MINUTES * 60 * 1000;
 const MAX_START_AHEAD_MS = events_1.MAX_STARTS_IN_MINUTES * 60 * 1000;
 const SCHEDULED_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;

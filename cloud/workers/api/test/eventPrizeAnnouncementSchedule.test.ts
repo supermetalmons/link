@@ -15,7 +15,7 @@ import {
 import {
   buildEventProgressPlan,
   type EventProgressPlan,
-} from "../src/eventProgress.ts";
+} from "../src/eventProgressCodec.ts";
 import type { EventGameplayRepository } from "../src/eventRepository.ts";
 import { eventReadFixture } from "./eventReadFixture.ts";
 import {

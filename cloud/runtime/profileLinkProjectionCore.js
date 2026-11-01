@@ -1,23 +1,13 @@
 // Generated from src/profileLinkProjectionCore.ts. Run npm run generate:runtime.
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.processWithConcurrency =
-  exports.createProfileLinkProjectionCore =
-  exports.PROFILE_LINK_CATCHUP_TIMEOUT_MS =
-  exports.PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP =
-  exports.PROFILE_LINK_CATCHUP_MAX_INVITES =
-  exports.PROFILE_LINK_CATCHUP_CONCURRENCY =
-    void 0;
+exports.processWithConcurrency = exports.createProfileLinkProjectionCore =
+  void 0;
 const gameProjectionModel_js_1 = require("./events/gameProjectionModel.js");
 const PROFILE_LINK_CATCHUP_MAX_INVITES = 20;
-exports.PROFILE_LINK_CATCHUP_MAX_INVITES = PROFILE_LINK_CATCHUP_MAX_INVITES;
 const PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP = 1;
-exports.PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP =
-  PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP;
 const PROFILE_LINK_CATCHUP_CONCURRENCY = 3;
-exports.PROFILE_LINK_CATCHUP_CONCURRENCY = PROFILE_LINK_CATCHUP_CONCURRENCY;
 const PROFILE_LINK_CATCHUP_TIMEOUT_MS = 50000;
-exports.PROFILE_LINK_CATCHUP_TIMEOUT_MS = PROFILE_LINK_CATCHUP_TIMEOUT_MS;
 const processWithConcurrency = async (
   items,
   concurrency,

@@ -21,15 +21,8 @@ import type {
 } from "./startTransitionCore.js";
 import {
   applyMatchResolution,
-  assignWinnerToNextRound,
   buildSeedToProfileId,
   createEmptyEventMatch,
-  getSortedMatchKeys,
-  getSortedRoundIndexes,
-  hasThirdPlaceMatchField,
-  isMatchResolved,
-  isMatchSlotBlocked,
-  isMatchWinnerDisqualified,
   recomputeRoundStatuses,
   setMatchSlotBlocked,
   setMatchSlotParticipant,
@@ -58,7 +51,7 @@ export type EventBracketDependencies = {
     eventId: string,
   ): Promise<Record<string, WithdrawalDocument>>;
 };
-export type EventPrizePlacementsInput = {
+type EventPrizePlacementsInput = {
   event: EventData | null;
   rounds: EventRounds;
   participantsById: EventParticipants;
@@ -120,9 +113,10 @@ declare const createEventBracketRuntime: (
       event: EventData;
       nowMs: number;
     } & Omit<EventStartTransitionDependencies, "buildRandomGameSeed">,
-  ) => Promise<
-    import("./startTransitionCore.js").ScheduledEventTransitionResult
-  >;
+  ) => Promise<{
+    didChange: boolean;
+    updates: EventCommitPlan;
+  }>;
   buildSeedToProfileId: ({
     participantIds,
     random,
@@ -240,18 +234,7 @@ declare const createEventBracketRuntime: (
   setMatchSlotParticipant: typeof import("./documents.js").copyEventParticipantToMatchSlot;
 };
 export type EventBracketRuntime = ReturnType<typeof createEventBracketRuntime>;
-export declare const addEventPrizeAssignmentUpdates: ({
-    updates,
-    eventId,
-    assignments,
-    includeEventAssignments,
-  }: {
-    updates: EventCommitPlan;
-    eventId: string;
-    assignments: Record<string, EventPrizeAssignmentRecord>;
-    includeEventAssignments: boolean;
-  }) => Promise<void>,
-  buildFixedBracketState: (
+export declare const buildFixedBracketState: (
     input: Omit<FixedBracketInput, "buildRandomGameSeed">,
   ) => Promise<{
     bracketSize: number;
@@ -261,15 +244,6 @@ export declare const addEventPrizeAssignmentUpdates: ({
     thirdPlaceMatch: import("../shared/event-types.js").EventMatchRecord | null;
     inviteUpdates: EventCommitPlan;
   }>,
-  buildScheduledEventDueUpdates: (
-    input: {
-      eventId: string;
-      event: EventData;
-      nowMs: number;
-    } & Omit<EventStartTransitionDependencies, "buildRandomGameSeed">,
-  ) => Promise<
-    import("./startTransitionCore.js").ScheduledEventTransitionResult
-  >,
   getEventPrizePlacements: ({
     event,
     rounds,
@@ -289,83 +263,12 @@ export declare const addEventPrizeAssignmentUpdates: ({
   }) => {
     didChange: boolean;
     participantsById: EventParticipants;
-  },
-  reconcileBracketMatchReadiness: (
-    input: Omit<MatchReadinessInput, "buildRandomGameSeed">,
-  ) => Promise<boolean>,
-  reconcileProfileEventPrizeAssignments: ({
-    event,
-    eventId,
-    assignments,
-    ownershipSnapshot,
-  }: PrizeProjectionInput) => Promise<{
-    didChange: boolean;
-  }>,
-  reconcileThirdPlaceMatchReadiness: (
-    input: Omit<
-      MatchReadinessInput,
-      "buildRandomGameSeed" | "ownershipSnapshot"
-    > &
-      ThirdPlaceReadinessOptions,
-  ) => Promise<
-    | {
-        didChange: boolean;
-        thirdPlaceMatch: null;
-      }
-    | {
-        didChange: boolean;
-        thirdPlaceMatch: import("../shared/event-types.js").EventMatchRecord;
-      }
-  >,
-  removeCompletedEventPrizeProjections: ({
-    event,
-    eventId,
-    assignments,
-    ownershipSnapshot,
-  }: PrizeProjectionInput) => Promise<void>,
-  resolveEventPrizeAssignments: ({
-    eventId,
-    event,
-    rounds,
-    participantsById,
-    thirdPlaceMatch,
-    assignedAtMs,
-    ownershipSnapshot,
-    prizeSelections,
-  }: EventPrizePlacementsInput & {
-    eventId: string;
-    assignedAtMs: number;
-    ownershipSnapshot: EventOwnershipSnapshot | null;
-    prizeSelections?: Record<string, string> | null;
-  }) => Promise<{
-    assignments: Record<string, EventPrizeAssignmentRecord>;
-    didCreate: boolean;
-  }>,
-  resolveRoundMatchState: (
-    matchRecord: EventMatch | null,
-    matchPair?: [unknown, unknown],
-  ) => Promise<MatchResolution | null>,
-  resolveRoundMatchesWithConcurrency: (
-    matchesByKey: EventMatchesDocument,
-  ) => Promise<
-    {
-      matchKey: string;
-      matchRecord: EventMatch | null;
-      resolved: MatchResolution | null;
-    }[]
-  >;
+  };
 export {
   createEventBracketRuntime,
   applyMatchResolution,
-  assignWinnerToNextRound,
   buildSeedToProfileId,
   createEmptyEventMatch,
-  getSortedMatchKeys,
-  getSortedRoundIndexes,
-  hasThirdPlaceMatchField,
-  isMatchResolved,
-  isMatchSlotBlocked,
-  isMatchWinnerDisqualified,
   recomputeRoundStatuses,
   setMatchSlotBlocked,
   setMatchSlotParticipant,

@@ -84,7 +84,7 @@ export type AutomatchProjectionPort = Pick<
   | "finishAutomatchProfileOutbox"
 >;
 
-export type AutomatchProjectionRecoveryPort = Pick<
+type AutomatchProjectionRecoveryPort = Pick<
   RawGameSessionPort,
   | "listDueAutomatchTelegramOutboxes"
   | "listDueAutomatchTelegramOutboxesPage"

@@ -18,7 +18,6 @@ export type {
   XRedirectFlowDocument,
   XRedirectFlow,
   XFlowUpdate,
-  XFlowResult,
 } from "./authStateRecords.ts";
 
 export type AuthStateRepository = {

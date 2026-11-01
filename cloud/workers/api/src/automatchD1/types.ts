@@ -1,14 +1,4 @@
-import type {
-  AutomatchRecordMap,
-  AutomatchEntryWrite,
-  AutomatchTelegramSourceWrite,
-  MutationReceiptWrite,
-  MutationReceiptExpirationWrite,
-} from "../../../../runtime/automatchRecords.js";
-import type {
-  TelegramProjectionRequest,
-  ProfileProjectionRequest,
-} from "../../../../runtime/gameSessionChanges.js";
+import type { AutomatchRecordMap } from "../../../../runtime/automatchRecords.js";
 import type { RecoveryScanPage } from "../recoveryScanPage.ts";
 
 export const AUTOMATCH_RECORD_TABLES = {
@@ -47,15 +37,6 @@ export const AUTOMATCH_RECORD_TABLES = {
 export type AutomatchRoot = keyof typeof AUTOMATCH_RECORD_TABLES;
 export type AutomatchRecordValue<Root extends AutomatchRoot> =
   AutomatchRecordMap[Root] | null;
-
-export type AutomatchFreshWrites = {
-  automatch: AutomatchEntryWrite;
-  telegramAutomatches: AutomatchTelegramSourceWrite;
-  "telegramProjectionOutbox/automatch": TelegramProjectionRequest;
-  "profileGameProjectionOutbox/automatch": ProfileProjectionRequest;
-  gameplayMutationReceipts: MutationReceiptWrite;
-  gameplayMutationReceiptExpirations: MutationReceiptExpirationWrite;
-};
 
 export type AutomatchRecordSnapshot<
   Root extends AutomatchRoot = AutomatchRoot,

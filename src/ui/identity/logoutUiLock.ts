@@ -5,9 +5,9 @@ type LogoutUiLockDependencies = {
   performCleanup: (options: { cleanupMode: "thorough" }) => void;
 };
 
-export const LOGOUT_UI_RECOVERY_TIMEOUT_MS = 5000;
+const LOGOUT_UI_RECOVERY_TIMEOUT_MS = 5000;
 export const LOGOUT_SIGN_OUT_FALLBACK_DELAY_MS = 700;
-export const LOGOUT_UI_LAST_RESORT_UNLOCK_TIMEOUT_MS = 12000;
+const LOGOUT_UI_LAST_RESORT_UNLOCK_TIMEOUT_MS = 12000;
 
 let logoutUiRecoveryTimeoutId: number | null = null;
 let logoutUiLastResortUnlockTimeoutId: number | null = null;
@@ -51,14 +51,14 @@ export const subscribeToLogoutUiLock = (
   };
 };
 
-export const clearLogoutUiRecoveryTimeout = () => {
+const clearLogoutUiRecoveryTimeout = () => {
   if (logoutUiRecoveryTimeoutId !== null) {
     window.clearTimeout(logoutUiRecoveryTimeoutId);
     logoutUiRecoveryTimeoutId = null;
   }
 };
 
-export const clearLogoutUiLastResortUnlockTimeout = () => {
+const clearLogoutUiLastResortUnlockTimeout = () => {
   if (logoutUiLastResortUnlockTimeoutId !== null) {
     window.clearTimeout(logoutUiLastResortUnlockTimeoutId);
     logoutUiLastResortUnlockTimeoutId = null;
@@ -74,7 +74,7 @@ export const beginLogoutAttempt = (): number => {
   return latestLogoutAttemptId;
 };
 
-export const armLogoutUiLastResortUnlockTimeout = (logoutAttemptId: number) => {
+const armLogoutUiLastResortUnlockTimeout = (logoutAttemptId: number) => {
   clearLogoutUiLastResortUnlockTimeout();
   logoutUiLastResortUnlockTimeoutId = window.setTimeout(() => {
     logoutUiLastResortUnlockTimeoutId = null;
