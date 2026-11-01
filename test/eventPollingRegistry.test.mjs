@@ -23,7 +23,7 @@ const eventResponse = (revision = 1, eventId = "event-1") => ({
   prizeSelections: { "profile-1": "1092" },
 });
 
-/** @returns {import("@mons/shared/event-prizes").ProfileEventPrizesResponse} */
+/** @returns {import("@mons/shared/event-prizes").ProfileEventPrizesSnapshot} */
 const profileResponse = (revision = 1) => ({
   ok: true,
   profileId: "profile-1",
@@ -44,7 +44,7 @@ const seed = (revision = 1, eventId = "event-1", bookmarkEpoch = epoch) => ({
 });
 
 /**
- * @template {import("@mons/shared/events").EventSnapshotResponse | import("@mons/shared/event-prizes").ProfileEventPrizesResponse} T
+ * @template {import("@mons/shared/events").EventSnapshotResponse | import("@mons/shared/event-prizes").ProfileEventPrizesSnapshot} T
  * @param {T} value
  * @returns {Extract<import("../src/services/gameplayTransport.ts").ConditionalRead<T>, {kind: "modified"}>}
  */
@@ -340,7 +340,7 @@ test("polls one canonical profile-prize resource and resets its bookmark on inva
     },
   });
   const firstUpdates = [];
-  /** @type {Array<import("@mons/shared/event-prizes").ProfileEventPrizesResponse>} */
+  /** @type {Array<import("@mons/shared/event-prizes").ProfileEventPrizesSnapshot>} */
   const secondUpdates = [];
   const unsubscribeFirst = polling.registry.subscribeToProfileEventPrizes(
     "profile-1",
@@ -383,7 +383,7 @@ test("rejects a mismatched profile before caching its read metadata", async () =
   });
   /** @type {Array<string>} */
   const errors = [];
-  /** @type {Array<import("@mons/shared/event-prizes").ProfileEventPrizesResponse>} */
+  /** @type {Array<import("@mons/shared/event-prizes").ProfileEventPrizesSnapshot>} */
   const updates = [];
   polling.registry.subscribeToProfileEventPrizes(
     "profile-1",
@@ -618,7 +618,7 @@ test("reset preserves mounted subscribers and starts fresh reads", async () => {
   });
   /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const events = [];
-  /** @type {Array<import("@mons/shared/event-prizes").ProfileEventPrizesResponse>} */
+  /** @type {Array<import("@mons/shared/event-prizes").ProfileEventPrizesSnapshot>} */
   const prizes = [];
   polling.registry.subscribeToEvent("event-1", (value) => events.push(value));
   polling.registry.subscribeToProfileEventPrizes("profile-1", (value) =>

@@ -67,7 +67,6 @@ type Signature_createEventLockManagerCore = (dependencies: {
     updater: (current: EventLeaseRecord | null) => EventLockTransactionDecision,
   ) => Promise<EventLockTransactionResult>;
   createLockId(): string;
-  includeLegacyOwnerId?: boolean;
   lockKind?: EventLeaseKind;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;

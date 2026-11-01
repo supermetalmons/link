@@ -30,7 +30,6 @@ export {
   readEventSnapshot,
   readEventSnapshotIfChanged,
   readProfileEventPrizes,
-  readProfileEventPrizesIfChanged,
   readProfileEventPrizeAssignment,
   listProfileEventPrizeAssignments,
   readEventLease,

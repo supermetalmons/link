@@ -155,7 +155,7 @@ defineEventRoute({ path: "/events/create", kind: "control", parse: () => endpoin
   );
 });
 
-test("existing query readers check contract keys and accepted mode values", () => {
+test("query readers reject keys outside their current contracts", () => {
   const mutations = [
     {
       file: "cloud/workers/api/src/sessionBootstrap.ts",
@@ -163,9 +163,9 @@ test("existing query readers check contract keys and accepted mode values", () =
       to: '"identity" satisfies keyof SessionQuery',
     },
     {
-      file: "cloud/workers/api/src/eventReadRoute.ts",
-      from: '"1" satisfies NonNullable<',
-      to: '"2" satisfies NonNullable<',
+      file: "cloud/workers/api/src/profileEventPrizePagination.ts",
+      from: '"cursor" satisfies keyof ApiQuery<"GET /events/prizes">',
+      to: '"pagination" satisfies keyof ApiQuery<"GET /events/prizes">',
     },
     {
       file: "cloud/workers/api/src/xCallback.ts",

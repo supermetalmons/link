@@ -14,7 +14,7 @@ import {
   getEventModalState,
   openEventModal,
   subscribeToEventModalState,
-} from "../eventModalController";
+} from "../event/modalState";
 
 const EVENT_MODAL_NAV_AUTOCLOSE_SUPPRESS_MS = 10000;
 export const EVENT_CLOUD_MAX_AVATARS = 4;

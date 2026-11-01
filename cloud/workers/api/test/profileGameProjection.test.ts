@@ -1402,7 +1402,6 @@ test("event projection cannot write after its lease is taken over", async () => 
           nowMs = 31_000;
           const contender = createEventLockManagerCore({
             createLockId: () => "successor-lock",
-            includeLegacyOwnerId: true,
             lockKind: "profile-game-projection",
             now: () => nowMs,
             transactEventLease: state.transactEventLease,

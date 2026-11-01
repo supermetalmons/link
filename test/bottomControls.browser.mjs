@@ -468,7 +468,7 @@ async function fixture(
     ["./uiSession", "bottom-transient"],
     ["./NavigationPicker", "bottom-navigation"],
     ["../navigation/appNavigation", "bottom-app-navigation"],
-    ["./eventModalController", "bottom-event-modal"],
+    ["./event/modalState", "bottom-event-modal"],
   ]);
   const stubs = new Map([
     ["../hooks/useAvailableMaterials", materialSource],
@@ -535,7 +535,7 @@ async function fixture(
       "../session/AppSessionManager",
       "../navigation/appNavigation",
       "../navigation/routeState",
-      "./eventModalController",
+      "./event/modalState",
     ])) {
       replacements.delete(id);
     }
@@ -645,8 +645,8 @@ export const teardownProfileScope = () => {};
               ? id.slice(3)
               : isControlsModule && id === "./boardReactionPort"
                 ? "./controls/boardReactionPort"
-                : isControlsModule && id === "../eventModalController"
-                  ? "./eventModalController"
+                : isControlsModule && id === "../event/modalState"
+                  ? "./event/modalState"
                   : id;
           if (
             (importer?.endsWith("/BottomControls.tsx") || isControlsModule) &&

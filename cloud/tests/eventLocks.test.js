@@ -20,7 +20,7 @@ const clone = (value) => (value === undefined ? value : structuredClone(value));
 
 /**
  * @typedef {import("../runtime/eventLeases").EventLeaseRecord} CurrentLease
- * @typedef {Partial<CurrentLease> & {expiresAtMs: number, requestId?: string}} RawLease
+ * @typedef {Partial<CurrentLease> & {expiresAtMs: number}} RawLease
  * @typedef {import("../runtime/events/lockManagerCore").EventLockHandle} LockHandle
  */
 /** @param {unknown} value @returns {value is CurrentLease} */
@@ -32,8 +32,7 @@ function isCurrentLease(value) {
     typeof row.ownerUid === "string" &&
     typeof row.acquiredAtMs === "number" &&
     typeof row.refreshedAtMs === "number" &&
-    typeof row.expiresAtMs === "number" &&
-    (row.ownerId === undefined || typeof row.ownerId === "string")
+    typeof row.expiresAtMs === "number"
   );
 }
 /** @param {unknown} output @returns {import("../runtime/transactions").TransactionDecision<CurrentLease>} */
@@ -292,7 +291,7 @@ test("validates lease domains and preserves the core default", () => {
   assert.equal(EVENT_LOCK_ROOT, "eventLocks");
 });
 
-test("acquires the legacy-compatible event lock schema through a cold transaction", async () => {
+test("acquires an event lock through a cold transaction", async () => {
   const database = createColdDatabase();
   const manager = createManager({ database, now: () => 1_000 });
   const handle = await manager.acquireEventLock("event-1", "owner-1");
@@ -316,44 +315,6 @@ test("acquires the legacy-compatible event lock schema through a cold transactio
   });
   assert.ok(database.transactionCalls[0]);
   assert.equal(database.transactionCalls[0].argumentCount, 1);
-});
-
-test("profile projection leases interoperate with legacy ownerId consumers", async () => {
-  const path = "profileGameProjectionLocks/event/event-1";
-  const database = createColdDatabase();
-  const manager = createManager({
-    database,
-    now: () => 1_000,
-    lockKind: "profile-game-projection",
-    includeLegacyOwnerId: true,
-  });
-  const handle = await manager.acquireEventLock("event-1", "new-owner");
-  assert.ok(handle);
-  assert.equal(leaseAt(database, path).ownerId, "new-owner");
-
-  const legacyAttempt = await runStateDecisionTransaction(
-    database.ref(path),
-    (current) =>
-      typeof current?.ownerId === "string" && current.expiresAtMs > 1_000
-        ? { commit: false, decision: "busy" }
-        : {
-            value: { ownerId: "legacy-contender", expiresAtMs: 901_000 },
-            decision: "acquired",
-          },
-  );
-  assert.equal(legacyAttempt.committed, false);
-  assert.equal(leaseAt(database, path).ownerId, "new-owner");
-
-  database.write(path, {
-    ownerId: "legacy-owner",
-    requestId: "legacy-request",
-    expiresAtMs: 2_000,
-  });
-  assert.equal(
-    await manager.acquireEventLock("event-1", "new-contender"),
-    null,
-  );
-  assert.equal(leaseAt(database, path).ownerId, "legacy-owner");
 });
 
 test("core and projection roots coexist while projection contenders exclude each other", async () => {

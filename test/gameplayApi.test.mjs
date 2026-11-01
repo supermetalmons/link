@@ -123,7 +123,8 @@ const {
   LEGACY_CORE_PRIZES_EVENT_ID,
   isEventPrizeAssignmentRecord,
   isEventPrizeAssignmentWireRecord,
-  isProfileEventPrizesResponse,
+  isProfileEventPrizesSnapshot,
+  profileEventPrizesPageEtag,
   isToggleEventPrizeSelectionRequest,
   isToggleEventPrizeSelectionResponse,
 } = await import("@mons/shared/event-prizes");
@@ -1063,14 +1064,22 @@ test("reads conditional event snapshots and profile prizes with transport metada
         },
       });
     }
-    return new Response(JSON.stringify(profilePrizes), {
-      status: 200,
-      headers: {
-        "Content-Type": "application/json",
-        ETag: 'W/"prizes-4"',
-        "X-D1-Bookmark": "bookmark-4",
+    return new Response(
+      JSON.stringify({ ...profilePrizes, nextCursor: null }),
+      {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+          ETag: profileEventPrizesPageEtag(
+            "12345678-1234-1234-1234-123456789abc",
+            "profile-1",
+            0,
+          ),
+          "X-D1-Bookmark":
+            "mons-d1-v1:12345678-1234-1234-1234-123456789abc:bookmark-4",
+        },
       },
-    });
+    );
   };
   const tokenProvider = Object.assign(async () => "session-token", {
     assertCurrentUser: () => undefined,
@@ -1097,18 +1106,19 @@ test("reads conditional event snapshots and profile prizes with transport metada
     {
       kind: "modified",
       value: profilePrizes,
-      etag: 'W/"prizes-4"',
-      bookmark: "bookmark-4",
+      etag: profileEventPrizesPageEtag(
+        "12345678-1234-1234-1234-123456789abc",
+        "profile-1",
+        0,
+      ),
+      bookmark: "mons-d1-v1:12345678-1234-1234-1234-123456789abc:bookmark-4",
     },
   );
   assert.equal(
     required(calls[0]).input,
     `https://api.mons.link/events/snapshot?eventId=${LEGACY_CORE_PRIZES_EVENT_ID}`,
   );
-  assert.equal(
-    required(calls[1]).input,
-    "https://api.mons.link/events/prizes?pagination=1",
-  );
+  assert.equal(required(calls[1]).input, "https://api.mons.link/events/prizes");
   const headers = new Headers(required(required(calls[0]).init).headers);
   assert.equal(headers.get("Authorization"), "Bearer session-token");
   assert.equal(headers.get("If-None-Match"), 'W/"event-2"');
@@ -1368,7 +1378,7 @@ test("bounds conditional event responses and validates exact read contracts", as
   };
   assert.equal(isEventPrizeAssignmentWireRecord(futureAssignment), true);
   assert.equal(
-    isProfileEventPrizesResponse({
+    isProfileEventPrizesSnapshot({
       ok: true,
       profileId: "profile-1",
       revision: 2,
@@ -1380,7 +1390,7 @@ test("bounds conditional event responses and validates exact read contracts", as
     true,
   );
   assert.equal(
-    isProfileEventPrizesResponse({
+    isProfileEventPrizesSnapshot({
       ok: true,
       profileId: null,
       revision: 1,

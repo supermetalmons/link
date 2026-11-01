@@ -26,7 +26,7 @@ const { getProfileByIdViaApi, resolveProfileIdViaApi } =
   await import("../src/services/profileApi.ts");
 const { getEndedEventWinnerPodiumEntries } =
   await import("../src/ui/event/eventPresentation.ts");
-const modalController = await import("../src/ui/eventModalController.ts");
+const modalController = await import("../src/ui/event/modalState.ts");
 
 /** @returns {import("@mons/shared/events").EventParticipantRecord} */
 const participant = (
@@ -791,7 +791,7 @@ test("sizes event prize artwork from catalog image dimensions", () => {
   assert.equal(view.match(/height=\{prize\.imageHeight\}/g)?.length, 2);
 });
 
-test("preserves the controller façade and modal state transitions", async (t) => {
+test("preserves event modal state transitions", async (t) => {
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
   let location = new URL("https://mons.link/game-1");
   /** @type {(string | URL | null | undefined)[]} */
@@ -836,7 +836,7 @@ test("preserves the controller façade and modal state transitions", async (t) =
   ]);
   await modalController.closeEventModal();
   /**
-   * @type {import("../src/ui/eventModalController.ts").EventModalState[]}
+   * @type {import("../src/ui/event/modalState.ts").EventModalState[]}
    */
   const states = [];
   const unsubscribe = modalController.subscribeToEventModalState((state) => {

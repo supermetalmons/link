@@ -91,6 +91,33 @@ async function signedRequest(command: unknown, bodyOverride?: string) {
   });
 }
 
+test("rejects stale and tampered signatures before storage access", async () => {
+  const command = { kind: "event-reminder-refresh", eventId: "event-1" };
+  const stale = await handleTelegramCommand(
+    await signedRequest(command),
+    TELEGRAM_TEST_ENV,
+    {
+      now: () => NOW_MS + 301_000,
+      readStorageMode: async () => assert.fail("Unexpected storage read"),
+    },
+  );
+  const signed = await signedRequest(command);
+  const tampered = await handleTelegramCommand(
+    new Request(signed.url, {
+      method: "POST",
+      headers: signed.headers,
+      body: `${JSON.stringify(command)} `,
+    }),
+    TELEGRAM_TEST_ENV,
+    {
+      now: () => NOW_MS,
+      readStorageMode: async () => assert.fail("Unexpected storage read"),
+    },
+  );
+  assert.equal(stale.status, 401);
+  assert.equal(tampered.status, 401);
+});
+
 test("persists admin desired state before enqueueing", async () => {
   const state = repositoryState();
   const sent: unknown[] = [];

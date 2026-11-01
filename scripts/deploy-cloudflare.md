@@ -27,10 +27,6 @@ Deploy only affected Workers. Shared prize-catalog changes need both the API and
 
 Authenticate Wrangler locally or supply `CLOUDFLARE_API_TOKEN` through the process environment. Never put credentials in arguments, source files, release files, or logs.
 
-## Match timer storage
-
-See [canonical timer storage](#canonical-timer-storage) for local layout requirements, release checks, and retained evidence.
-
 ## Automatch queue selection
 
 The live-ticket and pending-enqueue projections in `PROFILE_GAMES_DB` are maintained by triggers from canonical automatch records and session journals. Queue selection always uses FIFO; retained `automatch_runtime_control.metadata_json.queueSelection` values do not control the runtime. Bootstrap response enrichment and committed-session notifications are always enabled.
@@ -66,7 +62,7 @@ This write transport uses a private child process and an authenticated temporary
 
 `application_admission_retirements` permanently rejects the exact retired request identities at each D1 write-context boundary. The central database also rejects their new child admissions. Immutable retirement receipts preserve the original records and explicitly leave business outcomes unknown; they do not claim that an invocation terminated or that accepted background work completed. Keep these tables, triggers and receipts on rollback. The older `application_admission_reconciliations` records remain independent and immutable.
 
-The completed admission-retirement executor is archived and removed from active source. Preserve its immutable retirement markers and receipts. Ongoing maintenance commands retain the four-database guarded transport described above; they do not expose the retired executor or its general read interface.
+The [canonical cleanup report](../cloud/reports/canonical-cleanup-2026-11-01.md) records completed retirement work and archived tooling. Ongoing maintenance commands use the four-database guarded transport described above; immutable retirement markers and receipts remain required.
 
 `retired_invites` permanently excludes the two reviewed legacy rooms in the gameplay, profile and Telegram databases. Current code rejects their mutation locks and rerolls generated automatch collisions; database triggers also reject held or older writers. Preserve the exact identities, scoped guards, closed object controls and cleanup receipts. Removing an entire object or its controls can make it eligible for fresh initialization. Normal traffic and canonical Queue delivery remain active during these scoped operations.
 
@@ -142,15 +138,15 @@ Changes to shared event/profile repositories may affect both owned Workflow defi
 
 `WAGER_SETTLEMENT_QUEUE` sends initial and deferred retries to `mons-link-wager-settlement-data1`, with exhausted work retained in `mons-link-wager-settlement-data1-dlq`. Its consumer runs independently of Telegram delivery and preserves wager payloads, replay, profile admissions, and reservation checks.
 
-Legacy wager tasks in the Telegram queue forward unchanged to the settlement queue. They are acknowledged only after enqueue succeeds and retried if forwarding fails. Inspect both the settlement DLQ and legacy Telegram DLQ during recovery; reconcile canonical state before replaying a specific operation.
+Telegram delivery accepts only Telegram tasks. Inspect the settlement DLQ during recovery and reconcile canonical state before replaying a specific operation through the settlement queue.
 
-Preserve both settlement queues and their consumer configuration on rollback. A compatible Worker must handle the dedicated queue and retained legacy tasks. Verify affected behavior with `smoke:api` and fixture-owned `smoke:wagers`; do not purge queues or alter balances to make checks pass. Provisioning or consumer changes require their own explicit resource operation, not an ordinary code release.
+Preserve the settlement queue, its DLQ, and their consumer configuration on rollback. A compatible Worker must route settlement work to the dedicated consumer. Verify affected behavior with `smoke:api` and fixture-owned `smoke:wagers`; do not purge queues or alter balances to make checks pass. Provisioning or consumer changes require their own explicit resource operation, not an ordinary code release.
 
 ## Event navigation delivery
 
 `EVENT_PROFILE_GAME_PROJECTION_QUEUE` delivers event navigation work through `mons-link-event-profile-game-projection-data1`, independently of rating, invite, automatch, and profile-link work. Preserve canonical event records, task payloads, projection generations, durable outboxes, and the dedicated consumer.
 
-Version-pinned Workflow instances can still produce tasks on the shared profile-game queue. The shared consumer forwards event tasks unchanged and acknowledges them only after the dedicated enqueue succeeds. The event recovery sweep can re-enqueue pending outboxes; investigate the exact event and request before replaying. Rollback requires a Worker that explicitly routes the dedicated queue and supports legacy forwarding. Never redirect event work to an unknown handler, purge queues, or delete pending outboxes.
+The shared profile-game consumer logs and acknowledges misrouted event tasks. The event recovery sweep can re-enqueue pending outboxes through the dedicated queue; investigate the exact event and request before replaying. Rollback versions and version-pinned Workflows must retain dedicated event routing. Never redirect event work to an unknown handler, purge queues, or delete pending outboxes.
 
 For affected releases, publish changed Workflow definitions and verify the event read plus an isolated event preview. Use an approved admin fixture, an event outside the prize catalog with `isSundayMons: false` and all `telegramAnnouncements` flags false, and a dedicated test participant. Compare `/navigation/games/read` with `/events/snapshot`, remove the participant before start, and keep approved live events read-only. Finish after the required checks pass.
 
@@ -170,7 +166,7 @@ Current timer starts and claims use the invite Durable Object's verified local l
 
 Preserve absolute deadlines, highest-turn markers, claims, and downstream effect receipts. Validate retry, takeback, eviction, terminal-claim replay, and writer-fence behavior locally, then use the routine release and affected invite-lifecycle checks. A rollback version must understand the verified local layout and writer guards; never restore an older timer backend or reset a stored deadline.
 
-Keep the protected source/schema comparisons, exact scope, copy acknowledgements or verified empty decisions, and post-retirement schema checks with the release evidence. Applied migrations and immutable ownership/receipt records remain preserved. Migration `0039_retire_canonical_timer_starts.sql` retires the former D1 timer table and deletion context only after its control, drain, and exact-schema checks pass; current local timer rows are outside that migration's scope.
+Applied migrations and immutable ownership/receipt records remain preserved. Migration `0039_retire_canonical_timer_starts.sql` retired the former D1 timer table and deletion context; current local timer rows were outside its scope. The [canonical cleanup report](../cloud/reports/canonical-cleanup-2026-11-01.md) indexes the completed storage transition and protected verification evidence.
 
 Before a destructive schema change, qualify every version-pinned Workflow that could still execute older D1 queries. Promoting a newer API does not upgrade existing Workflow instances. Later compatible releases use the ordinary release path and preserve the retired schema state; they do not rerun a completed cleanup executor or introduce another cleanup endpoint.
 
@@ -227,7 +223,7 @@ npx wrangler queues resume-delivery mons-link-telegram-projection-data1 --config
 npx wrangler queues resume-delivery mons-link-wager-settlement-data1 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 ```
 
-When running a pre-split rollback version, include `mons-link-telegram-delivery-data1` in these pause and resume operations because that version executes settlement retries there. The current version only forwards legacy wager messages to the settlement queue.
+Rollback versions must retain the [current queue routing](#queue-and-workflow-operations). Telegram delivery does not execute or forward settlement tasks.
 
 Canonical profile incidents freeze affected writers and fix forward. Retained profile evidence, ownership, balances, and blocked business outcomes must remain intact.
 
@@ -289,7 +285,7 @@ npm run manage:wager-reservations -- --resume-d1
 npm run manage:profile-canonical -- --resume
 ```
 
-Recover only an expired admission whose original request has finished and whose uncertain effects have been reconciled. Resume requires admissions and gameplay leases drained. Include `mons-link-wager-settlement-data1` in coordinated maintenance because it executes settlement retries. A pre-split rollback version also requires `mons-link-telegram-delivery-data1`; the current Telegram handler only forwards legacy wager messages. Validate frozen reads and stale-client rejection while canonical writes remain frozen, then verify normal wagering after resume. Keep writes frozen and repair forward on failures; canonical balances, reservations, and wager settlement records must stay consistent.
+Recover only an expired admission whose original request has finished and whose uncertain effects have been reconciled. Resume requires admissions and gameplay leases drained. Include `mons-link-wager-settlement-data1` in coordinated maintenance because it executes settlement retries. Validate frozen reads and stale-client rejection while canonical writes remain frozen, then verify normal wagering after resume. Keep writes frozen and repair forward on failures; canonical balances, reservations, and wager settlement records must stay consistent.
 
 ## Event-prize withdrawal D1 operations
 
@@ -315,7 +311,16 @@ The preflight must complete with `{"ok":true,"status":"ready"}`. It validates th
 
 ## Queue and Workflow operations
 
-`mons-link-profile-game-projection-data1` owns rating, invite, automatch, and profile-link projections. `mons-link-event-profile-game-projection-data1` owns event navigation previews; the shared queue forwards legacy event tasks to it. `mons-link-telegram-projection-data1` owns automatch, rating, and event Telegram projections. Profile-link catch-up jobs are written atomically with canonical ownership changes in `PROFILE_DB`; their Queue dispatch is recovered by the scheduled D1 sweep. Automatch and manual-session outboxes live in `PROFILE_GAMES_DB`; a durable transition journal coordinates create-only Durable Object match effects with canonical invite metadata, session receipts, and outboxes. Event transitions retain their own D1 intents and use idempotent invite-effect receipts. Event and rating outboxes remain in their owning D1 databases. Do not purge Queues or delete pending jobs or outboxes during incidents.
+| Queue                                           | Work                                                    |
+| ----------------------------------------------- | ------------------------------------------------------- |
+| `mons-link-auth-recovery-data1`                 | Profile recovery                                        |
+| `mons-link-profile-game-projection-data1`       | Rating, invite, automatch, and profile-link projections |
+| `mons-link-event-profile-game-projection-data1` | Event navigation previews                               |
+| `mons-link-telegram-projection-data1`           | Automatch, rating, and event Telegram projections       |
+| `mons-link-telegram-delivery-data1`             | Telegram message delivery                               |
+| `mons-link-wager-settlement-data1`              | Wager settlement retries                                |
+
+Each producer targets its owning queue. Scheduled sweeps recover pending jobs and outboxes in their owning D1 databases. Session and event transitions retain their guarded journals and idempotent invite-effect receipts. Do not purge Queues or delete pending jobs or outboxes during incidents.
 
 `mons-link-event-progress-data1` owns scheduled event starts and retriable synchronization. Inspect every page of Workflow instances before schema maintenance when version-pinned work could still be active:
 

@@ -31,12 +31,15 @@ const {
 }: typeof import("@mons/shared/profiles") = require("@mons/shared/profiles");
 const {
   EVENT_BOOKMARK_HEADER,
+  MAX_EVENT_READ_RESPONSE_BYTES,
+  eventBookmarkEpoch,
   isEventSnapshotResponse,
 }: typeof import("@mons/shared/events") = require("@mons/shared/events");
 const {
   isEventPrizeAssignmentRecord,
   isEventPrizeId,
-  isProfileEventPrizesResponse,
+  isProfileEventPrizesPageResponse,
+  profileEventPrizesPageEtag,
 }: typeof import("@mons/shared/event-prizes") = require("@mons/shared/event-prizes");
 const {
   isSessionTokenResponse,
@@ -688,6 +691,89 @@ async function smokeFrozenProfileWrite(
   }
 }
 
+async function readSmokePrizeSnapshot(
+  url: string,
+  headers: Record<string, string>,
+  profileId: string | null,
+  dependencies: Dependencies,
+  first?: Awaited<ReturnType<typeof request>>,
+): Promise<{
+  snapshot: import("@mons/shared/event-prizes").ProfileEventPrizesSnapshot;
+  etag: string;
+  bookmark: string;
+}> {
+  let cursor: string | null = null;
+  let snapshot:
+    import("@mons/shared/event-prizes").ProfileEventPrizesSnapshot | null =
+    null;
+  let etag = "";
+  let bookmark = "";
+  let epoch: string | null = null;
+  const cursors = new Set<string>();
+  do {
+    const pageUrl = new URL(url);
+    if (cursor !== null) pageUrl.searchParams.set("cursor", cursor);
+    const result =
+      first ??
+      (await request(
+        pageUrl.href,
+        {
+          method: "GET",
+          headers: {
+            ...headers,
+            ...(bookmark ? { [EVENT_BOOKMARK_HEADER]: bookmark } : {}),
+          },
+        },
+        200,
+        dependencies,
+      ));
+    first = undefined;
+    assertEventReadCors(result.response);
+    const page = parseJson(result.body);
+    const pageEtag = result.response.headers.get("ETag") || "";
+    const pageBookmark =
+      result.response.headers.get(EVENT_BOOKMARK_HEADER) || "";
+    const pageEpoch = eventBookmarkEpoch(pageBookmark);
+    if (
+      !isProfileEventPrizesPageResponse(page) ||
+      page.profileId !== profileId ||
+      !pageEpoch ||
+      new TextEncoder().encode(result.body).byteLength >
+        MAX_EVENT_READ_RESPONSE_BYTES ||
+      pageEtag !==
+        profileEventPrizesPageEtag(pageEpoch, profileId, page.revision) ||
+      (snapshot !== null &&
+        (snapshot.revision !== page.revision ||
+          epoch !== pageEpoch ||
+          etag !== pageEtag))
+    )
+      throw new Error("Event prizes smoke response was invalid.");
+    snapshot ??= {
+      ok: true,
+      profileId,
+      revision: page.revision,
+      prizes: Object.create(null),
+    };
+    for (const [eventId, assignment] of Object.entries(page.prizes)) {
+      if (Object.hasOwn(snapshot.prizes, eventId))
+        throw new Error("Event prizes smoke response was invalid.");
+      snapshot.prizes[eventId] = assignment;
+    }
+    etag = pageEtag;
+    bookmark = pageBookmark;
+    epoch = pageEpoch;
+    cursor = page.nextCursor;
+    if (cursor !== null) {
+      if (cursors.has(cursor))
+        throw new Error("Event prizes smoke response was invalid.");
+      cursors.add(cursor);
+    }
+  } while (cursor !== null);
+  if (snapshot === null)
+    throw new Error("Event prizes smoke response was invalid.");
+  return { snapshot, etag, bookmark };
+}
+
 async function smokeEventReads(
   baseUrl: string,
   accessToken: string,
@@ -742,29 +828,23 @@ async function smokeEventReads(
   ) {
     throw new Error("Event snapshot smoke response was invalid.");
   }
-  const prizes = await request(
+  const prizes = await readSmokePrizeSnapshot(
     prizesUrl,
-    { method: "GET", headers },
-    200,
+    headers,
+    expectedProfileId,
     dependencies,
   );
-  const prizesPayload = parseJson(prizes.body);
-  assertEventReadCors(prizes.response);
+  const prizesPayload = prizes.snapshot;
   if (
-    !isProfileEventPrizesResponse(prizesPayload) ||
-    prizesPayload.profileId !== expectedProfileId ||
     (eventFixture && prizesPayload.revision < 1) ||
     (eventFixture &&
       prizesPayload.prizes[eventFixture.endedId]?.prizeId !==
-        eventFixture.assignedPrizeId) ||
-    !prizes.response.headers.get("ETag") ||
-    !prizes.response.headers.get(EVENT_BOOKMARK_HEADER)
+        eventFixture.assignedPrizeId)
   ) {
     throw new Error("Event prizes smoke response was invalid.");
   }
-  const prizesEtag = prizes.response.headers.get("ETag") || "";
-  const prizesBookmark =
-    prizes.response.headers.get(EVENT_BOOKMARK_HEADER) || "";
+  const prizesEtag = prizes.etag;
+  const prizesBookmark = prizes.bookmark;
   const conditionalPrizes = await request(
     prizesUrl,
     {
@@ -786,13 +866,21 @@ async function smokeEventReads(
     throw new Error("Event prizes smoke response was invalid.");
   }
   if (conditionalPrizes.response.status === 200) {
-    const updatedPrizes = parseJson(conditionalPrizes.body);
-    if (
-      !isProfileEventPrizesResponse(updatedPrizes) ||
-      updatedPrizes.profileId !== expectedProfileId
-    ) {
-      throw new Error("Event prizes smoke response was invalid.");
-    }
+    await readSmokePrizeSnapshot(
+      prizesUrl,
+      headers,
+      expectedProfileId,
+      dependencies,
+      conditionalPrizes,
+    );
+  } else if (
+    conditionalPrizes.body !== "" ||
+    conditionalPrizes.response.headers.get("ETag") !== prizesEtag ||
+    eventBookmarkEpoch(
+      conditionalPrizes.response.headers.get(EVENT_BOOKMARK_HEADER),
+    ) !== eventBookmarkEpoch(prizesBookmark)
+  ) {
+    throw new Error("Event prizes smoke response was invalid.");
   }
   for (const [fixtureEventId, expectedStatus] of eventFixture
     ? ([
@@ -1582,7 +1670,7 @@ async function smokeApi(
   );
 
   const internal = await request(
-    `${options.baseUrl}/internal/telegram/delivery`,
+    `${options.baseUrl}/internal/telegram/command`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1599,6 +1687,25 @@ async function smokeApi(
     (internalPayload as { error?: unknown }).error !== "unauthenticated"
   ) {
     throw new Error("Internal route smoke response was invalid.");
+  }
+  const retiredDelivery = await request(
+    `${options.baseUrl}/internal/telegram/delivery`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    },
+    404,
+    dependencies,
+  );
+  const retiredPayload = parseJson(retiredDelivery.body);
+  if (
+    !retiredPayload ||
+    typeof retiredPayload !== "object" ||
+    Array.isArray(retiredPayload) ||
+    (retiredPayload as { error?: unknown }).error !== "not-found"
+  ) {
+    throw new Error("Retired Telegram route smoke response was invalid.");
   }
   dependencies.log(`[api-smoke] Passed ${options.baseUrl}`);
 }

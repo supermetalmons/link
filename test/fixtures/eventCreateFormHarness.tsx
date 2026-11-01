@@ -8,7 +8,7 @@ import {
   closeEventModal,
   getEventModalState,
   openEventModal,
-} from "../../src/ui/eventModalController";
+} from "../../src/ui/event/modalState";
 import { bindProfileSurfaceData } from "../../src/ui/profileSurfaceDataPort";
 import type { ProfileSurfaceDataPort } from "../../src/ui/profileSurfaceDataPort";
 

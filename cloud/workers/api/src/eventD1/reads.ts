@@ -255,9 +255,35 @@ export async function readProfileEventPrizes(
   db: EventD1Connection,
   profileId: string,
 ): Promise<ProfileEventPrizeSnapshot> {
-  const result = await readProfileEventPrizesIfChanged(db, profileId);
-  if (result.notModified) throw new EventD1Failure();
-  return result.snapshot;
+  const normalizedProfileId = exactKey(profileId);
+  if (!normalizedProfileId) throw new EventD1Failure("invalid-profile-id");
+  const results = await db.batch([
+    db
+      .prepare(
+        `SELECT profile_id, event_id, assignment_json
+         FROM profile_event_prizes_canonical
+         WHERE profile_id = ? ORDER BY event_id`,
+      )
+      .bind(normalizedProfileId),
+    db
+      .prepare(
+        `SELECT revision FROM profile_event_prize_revisions_canonical
+         WHERE profile_id = ?`,
+      )
+      .bind(normalizedProfileId),
+  ]);
+  const revisionRow = results[1]!.results[0]! as
+    { revision: number } | undefined;
+  const revision = revisionRow ? safeInteger(revisionRow.revision, 1) : 0;
+  const prizes: Record<string, EventPrizeAssignmentRecord> = {};
+  for (const row of results[0]!.results as AssignmentRow[]) {
+    prizes[row.event_id] = parseStoredEventPrizeAssignment(
+      normalizedProfileId,
+      row.event_id,
+      decodeJson(row.assignment_json),
+    );
+  }
+  return { prizes, profileId: normalizedProfileId, revision };
 }
 
 const PROFILE_PRIZE_READ_BATCH_SIZE = 40;
@@ -322,53 +348,6 @@ export async function readProfilePrizeMutationSnapshots(
     }
   }
   return snapshots;
-}
-
-export async function readProfileEventPrizesIfChanged(
-  db: EventD1Connection,
-  profileId: string,
-  knownRevision: number | null = null,
-): Promise<ConditionalSnapshot<ProfileEventPrizeSnapshot>> {
-  const normalizedProfileId = exactKey(profileId);
-  if (!normalizedProfileId) throw new EventD1Failure("invalid-profile-id");
-  if (knownRevision !== null) safeInteger(knownRevision);
-  const results = await db.batch([
-    db
-      .prepare(
-        `SELECT profile_id, event_id, assignment_json
-         FROM profile_event_prizes_canonical
-         WHERE profile_id = CASE WHEN EXISTS (
-           SELECT 1 FROM profile_event_prize_revisions_canonical
-           WHERE profile_id = ? AND revision = ?
-         ) THEN NULL ELSE ? END ORDER BY event_id`,
-      )
-      .bind(normalizedProfileId, knownRevision, normalizedProfileId),
-    db
-      .prepare(
-        `SELECT revision FROM profile_event_prize_revisions_canonical
-         WHERE profile_id = ?`,
-      )
-      .bind(normalizedProfileId),
-  ]);
-  const revisionRow = results[1]!.results[0]! as
-    { revision: number } | undefined;
-  const revision = revisionRow ? safeInteger(revisionRow.revision, 1) : 0;
-  if (revisionRow && knownRevision === revision) {
-    return { notModified: true, revision };
-  }
-  const prizes: Record<string, EventPrizeAssignmentRecord> = {};
-  for (const row of results[0]!.results as AssignmentRow[]) {
-    prizes[row.event_id] = parseStoredEventPrizeAssignment(
-      normalizedProfileId,
-      row.event_id,
-      decodeJson(row.assignment_json),
-    );
-  }
-  if (knownRevision === revision) return { notModified: true, revision };
-  return {
-    notModified: false,
-    snapshot: { prizes, profileId: normalizedProfileId, revision },
-  };
 }
 
 export async function readProfileEventPrizePage(

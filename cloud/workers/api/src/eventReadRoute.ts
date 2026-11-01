@@ -6,24 +6,15 @@ import type {
 import {
   EVENT_BOOKMARK_HEADER,
   EVENT_ETAG_HEADER,
-  MAX_EVENT_READ_RESPONSE_BYTES,
   eventSnapshotEtag,
 } from "@mons/shared/events";
-import {
-  isProfileEventPrizesResponse,
-  type ProfileEventPrizesResponse,
-} from "@mons/shared/event-prizes";
 import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
 import {
   authJsonResponse,
   authPreflightResponse,
   getAuthCorsHeaders,
 } from "./authHttp.ts";
-import {
-  readEventRuntimeControl,
-  readProfileEventPrizesIfChanged,
-  type ConditionalSnapshot,
-} from "./eventD1.ts";
+import type { ConditionalSnapshot } from "./eventD1.ts";
 import {
   verifySessionRequest,
   type WorkerExecutionContext,
@@ -59,25 +50,13 @@ function safeKey(value: string): string {
   return value && value.trim() === value && isSafeRecordKey(value) ? value : "";
 }
 
-function etag(
-  kind: "event-snapshot" | "profile-event-prizes",
-  id: string,
-  revision: number,
-): string {
-  if (kind === "event-snapshot") return eventSnapshotEtag(id, revision);
-  return `W/"${kind}-${encodeURIComponent(id || "none")}-${revision}"`;
-}
-
-function knownRevision(
-  header: string | null,
-  kind: "event-snapshot" | "profile-event-prizes",
-  id: string,
-): number | null {
+function knownRevision(header: string | null, eventId: string): number | null {
   const value = header?.trim() || "";
   const match = /-(0|[1-9][0-9]*)"$/.exec(value);
   if (!match) return null;
   const revision = Number(match[1]);
-  return Number.isSafeInteger(revision) && etag(kind, id, revision) === value
+  return Number.isSafeInteger(revision) &&
+    eventSnapshotEtag(eventId, revision) === value
     ? revision
     : null;
 }
@@ -105,15 +84,6 @@ function notModified(headers: Record<string, string>): Response {
   });
 }
 
-function assertBounded(value: unknown): void {
-  if (
-    new TextEncoder().encode(JSON.stringify(value)).byteLength >
-    MAX_EVENT_READ_RESPONSE_BYTES
-  ) {
-    throw new AuthApiFailure(503, "unavailable", "event-response-too-large");
-  }
-}
-
 async function callerProfileId(
   repository: ProfileOwnershipReader,
   identity: RequestIdentity,
@@ -123,36 +93,6 @@ async function callerProfileId(
     profileIds: [],
   });
   return getLoginProfileId(ownership, identity.uid);
-}
-
-async function readPrizeResponse(
-  session: D1DatabaseSession,
-  profileId: string | null,
-  revision: number | null,
-): Promise<ConditionalSnapshot<ProfileEventPrizesResponse>> {
-  if (!profileId) {
-    await readEventRuntimeControl(session);
-    return revision === 0
-      ? { notModified: true, revision: 0 }
-      : {
-          notModified: false,
-          snapshot: { ok: true, profileId: null, revision: 0, prizes: {} },
-        };
-  }
-  const result = await readProfileEventPrizesIfChanged(
-    session,
-    profileId,
-    revision,
-  );
-  if (result.notModified) return result;
-  const candidate: unknown = {
-    ok: true,
-    ...result.snapshot,
-  };
-  if (!isProfileEventPrizesResponse(candidate)) {
-    throw new AuthApiFailure(503, "unavailable", "event-prizes-invalid");
-  }
-  return { notModified: false, snapshot: candidate };
 }
 
 export async function handleEventReadRoute(
@@ -208,10 +148,9 @@ export async function handleEventReadRoute(
       result = (await readEventSnapshotResponse(
         session,
         eventId,
-        knownRevision(conditionalHeader, "event-snapshot", eventId),
+        knownRevision(conditionalHeader, eventId),
       )) satisfies ConditionalSnapshot<ApiResponse<"GET /events/snapshot">>;
-      valueEtag = etag(
-        "event-snapshot",
+      valueEtag = eventSnapshotEtag(
         eventId,
         result.notModified ? result.revision : result.snapshot.revision,
       );
@@ -220,42 +159,15 @@ export async function handleEventReadRoute(
         dependencies.repository ||
         createD1ProfileOwnershipReader(env.PROFILE_DB);
       const profileId = await callerProfileId(repository, identity);
-      if (
-        url.searchParams.get(
-          "pagination" satisfies keyof ApiQuery<"GET /events/prizes">,
-        ) ===
-        ("1" satisfies NonNullable<
-          ApiQuery<"GET /events/prizes">["pagination"]
-        >)
-      ) {
-        const page = await readProfileEventPrizesPageResponse(
-          session,
-          profileId,
-          bookmarkEpoch,
-          url.searchParams,
-          conditionalHeader,
-        );
-        result = page.result satisfies ConditionalSnapshot<
-          ApiResponse<"GET /events/prizes">
-        >;
-        valueEtag = page.etag;
-      } else {
-        result = (await readPrizeResponse(
-          session,
-          profileId,
-          knownRevision(
-            conditionalHeader,
-            "profile-event-prizes",
-            profileId || "none",
-          ),
-        )) satisfies ConditionalSnapshot<ApiResponse<"GET /events/prizes">>;
-        valueEtag = etag(
-          "profile-event-prizes",
-          profileId || "none",
-          result.notModified ? result.revision : result.snapshot.revision,
-        );
-      }
-      if (!result.notModified) assertBounded(result.snapshot);
+      const page = await readProfileEventPrizesPageResponse(
+        session,
+        profileId,
+        bookmarkEpoch,
+        url.searchParams,
+        conditionalHeader,
+      );
+      result = page.result;
+      valueEtag = page.etag;
     } else {
       throw new AuthApiFailure(404, "not-found", "not-found");
     }

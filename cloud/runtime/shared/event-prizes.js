@@ -4,7 +4,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.isToggleEventPrizeSelectionResponse =
   exports.isToggleEventPrizeSelectionRequest =
   exports.isProfileEventPrizesPageResponse =
-  exports.isProfileEventPrizesResponse =
+  exports.isProfileEventPrizesSnapshot =
   exports.isEventPrizeWithdrawalStatusRequest =
   exports.isEventPrizeWithdrawalRequest =
   exports.isEventPrizeWithdrawalProcessingResponse =
@@ -918,7 +918,7 @@ const isEventPrizeAssignmentRecord = (value) =>
   isEventPrizeEvent(value.eventId) &&
   isEventPrizeId(value.eventId, value.prizeId);
 exports.isEventPrizeAssignmentRecord = isEventPrizeAssignmentRecord;
-const isProfileEventPrizesResponse = (value) => {
+const isProfileEventPrizesSnapshot = (value) => {
   if (
     !isExactRecord(value, ["ok", "profileId", "revision", "prizes"]) ||
     value.ok !== true ||
@@ -942,7 +942,7 @@ const isProfileEventPrizesResponse = (value) => {
       assignment.profileId === value.profileId,
   );
 };
-exports.isProfileEventPrizesResponse = isProfileEventPrizesResponse;
+exports.isProfileEventPrizesSnapshot = isProfileEventPrizesSnapshot;
 const isProfileEventPrizesPageResponse = (value) => {
   if (
     !isExactRecord(value, [
@@ -952,7 +952,7 @@ const isProfileEventPrizesPageResponse = (value) => {
       "prizes",
       "nextCursor",
     ]) ||
-    !isProfileEventPrizesResponse({
+    !isProfileEventPrizesSnapshot({
       ok: value.ok,
       profileId: value.profileId,
       revision: value.revision,

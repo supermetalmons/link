@@ -71,7 +71,6 @@ type Signature_createEventLockManagerCore = (dependencies: {
     updater: (current: EventLeaseRecord | null) => EventLockTransactionDecision,
   ) => Promise<EventLockTransactionResult>;
   createLockId(): string;
-  includeLegacyOwnerId?: boolean;
   lockKind?: EventLeaseKind;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
@@ -142,7 +141,6 @@ const createEventLockManagerCore: Signature_createEventLockManagerCore = (
   const setIntervalFn = dependencies.setInterval || setInterval;
   const clearIntervalFn = dependencies.clearInterval || clearInterval;
   const logger = dependencies.logger || console;
-  const includeLegacyOwnerId = dependencies.includeLegacyOwnerId === true;
 
   const acquireEventLock: EventLockManager["acquireEventLock"] = async (
     eventId,
@@ -164,7 +162,6 @@ const createEventLockManagerCore: Signature_createEventLockManagerCore = (
         value: {
           lockId,
           ownerUid,
-          ...(includeLegacyOwnerId ? { ownerId: ownerUid } : {}),
           expiresAtMs: nowMs + EVENT_LOCK_TTL_MS,
           acquiredAtMs: nowMs,
           refreshedAtMs: nowMs,

@@ -1,4 +1,4 @@
-import type { ProfileEventPrizesResponse } from "@mons/shared/event-prizes";
+import type { ProfileEventPrizesSnapshot } from "@mons/shared/event-prizes";
 import {
   eventBookmarkEpoch,
   isEventSnapshotSeed,
@@ -69,7 +69,7 @@ type EventPollingRegistryDependencies = {
   loadProfilePrizes: (
     profileId: string,
     options: ConditionalReadOptions,
-  ) => Promise<ConditionalRead<ProfileEventPrizesResponse>>;
+  ) => Promise<ConditionalRead<ProfileEventPrizesSnapshot>>;
   onEventIdle?: (eventId: string) => void;
   setTimer: (callback: () => void, delayMs: number) => TimerHandle;
   backoffMs?: readonly number[];
@@ -94,7 +94,7 @@ export class EventPollingRegistry {
   private readonly intervalMs: number;
   private readonly profilePrizeEntries = new Map<
     string,
-    PollingEntry<ProfileEventPrizesResponse>
+    PollingEntry<ProfileEventPrizesSnapshot>
   >();
   private removeVisibilityListener: (() => void) | null = null;
   private readonly now: () => number;
@@ -241,7 +241,7 @@ export class EventPollingRegistry {
 
   subscribeToProfileEventPrizes(
     profileId: string,
-    onUpdate: (response: ProfileEventPrizesResponse) => void,
+    onUpdate: (response: ProfileEventPrizesSnapshot) => void,
     onError?: (error: unknown) => void,
   ): () => void {
     const entry =
@@ -526,7 +526,7 @@ export class EventPollingRegistry {
 
   private createProfilePrizeEntry(
     profileId: string,
-  ): PollingEntry<ProfileEventPrizesResponse> {
+  ): PollingEntry<ProfileEventPrizesSnapshot> {
     const entry = this.createEntry(async (options) => {
       const result = await this.dependencies.loadProfilePrizes(
         profileId,

@@ -84,7 +84,6 @@ import {
   handleHistoricalMatchRoute,
   HISTORICAL_MATCH_PATH,
 } from "./historicalMatchRoute.ts";
-import { handleTelegramBridge } from "./telegramBridge.ts";
 import {
   handleTelegramCommand,
   TELEGRAM_COMMAND_PATH,
@@ -139,12 +138,6 @@ const routes: readonly HttpRoute[] = [
     fetchOnly: true,
     needsContext: false,
     run: ({ request, env }) => handleHistoricalMatchRoute(request, env),
-  },
-  {
-    matches: (path) => path === "/internal/telegram/delivery",
-    fetchOnly: true,
-    needsContext: false,
-    run: ({ request, env }) => handleTelegramBridge(request, env),
   },
   {
     matches: (path) => path === TELEGRAM_COMMAND_PATH,

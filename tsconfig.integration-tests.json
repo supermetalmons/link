@@ -2,7 +2,7 @@
   "extends": "./cloud/tests/tsconfig.json",
   "include": [
     "test/moveDeliveryIntegration.test.mjs",
-    "test/eventDataCompatibility.test.mjs",
+    "test/eventDataBoundary.test.mjs",
     "cloud/workers/api/worker-configuration.d.ts",
     "src/glicko2.d.ts"
   ]

@@ -11,6 +11,6 @@
   "include": ["test/**/*", "src/glicko2.d.ts", "src/vite-env.d.ts"],
   "exclude": [
     "test/moveDeliveryIntegration.test.mjs",
-    "test/eventDataCompatibility.test.mjs"
+    "test/eventDataBoundary.test.mjs"
   ]
 }

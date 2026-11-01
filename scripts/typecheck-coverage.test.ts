@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -64,6 +65,80 @@ test("full gate reaches strict compiler programs covering tests and configuratio
   assert.equal(result.requiredFiles.length, 4);
   assert.deepEqual(result.missingFiles, []);
   assert.deepEqual(result.unsafe, []);
+});
+
+test("coverage rejects disabled npm hooks from flags and environment", () => {
+  const environment = { ...process.env };
+  delete environment.npm_config_ignore_scripts;
+  delete environment.NPM_CONFIG_IGNORE_SCRIPTS;
+  delete environment["npm_config_ignore-scripts"];
+  delete environment["NPM_CONFIG_IGNORE-SCRIPTS"];
+  const cases: { args: string[]; env: NodeJS.ProcessEnv }[] = [
+    { args: ["--ignore-scripts"], env: {} },
+    ...["true", "1", "TRUE", "False"].map((value) => ({
+      args: [],
+      env: { npm_config_ignore_scripts: value },
+    })),
+    { args: [], env: { NPM_CONFIG_IGNORE_SCRIPTS: "true" } },
+    { args: [], env: { "npm_config_ignore-scripts": "true" } },
+  ];
+  for (const { args, env } of cases) {
+    const result = spawnSync("npm", [...args, "run", "typecheck:coverage"], {
+      cwd: resolve(import.meta.dirname, ".."),
+      env: { ...environment, ...env },
+      encoding: "utf8",
+    });
+    assert.ifError(result.error);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /requires npm lifecycle hooks/);
+    assert.doesNotMatch(result.stdout, /Strict semantic coverage:/);
+  }
+});
+
+test("npm lifecycle hooks contribute compiler coverage through nested commands", (t) => {
+  const f = fixture(t);
+  const scripts = {
+    "check:all": "npm run dry-run",
+    "predry-run": "npm run check:runtime",
+    "dry-run": "node upload.mjs",
+    "check:runtime": "tsc --noEmit",
+    "postdry-run": "tsc --noEmit -p post.json",
+    "prepredry-run": "tsc --noEmit -p unreachable-pre.json",
+    "postpredry-run": "tsc --noEmit -p unreachable-post.json",
+    preunused: "tsc --noEmit -p unused.json",
+    unused: "node unused.mjs",
+  };
+  const writeScripts = () =>
+    writeFileSync(resolve(f.root, "package.json"), JSON.stringify({ scripts }));
+  writeFileSync(resolve(f.root, "post.json"), JSON.stringify(f.config));
+  writeScripts();
+  assert.deepEqual(checkedProjects(f.root), [
+    resolve(f.root, "post.json"),
+    resolve(f.root, "tsconfig.json"),
+  ]);
+  assert.deepEqual(inspectTypecheckCoverage(f.root).missingFiles, []);
+
+  scripts["predry-run"] = "node prepare.mjs";
+  scripts["postdry-run"] = "node finish.mjs";
+  writeScripts();
+  assert.deepEqual(checkedProjects(f.root), []);
+  assert.equal(inspectTypecheckCoverage(f.root).missingFiles.length, 4);
+});
+
+test("an explicitly requested hook runs its own lifecycle even after an automatic invocation", (t) => {
+  const f = fixture(t);
+  writeFileSync(
+    resolve(f.root, "package.json"),
+    JSON.stringify({
+      scripts: {
+        "check:all": "npm run build && npm run prebuild",
+        prebuild: "node prepare.mjs",
+        build: "node build.mjs",
+        preprebuild: "tsc --noEmit",
+      },
+    }),
+  );
+  assert.deepEqual(checkedProjects(f.root), [resolve(f.root, "tsconfig.json")]);
 });
 
 test("unlisted files and JavaScript without semantic checks remain uncovered", (t) => {

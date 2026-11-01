@@ -581,8 +581,7 @@ function currentLease(value) {
     typeof row.ownerUid === "string" &&
     typeof row.acquiredAtMs === "number" &&
     typeof row.refreshedAtMs === "number" &&
-    typeof row.expiresAtMs === "number" &&
-    (row.ownerId === undefined || typeof row.ownerId === "string")
+    typeof row.expiresAtMs === "number"
   );
 }
 /** @param {unknown} value @returns {import("../runtime/transactions").TransactionDecision<import("../runtime/eventLeases").EventLeaseRecord>} */

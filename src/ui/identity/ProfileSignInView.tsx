@@ -28,7 +28,7 @@ import {
   EVENT_MODAL_AUTH_Z_INDEX,
   getEventModalState,
   subscribeToEventModalState,
-} from "../eventModalController";
+} from "../event/modalState";
 import { defaultEarlyInputEventName, isMobile } from "../../utils/misc";
 import {
   hideShinyCard,

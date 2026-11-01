@@ -443,7 +443,7 @@
     "isEventPrizeWithdrawalRequest",
     "isEventPrizeWithdrawalStatusRequest",
     "isProfileEventPrizesPageResponse",
-    "isProfileEventPrizesResponse",
+    "isProfileEventPrizesSnapshot",
     "isToggleEventPrizeSelectionRequest",
     "isToggleEventPrizeSelectionResponse",
     "profileEventPrizesPageEtag"

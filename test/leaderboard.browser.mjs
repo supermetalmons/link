@@ -219,7 +219,7 @@ mounted(
       playerEmojiId: "invalid",
       playerEmojiAura: "rainbow",
       cardBackgroundId: 7,
-      playerMiningMaterials: { dust: 5 },
+      playerMiningMaterials: { dust: 5, slime: 0, gum: 0, metal: 0, ice: 0 },
     });
     await call(
       page,
@@ -269,7 +269,7 @@ mounted(
       playerRating: 1777,
       playerEmojiAura: "rainbow",
       cardBackgroundId: 7,
-      playerMiningMaterials: { dust: 5 },
+      playerMiningMaterials: { dust: 5, slime: 0, gum: 0, metal: 0, ice: 0 },
     });
     await call(
       page,

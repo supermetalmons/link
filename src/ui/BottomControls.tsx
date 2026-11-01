@@ -93,7 +93,7 @@ import { getCurrentRouteState } from "../navigation/routeState";
 import { registerBottomControlsTransientUiHandler } from "./uiSession";
 import { problems } from "../content/problems";
 import { emojis } from "../content/emojis";
-import { openEventModal } from "./eventModalController";
+import { openEventModal } from "./event/modalState";
 import {
   PrimaryActionType,
   bindBottomControlsApi,

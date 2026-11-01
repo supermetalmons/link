@@ -110,13 +110,13 @@ export type EventPrizeAssignmentRecord = EventPrizeAssignmentWireRecord & {
   eventId: EventPrizeEventId;
   prizeId: EventPrizeId;
 };
-export type ProfileEventPrizesResponse = {
+export type ProfileEventPrizesSnapshot = {
   ok: true;
   profileId: string | null;
   revision: number;
   prizes: Record<string, EventPrizeAssignmentWireRecord>;
 };
-export type ProfileEventPrizesPageResponse = ProfileEventPrizesResponse & {
+export type ProfileEventPrizesPageResponse = ProfileEventPrizesSnapshot & {
   nextCursor: string | null;
 };
 export declare const PROFILE_EVENT_PRIZES_PAGE_SIZE = 100;
@@ -215,9 +215,9 @@ declare const isEventPrizeAssignmentWireRecord: (
 declare const isEventPrizeAssignmentRecord: (
   value: unknown,
 ) => value is EventPrizeAssignmentRecord;
-declare const isProfileEventPrizesResponse: (
+declare const isProfileEventPrizesSnapshot: (
   value: unknown,
-) => value is ProfileEventPrizesResponse;
+) => value is ProfileEventPrizesSnapshot;
 declare const isProfileEventPrizesPageResponse: (
   value: unknown,
 ) => value is ProfileEventPrizesPageResponse;
@@ -271,7 +271,7 @@ export {
   isEventPrizeWithdrawalProcessingResponse,
   isEventPrizeWithdrawalRequest,
   isEventPrizeWithdrawalStatusRequest,
-  isProfileEventPrizesResponse,
+  isProfileEventPrizesSnapshot,
   isProfileEventPrizesPageResponse,
   isToggleEventPrizeSelectionRequest,
   isToggleEventPrizeSelectionResponse,

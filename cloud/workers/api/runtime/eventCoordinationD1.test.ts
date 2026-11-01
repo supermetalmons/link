@@ -143,7 +143,6 @@ function coordinationTests<
     it("deep clones successful proposals while persisting only domain columns", async () => {
       await withAdmission(async (admission) => {
         const proposal = Object.assign(domain.record(1), {
-          ownerId: "legacy-owner",
           extra: { values: [1, 2] },
         });
         const result = await domain.transact(

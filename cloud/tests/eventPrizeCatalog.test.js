@@ -28,7 +28,7 @@ const {
   isEventPrizeEvent,
   isEventPrizeId,
   isEventPrizeRevealOpen,
-  isProfileEventPrizesResponse,
+  isProfileEventPrizesSnapshot,
   isEventPrizeStandard,
   isEventPrizeWithdrawalCompletedResponse,
   isEventPrizeWithdrawalProcessingResponse,
@@ -126,7 +126,7 @@ test("profile prize responses retain exact historical assignment records and rej
     false,
   );
   assert.equal(
-    isProfileEventPrizesResponse({
+    isProfileEventPrizesSnapshot({
       ok: true,
       profileId: "profile-1",
       revision: 1,
@@ -145,7 +145,7 @@ test("profile prize responses retain exact historical assignment records and rej
   };
   assert.equal(isEventPrizeAssignmentWireRecord(futureAssignment), true);
   assert.equal(
-    isProfileEventPrizesResponse({
+    isProfileEventPrizesSnapshot({
       ok: true,
       profileId: "profile-1",
       revision: 2,

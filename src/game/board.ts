@@ -79,7 +79,7 @@ import {
   incrementLifecycleCounter,
 } from "../lifecycle/lifecycleDiagnostics";
 import { getCurrentRouteState } from "../navigation/routeState";
-import { hasEventModalVisible } from "../ui/eventModalController";
+import { hasEventModalVisible } from "../ui/event/modalState";
 import { bindBoardEffectsRuntime } from "./boardEffectsPort";
 import { bindBoardColorChangeHandler } from "../content/boardStyleRuntimePort";
 import {

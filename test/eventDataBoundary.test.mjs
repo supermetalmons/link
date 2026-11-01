@@ -2,10 +2,7 @@ import assert from "node:assert/strict";
 import { registerTypeScriptTestHooks } from "./support/typescriptHooks.mjs";
 import test from "node:test";
 import { isEventSnapshotResponse } from "@mons/shared/events";
-import {
-  eventCompatibilityCases,
-  eventId,
-} from "./fixtures/eventDataCompatibility.mjs";
+import { retiredEventCases, eventId } from "./fixtures/retiredEventRecords.mjs";
 
 registerTypeScriptTestHooks();
 
@@ -13,7 +10,7 @@ const { validateEventAggregate } =
   await import("../cloud/workers/api/src/eventD1/validation.ts");
 const { canonicalEvent } = await import("./fixtures/canonicalData.mjs");
 
-for (const scenario of eventCompatibilityCases) {
+for (const scenario of retiredEventCases) {
   test(`canonical event boundary rejects retired shape: ${scenario.name}`, () => {
     const before = JSON.stringify(scenario.stored);
     assert.throws(() => validateEventAggregate(eventId, scenario.stored));

@@ -150,9 +150,6 @@ export async function readProfileEventPrizesPageResponse(
   etag: string;
 }> {
   if (
-    parameters.getAll(
-      "pagination" satisfies keyof ApiQuery<"GET /events/prizes">,
-    ).length !== 1 ||
     parameters.getAll("cursor" satisfies keyof ApiQuery<"GET /events/prizes">)
       .length > 1
   ) {

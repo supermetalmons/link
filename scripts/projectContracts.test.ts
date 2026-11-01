@@ -9,6 +9,9 @@ const {
 const { resolve }: typeof import("node:path") = require("node:path");
 const test: typeof import("node:test") = require("node:test");
 const typescript: typeof import("typescript") = require("typescript");
+const {
+  checkedProjects,
+}: typeof import("./typecheck-coverage.ts") = require("./typecheck-coverage.ts");
 
 type PackageManifest = {
   name?: string;
@@ -512,7 +515,12 @@ test("package manifests preserve public scripts and deployment command vectors",
     rootPackage.scripts?.["check:all"]
       ?.split(" && ")
       .includes("npm run check:runtime"),
-    true,
+    false,
+  );
+  assert.ok(
+    checkedProjects(repositoryRoot).includes(
+      resolve(repositoryRoot, "cloud/tests/tsconfig.json"),
+    ),
   );
   assert.doesNotMatch(
     rootPackage.scripts?.["check:all"] || "",

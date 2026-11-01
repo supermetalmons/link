@@ -56,6 +56,15 @@ export type ConditionalEventReadRejectsJson304 = Assert<
     ApiTransport<"GET /events/snapshot">
   >
 >;
+export type PrizeResponseRequiresCursor = Assert<
+  Rejects<
+    Omit<ApiResponse<"GET /events/prizes">, "nextCursor">,
+    ApiResponse<"GET /events/prizes">
+  >
+>;
+export type PrizeQueryHasOnlyCursor = Assert<
+  Accepts<keyof ApiQuery<"GET /events/prizes">, "cursor">
+>;
 export type ApplicationFailureCanUse200 = Assert<
   Accepts<
     { kind: "json"; status: 200; body: { ok: false } },
@@ -180,12 +189,6 @@ export type CallbackRejectsJsonFailure = Assert<
   Rejects<
     { kind: "json"; status: 400; body: { ok: false; error: string } },
     ApiTransport<"GET /auth/x/callback">
-  >
->;
-export type RetiredDeliveryHasNoSuccess = Assert<
-  Rejects<
-    { kind: "json"; status: 200; body: { ok: true } },
-    ApiTransport<"POST /internal/telegram/delivery">
   >
 >;
 export type TelegramRequestNeedsRecoveryIdentity = Assert<

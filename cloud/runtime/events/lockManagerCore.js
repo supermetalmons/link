@@ -72,7 +72,6 @@ const createEventLockManagerCore = (dependencies) => {
   const setIntervalFn = dependencies.setInterval || setInterval;
   const clearIntervalFn = dependencies.clearInterval || clearInterval;
   const logger = dependencies.logger || console;
-  const includeLegacyOwnerId = dependencies.includeLegacyOwnerId === true;
   const acquireEventLock = async (eventId, ownerUid) => {
     const key = { kind: lockKind, id: eventId };
     const lockId = createLockId();
@@ -90,7 +89,6 @@ const createEventLockManagerCore = (dependencies) => {
         value: {
           lockId,
           ownerUid,
-          ...(includeLegacyOwnerId ? { ownerId: ownerUid } : {}),
           expiresAtMs: nowMs + EVENT_LOCK_TTL_MS,
           acquiredAtMs: nowMs,
           refreshedAtMs: nowMs,

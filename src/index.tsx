@@ -21,13 +21,13 @@ import { isMobile } from "./utils/misc";
 import { preventTouchstartIfNeeded } from "./runtime/touchInputGuard";
 import { preloadSounds } from "./content/sounds";
 import { soundPlayer } from "./utils/SoundPlayer";
-import ProfileSignIn, {
-  handleLogout,
+import ProfileSignIn from "./ui/identity/ProfileSignInView";
+import { handleLogout, showSettings } from "./ui/identity/profileUiPort";
+import {
   isLogoutUiLocked,
-  showSettings,
   subscribeToLogoutUiLock,
-} from "./ui/ProfileSignIn";
-import EventModal from "./ui/EventModal";
+} from "./ui/identity/logoutUiLock";
+import EventModal from "./ui/event/EventModalView";
 import { isMainGameLoaded, onMainGameLoaded } from "./game/mainGameLoadState";
 import { Sound } from "./utils/gameModels";
 import { initializeAppSessionManager } from "./session/AppSessionManager";

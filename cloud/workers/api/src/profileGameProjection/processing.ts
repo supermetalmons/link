@@ -183,7 +183,6 @@ export async function processEventProfileGameProjection(
   const lockManager = createEventLockManagerCore({
     lockKind: "profile-game-projection",
     createLockId: () => crypto.randomUUID(),
-    includeLegacyOwnerId: true,
     transactEventLease: state.transactEventLease,
     now,
   });

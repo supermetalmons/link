@@ -121,14 +121,14 @@ export type EventPrizeAssignmentRecord = EventPrizeAssignmentWireRecord & {
   prizeId: EventPrizeId;
 };
 
-export type ProfileEventPrizesResponse = {
+export type ProfileEventPrizesSnapshot = {
   ok: true;
   profileId: string | null;
   revision: number;
   prizes: Record<string, EventPrizeAssignmentWireRecord>;
 };
 
-export type ProfileEventPrizesPageResponse = ProfileEventPrizesResponse & {
+export type ProfileEventPrizesPageResponse = ProfileEventPrizesSnapshot & {
   nextCursor: string | null;
 };
 
@@ -1051,9 +1051,9 @@ const isEventPrizeAssignmentRecord = (
   isEventPrizeEvent(value.eventId) &&
   isEventPrizeId(value.eventId, value.prizeId);
 
-const isProfileEventPrizesResponse = (
+const isProfileEventPrizesSnapshot = (
   value: unknown,
-): value is ProfileEventPrizesResponse => {
+): value is ProfileEventPrizesSnapshot => {
   if (
     !isExactRecord(value, ["ok", "profileId", "revision", "prizes"]) ||
     value.ok !== true ||
@@ -1089,7 +1089,7 @@ const isProfileEventPrizesPageResponse = (
       "prizes",
       "nextCursor",
     ]) ||
-    !isProfileEventPrizesResponse({
+    !isProfileEventPrizesSnapshot({
       ok: value.ok,
       profileId: value.profileId,
       revision: value.revision,
@@ -1197,7 +1197,7 @@ export {
   isEventPrizeWithdrawalProcessingResponse,
   isEventPrizeWithdrawalRequest,
   isEventPrizeWithdrawalStatusRequest,
-  isProfileEventPrizesResponse,
+  isProfileEventPrizesSnapshot,
   isProfileEventPrizesPageResponse,
   isToggleEventPrizeSelectionRequest,
   isToggleEventPrizeSelectionResponse,

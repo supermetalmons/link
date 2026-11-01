@@ -1,4 +1,7 @@
 const {
+  profileEventPrizesPageEtag,
+}: typeof import("@mons/shared/event-prizes") = require("@mons/shared/event-prizes");
+const {
   canonicalEvent,
 }: typeof import("../test/fixtures/canonicalData.mjs") = require("../test/fixtures/canonicalData.mjs");
 const {
@@ -202,8 +205,10 @@ const SMOKE_EVENTS = {
   endedId: "FRkdorMWaYW",
   selectionPrizeId: "1092",
 };
-const EVENT_SMOKE_BOOKMARK =
-  "mons-d1-v1:00000000-0000-4000-8000-000000000001:bookmark";
+const EVENT_SMOKE_EPOCH = "00000000-0000-4000-8000-000000000001";
+const EVENT_SMOKE_BOOKMARK = `mons-d1-v1:${EVENT_SMOKE_EPOCH}:bookmark`;
+const prizeEtag = (profileId: string | null, revision = 1) =>
+  profileEventPrizesPageEtag(EVENT_SMOKE_EPOCH, profileId, revision);
 const EVENT_READ_CORS_HEADERS = {
   "Access-Control-Allow-Headers":
     "Authorization, Content-Type, If-None-Match, X-D1-Bookmark",
@@ -919,18 +924,23 @@ test("smokes public, unauthenticated, and internal routes", async (t) => {
       );
     }
     if (url.endsWith("/events/prizes") && method === "GET") {
+      const authorization = new Headers(init?.headers).get("Authorization");
+      const profileId =
+        authorization === `Bearer ${AUTH_TOKEN}`
+          ? SMOKE_PROFILE.profileId
+          : null;
+      const revision = profileId === null ? 0 : 1;
       if (new Headers(init?.headers).get("If-None-Match")) {
         return new Response(null, {
           status: 304,
           headers: {
             ...EVENT_READ_CORS_HEADERS,
-            ETag: 'W/"profile-prizes"',
+            ETag: prizeEtag(profileId, revision),
             "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
             "Cache-Control": "no-store",
           },
         });
       }
-      const authorization = new Headers(init?.headers).get("Authorization");
       return json(
         {
           ok: true,
@@ -951,11 +961,12 @@ test("smokes public, unauthenticated, and internal routes", async (t) => {
                   },
                 }
               : {},
+          nextCursor: null,
         },
         200,
         {
           ...EVENT_READ_CORS_HEADERS,
-          ETag: 'W/"profile-prizes"',
+          ETag: prizeEtag(profileId, revision),
           "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
         },
       );
@@ -1096,8 +1107,11 @@ test("smokes public, unauthenticated, and internal routes", async (t) => {
     if (url.includes("/auth/x/callback")) {
       return json({ error: "invalid-state" }, 400);
     }
-    if (url.endsWith("/internal/telegram/delivery")) {
+    if (url.endsWith("/internal/telegram/command")) {
       return json({ error: "unauthenticated" }, 401);
+    }
+    if (url.endsWith("/internal/telegram/delivery")) {
+      return json({ ok: false, error: "not-found" }, 404);
     }
     throw new Error(`Unexpected smoke request: ${method} ${url}`);
   };
@@ -1505,7 +1519,7 @@ test("requires conditional event snapshots to return cache metadata", async () =
       200,
       {
         ...EVENT_READ_CORS_HEADERS,
-        ETag: 'W/"event"',
+        ETag: prizeEtag(SMOKE_PROFILE.profileId),
         "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
       },
     ),
@@ -1536,10 +1550,177 @@ test("requires conditional event snapshots to return cache metadata", async () =
   assert.equal(responses.length, 0);
 });
 
+test("verifies complete prize pagination and rejects inconsistent continuations", async (t) => {
+  type PrizePage =
+    import("@mons/shared/event-prizes").ProfileEventPrizesPageResponse;
+  const assignment = (eventId: string) => ({
+    eventId,
+    profileId: SMOKE_PROFILE.profileId,
+    place: 1 as const,
+    prizeId: SMOKE_EVENTS.assignedPrizeId,
+    assignedAtMs: 1,
+  });
+  const cases: Array<{
+    name: string;
+    mutate: (page: PrizePage) => unknown;
+    valid?: boolean;
+    epoch?: string;
+    revision?: number;
+  }> = [
+    { name: "complete", mutate: (page) => page, valid: true },
+    {
+      name: "missing cursor",
+      mutate: ({ nextCursor: _cursor, ...page }) => page,
+    },
+    { name: "changed revision", mutate: (page) => page, revision: 2 },
+    {
+      name: "changed owner",
+      mutate: (page) => ({ ...page, profileId: "other-profile" }),
+    },
+    {
+      name: "changed epoch",
+      mutate: (page) => page,
+      epoch: "00000000-0000-4000-8000-000000000002",
+    },
+    {
+      name: "repeated cursor",
+      mutate: (page) => ({ ...page, nextCursor: "cursor2" }),
+    },
+    {
+      name: "repeated assignment",
+      mutate: (page) => ({
+        ...page,
+        prizes: { "earlier-event": assignment("earlier-event") },
+      }),
+    },
+  ];
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      let prizePages = 0;
+      let conditionalPrizes = 0;
+      const headers = {
+        ...EVENT_READ_CORS_HEADERS,
+        ETag: prizeEtag(SMOKE_PROFILE.profileId),
+        "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
+        "Cache-Control": "no-store",
+      };
+      const read = smokeEventReads(
+        "https://api.mons.link",
+        AUTH_TOKEN,
+        SMOKE_PROFILE.profileId,
+        SMOKE_EVENTS,
+        {
+          fetch: async (input, init) => {
+            if (init?.method === "OPTIONS")
+              return new Response(null, { status: 204, headers });
+            const url = new URL(String(input));
+            const requestHeaders = new Headers(init?.headers);
+            if (url.pathname === "/events/prizes") {
+              assert.equal(url.searchParams.has("pagination"), false);
+              if (requestHeaders.has("If-None-Match")) {
+                conditionalPrizes++;
+                assert.equal(url.search, "");
+                assert.equal(requestHeaders.get("If-None-Match"), headers.ETag);
+                assert.equal(
+                  requestHeaders.get("X-D1-Bookmark"),
+                  EVENT_SMOKE_BOOKMARK + "-page2",
+                );
+                return new Response(null, { status: 304, headers });
+              }
+              prizePages++;
+              if (!url.searchParams.has("cursor")) {
+                assert.equal(prizePages, 1);
+                return json(
+                  {
+                    ok: true,
+                    profileId: SMOKE_PROFILE.profileId,
+                    revision: 1,
+                    prizes: { "earlier-event": assignment("earlier-event") },
+                    nextCursor: "cursor2",
+                  },
+                  200,
+                  headers,
+                );
+              }
+              assert.equal(prizePages, 2);
+              assert.equal(url.searchParams.get("cursor"), "cursor2");
+              assert.equal(
+                requestHeaders.get("X-D1-Bookmark"),
+                EVENT_SMOKE_BOOKMARK,
+              );
+              return json(
+                scenario.mutate({
+                  ok: true,
+                  profileId: SMOKE_PROFILE.profileId,
+                  revision: scenario.revision ?? 1,
+                  prizes: {
+                    [SMOKE_EVENTS.endedId]: assignment(SMOKE_EVENTS.endedId),
+                  },
+                  nextCursor: null,
+                }),
+                200,
+                {
+                  ...headers,
+                  ETag: profileEventPrizesPageEtag(
+                    scenario.epoch ?? EVENT_SMOKE_EPOCH,
+                    SMOKE_PROFILE.profileId,
+                    scenario.revision ?? 1,
+                  ),
+                  "X-D1-Bookmark": `mons-d1-v1:${scenario.epoch ?? EVENT_SMOKE_EPOCH}:bookmark-page2`,
+                },
+              );
+            }
+            if (requestHeaders.has("If-None-Match"))
+              return new Response(null, { status: 304, headers });
+            const eventId = url.searchParams.get("eventId") || "";
+            const event =
+              eventId === SMOKE_EVENTS.currentId
+                ? canonicalEvent({ eventId, status: "active" })
+                : eventId === SMOKE_EVENTS.endedId
+                  ? canonicalEvent({
+                      eventId,
+                      status: "ended",
+                      prizeAssignments: { 1: assignment(eventId) },
+                    })
+                  : null;
+            return json(
+              {
+                ok: true,
+                eventId,
+                revision: event ? 1 : 0,
+                event,
+                prizeSelections:
+                  eventId === SMOKE_EVENTS.currentId
+                    ? {
+                        [SMOKE_PROFILE.profileId]:
+                          SMOKE_EVENTS.selectionPrizeId,
+                      }
+                    : {},
+              },
+              200,
+              headers,
+            );
+          },
+          randomState: () => "pagination",
+          log: () => undefined,
+        },
+      );
+      if (scenario.valid) {
+        await read;
+        assert.equal(conditionalPrizes, 1);
+      } else {
+        await assert.rejects(read, /Event prizes smoke response was invalid/);
+        assert.equal(conditionalPrizes, 0);
+      }
+      assert.equal(prizePages, 2);
+    });
+  }
+});
+
 test("allows live prize changes but requires a stable cutover prize read", async () => {
   const headers = {
     ...EVENT_READ_CORS_HEADERS,
-    ETag: 'W/"event"',
+    ETag: prizeEtag(SMOKE_PROFILE.profileId),
     "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
   };
   const createFetch = (): typeof fetch => async (input, init) => {
@@ -1584,6 +1765,7 @@ test("allows live prize changes but requires a stable cutover prize read", async
             assignedAtMs: 1,
           },
         },
+        nextCursor: null,
       },
       200,
       headers,
@@ -1630,7 +1812,7 @@ test("verifies an ended selection while still requiring a current snapshot", asy
   };
   const headers = {
     ...EVENT_READ_CORS_HEADERS,
-    ETag: 'W/"event"',
+    ETag: prizeEtag(SMOKE_PROFILE.profileId),
     "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
     "Cache-Control": "no-store",
   };
@@ -1705,6 +1887,7 @@ test("verifies an ended selection while still requiring a current snapshot", asy
                 profileId: SMOKE_PROFILE.profileId,
                 revision: 1,
                 prizes: { [events.endedId]: assignment },
+                nextCursor: null,
               },
               200,
               headers,
@@ -1761,7 +1944,7 @@ test("verifies an ended selection while still requiring a current snapshot", asy
 test("rejects invalid conditional reads of the required ended event", async () => {
   const headers = {
     ...EVENT_READ_CORS_HEADERS,
-    ETag: 'W/"event"',
+    ETag: prizeEtag(SMOKE_PROFILE.profileId),
     "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
     "Cache-Control": "no-store",
   };
@@ -1842,6 +2025,7 @@ test("rejects invalid conditional reads of the required ended event", async () =
                   profileId: SMOKE_PROFILE.profileId,
                   revision: 1,
                   prizes: { [SMOKE_EVENTS.endedId]: assignment },
+                  nextCursor: null,
                 },
                 200,
                 headers,
@@ -1888,7 +2072,7 @@ test("rejects invalid conditional reads of the required ended event", async () =
 test("requires the ended event aggregate to contain the profile prize", async () => {
   const eventHeaders = {
     ...EVENT_READ_CORS_HEADERS,
-    ETag: 'W/"event"',
+    ETag: prizeEtag(SMOKE_PROFILE.profileId),
     "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
   };
   const missingEventId = "smoke-abcdefghijklmnopqrstuvwx";
@@ -1930,6 +2114,7 @@ test("requires the ended event aggregate to contain the profile prize", async ()
             assignedAtMs: 1,
           },
         },
+        nextCursor: null,
       },
       200,
       eventHeaders,
@@ -2429,7 +2614,7 @@ test("accepts an empty authenticated navigation projection", async () => {
               status: 304,
               headers: {
                 ...EVENT_READ_CORS_HEADERS,
-                ETag: 'W/"profile-prizes"',
+                ETag: prizeEtag(SMOKE_PROFILE.profileId, 0),
                 "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
                 "Cache-Control": "no-store",
               },
@@ -2441,11 +2626,12 @@ test("accepts an empty authenticated navigation projection", async () => {
               profileId: SMOKE_PROFILE.profileId,
               revision: 0,
               prizes: {},
+              nextCursor: null,
             },
             200,
             {
               ...EVENT_READ_CORS_HEADERS,
-              ETag: 'W/"profile-prizes"',
+              ETag: prizeEtag(SMOKE_PROFILE.profileId, 0),
               "X-D1-Bookmark": EVENT_SMOKE_BOOKMARK,
             },
           );

@@ -22,7 +22,7 @@ The frontend Worker serves `mons.link`; the API Worker serves `api.mons.link`. P
 
 The existing per-invite `InviteReactions` Durable Object owns active matches, timer claims, reactions, and live appearance. It delivers revisioned match, metadata, wager, reaction, and presentation snapshots over HTTP and WebSockets. Match routes and immutable archived records remain in gameplay D1. A missing route returns `match: null`; an existing route with unavailable canonical state returns a retryable error.
 
-Current timer starts use the invite object's verified local storage. There is no D1 timer backend, storage selector, or global timer-start sweep. Fresh rooms install application control, canonical schema, and writer/layout metadata atomically; existing rooms require their verified layout. Permanent SQLite guards enforce writer revisions and incarnations, including against late continuations.
+Timer starts use verified local storage in the invite object. Fresh rooms initialize atomically; existing rooms require verified layout metadata and permanent writer guards. See [canonical timer storage](scripts/deploy-cloudflare.md#canonical-timer-storage) for its invariants and release checks.
 
 Move and surrender APIs authorize the canonical actor and use typed Durable Object mutations. Cumulative moves and takebacks preserve replay, timer fences, and committed downstream effects. Browser journals survive same-match reconnects and reloads. Session transitions coordinate create-only match effects with D1 invite metadata, receipts, and outboxes.
 
@@ -64,15 +64,15 @@ Edit portable runtime code in `cloud/runtime/src/`, including shared rules in `c
 | `npm run deploy -- preview`                | Build, validate, and upload a frontend candidate.                                        |
 | `npm run repo-clean`                       | Apply the documented destructive branch/worktree cleanup policy.                         |
 
-Production release and maintenance procedures are in [Cloudflare deployment](scripts/deploy-cloudflare.md). Telegram recovery and admin operations are in [cloud operations](cloud/README.md).
-
-Routine releases have no overall time limit. Prepare validated candidates, promote exact versions, and verify affected behavior. Allow necessary provider propagation and retries, keep writes and Queues running, and finish after required checks pass. Do not add verification-only waits or observation windows longer than 60 seconds.
+Production release and maintenance procedures are in [Cloudflare deployment](scripts/deploy-cloudflare.md). Telegram recovery and admin operations are in [cloud operations](cloud/README.md). The [canonical cleanup report](cloud/reports/canonical-cleanup-2026-11-01.md) preserves the completed migration history and evidence.
 
 No build or test command implies a release. Public reaction sockets use `mons-reactions-v2` with an explicit match ID. Stored historical formats remain supported independently of retired client protocols. `repo-clean` deletes non-kept branches, worktrees, and stashes; inspect its documented policy before use.
 
 ## Package boundaries
 
 `@mons/shared` is the only local runtime package dependency at the root. It preserves direct subpath exports and browser-safe CommonJS modules with matching generated declarations. All portable runtime implementations and types originate in `cloud/runtime/src/`; edit that source instead of generated files. Frontend builds, API upload dry-runs, and API candidate uploads check generation freshness before proceeding. Portable runtime modules and admin tools remain separately installable; TypeScript and framework declarations are development dependencies. Provider-specific historical values are confined to compatibility codecs, applied migrations, and explicit regression guards.
+
+The complete gate reaches `check:runtime` through the API dry-run's npm lifecycle hook. Compiler coverage follows those hooks so runtime tests stay checked without repeating the runtime validation lane, and rejects runs with hooks disabled (`ignore-scripts`). Browser suites in `test/*.browser.mjs` run separately from the Node tests in `check:all`.
 
 ## Unused-code checks
 

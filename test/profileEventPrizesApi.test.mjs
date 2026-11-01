@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { registerTypeScriptTestHooks } from "./support/typescriptHooks.mjs";
 import test from "node:test";
 import {
-  isProfileEventPrizesResponse,
+  isProfileEventPrizesSnapshot,
   MAX_PROFILE_EVENT_PRIZES_CURSOR_LENGTH,
   profileEventPrizesPageEtag,
 } from "@mons/shared/event-prizes";
@@ -22,7 +22,7 @@ const { createUserBoundAuthTokenProvider } =
   await import("../src/services/authApi.ts");
 
 /**
- * @typedef {import("@mons/shared/event-prizes").ProfileEventPrizesResponse} PrizeSnapshot
+ * @typedef {import("@mons/shared/event-prizes").ProfileEventPrizesSnapshot} PrizeSnapshot
  * @typedef {import("@mons/shared/event-prizes").ProfileEventPrizesPageResponse} PrizePage
  * @typedef {import("@mons/shared/event-prizes").EventPrizeAssignmentWireRecord} PrizeAssignment
  * @typedef {import("../src/services/gameplayTransport.ts").ConditionalReadOptions} ReadOptions
@@ -141,7 +141,7 @@ test("assembles canonical historical assignments once with final transport metad
   await flush();
   assert.equal(settled, false);
   assert.equal(calls.length, 2);
-  assert.equal(required(calls[0]).url.search, "?pagination=1");
+  assert.equal(required(calls[0]).url.search, "");
   assert.equal(required(calls[0]).headers.get("If-None-Match"), etag(0));
   assert.equal(required(calls[0]).headers.get("X-D1-Bookmark"), bookmark(1));
   assert.equal(required(calls[1]).url.searchParams.get("cursor"), "cursor-1");
@@ -160,23 +160,15 @@ test("assembles canonical historical assignments once with final transport metad
   });
   assert.equal(result.kind, "modified");
   assert.ok(result.kind === "modified");
-  assert.equal(isProfileEventPrizesResponse(result.value), true);
+  assert.equal(isProfileEventPrizesSnapshot(result.value), true);
 });
 
-test("accepts a complete legacy first response during rollback", async () => {
-  const value = snapshot({ "event-1": assignment("event-1") });
-  const calls = serve([response(value, { ETag: 'W/"legacy-prizes-1"' })]);
-  assert.deepEqual(
-    await readProfileEventPrizesViaApi(profileId, async () => "token"),
-    {
-      kind: "modified",
-      value,
-      etag: 'W/"legacy-prizes-1"',
-      bookmark: bookmark(),
-    },
+test("rejects a first response without the canonical page cursor", async () => {
+  serve([response(snapshot({ "event-1": assignment("event-1") }))]);
+  await assert.rejects(
+    readProfileEventPrizesViaApi(profileId, async () => "token"),
+    unavailable,
   );
-  assert.equal(calls.length, 1);
-  assert.equal(isProfileEventPrizesResponse(page()), false);
 });
 
 test("accepts only a matching first-page conditional response", async () => {
@@ -196,6 +188,10 @@ test("accepts only a matching first-page conditional response", async () => {
     [{}, {}],
     [{ etag: etag(0) }, {}],
     [{ etag: etag() }, { "X-D1-Bookmark": bookmark(2, nextEpoch) }],
+    [
+      { etag: 'W/"profile-event-prizes-profile-1-1"' },
+      { ETag: 'W/"profile-event-prizes-profile-1-1"' },
+    ],
   ])) {
     serve([unchanged(headers)]);
     await assert.rejects(
@@ -205,7 +201,7 @@ test("accepts only a matching first-page conditional response", async () => {
   }
 });
 
-test("rejects invalid continuation metadata and partial legacy responses", async () => {
+test("rejects invalid continuation metadata and responses without page metadata", async () => {
   const first = () =>
     response(page({ "event-1": assignment("event-1") }, "cursor-1"));
   const invalidResponses = [
@@ -321,7 +317,7 @@ test("restarts changed snapshots once from primary without retaining earlier pri
     snapshot({ current: assignment("current") }, 2),
   );
   assert.equal(calls.length, 3);
-  assert.equal(required(calls[2]).url.search, "?pagination=1");
+  assert.equal(required(calls[2]).url.search, "");
   assert.equal(required(calls[2]).headers.has("If-None-Match"), false);
   assert.equal(required(calls[2]).headers.has("X-D1-Bookmark"), false);
 

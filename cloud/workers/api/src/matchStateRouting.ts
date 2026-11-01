@@ -118,7 +118,7 @@ async function readCurrentMatchStateSnapshot<
 export async function readMatchStateRecord(
   env: Env,
   request: ReadMatchSnapshotRequest,
-  options: { signal?: AbortSignal; fetcher?: typeof fetch } = {},
+  options: { signal?: AbortSignal } = {},
 ): Promise<RetainedMatchValue> {
   return (await readMatchStateRecords(env, [request], options))[0]!;
 }
@@ -168,8 +168,10 @@ export async function readMatchStateRecords(
         string,
         Array<{ input: ReadMatchSnapshotRequest; index: number }>
       >();
-      const legacy: Array<{ input: ReadMatchSnapshotRequest; index: number }> =
-        [];
+      const archived: Array<{
+        input: ReadMatchSnapshotRequest;
+        index: number;
+      }> = [];
       const reads: Array<() => Promise<void>> = [];
       for (const [index, route] of routes.entries()) {
         if (!route) continue;
@@ -177,7 +179,7 @@ export async function readMatchStateRecords(
           throw new Error("match-state-route-epoch-conflict");
         const input = inputs[index];
         if (route.kind === "archive") {
-          legacy.push({ input, index });
+          archived.push({ input, index });
         } else {
           if (!route.inviteId) throw new Error("match-state-route-invalid");
           const entries = rooms.get(route.inviteId) || [];
@@ -185,14 +187,14 @@ export async function readMatchStateRecords(
           rooms.set(route.inviteId, entries);
         }
       }
-      if (legacy.length > 0) {
+      if (archived.length > 0) {
         reads.push(async () => {
           const records = await readArchivedMatchStates(
             env.PROFILE_GAMES_DB,
-            legacy.map(({ input }) => input),
+            archived.map(({ input }) => input),
             signal,
           );
-          for (const [offset, entry] of legacy.entries())
+          for (const [offset, entry] of archived.entries())
             results[entry.index] = records[offset]!;
         });
       }

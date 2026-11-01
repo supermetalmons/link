@@ -60,7 +60,6 @@ export type ApiFailure = ApiJson<
   | 404
   | 405
   | 409
-  | 410
   | 412
   | 413
   | 426
@@ -89,13 +88,6 @@ export type EventPrizeWithdrawalWireRequest = Omit<
   "eventId"
 > & {
   eventId: string;
-};
-export type TelegramInitialDeliveryRequest = {
-  generation: string;
-  messageKey: string;
-  retrySequence: 0;
-  revision: string;
-  taskKind: "desired" | "manual-recovery";
 };
 export type TelegramRecoveryAction =
   "abandon" | "confirm-send-absent" | "confirm-send-applied";
@@ -222,11 +214,6 @@ export type ApiEndpoints = {
     undefined,
     Sessions.ReadHistoricalMatchRequest
   >;
-  "POST /internal/telegram/delivery": Endpoint<
-    TelegramInitialDeliveryRequest,
-    never,
-    never
-  >;
   "POST /internal/telegram/command": Endpoint<
     TelegramCommandRequest,
     TelegramCommandResponse,
@@ -332,15 +319,10 @@ export type ApiEndpoints = {
   >;
   "GET /events/prizes": Endpoint<
     undefined,
-    | EventPrizes.ProfileEventPrizesPageResponse
-    | EventPrizes.ProfileEventPrizesResponse,
-    ApiConditional<
-      | EventPrizes.ProfileEventPrizesPageResponse
-      | EventPrizes.ProfileEventPrizesResponse
-    >,
+    EventPrizes.ProfileEventPrizesPageResponse,
+    ApiConditional<EventPrizes.ProfileEventPrizesPageResponse>,
     undefined,
     {
-      pagination?: "1";
       cursor?: string;
     }
   >;

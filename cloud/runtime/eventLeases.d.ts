@@ -12,7 +12,6 @@ export type EventLeaseRecord = {
   acquiredAtMs: number;
   refreshedAtMs: number;
   expiresAtMs: number;
-  ownerId?: string;
 };
 export type EventLeaseStore = {
   transactEventLease(

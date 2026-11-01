@@ -6,7 +6,7 @@ import {
   openEventModal,
   openEventModalPendingCreate,
   setEventModalPendingCreateError,
-} from "../eventModalController";
+} from "./modalState";
 import {
   getDefaultScheduledDateTimeInput,
   validateEventCreateSchedule,

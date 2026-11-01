@@ -202,7 +202,6 @@ test("snapshot and Telegram routes retain their fetch-only methods and headers",
   for (const path of [
     "/matches/snapshot",
     "/matches/history",
-    "/internal/telegram/delivery",
     "/internal/telegram/command",
   ]) {
     const snapshot = path.startsWith("/matches/");
@@ -248,6 +247,9 @@ test("snapshot and Telegram routes retain their fetch-only methods and headers",
 
 test("nearby unknown and retired paths stay inert through both entrypoints", async () => {
   const { overrides, reads } = overridesFor();
+  const unavailableEnv = new Proxy(TELEGRAM_TEST_ENV, {
+    get: () => assert.fail("Unknown route accessed an environment binding"),
+  });
   for (const path of [
     "/nfts/",
     "/NFTS",
@@ -255,17 +257,23 @@ test("nearby unknown and retired paths stay inert through both entrypoints", asy
     "/matches/snapshot/",
     "/invites/invite-1/metadata/",
     "/invites/invite-1/matches/match-1/unknown",
+    "/internal/telegram/delivery",
     "/internal/telegram/command/status",
     "/internal/telegram/event-prize-announcement",
     "/internal/d1-migration",
     "/auth/profile-claim/sync",
   ]) {
-    for (const method of ["OPTIONS", "POST"]) {
+    for (const method of ["OPTIONS", "GET", "POST"]) {
       const input = request(path, method);
-      const response = await handleRequest(input, env, overrides, ctx);
+      const response = await handleRequest(
+        input,
+        unavailableEnv,
+        overrides,
+        ctx,
+      );
       assert.equal(response.status, 404, `${method} ${path}`);
       assert.deepEqual(
-        await responseValue(await handleFetch(input, env, ctx)),
+        await responseValue(await handleFetch(input, unavailableEnv, ctx)),
         await responseValue(response),
       );
       assert.equal(input.bodyUsed, false);

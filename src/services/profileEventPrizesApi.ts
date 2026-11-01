@@ -7,9 +7,8 @@ import {
   MAX_PROFILE_EVENT_PRIZES_CURSOR_LENGTH,
   profileEventPrizesPageEtag,
   isProfileEventPrizesPageResponse,
-  isProfileEventPrizesResponse,
   type EventPrizeAssignmentWireRecord,
-  type ProfileEventPrizesResponse,
+  type ProfileEventPrizesSnapshot,
 } from "@mons/shared/event-prizes";
 import { eventBookmarkEpoch } from "@mons/shared/events";
 import type { AuthTokenProvider } from "./authApi";
@@ -33,7 +32,6 @@ function validateNotModified(
   requestedEtag: string | null | undefined,
 ): void {
   if (result.etag !== requestedEtag?.trim()) throw invalidPrizeResponse();
-  if (!result.etag.startsWith('W/"profile-event-prizes-page-v1-')) return;
   const epoch = eventBookmarkEpoch(result.bookmark);
   const match = /-(0|[1-9][0-9]*)"$/.exec(result.etag);
   const revision = match ? Number(match[1]) : NaN;
@@ -50,7 +48,7 @@ export function readProfileEventPrizesViaApi(
   profileId: string,
   tokenProvider: AuthTokenProvider,
   options: ConditionalReadOptions = {},
-): Promise<ConditionalRead<ProfileEventPrizesResponse>> {
+): Promise<ConditionalRead<ProfileEventPrizesSnapshot>> {
   const normalizedProfileId = profileId.trim();
   return withConditionalGameplayReads(tokenProvider, options, async (read) => {
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -67,12 +65,6 @@ export function readProfileEventPrizesViaApi(
           const url = new URL(
             `${GAMEPLAY_API_ROOT}/events/prizes` satisfies ApiHttpUrl<"GET /events/prizes">,
           );
-          url.searchParams.set(
-            "pagination" satisfies keyof ApiQuery<"GET /events/prizes">,
-            "1" satisfies NonNullable<
-              ApiQuery<"GET /events/prizes">["pagination"]
-            >,
-          );
           if (cursor !== null)
             url.searchParams.set(
               "cursor" satisfies keyof ApiQuery<"GET /events/prizes">,
@@ -82,8 +74,7 @@ export function readProfileEventPrizesViaApi(
             await read(
               url,
               (value): value is ApiResponse<"GET /events/prizes"> =>
-                (isProfileEventPrizesPageResponse(value) ||
-                  (cursor === null && isProfileEventPrizesResponse(value))) &&
+                isProfileEventPrizesPageResponse(value) &&
                 value.profileId === normalizedProfileId,
               { bookmark, etag: cursor === null ? requestedEtag : null },
             );
@@ -93,7 +84,6 @@ export function readProfileEventPrizesViaApi(
             return result;
           }
           const page: ApiResponse<"GET /events/prizes"> = result.value;
-          if (!("nextCursor" in page)) return result;
           const epoch = eventBookmarkEpoch(result.bookmark);
           if (
             !epoch ||

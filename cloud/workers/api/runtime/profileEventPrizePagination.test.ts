@@ -4,7 +4,6 @@ import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import {
   isProfileEventPrizesPageResponse,
-  isProfileEventPrizesResponse,
   MAX_PROFILE_EVENT_PRIZES_CURSOR_LENGTH,
   profileEventPrizesPageEtag,
   type ProfileEventPrizesPageResponse,
@@ -19,7 +18,7 @@ import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
 const testEnv = env as Env & { TEST_EVENT_D1_MIGRATIONS: D1Migration[] };
 const profileId = "profile-one";
 const epoch = testEnv.EVENT_DB_BOOKMARK_EPOCH;
-const path = "/events/prizes?pagination=1";
+const path = "/events/prizes";
 
 function environmentWithEpoch(value: string): Env {
   return new Proxy(testEnv, {
@@ -144,7 +143,7 @@ async function page(
 
 function continuation(cursor: string | null): string {
   expect(cursor).not.toBeNull();
-  return `${path}&cursor=${encodeURIComponent(cursor || "")}`;
+  return `${path}?cursor=${encodeURIComponent(cursor || "")}`;
 }
 
 function cursorWith(
@@ -183,14 +182,9 @@ describe("profile prize pagination", () => {
       (_, index) => `event-${String(index).padStart(3, "0")}`,
     );
     await seed(ids);
-    const legacy = await request("/events/prizes");
-    const legacyBody = await legacy.json();
-    expect(isProfileEventPrizesResponse(legacyBody)).toBe(true);
-    expect(isProfileEventPrizesPageResponse(legacyBody)).toBe(false);
     const firstResponse = await request();
     const first = await page(firstResponse);
     expect(Object.keys(first.prizes)).toEqual(ids.slice(0, 100));
-    expect(isProfileEventPrizesResponse(first)).toBe(false);
     expect(Object.keys(first.prizes[ids[0]!]!).sort()).toEqual([
       "assignedAtMs",
       "eventId",
@@ -269,17 +263,24 @@ describe("profile prize pagination", () => {
     const owner = "profile";
     await seed(["event-0"], {}, owner);
     await seed(["event-1"], {}, owner);
-    const legacy = await request("/events/prizes", {}, owner);
-    expect(legacy.status).toBe(200);
     const complete = {
-      ...(await legacy.json<Record<string, unknown>>()),
+      ok: true,
+      profileId: owner,
+      revision: 1,
+      prizes: Object.fromEntries(
+        ["event-0", "event-1"].map((eventId) => [
+          eventId,
+          {
+            eventId,
+            profileId: owner,
+            place: 1,
+            prizeId: "future-prize",
+            assignedAtMs: 1,
+          },
+        ]),
+      ),
       nextCursor: null,
     };
-    expect(isProfileEventPrizesPageResponse(complete)).toBe(true);
-    expect(
-      new TextEncoder().encode(JSON.stringify(complete)).byteLength,
-    ).toBeLessThanOrEqual(MAX_EVENT_READ_RESPONSE_BYTES);
-
     const response = await request(path, {}, owner);
     expect(await page(response)).toEqual(complete);
   });
@@ -311,11 +312,10 @@ describe("profile prize pagination", () => {
     expect(next.headers.get("ETag")).toBe(
       profileEventPrizesPageEtag(nextEpoch, profileId, 1),
     );
-    const legacy = await request("/events/prizes");
     expect(
       (
         await request(path, {
-          "If-None-Match": legacy.headers.get("ETag") || "",
+          "If-None-Match": 'W/"profile-event-prizes-profile-one-1"',
         })
       ).status,
     ).toBe(200);
@@ -386,7 +386,7 @@ describe("profile prize pagination", () => {
       cursorWith(first.nextCursor, { extra: true }),
     ]) {
       expect(
-        (await request(`${path}&cursor=${encodeURIComponent(cursor)}`)).status,
+        (await request(`${path}?cursor=${encodeURIComponent(cursor)}`)).status,
       ).toBe(400);
     }
     expect(

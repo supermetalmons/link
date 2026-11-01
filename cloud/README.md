@@ -10,9 +10,7 @@ The [data boundary inventory](data-boundaries.md) records persistence and transp
 
 The invite Durable Object owns active match records and timer claims. Gameplay D1 owns actor/match routes, immutable archived records, invite metadata, automatch, session receipts, discovery, projection outboxes, and locks. Events, Telegram delivery, and prize withdrawals have their own D1 databases.
 
-Current timer starts live in the invite object's `match_state_timer_starts_canonical` table. The retired gameplay-D1 `match_timer_starts_canonical` table and its deletion context are not runtime dependencies. Existing rooms must retain verified local-layout metadata; fresh room initialization is atomic. Writer registration, incarnation/revision guards, and retained outcomes remain permanent coordination state. Do not delete these records or relax their SQL guards to make an unavailable room writable.
-
-Applied migrations, immutable D1 timer ownership and acknowledgement records, local receipts, and protected retirement reports preserve the evidence for the storage transition. Historical cleanup effect discriminators remain decodable for replay, without reviving a D1 timer writer or sweep. The final API exposes no temporary cleanup capability or executor.
+Current timer starts live in the invite object's `match_state_timer_starts_canonical` table. Preserve verified local-layout metadata, writer guards, receipts, and retained outcomes. [Canonical timer storage](../scripts/deploy-cloudflare.md#canonical-timer-storage) defines initialization, replay, and release requirements.
 
 Worker and portable-runtime callers use typed domain repositories for matches, sessions, wagers, events, leases, Telegram delivery, and prize withdrawals. Event and session plans preserve their existing guarded commit stages. Compatibility codecs retain the exact persisted path encodings and replay digests; legacy-shaped test adapters live only with the tests.
 
@@ -20,7 +18,7 @@ Wager mutations require a `WagerWriteRepository` supplied inside the reservation
 
 Rematch preparation reads both participants through the existing match-record batch API, sharing routing, authority checks, and room reads. Join and ensure-match operations retain their scalar reads so an existing participant match can return without reading the opponent.
 
-Preserve existing login IDs, applied SQL migrations, immutable snapshots, imported legacy match records, rating completions, source digests, and both event receipt stages. The canonical cutover is complete at data epoch 1. Current operations do not use source exports or the completed migration executor. Typed timestamp and counter commands resolve before persistence and digest calculation; stored compatibility formats do not authorize rewriting historical data.
+Preserve existing login IDs, applied SQL migrations, immutable snapshots, imported legacy match records, rating completions, source digests, and both event receipt stages. The data epoch is 1; the [canonical cleanup report](reports/canonical-cleanup-2026-11-01.md) records the completed cutover and retained evidence. Typed timestamp and counter commands resolve before persistence and digest calculation; stored compatibility formats do not authorize rewriting historical data.
 
 ## Browser sessions and profile recovery
 
@@ -133,7 +131,7 @@ Repair canonical data only through the existing profile maintenance procedure, p
 
 Moves, takebacks, timer starts/claims, surrender, and rematches use authenticated Worker APIs and typed Durable Object mutations. Cumulative delivery preserves prefixes, replay, status, and timer fences. Pending downstream effects remain durable and recover through the existing alarm.
 
-Match timers use invite Durable Object SQLite. Timer markers and match updates commit in one local transaction, preserving the first deadline for each highest turn across retries, takebacks, and eviction. Existing rooms require verified local layout version 2 and local cohorts; missing or incompatible state fails closed. Fresh rooms establish that layout before accepting business writes. Preserve timer markers alongside match records and deploy only versions that understand this local layout and its writer guards.
+Timer markers and match updates commit in one local transaction, preserving the first deadline for each highest turn across retries, takebacks, and eviction. Follow the [timer storage requirements](../scripts/deploy-cloudflare.md#canonical-timer-storage) when changing or releasing this behavior.
 
 `GET /matches/snapshot?playerId=…&matchId=…` resolves D1 routing and reads the exact canonical or archived match. An absent route returns `match: null`; unavailable canonical state is an error. Public historical pairs come solely from D1 and never backfill on reads.
 
@@ -164,7 +162,7 @@ Match mutations notify subscribers immediately; the server checks for missed mat
 
 Event control supports `d1` and `frozen`. The event-progress Workflow owns scheduled starts and retriable synchronization; existing instances retain their IDs, payloads, and versioned code during compatible releases. Event mutation intents and both receipt stages preserve exact replay and cross-database consistency. Never bulk-delete admissions or detach pending intents.
 
-`GET /events/prizes?pagination=1` returns up to 100 assignments within the existing response-size budget, with an opaque `nextCursor` for continuation. Pages retain one canonical profile, database epoch, and revision; a changed snapshot returns HTTP 409. The browser assembles the complete history before updating inventory, carries D1 bookmarks between pages, and can restart once within the existing 30-second deadline. The unpaginated route retains its original response contract for older clients.
+`GET /events/prizes` always returns a page of up to 100 assignments within the response-size budget. Every page includes `nextCursor`, which is an opaque continuation token or `null`; send the token as `?cursor=…`. Pages retain one canonical profile, database epoch, and revision; a changed snapshot returns HTTP 409. The browser assembles a complete `ProfileEventPrizesSnapshot` from the wire `ProfileEventPrizesPageResponse` pages before updating inventory, carries D1 bookmarks between pages, and can restart once within the 30-second deadline.
 
 Scheduled-event recovery discovers up to 800 urgent candidates and reads a 100-event background page using `EVENT_DB.event_scheduled_recovery_cursor`. Indexed reminder-window reads and bounded prize-catalogue lookups put announcements due within ten minutes ahead of ordinary or overdue starts. Missing announcement schedules take priority over matching checkpointed outboxes, so repeated sweeps make progress through deferred reminders. Urgent recovery runs independently of cursor and background reads; a failed recovery query preserves the cursor while available work still runs.
 
@@ -182,7 +180,7 @@ Malformed progress-outbox quarantine archives and removes only the exact observe
 
 `PROFILE_DB.invite_wager_states_canonical` owns proposals, agreements, settlement state, and resolution markers. Reserved balances, consumed operation tombstones, pending settlements, and replay records are current application data. Current wager incidents use `manage:wager-reservations` and canonical-profile maintenance. Reconcile uncertain effects before settling an expired admission.
 
-`WAGER_SETTLEMENT_QUEUE` sends initial and deferred settlement retries to `mons-link-wager-settlement-data1`, with exhausted retries retained in `mons-link-wager-settlement-data1-dlq`. The consumer preserves profile and reservation admission checks and runs independently of Telegram delivery. Legacy wager messages in `mons-link-telegram-delivery-data1` forward unchanged without added delay; the original message is acknowledged only after enqueue succeeds and retried if forwarding fails. Inspect legacy Telegram DLQ entries as well as the settlement DLQ during recovery; preserve their operation IDs and reconcile canonical state before replaying a specific task.
+`WAGER_SETTLEMENT_QUEUE` sends initial and deferred settlement retries to `mons-link-wager-settlement-data1`, with exhausted retries retained in `mons-link-wager-settlement-data1-dlq`. The consumer preserves profile and reservation admission checks and runs independently of Telegram delivery. Inspect the settlement DLQ during recovery; preserve operation IDs and reconcile canonical state before replaying a specific task. Queue ownership and release checks are in [wager settlement delivery](../scripts/deploy-cloudflare.md#wager-settlement-delivery).
 
 Prize withdrawals retain D1 leases, destination identity, signed transaction bytes, exact signature recovery, and completion records. Freeze affected storage before a schema change or terminating an instance. The read-only withdrawal Workflow preflight validates wallet identity and RPC access without sending a transaction. Never manually rewrite assigned prizes or replay a possibly completed transfer.
 
@@ -194,7 +192,7 @@ Telegram delivery is authored in `cloud/runtime/src/telegram/`. The delivery eng
 
 Event Telegram projection runs through `mons-link-telegram-projection-data1`. Every supported API or Workflow mutation writes `EVENT_DB.event_telegram_projection_outboxes_canonical` and increments the generation in `event_telegram_projection_state_canonical` atomically with the event update. The five-minute Worker schedule recovers pending markers; all event mutations pass through the canonical Worker repository.
 
-Event creation accepts `telegramAnnouncements` with three required booleans: `invite` sends the initial invite, `matches` sends event start and match updates, and `results` sends final results. The creation UI defaults all three to false. Omitting the settings defaults all three to false. New requests reject `announceOnTelegram`; historical stored records still decode that boolean when the current settings are absent.
+Event creation accepts `telegramAnnouncements` with three required booleans: `invite` sends the initial invite, `matches` sends event start and match updates, and `results` sends final results. The creation UI defaults all three to false. Omitting the settings defaults all three to false. Canonical event records require these settings; `announceOnTelegram` is not an accepted event field.
 
 When `invite` is false, joins and postponements cannot send an invite. A confirmed delivery receipt for `event:<event-id>:upcoming`, with instance `event:<event-id>:upcoming:v2` and destination `community`, permits edit-only updates; a missing message is never replaced automatically. Manual invite sending remains a separate future operation. That sender must record the canonical delivery receipt and enqueue event projection after confirmation to refresh participants immediately; otherwise the next event mutation picks it up. Start/match updates and final results work independently of invite delivery.
 
@@ -209,9 +207,7 @@ npm run recover:telegram -- --message-key <key> --action confirm-send-absent --b
 
 Use `confirm-send-applied --message-id <telegram-message-id>` when Telegram created the message, or `abandon` to retain the audit record and stop delivery.
 
-Once four-hour reminder jobs exist, rollback requires API version `7a94cfb8-550d-45c1-9ab1-4399ea9b6e11` or a later compatible version that accepts both stored three-hour and four-hour schedules.
-
-New Sunday Mons reminders send automatically four hours before the scheduled event start. Previously queued three-hour reminders retain their original schedule, and participant updates preserve the heading of already-sent messages. Only scheduled events with `isSundayMons === true` and a valid start time qualify; prizes are not required. The standalone HTML message goes to the community destination with notifications enabled and link previews disabled:
+New Sunday Mons reminders send automatically four hours before the scheduled event start. Previously queued three-hour reminders retain their original schedule, and participant updates preserve the heading of already-sent messages. Rollback versions must support both retained schedules. Only scheduled events with `isSundayMons === true` and a valid start time qualify; prizes are not required. The standalone HTML message goes to the community destination with notifications enabled and link previews disabled:
 
 ```text
 sunday mons in 4 hours!

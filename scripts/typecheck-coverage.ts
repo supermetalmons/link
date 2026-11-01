@@ -39,12 +39,26 @@ function scriptsAt(root: string): Record<string, string> {
 }
 
 export function checkedProjects(root = ROOT): string[] {
+  if (
+    Object.entries(process.env).some(
+      ([key, value]) =>
+        /^npm_config_ignore[-_]scripts$/i.test(key) &&
+        value !== undefined &&
+        value !== "" &&
+        value !== "false" &&
+        value !== "0",
+    )
+  )
+    throw new Error(
+      "Compiler coverage requires npm lifecycle hooks; unset ignore-scripts or set it to false.",
+    );
   const scripts = scriptsAt(root),
-    seen = new Set<string>(),
+    requested = new Set<string>(),
+    scanned = new Set<string>(),
     projects = new Set<string>();
-  const visit = (name: string): void => {
-    if (seen.has(name)) return;
-    seen.add(name);
+  const scan = (name: string): void => {
+    if (scanned.has(name)) return;
+    scanned.add(name);
     const script = scripts[name];
     if (!script) throw new Error(`typecheck-script-missing:${name}`);
     for (const command of script.split(/\s*&&\s*/)) {
@@ -60,6 +74,13 @@ export function checkedProjects(root = ROOT): string[] {
         throw new Error("typecheck-project-outside-repository");
       projects.add(path);
     }
+  };
+  const visit = (name: string): void => {
+    if (requested.has(name)) return;
+    requested.add(name);
+    if (scripts[`pre${name}`]) scan(`pre${name}`);
+    scan(name);
+    if (scripts[`post${name}`]) scan(`post${name}`);
   };
   visit("check:all");
   return [...projects].sort();

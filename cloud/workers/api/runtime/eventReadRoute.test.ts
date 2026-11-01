@@ -415,6 +415,7 @@ describe("event read route", () => {
       profileId: "new-profile-owner",
       revision: 0,
       prizes: {},
+      nextCursor: null,
     });
   });
 
@@ -701,6 +702,7 @@ describe("event read route", () => {
           assignedAtMs: 2_000,
         },
       },
+      nextCursor: null,
     });
   });
 
@@ -735,6 +737,7 @@ describe("event read route", () => {
       profileId: null,
       revision: 0,
       prizes: {},
+      nextCursor: null,
     });
     const etag = response.headers.get("ETag");
     const bookmark = response.headers.get("X-D1-Bookmark");
