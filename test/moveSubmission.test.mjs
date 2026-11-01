@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { registerTypeScriptTestHooks } from "./support/typescriptHooks.mjs";
 import test from "node:test";
 import ts from "typescript";
+import { isCompletedMatchPair } from "../src/connection/matchCompletion.ts";
 import {
   MoveDelivery,
   moveDeliveryStorageKey,
@@ -114,7 +115,7 @@ const scope = {
  * @typedef {"surrender" | "timer" | "claim" | "rating" | "wager" | "end" | "rematch"} TerminalKind
  * @typedef {import("@mons/shared/game-sessions").SurrenderMatchResponse & import("@mons/shared/game-sessions").EndRematchResponse & import("@mons/shared/timers").StartMatchTimerResponse & {mining: null}} TerminalReceipt
  * @typedef {{request: MoveRequest; bearer: string; options: {signal: AbortSignal; timeoutMs: number}; pending: PromiseWithResolvers<MoveResponse>}} MoveCall
- * @typedef {{moveDeliveryScope: SourceConnection["moveDeliveryScope"]; isCurrentMoveBoard: SourceConnection["isCurrentMoveBoard"]; recoverMoveBoard: SourceConnection["recoverMoveBoard"]; getMoveDelivery: SourceConnection["getMoveDelivery"]; flushPendingMoves: SourceConnection["flushPendingMoves"]; refreshMoveDeliveries: SourceConnection["refreshMoveDeliveries"]; sendMove: SourceConnection["sendMove"]; createSessionGuard: SourceConnection["createSessionGuard"]; createMatchContextGuard: SourceConnection["createMatchContextGuard"]; isSessionEpochActive: SourceConnection["isSessionEpochActive"]; isContextActive: SourceConnection["isContextActive"]; isCurrentAuthUser: SourceConnection["isCurrentAuthUser"]; requireWritableContext: SourceConnection["requireWritableContext"]; surrender: SourceConnection["surrender"]; startTimer: SourceConnection["startTimer"]; claimVictoryByTimer: SourceConnection["claimVictoryByTimer"]; updateRatings: SourceConnection["updateRatings"]; resolveWagerOutcome: SourceConnection["resolveWagerOutcome"]; getRematchEndDelivery: SourceConnection["getRematchEndDelivery"]; isRematchEndPending: SourceConnection["isRematchEndPending"]; refreshRematchEndDeliveries: SourceConnection["refreshRematchEndDeliveries"]; submitRematchEnd: SourceConnection["submitRematchEnd"]; sendEndMatchIndicator: SourceConnection["sendEndMatchIndicator"]; sendRematchProposal: SourceConnection["sendRematchProposal"]; getUserBoundAuthTokenProvider: SourceConnection["getUserBoundAuthTokenProvider"]; ensureAuthenticated: SourceConnection["ensureAuthenticated"]; getOpponentId: SourceConnection["getOpponentId"]; notifyNavigationGamesChanged: SourceConnection["notifyNavigationGamesChanged"]; logContextEvent: SourceConnection["logContextEvent"]; reconnectAfterMatchUpdateFailure: SourceConnection["reconnectAfterMatchUpdateFailure"]; rematchSeriesEndIsIndicated: SourceConnection["rematchSeriesEndIsIndicated"]; getRematchIndexAvailableForNewProposal: SourceConnection["getRematchIndexAvailableForNewProposal"]; getCachedHistoricalMatchPair: SourceConnection["getCachedHistoricalMatchPair"]; sessionEpoch: SourceConnection["sessionEpoch"]; activeContext: SourceConnection["activeContext"]; moveDeliveries: SourceConnection["moveDeliveries"]; rematchEndDeliveries: SourceConnection["rematchEndDeliveries"]; confirmedSurrenders: SourceConnection["confirmedSurrenders"]; reconcilingMoveKeys: SourceConnection["reconcilingMoveKeys"]; moveRecoveryTimers: SourceConnection["moveRecoveryTimers"]; moveReconnectCooldownMs: SourceConnection["moveReconnectCooldownMs"]; moveReconnectLastAttemptAt: SourceConnection["moveReconnectLastAttemptAt"]; moveReconnectInFlight: SourceConnection["moveReconnectInFlight"]; wagerClient: SourceConnection["wagerClient"]; auth: {currentUser: SessionUser | null; getTokenRemainingMs(token: string): number}; myMatch: LocalMatchProbe; latestInvite: {hostId: string; guestId: string}}} FixtureConnection
+ * @typedef {{moveDeliveryScope: SourceConnection["moveDeliveryScope"]; isCurrentMoveBoard: SourceConnection["isCurrentMoveBoard"]; recoverMoveBoard: SourceConnection["recoverMoveBoard"]; getMoveDelivery: SourceConnection["getMoveDelivery"]; flushPendingMoves: SourceConnection["flushPendingMoves"]; refreshMoveDeliveries: SourceConnection["refreshMoveDeliveries"]; sendMove: SourceConnection["sendMove"]; createSessionGuard: SourceConnection["createSessionGuard"]; createMatchContextGuard: SourceConnection["createMatchContextGuard"]; isSessionEpochActive: SourceConnection["isSessionEpochActive"]; isContextActive: SourceConnection["isContextActive"]; isCurrentAuthUser: SourceConnection["isCurrentAuthUser"]; requireWritableContext: SourceConnection["requireWritableContext"]; surrender: SourceConnection["surrender"]; startTimer: SourceConnection["startTimer"]; claimVictoryByTimer: SourceConnection["claimVictoryByTimer"]; updateRatings: SourceConnection["updateRatings"]; resolveWagerOutcome: SourceConnection["resolveWagerOutcome"]; getRematchEndDelivery: SourceConnection["getRematchEndDelivery"]; isRematchEndPending: SourceConnection["isRematchEndPending"]; refreshRematchEndDeliveries: SourceConnection["refreshRematchEndDeliveries"]; submitRematchEnd: SourceConnection["submitRematchEnd"]; sendEndMatchIndicator: SourceConnection["sendEndMatchIndicator"]; sendRematchProposal: SourceConnection["sendRematchProposal"]; getUserBoundAuthTokenProvider: SourceConnection["getUserBoundAuthTokenProvider"]; ensureAuthenticated: SourceConnection["ensureAuthenticated"]; getOpponentId: SourceConnection["getOpponentId"]; getCurrentInviteEventId: SourceConnection["getCurrentInviteEventId"]; notifyNavigationGamesChanged: SourceConnection["notifyNavigationGamesChanged"]; logContextEvent: SourceConnection["logContextEvent"]; reconnectAfterMatchUpdateFailure: SourceConnection["reconnectAfterMatchUpdateFailure"]; rematchSeriesEndIsIndicated: SourceConnection["rematchSeriesEndIsIndicated"]; getRematchIndexAvailableForNewProposal: SourceConnection["getRematchIndexAvailableForNewProposal"]; getCachedHistoricalMatchPair: SourceConnection["getCachedHistoricalMatchPair"]; sessionEpoch: SourceConnection["sessionEpoch"]; activeContext: SourceConnection["activeContext"]; moveDeliveries: SourceConnection["moveDeliveries"]; rematchEndDeliveries: SourceConnection["rematchEndDeliveries"]; confirmedSurrenders: SourceConnection["confirmedSurrenders"]; pendingSurrenders: SourceConnection["pendingSurrenders"]; pendingMatchCompletions: SourceConnection["pendingMatchCompletions"]; reconcilingMoveKeys: SourceConnection["reconcilingMoveKeys"]; moveRecoveryTimers: SourceConnection["moveRecoveryTimers"]; moveReconnectCooldownMs: SourceConnection["moveReconnectCooldownMs"]; moveReconnectLastAttemptAt: SourceConnection["moveReconnectLastAttemptAt"]; moveReconnectInFlight: SourceConnection["moveReconnectInFlight"]; wagerClient: SourceConnection["wagerClient"]; auth: {currentUser: SessionUser | null; getTokenRemainingMs(token: string): number}; myMatch: LocalMatchProbe; latestInvite: {hostId: string; guestId: string}}} FixtureConnection
  */
 /** @param {string} uid @param {SessionUser["getIdToken"]} [getIdToken] @returns {SessionUser} */
 const user = (uid, getIdToken = async () => "login-token") => ({
@@ -201,6 +202,7 @@ function harness({ token, records = new Map(), onTerminal, onReconnect } = {}) {
     return value;
   };
   const dependencies = {
+    isCompletedMatchPair,
     MoveDelivery,
     moveDeliveryStorageKey,
     RematchEndDelivery,
@@ -300,6 +302,8 @@ function harness({ token, records = new Map(), onTerminal, onReconnect } = {}) {
       moveDeliveries: new Map(),
       rematchEndDeliveries: new Map(),
       confirmedSurrenders: new Set(),
+      pendingSurrenders: new Map(),
+      pendingMatchCompletions: new Map(),
       reconcilingMoveKeys: new Set(),
       moveRecoveryTimers: new Map(),
       moveReconnectCooldownMs: 3000,
@@ -315,6 +319,7 @@ function harness({ token, records = new Map(), onTerminal, onReconnect } = {}) {
       },
       ensureAuthenticated: async () => {},
       getOpponentId: () => "opponent",
+      getCurrentInviteEventId: () => null,
       notifyNavigationGamesChanged() {},
       logContextEvent() {},
       reconnectAfterMatchUpdateFailure: (inviteId, guard) => {

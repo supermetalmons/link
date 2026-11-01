@@ -1,5 +1,9 @@
 import { required } from "./fixtures/canonicalData.mjs";
-import { canonicalEvent } from "./fixtures/canonicalData.mjs";
+import {
+  canonicalEvent,
+  canonicalEventMatch,
+} from "./fixtures/canonicalData.mjs";
+import { registerTypeScriptTestHooks } from "./support/typescriptHooks.mjs";
 import { createTimerHandle } from "./fixtures/timerHandle.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -13,6 +17,8 @@ import {
   EventPollingRegistry,
 } from "../src/connection/eventPollingRegistry.ts";
 import { createPollingAuthTokenProvider } from "../src/connection/pollingAuthTokenProvider.ts";
+
+registerTypeScriptTestHooks();
 
 /** @returns {import("@mons/shared/events").EventSnapshotResponse} */
 const eventResponse = (revision = 1, eventId = "event-1") => ({
@@ -85,11 +91,12 @@ function deferred() {
   return { promise, resolve };
 }
 
-/** @param {Partial<Pick<ConstructorParameters<typeof EventPollingRegistry>[0], "loadEvent" | "loadProfilePrizes" | "onEventIdle">>} [options] */
+/** @param {Partial<Pick<ConstructorParameters<typeof EventPollingRegistry>[0], "loadEvent" | "loadProfilePrizes" | "onEventIdle" | "subscribeToEventUpdates">>} [options] */
 function harness({
   loadEvent = async () => modified(eventResponse()),
   loadProfilePrizes = async () => modified(profileResponse()),
   onEventIdle = () => undefined,
+  subscribeToEventUpdates,
 } = {}) {
   let nowMs = 0;
   let visible = true;
@@ -118,6 +125,7 @@ function harness({
     isVisible: () => visible,
     loadEvent,
     loadProfilePrizes,
+    ...(subscribeToEventUpdates ? { subscribeToEventUpdates } : {}),
     now: () => nowMs,
     onEventIdle: (eventId) => {
       idleEventIds.push(eventId);
@@ -178,6 +186,453 @@ test("mutation guards follow only their event and are released when requests fin
   );
   registry.invalidateEvent("event-1");
   assert.equal(required(isCurrent)(), true);
+});
+
+/** @param {number} revision @param {string} [eventId] @param {string} [updateEpoch] @returns {import("@mons/shared/events").EventUpdateMessage} */
+const eventUpdate = (revision, eventId = "event-1", updateEpoch = epoch) => ({
+  schemaVersion: 1,
+  type: "event-changed",
+  eventId,
+  epoch: updateEpoch,
+  revision,
+});
+
+test("shares event updates across subscribers and fences stopped and reset channels", () => {
+  /** @type {{notify:(update:import("@mons/shared/events").EventUpdateMessage)=>void,stopped:boolean}[]} */
+  const channels = [];
+  const polling = harness({
+    subscribeToEventUpdates(_eventId, notify) {
+      const channel = { notify, stopped: false };
+      channels.push(channel);
+      return () => {
+        channel.stopped = true;
+      };
+    },
+  });
+  const closeEvent = polling.registry.subscribeToEvent("event-1", () => {});
+  const closePrizes = polling.registry.subscribeToEventPrizeSelections(
+    "event-1",
+    () => {},
+  );
+  assert.equal(channels.length, 1);
+  polling.registry.adoptEventSnapshot("event-1", seed(1));
+  polling.registry.reset();
+  assert.equal(channels.length, 2);
+  assert.equal(required(channels[0]).stopped, true);
+  polling.registry.adoptEventSnapshot("event-1", seed(2));
+  required(channels[0]).notify(eventUpdate(3));
+  assert.equal(
+    required([...polling.timers.values()][0]).delayMs,
+    EVENT_POLL_INTERVAL_MS,
+  );
+  closeEvent();
+  assert.equal(required(channels[1]).stopped, false);
+  closePrizes();
+  assert.equal(required(channels[1]).stopped, true);
+  required(channels[1]).notify(eventUpdate(4));
+  assert.equal(polling.timers.size, 0);
+});
+
+test("event hints refresh the primary immediately, coalesce revisions, and preserve mutation adoption", async () => {
+  /** @type {(update:import("@mons/shared/events").EventUpdateMessage)=>void} */
+  let notify = () => {};
+  /** @type {Parameters<ConstructorParameters<typeof EventPollingRegistry>[0]["loadEvent"]>[1][]} */
+  const reads = [];
+  /** @type {ReturnType<typeof deferred<import("../src/services/gameplayTransport.ts").ConditionalRead<import("@mons/shared/events").EventSnapshotResponse>>>} */
+  const older = deferred();
+  const polling = harness({
+    subscribeToEventUpdates(_eventId, listener) {
+      notify = listener;
+      return () => {};
+    },
+    loadEvent: async (_eventId, options) => {
+      reads.push(options);
+      return reads.length === 1 ? older.promise : modified(eventResponse(4), 4);
+    },
+  });
+  /** @type {(import("@mons/shared/events").EventRecord|null)[]} */
+  const observed = [];
+  const close = polling.registry.subscribeToEvent("event-1", (value) =>
+    observed.push(value),
+  );
+  polling.registry.adoptEventSnapshot("event-1", seed(1));
+  await polling.runNext();
+  const heldMutation = deferred();
+  const mutation = polling.registry.withEventMutation(
+    "event-1",
+    async (isCurrent) => {
+      await heldMutation.promise;
+      assert.equal(isCurrent(), true);
+      polling.registry.adoptEventSnapshot("event-1", seed(4));
+    },
+  );
+  notify(eventUpdate(2));
+  notify(eventUpdate(2));
+  notify(eventUpdate(4));
+  assert.equal(required(reads[0]).signal?.aborted, true);
+  older.resolve(modified(eventResponse(2), 2));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(await polling.runNext(), 0);
+  assert.equal(required(reads[1]).bookmark, null);
+  assert.equal(observed.at(-1)?.updatedAtMs, 4);
+  heldMutation.resolve();
+  await mutation;
+  notify(eventUpdate(3));
+  notify(eventUpdate(4));
+  assert.equal(
+    required([...polling.timers.values()][0]).delayMs,
+    EVENT_POLL_INTERVAL_MS,
+  );
+  close();
+});
+
+test("a hint arriving during a primary read requests only the remaining revision", async () => {
+  /** @type {(update:import("@mons/shared/events").EventUpdateMessage)=>void} */
+  let notify = () => {};
+  const pending = deferred();
+  let calls = 0;
+  const polling = harness({
+    subscribeToEventUpdates(_eventId, listener) {
+      notify = listener;
+      return () => {};
+    },
+    loadEvent: async () => {
+      if (++calls === 1) {
+        await pending.promise;
+        return modified(eventResponse(2), 2);
+      }
+      return modified(eventResponse(3), 3);
+    },
+  });
+  const close = polling.registry.subscribeToEvent("event-1", () => {});
+  polling.registry.adoptEventSnapshot("event-1", seed(1));
+  notify(eventUpdate(2));
+  assert.equal(await polling.runNext(), 0);
+  notify(eventUpdate(3));
+  pending.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(await polling.runNext(), 0);
+  assert.equal(calls, 2);
+  assert.equal(polling.registry.getEventSnapshot("event-1")?.revision, 3);
+  close();
+});
+
+test("event hints respect epoch changes, hidden pages, and retired epochs", async () => {
+  /** @type {(update:import("@mons/shared/events").EventUpdateMessage)=>void} */
+  let notify = () => {};
+  const polling = harness({
+    subscribeToEventUpdates(_eventId, listener) {
+      notify = listener;
+      return () => {};
+    },
+    loadEvent: async () => ({
+      ...modified(eventResponse(1)),
+      bookmark: bookmark(1, nextEpoch),
+    }),
+  });
+  const close = polling.registry.subscribeToEvent("event-1", () => {});
+  polling.registry.adoptEventSnapshot("event-1", seed(9));
+  polling.setVisible(false);
+  notify(eventUpdate(1, "event-1", nextEpoch));
+  assert.equal(polling.timers.size, 0);
+  assert.equal(polling.registry.getEventSnapshot("event-1")?.revision, 9);
+  polling.setVisible(true);
+  assert.equal(await polling.runNext(), 0);
+  assert.equal(polling.registry.getEventSnapshot("event-1")?.revision, 1);
+  notify(eventUpdate(10));
+  assert.equal(
+    required([...polling.timers.values()][0]).delayMs,
+    EVENT_POLL_INTERVAL_MS,
+  );
+  close();
+});
+
+test("repeated behind-hint reads fall back to polling after one immediate follow-up", async () => {
+  /** @type {(update:import("@mons/shared/events").EventUpdateMessage)=>void} */
+  let notify = () => {};
+  const polling = harness({
+    subscribeToEventUpdates(_eventId, listener) {
+      notify = listener;
+      return () => {};
+    },
+    loadEvent: async () => modified(eventResponse(2), 2),
+  });
+  const close = polling.registry.subscribeToEvent("event-1", () => {});
+  polling.registry.adoptEventSnapshot("event-1", seed(1));
+  notify(eventUpdate(4));
+  assert.equal(await polling.runNext(), 0);
+  assert.equal(await polling.runNext(), 0);
+  assert.equal(await polling.runNext(), EVENT_POLL_INTERVAL_MS);
+  notify(eventUpdate(5));
+  assert.equal(await polling.runNext(), 0);
+  close();
+});
+
+test("newer event hints recover immediately from an idle failed-read backoff", async () => {
+  /** @type {(update:import("@mons/shared/events").EventUpdateMessage)=>void} */
+  let notify = () => {};
+  let calls = 0;
+  const polling = harness({
+    subscribeToEventUpdates(_eventId, listener) {
+      notify = listener;
+      return () => {};
+    },
+    loadEvent: async (_eventId, options) => {
+      assert.equal(options.bookmark, null);
+      if (++calls <= 2) throw new Error("offline");
+      return modified(eventResponse(3), 3);
+    },
+  });
+  const close = polling.registry.subscribeToEvent("event-1", () => {});
+  polling.registry.adoptEventSnapshot("event-1", seed(1));
+  notify(eventUpdate(2));
+  assert.equal(await polling.runNext(), 0);
+  assert.equal(await polling.runNext(), EVENT_POLL_BACKOFF_MS[0]);
+  assert.equal(
+    required([...polling.timers.values()][0]).delayMs,
+    EVENT_POLL_BACKOFF_MS[1],
+  );
+  notify(eventUpdate(1));
+  notify(eventUpdate(2));
+  assert.equal(
+    required([...polling.timers.values()][0]).delayMs,
+    EVENT_POLL_BACKOFF_MS[1],
+  );
+  notify(eventUpdate(3));
+  assert.equal(await polling.runNext(), 0);
+  assert.equal(calls, 3);
+  assert.equal(polling.registry.getEventSnapshot("event-1")?.revision, 3);
+  assert.equal(
+    required([...polling.timers.values()][0]).delayMs,
+    EVENT_POLL_INTERVAL_MS,
+  );
+  close();
+});
+
+test("newer hints get one immediate primary read after an older read fails", async () => {
+  /** @type {(update:import("@mons/shared/events").EventUpdateMessage)=>void} */
+  let notify = () => {};
+  const pending = deferred();
+  let calls = 0;
+  const polling = harness({
+    subscribeToEventUpdates(_eventId, listener) {
+      notify = listener;
+      return () => {};
+    },
+    loadEvent: async (_eventId, options) => {
+      assert.equal(options.bookmark, null);
+      calls++;
+      if (calls === 2) await pending.promise;
+      if (calls <= 3) throw new Error("offline");
+      return modified(eventResponse(4), 4);
+    },
+  });
+  const close = polling.registry.subscribeToEvent("event-1", () => {});
+  polling.registry.adoptEventSnapshot("event-1", seed(1));
+  notify(eventUpdate(2));
+  assert.equal(await polling.runNext(), 0);
+  assert.equal(await polling.runNext(), EVENT_POLL_BACKOFF_MS[0]);
+  notify(eventUpdate(3));
+  notify(eventUpdate(4));
+  pending.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(polling.timers.size, 1);
+  assert.equal(await polling.runNext(), 0);
+  notify(eventUpdate(4));
+  assert.equal(polling.timers.size, 1);
+  assert.equal(await polling.runNext(), EVENT_POLL_BACKOFF_MS[2]);
+  assert.equal(calls, 4);
+  assert.equal(polling.registry.getEventSnapshot("event-1")?.revision, 4);
+  assert.equal(
+    required([...polling.timers.values()][0]).delayMs,
+    EVENT_POLL_INTERVAL_MS,
+  );
+  close();
+});
+
+test("primary reads settle advisory epochs without dropping hints received during the read", async () => {
+  /** @type {(update:import("@mons/shared/events").EventUpdateMessage)=>void} */
+  let notify = () => {};
+  const firstRead = deferred();
+  let reads = 0;
+  const polling = harness({
+    subscribeToEventUpdates(_eventId, listener) {
+      notify = listener;
+      return () => {};
+    },
+    loadEvent: async () => {
+      if (++reads === 1) await firstRead.promise;
+      return reads === 1 ? eventNotModified(9) : modified(eventResponse(9), 9);
+    },
+  });
+  /** @type {boolean[]} */
+  const freshness = [];
+  const close = polling.registry.subscribeToEvent("event-1", () => {});
+  const closeFreshness = polling.registry.subscribeToEventFreshness(
+    "event-1",
+    (value) => freshness.push(value),
+  );
+  polling.registry.adoptEventSnapshot("event-1", seed(9));
+  notify(eventUpdate(1, "event-1", nextEpoch));
+  await polling.runNext();
+  notify(eventUpdate(1, "event-1", "33333333-3333-4333-8333-333333333333"));
+  firstRead.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(freshness.at(-1), false);
+  assert.equal(await polling.runNext(), 0);
+  assert.equal(freshness.at(-1), true);
+  assert.equal(polling.registry.getEventSnapshot("event-1")?.revision, 9);
+  assert.equal(
+    required([...polling.timers.values()][0]).delayMs,
+    EVENT_POLL_INTERVAL_MS,
+  );
+  close();
+  closeFreshness();
+});
+
+test("completion seeds and event hints expose Play to both finalists without a polling interval", async () => {
+  const { getCurrentUiState } = await import("../src/ui/event/eventState.ts");
+  const base = canonicalEvent({
+    status: "active",
+    bracketSize: 4,
+    participants: { finishing: {}, waiting: {}, loser: {} },
+  });
+  const before = canonicalEvent({
+    ...base,
+    rounds: {
+      ...base.rounds,
+      0: {
+        ...required(base.rounds["0"]),
+        matches: {
+          "0_0": canonicalEventMatch({
+            inviteId: "last-semifinal",
+            status: "pending",
+            hostProfileId: "finishing",
+            guestProfileId: "loser",
+            hostLoginUid: "login-finishing",
+            hostDisplayName: "Finishing",
+            hostEmojiId: 1,
+            hostAura: "none",
+            guestLoginUid: "login-loser",
+            guestDisplayName: "Loser",
+            guestEmojiId: 1,
+            guestAura: "none",
+          }),
+          "0_1": canonicalEventMatch({
+            matchKey: "0_1",
+            status: "bye",
+            hostProfileId: "waiting",
+            winnerProfileId: "waiting",
+            hostLoginUid: "login-waiting",
+            hostDisplayName: "Waiting",
+            hostEmojiId: 1,
+            hostAura: "none",
+          }),
+        },
+      },
+    },
+  });
+  const after = canonicalEvent({
+    ...before,
+    rounds: {
+      0: {
+        ...required(before.rounds["0"]),
+        status: "completed",
+        completedAtMs: 2,
+        matches: {
+          ...required(before.rounds["0"]).matches,
+          "0_0": canonicalEventMatch({
+            inviteId: "last-semifinal",
+            status: "host",
+            resolvedAtMs: 2,
+            hostProfileId: "finishing",
+            guestProfileId: "loser",
+            winnerProfileId: "finishing",
+            loserProfileId: "loser",
+            hostLoginUid: "login-finishing",
+            hostDisplayName: "Finishing",
+            hostEmojiId: 1,
+            hostAura: "none",
+            guestLoginUid: "login-loser",
+            guestDisplayName: "Loser",
+            guestEmojiId: 1,
+            guestAura: "none",
+          }),
+        },
+      },
+      1: {
+        ...required(before.rounds["1"]),
+        status: "active",
+        matches: {
+          "1_0": canonicalEventMatch({
+            matchKey: "1_0",
+            inviteId: "final",
+            status: "pending",
+            hostProfileId: "finishing",
+            guestProfileId: "waiting",
+            hostLoginUid: "login-finishing",
+            hostDisplayName: "Finishing",
+            hostEmojiId: 1,
+            hostAura: "none",
+            guestLoginUid: "login-waiting",
+            guestDisplayName: "Waiting",
+            guestEmojiId: 1,
+            guestAura: "none",
+          }),
+        },
+      },
+    },
+  });
+  const initial = {
+    ...seed(1),
+    snapshot: { ...eventResponse(1), event: before },
+  };
+  const completed = {
+    ...seed(2),
+    snapshot: { ...eventResponse(2), event: after },
+  };
+  /** @type {(update:import("@mons/shared/events").EventUpdateMessage)=>void} */
+  let notify = () => {};
+  const finishing = harness({
+    loadEvent: async () =>
+      assert.fail("finishing player must use completion response"),
+  });
+  const waiting = harness({
+    subscribeToEventUpdates(_eventId, listener) {
+      notify = listener;
+      return () => {};
+    },
+    loadEvent: async () => ({
+      kind: "modified",
+      value: completed.snapshot,
+      etag: completed.etag,
+      bookmark: completed.bookmark,
+    }),
+  });
+  let finishingInvite = "";
+  let waitingInvite = "";
+  const closeFinishing = finishing.registry.subscribeToEvent(
+    "event-1",
+    (event) => {
+      finishingInvite =
+        getCurrentUiState(event, "finishing").playableMatch?.inviteId ?? "";
+    },
+  );
+  const closeWaiting = waiting.registry.subscribeToEvent("event-1", (event) => {
+    waitingInvite =
+      getCurrentUiState(event, "waiting").playableMatch?.inviteId ?? "";
+  });
+  finishing.registry.adoptEventSnapshot("event-1", initial);
+  waiting.registry.adoptEventSnapshot("event-1", initial);
+  assert.equal(finishingInvite, "last-semifinal");
+  assert.equal(waitingInvite, "");
+  finishing.registry.adoptEventSnapshot("event-1", completed);
+  notify(eventUpdate(2));
+  assert.equal(await waiting.runNext(), 0);
+  assert.equal(finishingInvite, "final");
+  assert.equal(waitingInvite, "final");
+  closeFinishing();
+  closeWaiting();
 });
 
 test("reset and an old completion cannot remove a new mutation guard", async () => {

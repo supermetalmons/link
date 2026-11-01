@@ -72,11 +72,46 @@ function deferred() {
   return { promise, resolve };
 }
 
-function notificationEnv(
-  notify: (inviteId: string, matchIds?: string[]) => Promise<void>,
-) {
+function eventNotificationEnv(
+  notifyEvent: (
+    eventId: string,
+    epoch: string,
+    revision: number,
+  ) => Promise<void>,
+): Env {
   return {
     ...testEnv,
+    EVENT_UPDATES: new Proxy(testEnv.EVENT_UPDATES, {
+      get(target, property) {
+        if (property === "getByName") {
+          return (name: string) =>
+            new Proxy(target.getByName(name), {
+              get(room, method) {
+                if (method === "notifyEventChanged") return notifyEvent;
+                const member = Reflect.get(room, method, room);
+                return typeof member === "function"
+                  ? (...args: unknown[]) => Reflect.apply(member, room, args)
+                  : member;
+              },
+            });
+        }
+        const member = Reflect.get(target, property, target);
+        return typeof member === "function" ? member.bind(target) : member;
+      },
+    }),
+  };
+}
+
+function notificationEnv(
+  notify: (inviteId: string, matchIds?: string[]) => Promise<void>,
+  notifyEvent: (
+    eventId: string,
+    epoch: string,
+    revision: number,
+  ) => Promise<void> = async () => undefined,
+) {
+  return {
+    ...eventNotificationEnv(notifyEvent),
     INVITE_REACTIONS: {
       getByName: () => ({
         notifyMatchesChanged: notify,
@@ -995,6 +1030,41 @@ describe("typed event repository", () => {
     );
   });
 
+  it("publishes actual revisions for event-only commits without notifying for outbox writes", async () => {
+    const notifyEvent = vi.fn(async () => undefined);
+    const f = eventTransitionFixture(
+      notificationEnv(async () => undefined, notifyEvent),
+    );
+    const secondEventId = "second-event";
+    await commitEventCompatibilityFixture(f.client, [
+      { kind: "event", eventId, value: eventRecord() },
+      {
+        kind: "event",
+        eventId: secondEventId,
+        value: eventRecord("scheduled", secondEventId),
+      },
+    ]);
+    expect(notifyEvent.mock.calls).toEqual([
+      [eventId, testEnv.EVENT_DB_BOOKMARK_EPOCH, 1],
+      [secondEventId, testEnv.EVENT_DB_BOOKMARK_EPOCH, 1],
+    ]);
+    notifyEvent.mockClear();
+    await commitEventCompatibilityFixture(
+      f.client,
+      decodeEventUpdates({ [`events/${eventId}/updatedAtMs`]: 200 }),
+    );
+    expect(notifyEvent).toHaveBeenCalledExactlyOnceWith(
+      eventId,
+      testEnv.EVENT_DB_BOOKMARK_EPOCH,
+      2,
+    );
+    notifyEvent.mockClear();
+    await commitEventCompatibilityFixture(f.client, [
+      { kind: "progress-outbox", outboxId: "completed-progress", value: null },
+    ]);
+    expect(notifyEvent).not.toHaveBeenCalled();
+  });
+
   it.each(["scheduled", "awaited", "recovery"] as const)(
     "commits and releases transition admissions before %s notifications",
     async (mode) => {
@@ -1004,7 +1074,14 @@ describe("typed event repository", () => {
         started.resolve();
         await blocked.promise;
       });
-      const scopedEnv = notificationEnv(notify);
+      const notifyEvent = vi.fn(
+        async (_eventId: string, _epoch: string, revision: number) => {
+          if (revision < 2) return;
+          started.resolve();
+          await blocked.promise;
+        },
+      );
+      const scopedEnv = notificationEnv(notify, notifyEvent);
       const f = eventTransitionFixture(scopedEnv);
       const scheduled: Promise<void>[] = [];
       const client = createEventStateRepository(
@@ -1019,6 +1096,8 @@ describe("typed event repository", () => {
       await commitEventCompatibilityFixture(client, [
         { kind: "event", eventId, value: eventRecord() },
       ]);
+      await Promise.all(scheduled.splice(0));
+      notifyEvent.mockClear();
       const updates = {
         ...eventStatusFixture(eventId, "active"),
         "players/login-one/matches/event-match/timer": { state: "finished" },
@@ -1088,6 +1167,11 @@ describe("typed event repository", () => {
         await Promise.all(scheduled);
       }
       expect(notify).toHaveBeenCalledTimes(1);
+      expect(notifyEvent).toHaveBeenCalledExactlyOnceWith(
+        eventId,
+        testEnv.EVENT_DB_BOOKMARK_EPOCH,
+        2,
+      );
     },
   );
 
@@ -1095,11 +1179,13 @@ describe("typed event repository", () => {
     "retains pending recovery without notifying when %s fail",
     async (failure) => {
       const notify = vi.fn(async () => {});
-      const scopedEnv = notificationEnv(notify);
+      const notifyEvent = vi.fn(async () => {});
+      const scopedEnv = notificationEnv(notify, notifyEvent);
       const f = eventTransitionFixture(scopedEnv);
       await commitEventCompatibilityFixture(f.client, [
         { kind: "event", eventId, value: eventRecord() },
       ]);
+      notifyEvent.mockClear();
       if (failure === "effects") {
         f.hooks.beforePatch = async () => {
           throw new Error("required-effects-failed");
@@ -1124,6 +1210,7 @@ describe("typed event repository", () => {
           ),
         ).rejects.toThrow();
         expect(notify).not.toHaveBeenCalled();
+        expect(notifyEvent).not.toHaveBeenCalled();
         expect(
           await readEventSnapshot(testEnv.EVENT_DB, eventId),
         ).toMatchObject({
@@ -1144,6 +1231,11 @@ describe("typed event repository", () => {
         recoverEventTransitionIntents(scopedEnv, 100, f.raw),
       ).resolves.toBe(1);
       expect(notify).toHaveBeenCalledTimes(1);
+      expect(notifyEvent).toHaveBeenCalledExactlyOnceWith(
+        eventId,
+        testEnv.EVENT_DB_BOOKMARK_EPOCH,
+        2,
+      );
       expect(await listPendingEventTransitionIntents(testEnv.EVENT_DB)).toEqual(
         [],
       );
@@ -1158,8 +1250,15 @@ describe("typed event repository", () => {
         if (failure === "timeout") await blocked.promise;
         else throw new Error("notification-unavailable");
       });
+      const notifyEvent = vi.fn(
+        async (_eventId: string, _epoch: string, revision: number) => {
+          if (revision < 2) return;
+          if (failure === "timeout") await blocked.promise;
+          else throw new Error("event-notification-unavailable");
+        },
+      );
       const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-      const scopedEnv = notificationEnv(notify);
+      const scopedEnv = notificationEnv(notify, notifyEvent);
       const f = eventTransitionFixture(scopedEnv);
       const scheduled: Promise<void>[] = [];
       const client = createEventStateRepository(
@@ -1182,6 +1281,7 @@ describe("typed event repository", () => {
         await commitEventCompatibilityFixture(client, [
           { kind: "event", eventId, value: eventRecord() },
         ]);
+        notifyEvent.mockClear();
         await expect(
           commitEventCompatibilityFixture(
             client,
@@ -1205,6 +1305,11 @@ describe("typed event repository", () => {
         ).toEqual([]);
         expect(f.patches).toHaveLength(1);
         expect(notify).toHaveBeenCalledTimes(1);
+        expect(notifyEvent).toHaveBeenCalledExactlyOnceWith(
+          eventId,
+          testEnv.EVENT_DB_BOOKMARK_EPOCH,
+          2,
+        );
       } finally {
         blocked.resolve();
         errors.mockRestore();
@@ -1436,7 +1541,8 @@ describe("typed event repository", () => {
   });
 
   it("preserves advanced matches after an ambiguous creation commit", async () => {
-    const f = eventTransitionFixture(testEnv);
+    const notifyEvent = vi.fn(async () => {});
+    const f = eventTransitionFixture(eventNotificationEnv(notifyEvent));
     const matchPath = "players/login-one/matches/event-match";
     f.hooks.afterTransaction = async (path) => {
       if (path !== matchPath) return;
@@ -1447,6 +1553,7 @@ describe("typed event repository", () => {
       f.client,
       decodeEventUpdates({ [`events/${eventId}`]: eventRecord() }),
     );
+    notifyEvent.mockClear();
     await expect(
       commitEventCompatibilityFixture(
         f.client,
@@ -1468,6 +1575,7 @@ describe("typed event repository", () => {
         }),
       ),
     ).rejects.toThrow("ambiguous-state-commit");
+    expect(notifyEvent).not.toHaveBeenCalled();
     const stored = f.values.get(matchPath) as Record<string, unknown>;
     const advanced = {
       ...stored,
@@ -1476,6 +1584,11 @@ describe("typed event repository", () => {
     };
     f.values.set(matchPath, advanced);
     await expect(f.recover()).resolves.toBe(1);
+    expect(notifyEvent).toHaveBeenCalledExactlyOnceWith(
+      eventId,
+      testEnv.EVENT_DB_BOOKMARK_EPOCH,
+      2,
+    );
     expect(f.values.get(matchPath)).toEqual(advanced);
     expect(f.writes.filter((path) => path === matchPath)).toHaveLength(1);
     expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toMatchObject({

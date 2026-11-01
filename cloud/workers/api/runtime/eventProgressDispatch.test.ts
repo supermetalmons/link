@@ -1,4 +1,5 @@
 import { requiredFixture } from "../test/requiredFixture.ts";
+import { eventApplicationEnvironment } from "./eventApplicationFixture.ts";
 import {
   commitEventCompatibilityFixture,
   eventDocumentFixture,
@@ -30,7 +31,7 @@ import { readEventOwnedPath } from "./eventD1Fixture.ts";
 import { applyEventTestMigrations } from "./eventTestMigrations.ts";
 import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 
-const testEnv = env as Env & {
+const testEnv = eventApplicationEnvironment(env) as Env & {
   TEST_EVENT_D1_MIGRATIONS: D1Migration[];
   TEST_D1_MIGRATIONS: D1Migration[];
 };

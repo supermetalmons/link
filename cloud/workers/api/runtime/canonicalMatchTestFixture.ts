@@ -163,16 +163,16 @@ export function runInCanonicalMatchWriterFixture<T>(
 export function canonicalMatchEnvironment(env: Env): Env {
   return new Proxy(env, {
     get(target, property) {
-      if (property !== "INVITE_REACTIONS")
+      if (property !== "INVITE_REACTIONS" && property !== "EVENT_UPDATES")
         return Reflect.get(target, property, target);
-      return new Proxy(target.INVITE_REACTIONS, {
+      return new Proxy(target[property], {
         get(namespace, member) {
           if (member === "getByName")
             return (name: string) =>
-              admittedApplicationRoom(namespace.getByName(name));
+              admittedApplicationRoom(namespace.getByName(name), property);
           if (member === "get")
             return (...args: Parameters<typeof namespace.get>) =>
-              admittedApplicationRoom(namespace.get(...args));
+              admittedApplicationRoom(namespace.get(...args), property);
           const value: unknown = Reflect.get(namespace, member, namespace);
           return typeof value === "function" ? value.bind(namespace) : value;
         },

@@ -13,6 +13,8 @@ exports.THIRD_PLACE_MATCH_KEY =
   exports.MAX_EVENT_PARTICIPANTS =
   exports.EVENT_SCHEMA_VERSION =
   exports.EVENT_SCHEDULE_TIMEZONE_OPTIONS =
+  exports.EVENT_UPDATES_MAX_MESSAGE_BYTES =
+  exports.EVENT_UPDATES_SOCKET_PROTOCOL =
   exports.EVENT_ETAG_HEADER =
   exports.EVENT_BOOKMARK_HEADER =
   exports.EVENT_POSTPONE_OPTIONS_MINUTES =
@@ -37,6 +39,7 @@ exports.THIRD_PLACE_MATCH_KEY =
 exports.eventSnapshotEtag = eventSnapshotEtag;
 exports.eventBookmarkEpoch = eventBookmarkEpoch;
 exports.isEventSnapshotSeed = isEventSnapshotSeed;
+exports.isEventUpdateMessage = isEventUpdateMessage;
 exports.buildEventMatchKey = buildEventMatchKey;
 exports.buildEventParticipantSnapshot = buildEventParticipantSnapshot;
 exports.buildEventSeedOrder = buildEventSeedOrder;
@@ -229,6 +232,10 @@ const MAX_EVENT_READ_RESPONSE_BYTES = 640 * 1024;
 exports.MAX_EVENT_READ_RESPONSE_BYTES = MAX_EVENT_READ_RESPONSE_BYTES;
 const MAX_EVENT_BOOKMARK_LENGTH = 2048;
 exports.MAX_EVENT_BOOKMARK_LENGTH = MAX_EVENT_BOOKMARK_LENGTH;
+const EVENT_UPDATES_SOCKET_PROTOCOL = "mons-event-updates-v1";
+exports.EVENT_UPDATES_SOCKET_PROTOCOL = EVENT_UPDATES_SOCKET_PROTOCOL;
+const EVENT_UPDATES_MAX_MESSAGE_BYTES = 2048;
+exports.EVENT_UPDATES_MAX_MESSAGE_BYTES = EVENT_UPDATES_MAX_MESSAGE_BYTES;
 function eventSnapshotEtag(eventId, revision) {
   return `W/"event-snapshot-${encodeURIComponent(eventId)}-${revision}"`;
 }
@@ -544,6 +551,26 @@ function isEventSnapshotSeed(value) {
     value.etag ===
       eventSnapshotEtag(value.snapshot.eventId, value.snapshot.revision) &&
     eventBookmarkEpoch(value.bookmark) !== null
+  );
+}
+function isEventUpdateMessage(value) {
+  return (
+    isExactRecord(value, [
+      "schemaVersion",
+      "type",
+      "eventId",
+      "epoch",
+      "revision",
+    ]) &&
+    value.schemaVersion === 1 &&
+    value.type === "event-changed" &&
+    isExactSafeRecordKey(value.eventId) &&
+    typeof value.epoch === "string" &&
+    /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(
+      value.epoch,
+    ) &&
+    Number.isSafeInteger(value.revision) &&
+    value.revision >= 0
   );
 }
 function isPostponeEventStartResponse(value) {

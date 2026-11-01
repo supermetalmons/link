@@ -4,6 +4,7 @@ import {
   type EventCreateDateTimePayload,
   type EventSnapshotResponse,
   type EventSnapshotSeed,
+  type EventUpdateMessage,
   type LeaveEventResponse,
 } from "@mons/shared/events";
 import {
@@ -70,12 +71,17 @@ export type EventClientDependencies = {
   clearTimer: (timer: TimerHandle) => void;
   isVisible: () => boolean;
   addVisibilityListener: (listener: () => void) => () => void;
+  subscribeToEventUpdates?: (
+    eventId: string,
+    onUpdate: (update: EventUpdateMessage) => void,
+  ) => () => void;
   notifyNavigationGamesChanged: () => void;
 };
 
 const EVENT_SYNC_COOLDOWN_ACTIVE_MS = 700;
 const EVENT_SYNC_COOLDOWN_SCHEDULED_MS = 1500;
 const EVENT_SYNC_RETRY_DELAYS_MS = [150, 300] as const;
+const EVENT_MATCH_SYNC_RETRY_DELAYS_MS = [550, 1_000] as const;
 
 const mapKnownEventPrizeSelections = (
   eventId: string,
@@ -120,6 +126,11 @@ export class EventClient {
     string,
     EventRecord | null
   >();
+  private readonly inFlightMatchSync = new Map<
+    string,
+    Promise<EventSyncResponse>
+  >();
+  private readonly completedMatchSync = new Map<string, EventSyncResponse>();
 
   constructor(dependencies: EventClientDependencies) {
     this.dependencies = dependencies;
@@ -138,6 +149,9 @@ export class EventClient {
       onEventIdle: (eventId) => this.clearEventSyncCacheForId(eventId),
       setTimer: dependencies.setTimer,
       now: dependencies.now,
+      ...(dependencies.subscribeToEventUpdates
+        ? { subscribeToEventUpdates: dependencies.subscribeToEventUpdates }
+        : {}),
     });
     dependencies.onAuthStateChanged(() => this.synchronizeEventAuthOwner());
   }
@@ -468,6 +482,60 @@ export class EventClient {
   }
 
   public async syncEventState(eventId: string): Promise<EventSyncResponse> {
+    return this.requestEventSync(eventId, false);
+  }
+
+  public async syncEventStateAfterMatch(
+    eventId: string,
+    matchId: string,
+  ): Promise<EventSyncResponse> {
+    this.synchronizeEventAuthOwner();
+    const user = this.dependencies.getCurrentUser();
+    const normalizedEventId = eventId.trim();
+    const normalizedMatchId = matchId.trim();
+    if (!user || !normalizedEventId || !normalizedMatchId)
+      return { ok: false, skipped: true, event: null };
+    const key = JSON.stringify([normalizedEventId, normalizedMatchId]);
+    const completed = this.completedMatchSync.get(key);
+    if (completed) return completed;
+    const existing = this.inFlightMatchSync.get(key);
+    if (existing) return existing;
+    const generation = this.eventPollingRegistry.getGeneration();
+    const isCurrent = () =>
+      this.dependencies.getCurrentUser() === user &&
+      this.eventPollingRegistry.getGeneration() === generation;
+    const pending = (async () => {
+      let earlier;
+      while ((earlier = this.inFlightEventSyncById.get(normalizedEventId))) {
+        await earlier.catch(() => {});
+        if (!isCurrent())
+          throw new GameplayApiError("aborted", "request-aborted");
+      }
+      if (!isCurrent())
+        throw new GameplayApiError("aborted", "request-aborted");
+      const response = await this.requestEventSync(normalizedEventId, true);
+      if (isCurrent() && response.ok && !response.skipped) {
+        this.completedMatchSync.set(key, response);
+        while (this.completedMatchSync.size > 64)
+          this.completedMatchSync.delete(
+            this.completedMatchSync.keys().next().value!,
+          );
+      }
+      return response;
+    })();
+    this.inFlightMatchSync.set(key, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.inFlightMatchSync.get(key) === pending)
+        this.inFlightMatchSync.delete(key);
+    }
+  }
+
+  private async requestEventSync(
+    eventId: string,
+    afterMatch: boolean,
+  ): Promise<EventSyncResponse> {
     const normalizedEventId = eventId.trim();
     if (!normalizedEventId) {
       return { ok: false, skipped: true, event: null };
@@ -480,14 +548,16 @@ export class EventClient {
       normalizedEventId,
       nowMs,
     );
-    if (cachedSyncResponse) {
+    if (!afterMatch && cachedSyncResponse) {
       return cachedSyncResponse;
     }
 
     const existingSync = this.inFlightEventSyncById.get(normalizedEventId);
-    if (existingSync) {
+    if (!afterMatch && existingSync) {
       return existingSync;
     }
+    const requestUser = this.dependencies.getCurrentUser();
+    const requestGeneration = this.eventPollingRegistry.getGeneration();
 
     const syncPromise = this.eventPollingRegistry.withEventMutation(
       normalizedEventId,
@@ -495,11 +565,18 @@ export class EventClient {
         try {
           await this.dependencies.ensureAuthenticated();
           this.synchronizeEventAuthOwner();
+          if (
+            afterMatch &&
+            (requestUser !== this.dependencies.getCurrentUser() ||
+              requestGeneration !== this.eventPollingRegistry.getGeneration())
+          )
+            throw new GameplayApiError("aborted", "request-aborted");
           const generation = this.eventPollingRegistry.getGeneration();
           const tokenProvider =
             this.dependencies.getUserBoundAuthTokenProvider();
           const isParticipant =
-            await this.isLocalProfileEventParticipant(normalizedEventId);
+            afterMatch ||
+            (await this.isLocalProfileEventParticipant(normalizedEventId));
           if (!isParticipant) {
             return this.commitEventSyncResponse(
               normalizedEventId,
@@ -514,7 +591,10 @@ export class EventClient {
             );
           }
 
-          const maxRetries = EVENT_SYNC_RETRY_DELAYS_MS.length;
+          const retryDelays = afterMatch
+            ? EVENT_MATCH_SYNC_RETRY_DELAYS_MS
+            : EVENT_SYNC_RETRY_DELAYS_MS;
+          const maxRetries = retryDelays.length;
           const maxAttempts = maxRetries + 1;
           for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
             const data = await this.dependencies.api.syncEventStateViaApi(
@@ -547,7 +627,7 @@ export class EventClient {
               );
               return response;
             }
-            await this.delay(EVENT_SYNC_RETRY_DELAYS_MS[attempt] || 300);
+            await this.delay(retryDelays[attempt] || 300);
           }
 
           return this.commitEventSyncResponse(
@@ -678,7 +758,11 @@ export class EventClient {
   public reset({
     preserveSnapshots = false,
   }: { preserveSnapshots?: boolean } = {}): void {
-    this.inFlightEventSyncById.clear();
+    if (!preserveSnapshots) {
+      this.inFlightEventSyncById.clear();
+      this.inFlightMatchSync.clear();
+      this.completedMatchSync.clear();
+    }
     this.eventSyncCooldownCacheById.clear();
     this.latestObservedEventById.clear();
     if (!preserveSnapshots) this.eventPollingRegistry.reset();
@@ -713,7 +797,6 @@ export class EventClient {
   }
 
   private clearEventSyncCacheForId(eventId: string): void {
-    this.inFlightEventSyncById.delete(eventId);
     this.eventSyncCooldownCacheById.delete(eventId);
     this.latestObservedEventById.delete(eventId);
   }

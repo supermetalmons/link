@@ -651,3 +651,133 @@ test("auth replacement rejects a pending sync and permits the new owner to retry
   await h.client.syncEventState(eventId);
   assert.equal(calls, 2);
 });
+
+test("match completion waits for an earlier sync, bypasses its cooldown, and deduplicates across navigation", async () => {
+  const earlier = deferred();
+  let calls = 0;
+  const h = harness({
+    api: {
+      syncEventStateViaApi: async () => {
+        if (++calls === 1) await earlier.promise;
+        return {
+          ok: true,
+          eventId,
+          didChange: true,
+          event: seed(calls).snapshot.event,
+          eventSnapshot: seed(calls),
+        };
+      },
+    },
+  });
+  const close = h.client.subscribeToEvent(eventId, () => {});
+  const ordinary = h.client.syncEventState(eventId);
+  await settle();
+  const first = h.client.syncEventStateAfterMatch(eventId, "match-1");
+  const duplicate = h.client.syncEventStateAfterMatch(eventId, "match-1");
+  await settle();
+  assert.equal(calls, 1);
+  close();
+  h.client.reset({ preserveSnapshots: true });
+  earlier.resolve();
+  await ordinary;
+  assert.deepEqual(await first, await duplicate);
+  assert.equal(calls, 2);
+  assert.equal(
+    (await h.client.syncEventStateAfterMatch(eventId, "match-1")).ok,
+    true,
+  );
+  assert.equal(calls, 2);
+  await h.client.syncEventStateAfterMatch(eventId, "match-2");
+  assert.equal(calls, 3);
+});
+
+test("match completion retries contention beyond the event throttle and allows recovery after failure", async () => {
+  let calls = 0;
+  const h = harness({
+    api: {
+      syncEventStateViaApi: async () => {
+        calls++;
+        return calls <= 3
+          ? { ok: true, eventId, skipped: true, reason: "rate-limited" }
+          : {
+              ok: true,
+              eventId,
+              didChange: true,
+              event: seed(2).snapshot.event,
+              eventSnapshot: seed(2),
+            };
+      },
+    },
+  });
+  const pending = h.client.syncEventStateAfterMatch(eventId, "match-1");
+  await settle();
+  await h.runNext(550);
+  await h.runNext(1000);
+  assert.equal((await pending).skipped, true);
+  assert.equal(calls, 3);
+  assert.equal(
+    (await h.client.syncEventStateAfterMatch(eventId, "match-1")).ok,
+    true,
+  );
+  assert.equal(calls, 4);
+});
+
+test("match completion cannot dispatch for a replaced session while waiting for an earlier sync", async () => {
+  const earlier = deferred();
+  const h = harness({
+    api: {
+      syncEventStateViaApi: async () => {
+        await earlier.promise;
+        return {
+          ok: true,
+          eventId,
+          didChange: false,
+          event: seed().snapshot.event,
+        };
+      },
+    },
+  });
+  const ordinary = assert.rejects(
+    h.client.syncEventState(eventId),
+    /authentication-changed/,
+  );
+  await settle();
+  const completion = assert.rejects(
+    h.client.syncEventStateAfterMatch(eventId, "match-1"),
+    /request-aborted/,
+  );
+  h.changeAuth();
+  earlier.resolve();
+  await Promise.all([ordinary, completion]);
+  assert.equal(h.callsTo("syncEventStateViaApi").length, 1);
+  await h.client.syncEventStateAfterMatch(eventId, "match-1");
+  assert.equal(h.callsTo("syncEventStateViaApi").length, 2);
+});
+
+test("match completion uses server participation checks for linked profiles and retains retryability after transport failure", async () => {
+  let calls = 0;
+  const h = harness({
+    profileId: "linked-profile",
+    api: {
+      syncEventStateViaApi: async () => {
+        if (++calls === 1) throw new Error("offline");
+        return {
+          ok: true,
+          eventId,
+          didChange: true,
+          event: seed(2).snapshot.event,
+          eventSnapshot: seed(2),
+        };
+      },
+    },
+  });
+  await h.publish(seed(1, { createdByProfileId: "another-profile" }));
+  const close = h.client.subscribeToEvent(eventId, () => {});
+  await assert.rejects(
+    h.client.syncEventStateAfterMatch(eventId, "match-1"),
+    /offline/,
+  );
+  await h.client.syncEventStateAfterMatch(eventId, "match-1");
+  assert.equal(calls, 2);
+  close();
+});

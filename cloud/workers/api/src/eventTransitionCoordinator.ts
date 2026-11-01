@@ -52,6 +52,7 @@ import {
   notifyMatchSyncInvites,
 } from "./matchSyncNotifications.ts";
 import type { PrepareMatchPresentations } from "./matchPresentationRegistry.ts";
+import { notifyEventUpdates } from "./eventUpdatesNotifications.ts";
 
 const EVENT_TRANSITION_APPLICATION_LOCK_TTL_MS = 5 * 60 * 1_000;
 const EVENT_TRANSITION_APPLICATION_LOCK_OWNER = "event-transition-applier";
@@ -66,6 +67,11 @@ type EventTransitionCoordinatorDependencies = {
 type EventTransitionCoordinator = {
   commitEventPlan: EventStore["commitEventPlan"];
   recoverPendingIntents(limit?: number): Promise<number>;
+};
+
+type CommittedEventPlan = {
+  intent?: EventTransitionIntent;
+  eventRevisions: Record<string, number>;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -188,7 +194,7 @@ async function applyIntent(
   raw: MatchStatePort,
   prepareMatchPresentations: PrepareMatchPresentations,
   signal?: AbortSignal,
-): Promise<EventTransitionIntent | undefined> {
+): Promise<CommittedEventPlan | undefined> {
   let lock: eventD1.EventLeaseRecord | null = null;
   try {
     lock = await acquireTransitionApplicationLock(db, intent, admission);
@@ -213,18 +219,22 @@ async function applyIntent(
     });
     logTransitionTiming(currentIntent, "effects", effectsStartedAt);
     const commitStartedAt = Date.now();
-    await commitEventMutations(db, canonicalChanges, {
-      admission,
-      expectedEventRevisions: {
-        [currentIntent.eventId]: currentIntent.expectedRevision,
+    const { eventRevisions } = await commitEventMutations(
+      db,
+      canonicalChanges,
+      {
+        admission,
+        expectedEventRevisions: {
+          [currentIntent.eventId]: currentIntent.expectedRevision,
+        },
+        transition: {
+          eventId: currentIntent.eventId,
+          transitionId: currentIntent.transitionId,
+        },
       },
-      transition: {
-        eventId: currentIntent.eventId,
-        transitionId: currentIntent.transitionId,
-      },
-    });
+    );
     logTransitionTiming(currentIntent, "commit", commitStartedAt);
-    return currentIntent;
+    return { intent: currentIntent, eventRevisions };
   } catch (error) {
     await recordEventTransitionAttempt(db, {
       error: error instanceof Error ? error.message : "event-transition-failed",
@@ -248,7 +258,7 @@ async function commitD1EventPlan(
   prepareMatchPresentations: PrepareMatchPresentations,
   signal?: AbortSignal,
   options?: EventCommitOptions,
-): Promise<EventTransitionIntent | undefined> {
+): Promise<CommittedEventPlan | undefined> {
   const canonical = plan.filter(isEventMutation);
   const effects = plan.filter((command) => !isEventMutation(command));
   if (options?.upcomingEventId !== undefined && effects.length > 0) {
@@ -262,8 +272,11 @@ async function commitD1EventPlan(
   )
     throw new Error("event-match-creation-requires-transition");
   if (!effects.length) {
-    await commitEventMutations(db, canonical, { admission, ...options });
-    return;
+    const { eventRevisions } = await commitEventMutations(db, canonical, {
+      admission,
+      ...options,
+    });
+    return { eventRevisions };
   }
   const eventIds = [
     ...new Set(
@@ -372,24 +385,34 @@ function logTransitionTiming(
 
 async function dispatchCommittedNotifications(
   env: Env,
-  intent: EventTransitionIntent | undefined,
+  committed: CommittedEventPlan | undefined,
   schedule?: EventTransitionCoordinatorDependencies["schedule"],
 ): Promise<void> {
-  if (!intent) return;
+  if (!committed) return;
+  const { intent, eventRevisions } = committed;
+  if (!intent && Object.keys(eventRevisions).length === 0) return;
   const startedAt = Date.now();
   const logFailure = (error: unknown) => {
     console.error(
       JSON.stringify({
         event: "event_transition_notification_failed",
-        eventId: intent.eventId,
-        transitionId: intent.transitionId,
+        eventIds: Object.keys(eventRevisions),
+        ...(intent
+          ? { eventId: intent.eventId, transitionId: intent.transitionId }
+          : {}),
         kind: error instanceof Error ? error.name : typeof error,
       }),
     );
   };
-  const work = notifyEventInviteEffects(env, intent)
+  const work = Promise.all([
+    notifyEventUpdates(env, eventRevisions),
+    ...(intent ? [notifyEventInviteEffects(env, intent)] : []),
+  ])
+    .then(() => undefined)
     .catch(logFailure)
-    .finally(() => logTransitionTiming(intent, "notifications", startedAt));
+    .finally(() => {
+      if (intent) logTransitionTiming(intent, "notifications", startedAt);
+    });
   if (schedule) {
     try {
       schedule(work);

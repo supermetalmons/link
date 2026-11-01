@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { registerTypeScriptTestHooks } from "./support/typescriptHooks.mjs";
 import test from "node:test";
 import ts from "typescript";
+import { isCompletedMatchPair } from "../src/connection/matchCompletion.ts";
 import {
   InviteMetadataState,
   rematchSeriesEqual,
@@ -53,6 +54,8 @@ const { GameBootstrapApiError } =
  * @property {ConnectionContract["clearAllObserverContexts"]} clearAllObserverContexts
  * @property {ConnectionContract["confirmRematchEndFromMetadata"]} confirmRematchEndFromMetadata
  * @property {ConnectionContract["confirmedSurrenders"]} confirmedSurrenders
+ * @property {ConnectionContract["pendingSurrenders"]} pendingSurrenders
+ * @property {ConnectionContract["pendingMatchCompletions"]} pendingMatchCompletions
  * @property {ConnectionContract["connectAttemptId"]} connectAttemptId
  * @property {ConnectionContract["connectToGame"]} connectToGame
  * @property {ConnectionContract["createMatchContextGuard"]} createMatchContextGuard
@@ -502,6 +505,7 @@ function harness({
       }),
     },
     moveDeliveryStorageKey,
+    isCompletedMatchPair,
     InviteMetadataState,
     rematchSeriesEqual,
     selectInviteMatch,
@@ -773,6 +777,8 @@ function harness({
       moveDeliveries: new Map(),
       reconcilingMoveKeys: new Set(),
       confirmedSurrenders: new Set(),
+      pendingSurrenders: new Map(),
+      pendingMatchCompletions: new Map(),
       moveRecoveryTimers: new Map(),
       moveReconnectCooldownMs: 0,
       moveReconnectLastAttemptAt: 0,

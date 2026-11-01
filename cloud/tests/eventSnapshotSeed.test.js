@@ -7,6 +7,7 @@ const {
   eventBookmarkEpoch,
   eventSnapshotEtag,
   isEventSnapshotSeed,
+  isEventUpdateMessage,
   MAX_EVENT_READ_RESPONSE_BYTES,
 } = require("../runtime/shared/events");
 const {
@@ -27,6 +28,33 @@ const seed = {
   etag: eventSnapshotEtag("event-one", 2),
   bookmark: `mons-d1-v1:${epoch}:native-token`,
 };
+
+test("event update hints accept only canonical event, epoch and revision identities", () => {
+  const message = {
+    schemaVersion: 1,
+    type: "event-changed",
+    eventId: "event-one",
+    epoch,
+    revision: 2,
+  };
+  assert.equal(isEventUpdateMessage(message), true);
+  assert.equal(isEventUpdateMessage({ ...message, revision: 0 }), true);
+  for (const invalid of [
+    null,
+    { ...message, schemaVersion: 2 },
+    { ...message, type: "snapshot" },
+    { ...message, eventId: " event-one" },
+    { ...message, eventId: "event/one" },
+    { ...message, epoch: "wrong" },
+    { ...message, epoch: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA" },
+    { ...message, revision: -1 },
+    { ...message, revision: 1.5 },
+    { ...message, revision: Number.MAX_SAFE_INTEGER + 1 },
+    { ...message, revision: "2" },
+    { ...message, event: seed.snapshot.event },
+  ])
+    assert.equal(isEventUpdateMessage(invalid), false);
+});
 
 test("snapshot seeds require matching revisions and scoped bookmarks", () => {
   assert.equal(isEventSnapshotSeed(seed), true);

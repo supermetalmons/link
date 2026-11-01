@@ -22,6 +22,7 @@ export const APPLICATION_ROOM_RPC_ARITY = {
   notifyMetadataChanged: 1,
   notifySessionCommitted: 1,
   notifyWagersChanged: 1,
+  notifyEventChanged: 3,
   publish: 2,
   registerPresentationSeeds: 2,
   getRegisteredPresentationSnapshot: 1,
@@ -60,11 +61,12 @@ function isRoomMethod(
   );
 }
 
-export function propagateApplicationRoomAdmission(
-  namespace: Env["INVITE_REACTIONS"],
-  admission: () => ApplicationAdmission,
-): Env["INVITE_REACTIONS"] {
-  const wrapStub = (stub: ReturnType<Env["INVITE_REACTIONS"]["get"]>) =>
+type ApplicationRoomNamespace = Env["INVITE_REACTIONS"] | Env["EVENT_UPDATES"];
+
+export function propagateApplicationRoomAdmission<
+  Namespace extends ApplicationRoomNamespace,
+>(namespace: Namespace, admission: () => ApplicationAdmission): Namespace {
+  const wrapStub = (stub: ReturnType<ApplicationRoomNamespace["get"]>) =>
     new Proxy(stub, {
       get(target, property) {
         if (property === "fetch")

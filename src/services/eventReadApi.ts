@@ -2,6 +2,7 @@ import type {
   ApiQuery,
   ApiHttpUrl,
   ApiResponse,
+  ApiSocketUrl,
 } from "@mons/shared/api-contracts";
 import { isEventSnapshotResponse } from "@mons/shared/events";
 import type { AuthTokenProvider } from "./authApi";
@@ -12,6 +13,12 @@ import {
   type ConditionalReadOptions,
 } from "./gameplayTransport";
 type EventSnapshotResponse = ApiResponse<"GET /events/snapshot">;
+
+export function getEventUpdatesSocketUrl(
+  eventId: string,
+): ApiSocketUrl<"GET /events/:eventId/socket"> {
+  return `${GAMEPLAY_API_ROOT.replace("https:", "wss:")}/events/${encodeURIComponent(eventId)}/socket`;
+}
 
 export type {
   ConditionalRead,

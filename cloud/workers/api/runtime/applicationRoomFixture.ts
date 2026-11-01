@@ -21,9 +21,11 @@ import {
   runApplicationOperation,
 } from "../src/applicationExecution.ts";
 import type { InviteReactions } from "../src/inviteReactions.ts";
+import type { EventUpdates } from "../src/eventUpdates.ts";
 
 type Room = DurableObjectStub<InviteReactions>;
-const rawRooms = new WeakMap<Room, Room>();
+type ApplicationRoom = Room | DurableObjectStub<EventUpdates>;
+const rawRooms = new WeakMap<object, object>();
 const MIGRATIONS = {
   PROFILE_GAMES_DB: "TEST_D1_MIGRATIONS",
   PROFILE_DB: "TEST_PROFILE_D1_MIGRATIONS",
@@ -56,11 +58,14 @@ export async function activateCanonicalApplicationFixture(): Promise<void> {
   );
 }
 
-export function rawApplicationRoom(room: Room): Room {
-  return rawRooms.get(room) ?? room;
+export function rawApplicationRoom<T extends object>(room: T): T {
+  return (rawRooms.get(room) ?? room) as T;
 }
 
-export function admittedApplicationRoom(room: Room): Room {
+export function admittedApplicationRoom<T extends ApplicationRoom>(
+  room: T,
+  binding: "INVITE_REACTIONS" | "EVENT_UPDATES" = "INVITE_REACTIONS",
+): T {
   if (rawRooms.has(room)) return room;
   const wrapped = new Proxy(room, {
     get(target, property) {
@@ -106,7 +111,7 @@ export function admittedApplicationRoom(room: Room): Room {
             "http",
             1,
             async (admittedEnv) => {
-              const admitted = admittedEnv.INVITE_REACTIONS.get(target.id);
+              const admitted = admittedEnv[binding].get(target.id);
               const callback: unknown = Reflect.get(
                 admitted,
                 property,
@@ -139,12 +144,12 @@ export async function canonicalRoomFixture(name: string): Promise<Room> {
   return room;
 }
 
-export async function runInAdmittedRoom<T>(
-  room: Room,
-  callback: (
-    instance: InviteReactions,
-    state: DurableObjectState,
-  ) => T | Promise<T>,
+async function runInAdmittedTypedRoom<
+  Instance extends InviteReactions | EventUpdates,
+  T,
+>(
+  room: DurableObjectStub<Instance>,
+  callback: (instance: Instance, state: DurableObjectState) => T | Promise<T>,
 ): Promise<T> {
   const context = createExecutionContext();
   try {
@@ -155,7 +160,7 @@ export async function runInAdmittedRoom<T>(
       async () => {
         const admission = currentApplicationAdmission();
         if (!admission) throw new Error("fixture-admission-missing");
-        return runInDurableObject<InviteReactions, T>(
+        return runInDurableObject<Instance, T>(
           rawApplicationRoom(room),
           (instance, state) => {
             const admitted = new Proxy(instance, {
@@ -208,4 +213,24 @@ export async function runInAdmittedRoom<T>(
   } finally {
     await waitOnExecutionContext(context);
   }
+}
+
+export function runInAdmittedRoom<T>(
+  room: Room,
+  callback: (
+    instance: InviteReactions,
+    state: DurableObjectState,
+  ) => T | Promise<T>,
+): Promise<T> {
+  return runInAdmittedTypedRoom<InviteReactions, T>(room, callback);
+}
+
+export function runInAdmittedEventRoom<T>(
+  room: DurableObjectStub<EventUpdates>,
+  callback: (
+    instance: EventUpdates,
+    state: DurableObjectState,
+  ) => T | Promise<T>,
+): Promise<T> {
+  return runInAdmittedTypedRoom<EventUpdates, T>(room, callback);
 }

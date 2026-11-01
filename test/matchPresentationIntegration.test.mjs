@@ -13,6 +13,8 @@ import { createMatchTimerHarness } from "./fixtures/matchTimerHarness.mjs";
 import { createRematchViewingHarness } from "./fixtures/rematchViewingHarness.mjs";
 import { MatchPresentationState } from "../src/connection/matchPresentationState.ts";
 import { moveDeliveryStorageKey } from "../src/connection/moveDelivery.ts";
+import { isCompletedMatchPair } from "../src/connection/matchCompletion.ts";
+import { canonicalScoreMatchPair } from "./fixtures/completedMatchPair.mjs";
 
 registerTypeScriptTestHooks();
 
@@ -35,6 +37,12 @@ const { batchGameControlsUpdates } =
  * @property {ConnectionContract["getMatchPresentation"]} getMatchPresentation
  * @property {ConnectionContract["updateEmoji"]} updateEmoji
  * @property {ConnectionContract["surrender"]} surrender
+ * @property {ConnectionContract["updateRatings"]} updateRatings
+ * @property {ConnectionContract["applyMatchSyncSnapshot"]} applyMatchSyncSnapshot
+ * @property {ConnectionContract["getOpponentId"]} getOpponentId
+ * @property {ConnectionContract["getCurrentInviteEventId"]} getCurrentInviteEventId
+ * @property {ConnectionContract["ensureAuthenticated"]} ensureAuthenticated
+ * @property {ConnectionContract["notifyNavigationGamesChanged"]} notifyNavigationGamesChanged
  * @property {ConnectionContract["moveDeliveryScope"]} moveDeliveryScope
  * @property {ConnectionContract["isCurrentMoveBoard"]} isCurrentMoveBoard
  * @property {ConnectionContract["recoverMoveBoard"]} recoverMoveBoard
@@ -58,7 +66,8 @@ const { batchGameControlsUpdates } =
  * db?: Record<string, never>; auth: {currentUser: {uid: string} | null};
  * myMatch: LocalMatchProbe | null; activeContext: FixtureContext | null;
  * latestInvite?: Pick<import("@mons/shared/invite-metadata").InviteMetadataSnapshot, "hostId" | "guestId"> | null;
- * matchPresentations: Map<string, Presentation>; confirmedSurrenders: Set<string>; reconcilingMoveKeys: Set<string>;
+ * matchPresentations: Map<string, Presentation>; confirmedSurrenders: Set<string>; pendingSurrenders: Map<string, Promise<void>>; pendingMatchCompletions: ConnectionContract["pendingMatchCompletions"]; reconcilingMoveKeys: Set<string>;
+ * eventClient: Pick<ConnectionContract["eventClient"], "syncEventStateAfterMatch">;
  * moveRecoveryTimers: ConnectionContract["moveRecoveryTimers"]; observedMatchSnapshots?: Map<string, LocalMatchProbe>;
  * sessionEpoch: number; moveReconnectCooldownMs: number; moveReconnectLastAttemptAt: number; moveReconnectInFlight: boolean;
  * inviteReactionSubscription: {contextId: number; channel: {signal: AbortSignal; stop(): void}; presentation: MatchPresentationState; stop(): void} | null;
@@ -205,6 +214,7 @@ function connectionHarness({ paired = true } = {}) {
       {
         MatchPresentationState,
         moveDeliveryStorageKey,
+        isCompletedMatchPair,
         InviteReactionChannel: Channel,
         readMatchPresentationViaApi: (
           /** @type {Parameters<typeof import("../src/services/matchPresentationApi.ts").readMatchPresentationViaApi>} */ ...args
@@ -253,6 +263,8 @@ function connectionHarness({ paired = true } = {}) {
       moveReconnectInFlight: false,
       matchPresentations: new Map(),
       confirmedSurrenders: new Set(),
+      pendingSurrenders: new Map(),
+      pendingMatchCompletions: new Map(),
       reconcilingMoveKeys: new Set(),
       moveRecoveryTimers: new Map(),
       observedMatchSnapshots: new Map(),
@@ -370,6 +382,29 @@ test("actual connection hydrates before pairing and isolates optimistic appearan
 function surrenderHarness() {
   /** @type {PromiseWithResolvers<import("@mons/shared/game-sessions").SurrenderMatchResponse>} */
   const pendingSurrender = deferred();
+  /** @type {PromiseWithResolvers<import("@mons/shared/ratings").RatingUpdateResponse>} */
+  const pendingRating = deferred();
+  const rating = { submit: () => pendingRating.promise };
+  /** @type {import("@mons/shared/ratings").RatingUpdateRequest[]} */
+  const ratingRequests = [];
+  /** @type {Array<{eventId: string; matchId: string}>} */
+  const syncRequests = [];
+  /** @type {Array<Parameters<typeof import("../src/services/matchSyncApi.ts").readMatchSyncViaApi>>} */
+  const recoveryReads = [];
+  /** @type {import("@mons/shared/match-sync").MatchSyncSnapshot} */
+  const canonicalSnapshot = {
+    inviteId: "invite",
+    matchId: "invite",
+    revision: 1,
+    hostPlayerId: "actor",
+    guestPlayerId: "opponent",
+    hostMatch: canonicalMatch(),
+    guestMatch: canonicalMatch({ color: "black" }),
+  };
+  /** @type {{read: typeof import("../src/services/matchSyncApi.ts").readMatchSyncViaApi}} */
+  const recovery = {
+    read: async () => ({ ok: true, snapshot: canonicalSnapshot }),
+  };
   /** @type {Array<{request: import("@mons/shared/game-sessions").SurrenderMatchRequest; tokenProvider: import("../src/services/apiTransport.ts").AuthTokenProvider}>} */
   const requests = [];
   /** @type {string[]} */
@@ -383,6 +418,9 @@ function surrenderHarness() {
     compile(
       `class Connection { ${methods([
         "surrender",
+        "updateRatings",
+        "applyMatchSyncSnapshot",
+        "isContextActive",
         "moveDeliveryScope",
         "isCurrentMoveBoard",
         "recoverMoveBoard",
@@ -395,6 +433,21 @@ function surrenderHarness() {
       ])} }`,
       {
         moveDeliveryStorageKey,
+        isCompletedMatchPair,
+        updateRatingsViaApi: (
+          /** @type {import("@mons/shared/ratings").RatingUpdateRequest} */ request,
+        ) => {
+          ratingRequests.push(request);
+          return rating.submit();
+        },
+        console: { error: () => {} },
+        didReceiveMatchUpdates: () => {},
+        readMatchSyncViaApi: (
+          /** @type {Parameters<typeof import("../src/services/matchSyncApi.ts").readMatchSyncViaApi>} */ ...args
+        ) => {
+          recoveryReads.push(args);
+          return recovery.read(...args);
+        },
         surrenderMatchViaApi: (
           /** @type {import("@mons/shared/game-sessions").SurrenderMatchRequest} */ request,
           /** @type {import("../src/services/apiTransport.ts").AuthTokenProvider} */ tokenProvider,
@@ -411,9 +464,23 @@ function surrenderHarness() {
     new Constructor(),
     /** @satisfies {Partial<FixtureConnection>} */ ({
       auth: state,
+      getOpponentId: () => "opponent",
+      getCurrentInviteEventId: () => "event",
+      ensureAuthenticated: async () => {},
+      notifyNavigationGamesChanged: () => {},
+      eventClient: {
+        syncEventStateAfterMatch: async (eventId, matchId) => {
+          syncRequests.push({ eventId, matchId });
+          return { ok: true };
+        },
+      },
       confirmedSurrenders: new Set(),
+      pendingSurrenders: new Map(),
+      pendingMatchCompletions: new Map(),
       reconcilingMoveKeys: new Set(),
       moveRecoveryTimers: new Map(),
+      observedMatchSnapshots: new Map(),
+      latestInvite: { hostId: "actor", guestId: "opponent" },
       myMatch: {
         fen: "current-fen",
         flatMovesString: "current-moves",
@@ -457,8 +524,530 @@ function surrenderHarness() {
       },
     }),
   );
-  return { connection, pendingSurrender, requests, events, reconnects, state };
+  return {
+    connection,
+    pendingSurrender,
+    pendingRating,
+    rating,
+    ratingRequests,
+    syncRequests,
+    recoveryReads,
+    canonicalSnapshot,
+    recovery,
+    requests,
+    events,
+    reconnects,
+    state,
+  };
 }
+
+test("match completion advances its captured event after moves commit while ratings are pending", async () => {
+  const h = surrenderHarness();
+  const moves = deferred();
+  h.connection.flushPendingMoves = () => moves.promise;
+  const completion = h.connection.updateRatings();
+  await flush();
+  assert.deepEqual(h.syncRequests, []);
+  assert.deepEqual(h.ratingRequests, []);
+  required(h.connection.activeContext).matchId = "another-match";
+  h.connection.getCurrentInviteEventId = () => "another-event";
+  moves.resolve();
+  await flush();
+  assert.deepEqual(h.syncRequests, [{ eventId: "event", matchId: "invite" }]);
+  assert.deepEqual(h.ratingRequests, [
+    {
+      playerId: "actor",
+      inviteId: "invite",
+      matchId: "invite",
+      opponentId: "opponent",
+    },
+  ]);
+  h.pendingRating.resolve({ ok: true });
+  await completion;
+});
+
+test("surrender acknowledgement precedes both event progression and ratings", async () => {
+  const h = surrenderHarness();
+  assert.equal(h.connection.surrender(), true);
+  const completion = h.connection.updateRatings();
+  await flush();
+  assert.equal(h.requests.length, 1);
+  assert.deepEqual(h.syncRequests, []);
+  assert.deepEqual(h.ratingRequests, []);
+  h.pendingSurrender.resolve(surrenderReceipt());
+  await flush();
+  assert.deepEqual(h.syncRequests, [{ eventId: "event", matchId: "invite" }]);
+  assert.equal(h.ratingRequests.length, 1);
+  h.pendingRating.resolve({ ok: true });
+  await completion;
+  assert.equal(h.connection.pendingSurrenders.size, 0);
+});
+
+test("uncertain surrender failure does not send premature event or rating updates", async () => {
+  const h = surrenderHarness();
+  assert.equal(h.connection.surrender(), true);
+  const failure = assert.rejects(h.connection.updateRatings(), /timed out/);
+  await flush();
+  h.pendingSurrender.reject(new Error("Gameplay request timed out."));
+  await failure;
+  await flush();
+  assert.deepEqual(h.syncRequests, []);
+  assert.deepEqual(h.ratingRequests, []);
+  assert.equal(h.recoveryReads.length, 1);
+  assert.deepEqual(h.recoveryReads[0]?.slice(0, 2), ["invite", "invite"]);
+  assert.equal(h.recoveryReads[0]?.[2], h.requests[0]?.tokenProvider);
+  assert.deepEqual(h.reconnects, [["login-alias", "invite", false]]);
+});
+
+test("a failed surrender reconciliation resumes completion from the canonical reconnect snapshot", async () => {
+  const h = surrenderHarness();
+  h.recovery.read = async () => {
+    throw new Error("http-503");
+  };
+  assert.equal(h.connection.surrender(), true);
+  const failed = assert.rejects(h.connection.updateRatings(), /http-503/);
+  const duplicate = h.connection.updateRatings();
+  assert.deepEqual(await duplicate, { ok: true, skipped: true });
+  await flush();
+  h.pendingSurrender.reject(new Error("lost-response"));
+  await failed;
+  await flush();
+  assert.equal(h.connection.pendingMatchCompletions.size, 1);
+  assert.equal(h.ratingRequests.length, 0);
+  h.connection.sessionEpoch++;
+  h.connection.activeContext = {
+    ...required(h.connection.activeContext),
+    contextId: 2,
+    sessionEpoch: h.connection.sessionEpoch,
+  };
+  const observe = () =>
+    h.connection.applyMatchSyncSnapshot(
+      required(h.connection.activeContext),
+      h.canonicalSnapshot,
+      new Set(["opponent"]),
+    );
+  observe();
+  assert.equal(h.ratingRequests.length, 0);
+  h.canonicalSnapshot.hostMatch = canonicalMatch({ status: "surrendered" });
+  observe();
+  observe();
+  await flush();
+  assert.equal(h.ratingRequests.length, 1);
+  assert.deepEqual(h.syncRequests, [{ eventId: "event", matchId: "invite" }]);
+  assert.equal(h.connection.confirmedSurrenders.size, 0);
+  h.pendingRating.resolve({ ok: true });
+  await flush();
+  assert.equal(h.connection.pendingMatchCompletions.size, 0);
+  observe();
+  assert.equal(h.ratingRequests.length, 1);
+});
+
+for (const hostColor of /** @type {const} */ (["white", "black"])) {
+  for (const evidence of ["reconciliation", "early-snapshot", "reconnect"]) {
+    test(`normal score completion recovers surrender through ${evidence} with a ${hostColor} host`, async () => {
+      const h = surrenderHarness();
+      if (evidence !== "reconciliation")
+        h.recovery.read = async () => {
+          throw new Error("reconciliation-unavailable");
+        };
+      assert.equal(h.connection.surrender(), true);
+      const completion = h.connection.updateRatings();
+      const failed =
+        evidence === "reconnect"
+          ? assert.rejects(completion, /reconciliation-unavailable/)
+          : null;
+      await flush();
+      Object.assign(
+        h.canonicalSnapshot,
+        canonicalScoreMatchPair({ hostColor }),
+      );
+      const observe = () =>
+        h.connection.applyMatchSyncSnapshot(
+          required(h.connection.activeContext),
+          h.canonicalSnapshot,
+          new Set(["opponent"]),
+        );
+      if (evidence === "early-snapshot") {
+        observe();
+        h.connection.activeContext = null;
+        h.connection.getCurrentInviteEventId = () => "another-event";
+      }
+      h.pendingSurrender.reject(new Error("surrender-unavailable"));
+      if (failed) {
+        await failed;
+        assert.equal(h.ratingRequests.length, 0);
+        assert.equal(h.connection.pendingMatchCompletions.size, 1);
+        h.connection.sessionEpoch++;
+        h.connection.activeContext = {
+          ...required(h.connection.activeContext),
+          contextId: 2,
+          sessionEpoch: h.connection.sessionEpoch,
+        };
+        observe();
+        observe();
+      }
+      await flush();
+      assert.deepEqual(h.ratingRequests, [
+        {
+          playerId: "actor",
+          opponentId: "opponent",
+          inviteId: "invite",
+          matchId: "invite",
+        },
+      ]);
+      assert.deepEqual(h.syncRequests, [
+        { eventId: "event", matchId: "invite" },
+      ]);
+      assert.equal(h.connection.confirmedSurrenders.size, 0);
+      h.pendingRating.resolve({ ok: true });
+      if (!failed) assert.deepEqual(await completion, { ok: true });
+      await flush();
+      assert.equal(h.connection.pendingMatchCompletions.size, 0);
+    });
+  }
+}
+
+test("unconfirmed or malformed score snapshots cannot settle a failed surrender", async () => {
+  const completePair = canonicalScoreMatchPair();
+  for (const pair of [
+    canonicalScoreMatchPair({ completed: false }),
+    {
+      hostMatch: { ...completePair.hostMatch, fen: "invalid" },
+      guestMatch: { ...completePair.guestMatch, fen: "invalid" },
+    },
+    {
+      ...completePair,
+      guestMatch: { ...completePair.guestMatch, flatMovesString: "invalid" },
+    },
+  ]) {
+    const h = surrenderHarness();
+    Object.assign(h.canonicalSnapshot, pair);
+    assert.equal(h.connection.surrender(), true);
+    const failed = assert.rejects(
+      h.connection.updateRatings(),
+      /surrender-unavailable/,
+    );
+    await flush();
+    h.pendingSurrender.reject(new Error("surrender-unavailable"));
+    await failed;
+    h.connection.applyMatchSyncSnapshot(
+      required(h.connection.activeContext),
+      h.canonicalSnapshot,
+      new Set(["opponent"]),
+    );
+    await flush();
+    assert.deepEqual(h.ratingRequests, []);
+    assert.deepEqual(h.syncRequests, []);
+    assert.equal(h.connection.confirmedSurrenders.size, 0);
+    assert.equal(h.connection.pendingMatchCompletions.size, 1);
+  }
+});
+
+test("terminal evidence received before surrender failure survives navigation", async () => {
+  const h = surrenderHarness();
+  h.recovery.read = async () => {
+    throw new Error("http-503");
+  };
+  assert.equal(h.connection.surrender(), true);
+  const completion = h.connection.updateRatings();
+  await flush();
+  h.canonicalSnapshot.guestMatch = canonicalMatch({
+    color: "black",
+    timer: { state: "finished" },
+  });
+  h.connection.applyMatchSyncSnapshot(
+    required(h.connection.activeContext),
+    h.canonicalSnapshot,
+    new Set(["opponent"]),
+  );
+  assert.equal(h.ratingRequests.length, 0);
+  h.connection.activeContext = null;
+  h.connection.getCurrentInviteEventId = () => "another-event";
+  h.pendingSurrender.reject(new Error("lost-response"));
+  await flush();
+  assert.deepEqual(h.ratingRequests, [
+    {
+      playerId: "actor",
+      opponentId: "opponent",
+      inviteId: "invite",
+      matchId: "invite",
+    },
+  ]);
+  assert.deepEqual(h.syncRequests, [{ eventId: "event", matchId: "invite" }]);
+  h.pendingRating.resolve({ ok: true });
+  await completion;
+  assert.equal(h.connection.pendingMatchCompletions.size, 0);
+});
+
+test("a failed recovery settlement remains retryable on the next canonical reconnect", async () => {
+  for (const earlyEvidence of [false, true]) {
+    const h = surrenderHarness();
+    h.recovery.read = async () => {
+      throw new Error("http-503");
+    };
+    assert.equal(h.connection.surrender(), true);
+    const failed = assert.rejects(
+      h.connection.updateRatings(),
+      earlyEvidence ? /rating-unavailable/ : /http-503/,
+    );
+    await flush();
+    h.canonicalSnapshot.hostMatch = canonicalMatch({ status: "surrendered" });
+    const observe = () =>
+      h.connection.applyMatchSyncSnapshot(
+        required(h.connection.activeContext),
+        h.canonicalSnapshot,
+        new Set(["opponent"]),
+      );
+    if (earlyEvidence) observe();
+    h.pendingSurrender.reject(new Error("lost-response"));
+    await flush();
+    if (!earlyEvidence) observe();
+    await flush();
+    h.pendingRating.reject(new Error("rating-unavailable"));
+    await failed;
+    await flush();
+    assert.equal(h.connection.pendingMatchCompletions.size, 1);
+    h.rating.submit = async () => ({ ok: true });
+    observe();
+    observe();
+    await flush();
+    assert.equal(h.ratingRequests.length, 2);
+    assert.equal(h.connection.pendingMatchCompletions.size, 0);
+  }
+});
+
+test("a later game completion can supersede an unconfirmed failed surrender", async () => {
+  const h = surrenderHarness();
+  assert.equal(h.connection.surrender(), true);
+  const failed = assert.rejects(
+    h.connection.updateRatings(),
+    /surrender-unavailable/,
+  );
+  await flush();
+  h.pendingSurrender.reject(new Error("surrender-unavailable"));
+  await failed;
+  await flush();
+  assert.equal(h.connection.pendingSurrenders.size, 0);
+  assert.equal(h.connection.pendingMatchCompletions.size, 1);
+  assert.equal(h.ratingRequests.length, 0);
+  const completion = h.connection.updateRatings();
+  await flush();
+  assert.equal(h.ratingRequests.length, 1);
+  assert.deepEqual(h.syncRequests, [{ eventId: "event", matchId: "invite" }]);
+  h.pendingRating.resolve({ ok: true });
+  assert.deepEqual(await completion, { ok: true });
+  assert.equal(h.connection.pendingMatchCompletions.size, 0);
+});
+
+test("deferred completion rejects other matches, participants, and replacement auth sessions", async () => {
+  const h = surrenderHarness();
+  h.recovery.read = async () => {
+    throw new Error("http-503");
+  };
+  assert.equal(h.connection.surrender(), true);
+  const failed = assert.rejects(h.connection.updateRatings(), /http-503/);
+  await flush();
+  h.pendingSurrender.reject(new Error("lost-response"));
+  await failed;
+  await flush();
+  h.canonicalSnapshot.hostMatch = canonicalMatch({ status: "surrendered" });
+  const recovery = required(
+    [...h.connection.pendingMatchCompletions.values()][0],
+  );
+  for (const snapshot of [
+    { ...h.canonicalSnapshot, inviteId: "other" },
+    { ...h.canonicalSnapshot, matchId: "other" },
+    { ...h.canonicalSnapshot, guestPlayerId: "other" },
+    { ...h.canonicalSnapshot, hostPlayerId: "other" },
+    { ...h.canonicalSnapshot, hostMatch: null },
+  ])
+    recovery.observe(snapshot);
+  assert.equal(h.ratingRequests.length, 0);
+  h.state.currentUser = { uid: "login-alias" };
+  recovery.observe(h.canonicalSnapshot);
+  await flush();
+  assert.equal(h.ratingRequests.length, 0);
+  assert.deepEqual(h.syncRequests, []);
+  assert.equal(h.connection.pendingMatchCompletions.size, 0);
+});
+
+test("a lost surrender response progresses only after the actor's canonical surrender is confirmed", async () => {
+  for (const role of ["host", "guest"]) {
+    const h = surrenderHarness();
+    /** @type {PromiseWithResolvers<import("@mons/shared/match-sync").ReadMatchSyncResponse>} */
+    const read = deferred();
+    h.recovery.read = () => read.promise;
+    if (role === "guest") {
+      h.canonicalSnapshot.hostPlayerId = "opponent";
+      h.canonicalSnapshot.guestPlayerId = "actor";
+      h.canonicalSnapshot.guestMatch = canonicalMatch({
+        color: "black",
+        status: "surrendered",
+      });
+    } else {
+      h.canonicalSnapshot.hostMatch = canonicalMatch({ status: "surrendered" });
+    }
+    assert.equal(h.connection.surrender(), true);
+    const completion = h.connection.updateRatings();
+    await flush();
+    h.pendingSurrender.reject(new Error("Gameplay request timed out."));
+    await flush();
+    assert.equal(h.requests.length, 1);
+    assert.equal(h.recoveryReads.length, 1);
+    assert.deepEqual(h.recoveryReads[0]?.slice(0, 2), ["invite", "invite"]);
+    assert.equal(h.recoveryReads[0]?.[2], h.requests[0]?.tokenProvider);
+    assert.deepEqual(h.syncRequests, []);
+    assert.deepEqual(h.ratingRequests, []);
+    read.resolve({ ok: true, snapshot: h.canonicalSnapshot });
+    await flush();
+    assert.deepEqual(h.syncRequests, [{ eventId: "event", matchId: "invite" }]);
+    assert.equal(h.ratingRequests.length, 1);
+    h.pendingRating.resolve({ ok: true });
+    await completion;
+    assert.deepEqual(h.events, ["ctx.write.success"]);
+    assert.deepEqual(h.reconnects, []);
+    assert.equal(h.connection.pendingSurrenders.size, 0);
+  }
+});
+
+test("surrender losing a terminal-state race still settles the captured match without confirming surrender", async () => {
+  for (const actorRole of ["host", "guest"]) {
+    for (const terminal of [
+      "host-timer",
+      "guest-timer",
+      "opponent-surrender",
+    ]) {
+      const h = surrenderHarness();
+      if (actorRole === "guest") {
+        h.canonicalSnapshot.hostPlayerId = "opponent";
+        h.canonicalSnapshot.guestPlayerId = "actor";
+      }
+      if (terminal === "host-timer")
+        required(h.canonicalSnapshot.hostMatch).timer = { state: "finished" };
+      else if (terminal === "guest-timer")
+        required(h.canonicalSnapshot.guestMatch).timer = { state: "finished" };
+      else
+        required(
+          actorRole === "host"
+            ? h.canonicalSnapshot.guestMatch
+            : h.canonicalSnapshot.hostMatch,
+        ).status = "surrendered";
+      assert.equal(h.connection.surrender(), true);
+      const completion = h.connection.updateRatings();
+      await flush();
+      h.pendingSurrender.reject(new Error("match-surrender-blocked"));
+      await flush();
+      assert.equal(h.requests.length, 1);
+      assert.equal(h.recoveryReads.length, 1);
+      assert.equal(h.ratingRequests.length, 1);
+      assert.deepEqual(h.syncRequests, [
+        { eventId: "event", matchId: "invite" },
+      ]);
+      assert.equal(h.connection.confirmedSurrenders.size, 0);
+      assert.deepEqual(h.reconnects, [["login-alias", "invite", false]]);
+      assert.deepEqual(h.events, []);
+      h.pendingRating.resolve({ ok: true });
+      assert.deepEqual(await completion, { ok: true });
+      assert.equal(h.connection.pendingSurrenders.size, 0);
+    }
+  }
+});
+
+test("surrender reconciliation rejects another match or an absent actor", async () => {
+  for (const change of /** @satisfies {Array<(snapshot: import("@mons/shared/match-sync").MatchSyncSnapshot) => void>} */ ([
+    (snapshot) => {
+      snapshot.inviteId = "other-invite";
+    },
+    (snapshot) => {
+      snapshot.matchId = "invite1";
+    },
+    (snapshot) => {
+      snapshot.hostPlayerId = "different-actor";
+    },
+    (snapshot) => {
+      snapshot.hostMatch = null;
+    },
+  ])) {
+    const h = surrenderHarness();
+    h.canonicalSnapshot.hostMatch = canonicalMatch({ status: "surrendered" });
+    change(h.canonicalSnapshot);
+    assert.equal(h.connection.surrender(), true);
+    const failure = assert.rejects(h.connection.updateRatings(), /timed out/);
+    await flush();
+    h.pendingSurrender.reject(new Error("Gameplay request timed out."));
+    await failure;
+    await flush();
+    assert.equal(h.recoveryReads.length, 1);
+    assert.deepEqual(h.syncRequests, []);
+    assert.deepEqual(h.ratingRequests, []);
+    assert.equal(h.connection.confirmedSurrenders.size, 0);
+  }
+});
+
+test("surrender reconciliation cannot read or confirm under a replacement authentication session", async () => {
+  for (const duringRead of [false, true]) {
+    const h = surrenderHarness();
+    /** @type {PromiseWithResolvers<import("@mons/shared/match-sync").ReadMatchSyncResponse>} */
+    const read = deferred();
+    h.recovery.read = () => read.promise;
+    h.canonicalSnapshot.hostMatch = canonicalMatch({ status: "surrendered" });
+    assert.equal(h.connection.surrender(), true);
+    const failure = assert.rejects(
+      h.connection.updateRatings(),
+      /authentication-changed/,
+    );
+    await flush();
+    if (!duringRead) h.state.currentUser = { uid: "login-alias" };
+    h.pendingSurrender.reject(new Error("Gameplay request timed out."));
+    await flush();
+    if (duringRead) h.state.currentUser = { uid: "login-alias" };
+    read.resolve({ ok: true, snapshot: h.canonicalSnapshot });
+    await failure;
+    await flush();
+    assert.equal(h.recoveryReads.length, duringRead ? 1 : 0);
+    assert.deepEqual(h.syncRequests, []);
+    assert.deepEqual(h.ratingRequests, []);
+    assert.equal(h.connection.confirmedSurrenders.size, 0);
+  }
+});
+
+test("completion cannot dispatch under a replacement authentication session", async () => {
+  const h = surrenderHarness();
+  const moves = deferred();
+  h.connection.flushPendingMoves = () => moves.promise;
+  const failure = assert.rejects(
+    h.connection.updateRatings(),
+    /authentication-changed/,
+  );
+  await flush();
+  h.state.currentUser = { uid: "login-alias" };
+  moves.resolve();
+  await failure;
+  assert.deepEqual(h.syncRequests, []);
+  assert.deepEqual(h.ratingRequests, []);
+});
+
+test("non-event completions do not synchronize events", async () => {
+  const h = surrenderHarness();
+  h.connection.getCurrentInviteEventId = () => null;
+  const completion = h.connection.updateRatings();
+  await flush();
+  assert.deepEqual(h.syncRequests, []);
+  assert.equal(h.ratingRequests.length, 1);
+  h.pendingRating.resolve({ ok: true });
+  await completion;
+});
+
+test("event synchronization failure does not fail completed rating processing", async () => {
+  const h = surrenderHarness();
+  h.connection.eventClient.syncEventStateAfterMatch = async () => {
+    throw new Error("event-sync-unavailable");
+  };
+  const completion = h.connection.updateRatings();
+  await flush();
+  h.pendingRating.resolve({ ok: true });
+  assert.deepEqual(await completion, { ok: true });
+});
 
 test("surrender immediately updates only local status and queues the captured actor through the API", async () => {
   const h = surrenderHarness();

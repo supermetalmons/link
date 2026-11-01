@@ -351,11 +351,10 @@ describe("retired invite native storage guards", () => {
       await expect(db.prepare(sql).run()).rejects.toThrow(
         "retired-invite-immutable",
       );
-    expect(
-      await db
-        .prepare("SELECT * FROM retired_invites ORDER BY invite_id")
-        .all(),
-    ).toEqual(before);
+    const after = await db
+      .prepare("SELECT * FROM retired_invites ORDER BY invite_id")
+      .all();
+    expect(after.results).toEqual(before.results);
   });
 
   it("uses the migration journal for idempotent application without replaying immutable seeds", async () => {

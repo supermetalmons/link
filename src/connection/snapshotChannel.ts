@@ -41,7 +41,7 @@ export type SnapshotChannelDependencies<
   createSocket: (url: string, protocols?: string[]) => SnapshotSocket;
   getProtocols?: (forceRefresh: boolean) => Promise<string[]>;
   getTokenRemainingMs?: (token: string) => number;
-  readSnapshot: (signal: AbortSignal) => Promise<TResponse>;
+  readSnapshot?: (signal: AbortSignal) => Promise<TResponse>;
   parseMessage: (value: unknown) => TSnapshot | null;
   captureGeneration?: () => number;
   needsHttpRefresh?: () => boolean;
@@ -156,7 +156,12 @@ export class SnapshotChannel<
   }
 
   requestRefresh(): void {
-    if (!this.isActive() || !this.dependencies.isOnline()) return;
+    if (
+      !this.dependencies.readSnapshot ||
+      !this.isActive() ||
+      !this.dependencies.isOnline()
+    )
+      return;
     if (this.reading) {
       this.refreshAgain = true;
       return;
@@ -206,6 +211,7 @@ export class SnapshotChannel<
   private scheduleHttp(delayMs: number): void {
     this.clearTimer("httpTimer");
     if (
+      !this.dependencies.readSnapshot ||
       !this.isActive() ||
       !this.dependencies.isOnline() ||
       !this.dependencies.isVisible()
@@ -221,9 +227,11 @@ export class SnapshotChannel<
   }
 
   private async read(): Promise<void> {
+    const readSnapshot = this.dependencies.readSnapshot;
+    if (!readSnapshot) return;
     try {
       const requestGeneration = this.dependencies.captureGeneration?.() ?? 0;
-      const response = await this.dependencies.readSnapshot(this.signal);
+      const response = await readSnapshot(this.signal);
       if (!this.isActive()) return;
       this.httpFailures = 0;
       this.nextHttpAt = 0;

@@ -2,8 +2,10 @@ import type { ProfileEventPrizesSnapshot } from "@mons/shared/event-prizes";
 import {
   eventBookmarkEpoch,
   isEventSnapshotSeed,
+  isEventUpdateMessage,
   type EventSnapshotResponse,
   type EventSnapshotSeed,
+  type EventUpdateMessage,
 } from "@mons/shared/events";
 import type {
   ConditionalRead,
@@ -49,6 +51,10 @@ type EventPollingEntry = PollingEntry<EventSnapshotResponse> & {
   fresh: boolean;
   retiredEpochs: Set<string>;
   validatedAtMs: number | null;
+  pendingUpdate: EventUpdateMessage | null;
+  readUpdate: EventUpdateMessage | null;
+  updateFollowupUsed: boolean;
+  stopUpdates: (() => void) | null;
 };
 
 type CachedEventSnapshot = {
@@ -71,6 +77,10 @@ type EventPollingRegistryDependencies = {
     options: ConditionalReadOptions,
   ) => Promise<ConditionalRead<ProfileEventPrizesSnapshot>>;
   onEventIdle?: (eventId: string) => void;
+  subscribeToEventUpdates?: (
+    eventId: string,
+    onUpdate: (update: EventUpdateMessage) => void,
+  ) => () => void;
   setTimer: (callback: () => void, delayMs: number) => TimerHandle;
   backoffMs?: readonly number[];
   intervalMs?: number;
@@ -227,14 +237,16 @@ export class EventPollingRegistry {
     entry.etag = seed.etag;
     entry.bookmark = seed.bookmark;
     entry.lastResponse = seed.snapshot;
+    this.clearSatisfiedUpdate(entry, seed.snapshot, epoch);
+    if (entry.pendingUpdate) entry.bookmark = null;
     entry.consecutiveFailures = 0;
     entry.lastError = undefined;
     const responseVersion = entry.responseVersion;
-    this.setEventFreshness(entry, true);
+    this.setEventFreshness(entry, entry.pendingUpdate === null);
     if (entry.responseVersion !== responseVersion) return true;
     this.broadcastEntry(entry, seed.snapshot);
     if (entry.responseVersion === responseVersion) {
-      this.restartEntry(entry, this.intervalMs, true);
+      this.restartEntry(entry, entry.pendingUpdate ? 0 : this.intervalMs, true);
     }
     return true;
   }
@@ -295,11 +307,16 @@ export class EventPollingRegistry {
     this.pendingMutations.clear();
     this.eventSnapshots.clear();
     for (const entry of this.eventEntries.values()) {
+      entry.stopUpdates?.();
+      entry.stopUpdates = null;
       this.resetEntry(entry);
       entry.adoptedAtMs = null;
       entry.validatedAtMs = null;
       entry.epoch = null;
       entry.retiredEpochs.clear();
+      entry.pendingUpdate = null;
+      entry.readUpdate = null;
+      entry.updateFollowupUsed = false;
       this.setEventFreshness(entry, false);
       this.broadcastEntry(entry, {
         ok: true,
@@ -308,6 +325,7 @@ export class EventPollingRegistry {
         event: null,
         prizeSelections: {},
       });
+      this.startEventUpdates(entry);
     }
     for (const [profileId, entry] of this.profilePrizeEntries) {
       this.resetEntry(entry);
@@ -327,7 +345,8 @@ export class EventPollingRegistry {
   ): () => void {
     const entry =
       this.eventEntries.get(eventId) || this.createEventEntry(eventId);
-    return this.subscribe(
+    const shouldStartUpdates = entry.subscribers.size === 0;
+    const unsubscribe = this.subscribe(
       entry,
       onUpdate,
       onError,
@@ -335,6 +354,8 @@ export class EventPollingRegistry {
         if (this.eventEntries.get(eventId) !== entry) return;
         const generation = this.generation;
         this.eventEntries.delete(eventId);
+        entry.stopUpdates?.();
+        entry.stopUpdates = null;
         this.teardownEntry(entry);
         this.releaseVisibilityListenerIfIdle();
         this.dependencies.onEventIdle?.(eventId);
@@ -360,6 +381,76 @@ export class EventPollingRegistry {
       },
       this.initialEventDelay(entry),
     );
+    if (shouldStartUpdates) this.startEventUpdates(entry);
+    return unsubscribe;
+  }
+
+  private startEventUpdates(entry: EventPollingEntry): void {
+    if (
+      !this.dependencies.subscribeToEventUpdates ||
+      entry.subscribers.size === 0 ||
+      entry.stopUpdates !== null
+    )
+      return;
+    const token = entry.lifecycleToken;
+    const stop = this.dependencies.subscribeToEventUpdates(
+      entry.eventId,
+      (update) => {
+        if (
+          this.eventEntries.get(entry.eventId) !== entry ||
+          entry.lifecycleToken !== token ||
+          entry.subscribers.size === 0 ||
+          !isEventUpdateMessage(update) ||
+          update.eventId !== entry.eventId ||
+          entry.retiredEpochs.has(update.epoch) ||
+          (update.epoch === entry.epoch &&
+            update.revision <= (entry.lastResponse?.revision ?? -1))
+        )
+          return;
+        const pending = entry.pendingUpdate;
+        if (
+          pending?.epoch === update.epoch &&
+          pending.revision >= update.revision
+        )
+          return;
+        entry.pendingUpdate = update;
+        entry.updateFollowupUsed = false;
+        if (pending && entry.abortController) return;
+        entry.responseVersion += 1;
+        entry.adoptedAtMs = null;
+        entry.bookmark = null;
+        this.setEventFreshness(entry, false);
+        this.refreshEntry(entry, true);
+      },
+    );
+    if (
+      entry.lifecycleToken === token &&
+      this.eventEntries.get(entry.eventId) === entry
+    )
+      entry.stopUpdates = stop;
+    else stop();
+  }
+
+  private clearSatisfiedUpdate(
+    entry: EventPollingEntry,
+    snapshot: EventSnapshotResponse,
+    epoch: string,
+    readUpdate: EventUpdateMessage | null = null,
+  ): void {
+    const pending = entry.pendingUpdate;
+    if (
+      pending &&
+      (entry.retiredEpochs.has(pending.epoch) ||
+        (pending.epoch === epoch && snapshot.revision >= pending.revision) ||
+        (pending === readUpdate && pending.epoch !== epoch))
+    )
+      entry.pendingUpdate = null;
+  }
+
+  private scheduleUpdateFollowup(entry: EventPollingEntry): void {
+    entry.bookmark = null;
+    entry.queuedDelayMs = entry.updateFollowupUsed ? this.intervalMs : 0;
+    entry.updateFollowupUsed = true;
   }
 
   private subscribe<T>(
@@ -394,15 +485,20 @@ export class EventPollingRegistry {
     const cached = this.readCachedEventSnapshot(eventId);
     this.eventSnapshots.delete(eventId);
     const entry: EventPollingEntry = {
-      ...this.createEntry((options) =>
-        this.dependencies.loadEvent(eventId, options),
-      ),
+      ...this.createEntry((options) => {
+        entry.readUpdate = entry.pendingUpdate;
+        return this.dependencies.loadEvent(eventId, options);
+      }),
       adoptedAtMs: cached?.adoptedAtMs ?? null,
       epoch: eventBookmarkEpoch(cached?.seed.bookmark),
       eventId,
       fresh: false,
       retiredEpochs: cached?.retiredEpochs ?? new Set(),
       validatedAtMs: cached?.validatedAtMs ?? null,
+      pendingUpdate: null,
+      readUpdate: null,
+      updateFollowupUsed: false,
+      stopUpdates: null,
     };
     if (cached) {
       entry.lastResponse = cached.seed.snapshot;
@@ -413,9 +509,14 @@ export class EventPollingRegistry {
     entry.onReadAccepted = () => {
       entry.adoptedAtMs = null;
       entry.validatedAtMs = this.now();
-      this.setEventFreshness(entry, true);
+      if (entry.pendingUpdate) entry.bookmark = null;
+      this.setEventFreshness(entry, entry.pendingUpdate === null);
     };
-    entry.onReadFailed = () => this.setEventFreshness(entry, false);
+    entry.onReadFailed = () => {
+      if (entry.pendingUpdate && entry.pendingUpdate !== entry.readUpdate)
+        this.scheduleUpdateFollowup(entry);
+      this.setEventFreshness(entry, false);
+    };
     this.eventEntries.set(eventId, entry);
     if (entry.adoptedAtMs !== null && this.initialEventDelay(entry) > 0) {
       this.setEventFreshness(entry, true);
@@ -446,6 +547,17 @@ export class EventPollingRegistry {
         entry.bookmark = null;
         throw new Error("invalid-event-not-modified-response");
       }
+      this.clearSatisfiedUpdate(
+        entry,
+        entry.lastResponse,
+        epoch,
+        entry.readUpdate,
+      );
+      if (entry.pendingUpdate) {
+        entry.etag = null;
+        this.scheduleUpdateFollowup(entry);
+        return false;
+      }
       return true;
     }
     const seed: EventSnapshotSeed = {
@@ -469,6 +581,8 @@ export class EventPollingRegistry {
     if (entry.epoch && entry.epoch !== epoch)
       entry.retiredEpochs.add(entry.epoch);
     entry.epoch = epoch;
+    this.clearSatisfiedUpdate(entry, result.value, epoch!, entry.readUpdate);
+    if (entry.pendingUpdate) this.scheduleUpdateFollowup(entry);
     if (result.value.event === null) this.eventSnapshots.delete(entry.eventId);
     return true;
   }

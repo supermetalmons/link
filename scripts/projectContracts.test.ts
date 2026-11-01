@@ -105,9 +105,13 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   ]);
   assert.deepEqual(config.exports, {
     InviteReactions: { type: "durable-object", storage: "sqlite" },
+    EventUpdates: { type: "durable-object", storage: "sqlite" },
   });
   assert.deepEqual(config.durable_objects, {
-    bindings: [{ name: "INVITE_REACTIONS", class_name: "InviteReactions" }],
+    bindings: [
+      { name: "INVITE_REACTIONS", class_name: "InviteReactions" },
+      { name: "EVENT_UPDATES", class_name: "EventUpdates" },
+    ],
   });
   assert.equal(config.migrations, undefined);
   assert.deepEqual(config.workflows, [

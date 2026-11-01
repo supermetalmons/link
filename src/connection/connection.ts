@@ -213,6 +213,7 @@ import { InviteReactionChannel } from "./inviteReactionChannel";
 import { InviteMetadataChannel } from "./inviteMetadataChannel";
 import { MatchSyncChannel } from "./matchSyncChannel";
 import type { MatchSyncSnapshot } from "@mons/shared/match-sync";
+import { isCompletedMatchPair } from "./matchCompletion";
 import type { ReadGameBootstrapResponse } from "@mons/shared/game-bootstrap";
 import {
   GameBootstrapApiError,
@@ -249,6 +250,10 @@ import {
 import { transition, transitionToHome } from "../session/sessionTransitionPort";
 import { startNavigationGamesPolling } from "./navigationGamesPoller";
 import { EventClient, type EventSyncResponse } from "./eventClient";
+import {
+  EventUpdatesChannel,
+  createEventUpdatesSocketProtocols,
+} from "./eventUpdatesChannel";
 import { WagerClient, type WagerOwner } from "./wagerClient";
 import { ProfileClient } from "./profileClient";
 import { AutomatchClient } from "./automatchClient";
@@ -353,6 +358,15 @@ class Connection {
   private readonly moveDeliveries = new Map<string, MoveDelivery>();
   private readonly reconcilingMoveKeys = new Set<string>();
   private readonly confirmedSurrenders = new Set<string>();
+  private readonly pendingSurrenders = new Map<string, Promise<void>>();
+  private readonly pendingMatchCompletions = new Map<
+    string,
+    {
+      assertCurrentUser: () => void;
+      isInFlight: () => boolean;
+      observe: (snapshot: MatchSyncSnapshot) => void;
+    }
+  >();
   private readonly moveRecoveryTimers = new Map<
     string,
     ReturnType<typeof setTimeout>
@@ -859,6 +873,49 @@ class Connection {
         document.visibilityState !== "hidden",
       setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
       notifyNavigationGamesChanged: () => this.notifyNavigationGamesChanged(),
+      subscribeToEventUpdates: (eventId, onUpdate) => {
+        const user = this.auth.currentUser;
+        if (!user) return () => {};
+        const channel = new EventUpdatesChannel({
+          eventId,
+          createSocket: (url, protocols) => new WebSocket(url, protocols),
+          getTokenRemainingMs: (token) => this.auth.getTokenRemainingMs(token),
+          getProtocols: async (forceRefresh) => {
+            const tokenProvider = this.getUserBoundAuthTokenProvider(user.uid);
+            const token = await tokenProvider(forceRefresh);
+            tokenProvider.assertCurrentUser();
+            return createEventUpdatesSocketProtocols(token);
+          },
+          isActive: () => this.auth.currentUser === user,
+          isOnline: () => typeof navigator === "undefined" || navigator.onLine,
+          isVisible: () =>
+            typeof document === "undefined" ||
+            document.visibilityState === "visible",
+          addWakeListener: (listener) => {
+            if (typeof window === "undefined") return () => {};
+            window.addEventListener("online", listener);
+            window.addEventListener("offline", listener);
+            window.addEventListener("pageshow", listener);
+            document.addEventListener("visibilitychange", listener);
+            return () => {
+              window.removeEventListener("online", listener);
+              window.removeEventListener("offline", listener);
+              window.removeEventListener("pageshow", listener);
+              document.removeEventListener("visibilitychange", listener);
+            };
+          },
+          onUpdate,
+          onError: (error) =>
+            this.logContextEvent("event.updates.unavailable", {
+              eventId,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
+          clearTimer: (timer) => clearTimeout(timer),
+          random: Math.random,
+        });
+        return () => channel.stop();
+      },
     });
   }
 
@@ -1183,6 +1240,7 @@ class Connection {
   }
 
   public detachFromProfileSession(): void {
+    this.pendingMatchCompletions.clear();
     this.loginUid = null;
     this.setSameProfilePlayerUid(null);
     this.wagerClient.resetProfile();
@@ -2406,41 +2464,125 @@ class Connection {
   }
 
   public async updateRatings(): Promise<RatingUpdateResponse> {
+    let retainRecovery = false;
+    let recovering = false;
+    let releaseRecovery = () => {};
     try {
-      const writableContext = this.requireWritableContext(
+      const currentContext = this.requireWritableContext(
         undefined,
         "updateRatings",
       );
-      if (!writableContext) {
+      if (!currentContext) {
         return { ok: false };
       }
+      const writableContext = { ...currentContext };
       const opponentId = this.getOpponentId(writableContext.actorUid);
+      const eventId = this.getCurrentInviteEventId();
+      const completionKey = moveDeliveryStorageKey(
+        this.moveDeliveryScope(writableContext),
+      );
+      const pendingSurrender = this.pendingSurrenders.get(completionKey);
       const tokenProvider = this.getUserBoundAuthTokenProvider(
         writableContext.loginUid,
       );
+      const existingCompletion =
+        this.pendingMatchCompletions.get(completionKey);
+      if (existingCompletion) {
+        try {
+          existingCompletion.assertCurrentUser();
+          if (pendingSurrender || existingCompletion.isInFlight())
+            return { ok: true, skipped: true };
+        } catch {}
+        this.pendingMatchCompletions.delete(completionKey);
+      }
+      const submit = async () => {
+        tokenProvider.assertCurrentUser();
+        if (eventId) {
+          void this.eventClient
+            .syncEventStateAfterMatch(eventId, writableContext.matchId)
+            .catch((error) => {
+              console.error("Error progressing event after match:", error);
+            });
+        }
+        const response = await updateRatingsViaApi(
+          {
+            playerId: writableContext.actorUid,
+            inviteId: writableContext.inviteId,
+            matchId: writableContext.matchId,
+            opponentId,
+          },
+          tokenProvider,
+          {
+            shouldRetry: () =>
+              this.auth.currentUser?.uid === writableContext.loginUid,
+          },
+        );
+        if (response.ok && !("skipped" in response)) releaseRecovery();
+        this.notifyNavigationGamesChanged();
+        return response;
+      };
+      let terminalConfirmed = false;
+      const observe = (snapshot: MatchSyncSnapshot) => {
+        try {
+          tokenProvider.assertCurrentUser();
+        } catch {
+          releaseRecovery();
+          return;
+        }
+        const participants = [snapshot.hostPlayerId, snapshot.guestPlayerId];
+        if (
+          snapshot.inviteId !== writableContext.inviteId ||
+          snapshot.matchId !== writableContext.matchId ||
+          !participants.includes(writableContext.actorUid) ||
+          !participants.includes(opponentId) ||
+          !isCompletedMatchPair(snapshot)
+        )
+          return;
+        terminalConfirmed = true;
+        if (!retainRecovery || recovering) return;
+        recovering = true;
+        void submit()
+          .catch((error) => {
+            console.error("Error recovering match completion:", error);
+          })
+          .finally(() => {
+            recovering = false;
+          });
+      };
+      releaseRecovery = () => {
+        if (
+          this.pendingMatchCompletions.get(completionKey)?.observe === observe
+        )
+          this.pendingMatchCompletions.delete(completionKey);
+      };
+      if (pendingSurrender) {
+        this.pendingMatchCompletions.set(completionKey, {
+          assertCurrentUser: tokenProvider.assertCurrentUser,
+          isInFlight: () => !retainRecovery || recovering,
+          observe,
+        });
+        const snapshot = this.matchSyncSubscription?.snapshot;
+        if (snapshot) observe(snapshot);
+      }
       await this.ensureAuthenticated();
       await this.flushPendingMoves(writableContext, {
         requireCurrentContext: false,
       });
-      tokenProvider.assertCurrentUser();
-      const response = await updateRatingsViaApi(
-        {
-          playerId: writableContext.actorUid,
-          inviteId: writableContext.inviteId,
-          matchId: writableContext.matchId,
-          opponentId,
-        },
-        tokenProvider,
-        {
-          shouldRetry: () =>
-            this.auth.currentUser?.uid === writableContext.loginUid,
-        },
-      );
-      this.notifyNavigationGamesChanged();
-      return response;
+      try {
+        await pendingSurrender;
+      } catch (error) {
+        tokenProvider.assertCurrentUser();
+        retainRecovery = true;
+        if (!terminalConfirmed) throw error;
+        recovering = true;
+      }
+      return await submit();
     } catch (error) {
       console.error("Error updating ratings:", error);
       throw error;
+    } finally {
+      recovering = false;
+      if (!retainRecovery) releaseRecovery();
     }
   }
 
@@ -2738,17 +2880,46 @@ class Connection {
       }
     };
     this.myMatch.status = "surrendered";
-    void this.flushPendingMoves(writableContext, {
+    const surrenderKey = moveDeliveryStorageKey(scope);
+    const pending = this.flushPendingMoves(writableContext, {
       requireCurrentContext: false,
     })
       .then(() =>
         surrenderMatchViaApi(
           { inviteId, matchId, playerId: actorUid },
           tokenProvider,
-        ),
+        )
+          .then(() => true)
+          .catch(async (error) => {
+            tokenProvider.assertCurrentUser();
+            const { snapshot } = await readMatchSyncViaApi(
+              inviteId,
+              matchId,
+              tokenProvider,
+            );
+            tokenProvider.assertCurrentUser();
+            const actorMatch =
+              snapshot.hostPlayerId === actorUid
+                ? snapshot.hostMatch
+                : snapshot.guestPlayerId === actorUid
+                  ? snapshot.guestMatch
+                  : null;
+            if (
+              snapshot.inviteId !== inviteId ||
+              snapshot.matchId !== matchId ||
+              !actorMatch ||
+              !isCompletedMatchPair(snapshot)
+            )
+              throw error;
+            return actorMatch.status === "surrendered";
+          }),
       )
-      .then(() => {
+      .then((surrendered) => {
         tokenProvider.assertCurrentUser();
+        if (!surrendered) {
+          this.recoverMoveBoard(scope);
+          return;
+        }
         this.confirmedSurrenders.add(moveDeliveryStorageKey(scope));
         if (this.isCurrentMoveBoard(scope) && this.myMatch) {
           this.myMatch.status = "surrendered";
@@ -2765,7 +2936,9 @@ class Connection {
           contextId,
           sessionEpoch,
         });
-      })
+      });
+    this.pendingSurrenders.set(surrenderKey, pending);
+    void pending
       .catch((error) => {
         if (!requestIsCurrent()) return;
         this.logContextEvent("ctx.write.fail", {
@@ -2778,6 +2951,10 @@ class Connection {
           error: error instanceof Error ? error.message : String(error),
         });
         this.reconnectAfterMatchUpdateFailure(inviteId, requestIsCurrent);
+      })
+      .finally(() => {
+        if (this.pendingSurrenders.get(surrenderKey) === pending)
+          this.pendingSurrenders.delete(surrenderKey);
       });
     return true;
   }
@@ -4172,6 +4349,18 @@ class Connection {
       snapshot.guestPlayerId !== (this.latestInvite?.guestId ?? null)
     )
       return;
+    if (context.canWrite && context.actorUid) {
+      this.pendingMatchCompletions
+        .get(
+          moveDeliveryStorageKey({
+            loginUid: context.loginUid,
+            inviteId: context.inviteId,
+            matchId: context.matchId,
+            playerId: context.actorUid,
+          }),
+        )
+        ?.observe(snapshot);
+    }
     const matches = new Map<string, Match>();
     for (const playerId of players) {
       if (context.canWrite && context.actorUid === playerId) continue;

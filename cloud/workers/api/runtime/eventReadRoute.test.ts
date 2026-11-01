@@ -1,4 +1,5 @@
 import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
+import { eventApplicationEnvironment } from "./eventApplicationFixture.ts";
 import { patchEventOwnedPaths } from "./eventD1Fixture.ts";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
@@ -25,7 +26,7 @@ import {
 } from "../src/eventD1.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 
-const testEnv = env as Env & {
+const testEnv = eventApplicationEnvironment(env) as Env & {
   TEST_EVENT_D1_MIGRATIONS: D1Migration[];
   TEST_D1_MIGRATIONS: D1Migration[];
 };

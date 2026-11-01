@@ -65,6 +65,7 @@ function runtime() {
     {
       ...env,
       INVITE_REACTIONS: canonicalMatchEnvironment(env).INVITE_REACTIONS,
+      EVENT_UPDATES: canonicalMatchEnvironment(env).EVENT_UPDATES,
       AUTH_RATE_LIMITER: TELEGRAM_TEST_ENV.AUTH_RATE_LIMITER,
       MOVE_RATE_LIMITER: TELEGRAM_TEST_ENV.MOVE_RATE_LIMITER,
       PROFILE_GAME_PROJECTION_QUEUE:

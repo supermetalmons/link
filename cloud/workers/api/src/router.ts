@@ -40,6 +40,11 @@ import {
 import type { WorkerExecutionContext } from "./sessionAuth.ts";
 import { EVENT_PATHS, handleEventRoute } from "./eventRoute.ts";
 import {
+  handleEventUpdatesRoute,
+  isEventUpdatesPath,
+  type EventUpdatesRouteDependencies,
+} from "./eventUpdatesRoute.ts";
+import {
   EVENT_SNAPSHOT_PATH,
   PROFILE_EVENT_PRIZES_PATH,
   handleEventReadRoute,
@@ -100,6 +105,7 @@ type RequestDependencies = Partial<WorkerDependencies> & {
   metadata?: InviteMetadataRouteDependencies;
   wagers?: InviteWagersRouteDependencies;
   matchSync?: MatchSyncRouteDependencies;
+  eventUpdates?: EventUpdatesRouteDependencies;
   gameBootstrap?: GameBootstrapRouteDependencies;
   xCallback?: XCallbackDependencyOverrides;
 };
@@ -127,6 +133,12 @@ type HttpRoute = {
 );
 
 const routes: readonly HttpRoute[] = [
+  {
+    matches: isEventUpdatesPath,
+    needsContext: true,
+    run: ({ request, env, ctx, overrides }) =>
+      handleEventUpdatesRoute(request, env, ctx, overrides.eventUpdates),
+  },
   {
     matches: (path) => path === MATCH_SNAPSHOT_PATH,
     fetchOnly: true,

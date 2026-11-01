@@ -34,6 +34,7 @@ function applicationExecutionEnv(
 ): Env {
   const databases = new Map<ApplicationDatabaseBinding, D1Database>();
   let rooms: Env["INVITE_REACTIONS"] | undefined;
+  let eventRooms: Env["EVENT_UPDATES"] | undefined;
   return new Proxy(env, {
     get(target, property) {
       if (property === "INVITE_REACTIONS") {
@@ -42,6 +43,14 @@ function applicationExecutionEnv(
           () => (typeof admission === "function" ? admission() : admission),
         );
         return rooms;
+      }
+      if (property === "EVENT_UPDATES") {
+        const namespace = target.EVENT_UPDATES;
+        if (!namespace) return undefined;
+        eventRooms ??= propagateApplicationRoomAdmission(namespace, () =>
+          typeof admission === "function" ? admission() : admission,
+        );
+        return eventRooms;
       }
       if (!isDatabaseBinding(property)) {
         const value: unknown = Reflect.get(target, property, target);

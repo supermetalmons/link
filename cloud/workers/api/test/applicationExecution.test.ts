@@ -7,6 +7,8 @@ import {
   scopedApplicationEnv,
 } from "../src/applicationExecution.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+import { notifyEventUpdates } from "../src/eventUpdatesNotifications.ts";
+import { readApplicationRpcAdmission } from "../src/applicationRoomRpc.ts";
 
 test("execution waits for waitUntil work before releasing its admission", async () => {
   const statements: string[] = [];
@@ -81,4 +83,65 @@ test("lazy Workflow repositories cannot write outside an admitted step", async (
   assert.equal(currentApplicationAdmission(), undefined);
   await step.sleep();
   await assert.rejects(statement.run(), /application-data-unavailable/);
+});
+
+test("staging without an event-update binding preserves optional notifications", async () => {
+  const staging = new Proxy(TELEGRAM_TEST_ENV, {
+    get(target, property) {
+      return property === "EVENT_UPDATES"
+        ? undefined
+        : Reflect.get(target, property, target);
+    },
+  });
+  const scoped = scopedApplicationEnv(staging);
+  assert.equal(scoped.EVENT_UPDATES, undefined);
+  await notifyEventUpdates(
+    scoped,
+    { "event-one": 1 },
+    {
+      logFailure: () =>
+        assert.fail("absent binding is not a notification failure"),
+    },
+  );
+  await runApplicationOperation(staging, "http", 1, async (admitted) => {
+    assert.equal(admitted.EVENT_UPDATES, undefined);
+    await notifyEventUpdates(admitted, { "event-one": 1 });
+  });
+});
+
+test("configured event-update namespaces retain application admission fencing", async () => {
+  const calls: unknown[][] = [];
+  const namespace = new Proxy(TELEGRAM_TEST_ENV.EVENT_UPDATES, {
+    get(target, property) {
+      if (property === "getByName")
+        return (name: string) => {
+          assert.equal(name, "event-one");
+          return {
+            async notifyEventChanged(...args: unknown[]) {
+              readApplicationRpcAdmission(args[3]);
+              calls.push(args);
+            },
+          };
+        };
+      return Reflect.get(target, property, target);
+    },
+  });
+  const configured = { ...TELEGRAM_TEST_ENV, EVENT_UPDATES: namespace };
+  const scoped = scopedApplicationEnv(configured);
+  const notify = () =>
+    scoped.EVENT_UPDATES.getByName("event-one").notifyEventChanged(
+      "event-one",
+      configured.EVENT_DB_BOOKMARK_EPOCH,
+      4,
+    );
+  assert.throws(notify, /application-data-unavailable/);
+  await runApplicationOperation(configured, "http", 1, async () => {
+    const admission = currentApplicationAdmission();
+    await notify();
+    assert.deepEqual(calls, [
+      ["event-one", configured.EVENT_DB_BOOKMARK_EPOCH, 4, admission],
+    ]);
+  });
+  assert.throws(notify, /application-data-unavailable/);
+  assert.equal(calls.length, 1);
 });

@@ -101,6 +101,14 @@ export type EventSnapshotSeed = {
   bookmark: string;
 };
 
+export type EventUpdateMessage = {
+  schemaVersion: 1;
+  type: "event-changed";
+  eventId: string;
+  epoch: string;
+  revision: number;
+};
+
 export type PostponeEventStartResponse = CreateEventResponse & {
   postponeByMinutes: EventPostponeMinutes;
   startAtMs: number;
@@ -224,6 +232,8 @@ const EVENT_BOOKMARK_HEADER = "X-D1-Bookmark";
 const EVENT_ETAG_HEADER = "ETag";
 const MAX_EVENT_READ_RESPONSE_BYTES: number = 640 * 1024;
 const MAX_EVENT_BOOKMARK_LENGTH = 2048;
+const EVENT_UPDATES_SOCKET_PROTOCOL = "mons-event-updates-v1";
+const EVENT_UPDATES_MAX_MESSAGE_BYTES = 2048;
 
 function eventSnapshotEtag(eventId: string, revision: number): string {
   return `W/"event-snapshot-${encodeURIComponent(eventId)}-${revision}"`;
@@ -590,6 +600,27 @@ function isEventSnapshotSeed(value: unknown): value is EventSnapshotSeed {
   );
 }
 
+function isEventUpdateMessage(value: unknown): value is EventUpdateMessage {
+  return (
+    isExactRecord(value, [
+      "schemaVersion",
+      "type",
+      "eventId",
+      "epoch",
+      "revision",
+    ]) &&
+    value.schemaVersion === 1 &&
+    value.type === "event-changed" &&
+    isExactSafeRecordKey(value.eventId) &&
+    typeof value.epoch === "string" &&
+    /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(
+      value.epoch,
+    ) &&
+    Number.isSafeInteger(value.revision) &&
+    (value.revision as number) >= 0
+  );
+}
+
 function isPostponeEventStartResponse(
   value: unknown,
 ): value is PostponeEventStartResponse {
@@ -667,6 +698,8 @@ export {
   EVENT_POSTPONE_OPTIONS_MINUTES,
   EVENT_BOOKMARK_HEADER,
   EVENT_ETAG_HEADER,
+  EVENT_UPDATES_SOCKET_PROTOCOL,
+  EVENT_UPDATES_MAX_MESSAGE_BYTES,
   EVENT_SCHEDULE_TIMEZONE_OPTIONS,
   EVENT_SCHEMA_VERSION,
   MAX_EVENT_PARTICIPANTS,
@@ -676,6 +709,7 @@ export {
   eventSnapshotEtag,
   eventBookmarkEpoch,
   isEventSnapshotSeed,
+  isEventUpdateMessage,
   MAX_STARTS_IN_DAYS,
   MAX_STARTS_IN_MINUTES,
   MIN_STARTS_IN_MINUTES,

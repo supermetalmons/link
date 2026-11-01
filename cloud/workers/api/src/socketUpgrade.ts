@@ -6,6 +6,7 @@ import type {
 import type { StoredReactionSnapshot } from "./reactionRecords.ts";
 import type { RoomSocketAttachment } from "./socketAttachmentRecords.ts";
 import type { SocketSessions } from "./socketSession.ts";
+import type { EventUpdateMessage } from "@mons/shared/events";
 type InviteMetadataMessage =
   ApiSocketMessage<"GET /invites/:inviteId/metadata/socket">;
 type InviteWagersMessage =
@@ -26,6 +27,7 @@ export type InviteChannelSnapshotMessage = {
 type SocketSnapshot =
   | InviteChannelSnapshotMessage
   | MatchSyncMessage
+  | EventUpdateMessage
   | InviteRoomSnapshot
   | StoredReactionSnapshot;
 

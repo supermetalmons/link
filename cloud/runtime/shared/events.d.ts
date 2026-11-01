@@ -92,6 +92,13 @@ export type EventSnapshotSeed = {
   etag: string;
   bookmark: string;
 };
+export type EventUpdateMessage = {
+  schemaVersion: 1;
+  type: "event-changed";
+  eventId: string;
+  epoch: string;
+  revision: number;
+};
 export type PostponeEventStartResponse = CreateEventResponse & {
   postponeByMinutes: EventPostponeMinutes;
   startAtMs: number;
@@ -207,6 +214,8 @@ declare const EVENT_BOOKMARK_HEADER = "X-D1-Bookmark";
 declare const EVENT_ETAG_HEADER = "ETag";
 declare const MAX_EVENT_READ_RESPONSE_BYTES: number;
 declare const MAX_EVENT_BOOKMARK_LENGTH = 2048;
+declare const EVENT_UPDATES_SOCKET_PROTOCOL = "mons-event-updates-v1";
+declare const EVENT_UPDATES_MAX_MESSAGE_BYTES = 2048;
 declare function eventSnapshotEtag(eventId: string, revision: number): string;
 declare function eventBookmarkEpoch(value: unknown): string | null;
 declare function buildEventMatchKey(
@@ -266,6 +275,9 @@ declare function isEventSnapshotResponse(
 declare function isEventSnapshotSeed(
   value: unknown,
 ): value is EventSnapshotSeed;
+declare function isEventUpdateMessage(
+  value: unknown,
+): value is EventUpdateMessage;
 declare function isPostponeEventStartResponse(
   value: unknown,
 ): value is PostponeEventStartResponse;
@@ -279,6 +291,8 @@ export {
   EVENT_POSTPONE_OPTIONS_MINUTES,
   EVENT_BOOKMARK_HEADER,
   EVENT_ETAG_HEADER,
+  EVENT_UPDATES_SOCKET_PROTOCOL,
+  EVENT_UPDATES_MAX_MESSAGE_BYTES,
   EVENT_SCHEDULE_TIMEZONE_OPTIONS,
   EVENT_SCHEMA_VERSION,
   MAX_EVENT_PARTICIPANTS,
@@ -288,6 +302,7 @@ export {
   eventSnapshotEtag,
   eventBookmarkEpoch,
   isEventSnapshotSeed,
+  isEventUpdateMessage,
   MAX_STARTS_IN_DAYS,
   MAX_STARTS_IN_MINUTES,
   MIN_STARTS_IN_MINUTES,

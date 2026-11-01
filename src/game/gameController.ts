@@ -3796,7 +3796,7 @@ function updateRatings(isWin: boolean) {
     return;
   }
 
-  connection.updateRatings();
+  void connection.updateRatings().catch(() => {});
 
   const isEventGame =
     connection.isCurrentInviteEventOwned() ||

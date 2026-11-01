@@ -317,6 +317,14 @@ export type ApiEndpoints = {
       eventId: string;
     }
   >;
+  "GET /events/:eventId/socket": Endpoint<
+    undefined,
+    never,
+    ApiSocket<Events.EventUpdateMessage>,
+    {
+      eventId: string;
+    }
+  >;
   "GET /events/prizes": Endpoint<
     undefined,
     EventPrizes.ProfileEventPrizesPageResponse,

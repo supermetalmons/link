@@ -3,14 +3,14 @@ import { admittedApplicationRoom } from "./applicationRoomFixture.ts";
 export function eventApplicationEnvironment(env: Env): Env {
   return new Proxy(env, {
     get(target, property) {
-      if (property !== "INVITE_REACTIONS")
+      if (property !== "INVITE_REACTIONS" && property !== "EVENT_UPDATES")
         return Reflect.get(target, property, target);
-      return new Proxy(target.INVITE_REACTIONS, {
+      return new Proxy(target[property], {
         get(namespace, member) {
           if (member !== "getByName")
             return Reflect.get(namespace, member, namespace);
           return (name: string) =>
-            admittedApplicationRoom(namespace.getByName(name));
+            admittedApplicationRoom(namespace.getByName(name), property);
         },
       });
     },

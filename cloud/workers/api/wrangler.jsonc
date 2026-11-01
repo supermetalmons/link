@@ -15,12 +15,20 @@
       "type": "durable-object",
       "storage": "sqlite",
     },
+    "EventUpdates": {
+      "type": "durable-object",
+      "storage": "sqlite",
+    },
   },
   "durable_objects": {
     "bindings": [
       {
         "name": "INVITE_REACTIONS",
         "class_name": "InviteReactions",
+      },
+      {
+        "name": "EVENT_UPDATES",
+        "class_name": "EventUpdates",
       },
     ],
   },

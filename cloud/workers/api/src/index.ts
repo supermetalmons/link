@@ -8,3 +8,4 @@ export {
 export { EventProgressWorkflow } from "./eventProgressWorkflow.ts";
 export { EventPrizeWithdrawalWorkflow } from "./eventPrizeWithdrawalWorkflow.ts";
 export { InviteReactions } from "./inviteReactions.ts";
+export { EventUpdates } from "./eventUpdates.ts";

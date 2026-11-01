@@ -24,8 +24,17 @@ type ReactionSocketAttachment = {
   schemaVersion: 2;
   matchId: string;
 } & SocketSession;
+type EventSocketAttachment = {
+  channel: "events";
+  schemaVersion: 1;
+  eventId: string;
+  uid: string;
+} & Extract<SocketSession, { authenticated: true }>;
 export type RoomSocketAttachment =
-  InviteSocketAttachment | MatchSocketAttachment | ReactionSocketAttachment;
+  | InviteSocketAttachment
+  | MatchSocketAttachment
+  | ReactionSocketAttachment
+  | EventSocketAttachment;
 export type SocketAttachment = RoomSocketAttachment | null;
 export type SocketMatchKey = string | null;
 export type SocketInviteKey = string | null;
@@ -55,15 +64,17 @@ export function decodeSocketAttachment(value: unknown): SocketAttachment {
   const keys =
     row.channel === "reaction"
       ? ["channel", "schemaVersion", "matchId", ...sessionKeys]
-      : [
-          "channel",
-          "schemaVersion",
-          "inviteId",
-          "role",
-          "actorUid",
-          ...sessionKeys,
-          ...(row.channel === "matches" ? ["matchId"] : []),
-        ];
+      : row.channel === "events"
+        ? ["channel", "schemaVersion", "eventId", "uid", ...sessionKeys]
+        : [
+            "channel",
+            "schemaVersion",
+            "inviteId",
+            "role",
+            "actorUid",
+            ...sessionKeys,
+            ...(row.channel === "matches" ? ["matchId"] : []),
+          ];
   if (
     Object.keys(row).length !== keys.length ||
     !keys.every((key) => Object.hasOwn(row, key))
@@ -75,6 +86,20 @@ export function decodeSocketAttachment(value: unknown): SocketAttachment {
           channel: row.channel,
           schemaVersion: 2,
           matchId: row.matchId,
+          ...session,
+        }
+      : null;
+  if (row.channel === "events")
+    return row.schemaVersion === 1 &&
+      session.authenticated &&
+      isSafeRecordKey(row.eventId) &&
+      row.eventId === row.eventId.trim() &&
+      isCanonicalLoginUid(row.uid)
+      ? {
+          channel: row.channel,
+          schemaVersion: 1,
+          eventId: row.eventId,
+          uid: row.uid,
           ...session,
         }
       : null;

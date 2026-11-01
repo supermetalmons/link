@@ -399,6 +399,7 @@ export const TELEGRAM_TEST_ENV = {
   MATCH_SYNC_RATE_LIMITER: rateLimit,
   REACTION_RATE_LIMITER: rateLimit,
   INVITE_REACTIONS: inviteReactions,
+  EVENT_UPDATES: inviteReactions,
   EVENT_PROGRESS_WORKFLOW: workflow,
   EVENT_DB: eventDb,
   EVENT_PRIZE_ADMIN_PRIVATE_KEY: "test-event-prize-private-key",
