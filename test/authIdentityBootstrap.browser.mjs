@@ -186,12 +186,16 @@ async function serve() {
   const entryPath = html.match(/<script[^>]+src="([^"]+)"/)?.[1];
   assert.ok(entryPath, "Built HTML must reference its bootstrap module");
   const entry = await readFile(resolve(root, entryPath.slice(1)), "utf8");
-  const appImport = entry.match(/import\(["'`]([^"'`]+)["'`]\)/)?.[1];
-  assert.ok(
-    appImport,
-    "Built bootstrap must dynamically import the application",
+  const appImports = [...entry.matchAll(/import\(["'`]([^"'`]+)["'`]\)/g)]
+    .map((match) => present(match[1]))
+    .filter((specifier) => /^\.\/src-[\w-]+\.js$/.test(specifier));
+  assert.equal(
+    appImports.length,
+    1,
+    "Built bootstrap must identify exactly one application chunk",
   );
-  const appPath = new URL(appImport, `http://fixture${entryPath}`).pathname;
+  const appPath = new URL(present(appImports[0]), `http://fixture${entryPath}`)
+    .pathname;
   const server = createHttpServer(async (request, response) => {
     const pathname = new URL(request.url ?? "/", "http://fixture").pathname;
     const relative = extname(pathname) ? pathname.slice(1) : "index.html";
