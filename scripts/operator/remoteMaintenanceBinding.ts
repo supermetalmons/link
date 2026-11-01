@@ -31,29 +31,11 @@ import { readResponseJson, resolveCloudflareToken } from "./runtime.ts";
 
 const CONTROL_SQL =
   "SELECT singleton, generation, data_epoch, phase, migration_id FROM application_data_control WHERE singleton = 1";
-const MAINTENANCE_BINDINGS: readonly MaintenanceBinding[] = [
+const BINDINGS: readonly MaintenanceBinding[] = [
   "PROFILE_GAMES_DB",
   "PROFILE_DB",
   "EVENT_DB",
   "EVENT_PRIZE_WITHDRAWALS_DB",
-];
-export type RemoteD1Binding =
-  MaintenanceBinding | "AUTH_STATE_DB" | "TELEGRAM_DB";
-export type RemoteD1Transport = {
-  readControl(): Promise<unknown[]>;
-  readRows(
-    binding: RemoteD1Binding,
-    statement: MaintenanceStatement,
-  ): Promise<Record<string, unknown>[]>;
-  atomicBatch(
-    binding: RemoteD1Binding,
-    statements: readonly MaintenanceStatement[],
-  ): Promise<MaintenanceResult[]>;
-};
-const BINDINGS: readonly RemoteD1Binding[] = [
-  ...MAINTENANCE_BINDINGS,
-  "AUTH_STATE_DB",
-  "TELEGRAM_DB",
 ];
 const DEADLINE_MS = 60_000;
 const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
@@ -68,7 +50,7 @@ export type RemoteMaintenanceConfiguration = {
   name: string;
   accountId: string;
   compatibilityDate: string;
-  targetBinding: RemoteD1Binding;
+  targetBinding: MaintenanceBinding;
   databases: Coordinates[];
   sourceConfigSha256: string;
   versions: typeof PINNED_VERSIONS;
@@ -309,8 +291,8 @@ function requireRecord(value: unknown): Record<string, unknown> {
     throw failure("invalid-message");
   return value as Record<string, unknown>;
 }
-function requireBinding(value: unknown): asserts value is RemoteD1Binding {
-  if (!BINDINGS.includes(value as RemoteD1Binding))
+function requireBinding(value: unknown): asserts value is MaintenanceBinding {
+  if (!BINDINGS.includes(value as MaintenanceBinding))
     throw failure("invalid-binding");
 }
 function requireStatements(
@@ -366,20 +348,11 @@ export function remoteMaintenanceConfiguration(
   targetBinding: MaintenanceBinding,
   configPath = DEFAULT_API_CONFIG,
 ): RemoteMaintenanceConfiguration {
-  if (!MAINTENANCE_BINDINGS.includes(targetBinding))
-    throw failure("invalid-binding");
-  return remoteD1Configuration(targetBinding, configPath);
-}
-
-export function remoteD1Configuration(
-  targetBinding: RemoteD1Binding,
-  configPath = DEFAULT_API_CONFIG,
-): RemoteMaintenanceConfiguration {
   requireBinding(targetBinding);
   const before = readFileSync(configPath),
     source = readOperatorConfiguration(configPath);
   const databases = [
-    ...new Set<RemoteD1Binding>(["PROFILE_GAMES_DB", targetBinding]),
+    ...new Set<MaintenanceBinding>(["PROFILE_GAMES_DB", targetBinding]),
   ].map((binding) => resolveD1Coordinates(binding, configPath));
   if (
     !before.equals(readFileSync(configPath)) ||
@@ -554,7 +527,7 @@ const nativeDependencies: NativeMaintenanceDependencies = {
 export async function openNativeMaintenanceBindings(
   input: StartInput,
   dependencies: NativeMaintenanceDependencies = nativeDependencies,
-): Promise<{ transport: RemoteD1Transport; dispose(): Promise<void> }> {
+): Promise<{ transport: MaintenanceTransport; dispose(): Promise<void> }> {
   let remote: RemoteSession | undefined,
     local: LocalRuntime | undefined,
     closed = false,
@@ -584,7 +557,7 @@ export async function openNativeMaintenanceBindings(
       .sort();
     if (JSON.stringify(Object.keys(env).sort()) !== JSON.stringify(expected))
       throw failure("binding-coverage-mismatch");
-    const database = (binding: RemoteD1Binding) => {
+    const database = (binding: MaintenanceBinding) => {
       if (closed) throw failure("session-closed");
       if (!expected.includes(binding)) throw failure("binding-outside-session");
       const value = env[binding];
@@ -597,7 +570,7 @@ export async function openNativeMaintenanceBindings(
         throw failure("native-binding-unavailable");
       return value;
     };
-    for (const binding of expected) database(binding as RemoteD1Binding);
+    for (const binding of expected) database(binding as MaintenanceBinding);
     return {
       dispose,
       transport: {
@@ -605,18 +578,6 @@ export async function openNativeMaintenanceBindings(
           const result = await database("PROFILE_GAMES_DB")
             .withSession("first-primary")
             .prepare(CONTROL_SQL)
-            .all();
-          return results([result], 1)[0]!.results;
-        },
-        async readRows(binding, statement) {
-          requireBinding(binding);
-          requireStatements([statement]);
-          if (!/^SELECT\s/i.test(statement.sql))
-            throw failure("invalid-statements");
-          const result = await database(binding)
-            .withSession("first-primary")
-            .prepare(statement.sql)
-            .bind(...statement.bindings)
             .all();
           return results([result], 1)[0]!.results;
         },
@@ -686,21 +647,7 @@ export async function openRemoteMaintenanceTransport(
   dispose(): Promise<void>;
   configuration: RemoteMaintenanceConfiguration;
 }> {
-  if (!MAINTENANCE_BINDINGS.includes(targetBinding))
-    throw failure("invalid-binding");
-  return openRemoteD1Transport(targetBinding, options, dependencies);
-}
-
-export async function openRemoteD1Transport(
-  targetBinding: RemoteD1Binding,
-  options: { configPath?: string; apiToken?: string } = {},
-  dependencies: ParentDependencies = parentDependencies,
-): Promise<{
-  transport: RemoteD1Transport;
-  dispose(): Promise<void>;
-  configuration: RemoteMaintenanceConfiguration;
-}> {
-  const configuration = remoteD1Configuration(
+  const configuration = remoteMaintenanceConfiguration(
     targetBinding,
     options.configPath,
   );
@@ -857,17 +804,6 @@ export async function openRemoteD1Transport(
           if (!Array.isArray(value)) throw failure("unconfirmed-result");
           return value.map(requireRecord);
         },
-        async readRows(binding, statement) {
-          requireBinding(binding);
-          requireStatements([statement]);
-          if (!/^SELECT\s/i.test(statement.sql))
-            throw failure("invalid-statements");
-          if (!configuration.databases.some((row) => row.binding === binding))
-            throw failure("binding-outside-session");
-          const value = await enqueue("readRows", { binding, statement });
-          if (!Array.isArray(value)) throw failure("unconfirmed-result");
-          return value.map(requireRecord);
-        },
         async atomicBatch(binding, statements) {
           requireBinding(binding);
           requireStatements(statements);
@@ -941,13 +877,6 @@ async function childMain(): Promise<void> {
         else if (row.kind === "readControl") {
           stage = "read-control";
           value = await session.transport.readControl();
-        } else if (row.kind === "readRows") {
-          stage = "read-control";
-          const payload = requireRecord(row.payload);
-          requireBinding(payload.binding);
-          requireStatements([payload.statement]);
-          const statement = payload.statement as MaintenanceStatement;
-          value = await session.transport.readRows(payload.binding, statement);
         } else if (row.kind === "atomicBatch") {
           stage = "atomic-batch";
           const payload = requireRecord(row.payload);

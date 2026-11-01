@@ -23,9 +23,6 @@ import {
 } from "miniflare";
 import {
   openNativeMaintenanceBindings,
-  openRemoteD1Transport,
-  remoteD1Configuration,
-  type RemoteD1Binding,
   openRemoteMaintenanceTransport,
   remoteMaintenanceChildEnvironment,
   remoteMaintenanceConfiguration,
@@ -41,8 +38,6 @@ const IDS = {
   PROFILE_GAMES_DB: "11111111-1111-4111-8111-111111111111",
   PROFILE_DB: "22222222-2222-4222-8222-222222222222",
   EVENT_DB: "33333333-3333-4333-8333-333333333333",
-  AUTH_STATE_DB: "44444444-4444-4444-8444-444444444444",
-  TELEGRAM_DB: "55555555-5555-4555-8555-555555555555",
 };
 const CONTROL = {
   singleton: 1,
@@ -66,7 +61,7 @@ type LocalDatabase = {
   ): Promise<Array<{ results: Record<string, unknown>[] }>>;
 };
 
-function configuration(t: test.TestContext, targetBinding?: RemoteD1Binding) {
+function configuration(t: test.TestContext) {
   const directory = mkdtempSync(resolve(tmpdir(), "remote-maintenance-test-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const path = resolve(directory, "source.json");
@@ -89,14 +84,12 @@ function configuration(t: test.TestContext, targetBinding?: RemoteD1Binding) {
   return {
     path,
     directory,
-    value: targetBinding
-      ? remoteD1Configuration(targetBinding, path)
-      : remoteMaintenanceConfiguration("PROFILE_DB", path),
+    value: remoteMaintenanceConfiguration("PROFILE_DB", path),
   };
 }
 
-function nativeFixture(t: test.TestContext, targetBinding?: RemoteD1Binding) {
-  const source = configuration(t, targetBinding);
+function nativeFixture(t: test.TestContext) {
+  const source = configuration(t);
   type Runtime = Awaited<
     ReturnType<NativeMaintenanceDependencies["createRuntime"]>
   >;
@@ -170,7 +163,7 @@ function nativeFixture(t: test.TestContext, targetBinding?: RemoteD1Binding) {
       assert.equal(input.configuration.accountId, ACCOUNT);
       assert.deepEqual(
         input.configuration.databases.map((row) => row.binding),
-        source.value.databases.map((row) => row.binding),
+        ["PROFILE_GAMES_DB", "PROFILE_DB"],
       );
       return {
         remoteProxyConnectionString: new URL(
@@ -194,12 +187,8 @@ function nativeFixture(t: test.TestContext, targetBinding?: RemoteD1Binding) {
           calls.push("bindings");
           if (f.failBindings) throw new Error("bindings-failed");
           return {
-            ...Object.fromEntries(
-              source.value.databases.map((row) => [
-                row.binding,
-                makeDatabase(row.binding),
-              ]),
-            ),
+            PROFILE_GAMES_DB: makeDatabase("PROFILE_GAMES_DB"),
+            PROFILE_DB: makeDatabase("PROFILE_DB"),
             ...(f.extraBinding ? { EVENT_DB: makeDatabase("EVENT_DB") } : {}),
           };
         },
@@ -746,58 +735,51 @@ test(
   },
 );
 
-test("six-binding transport is explicit while legacy maintenance remains restricted", async (t) => {
+test("maintenance rejects unsupported bindings before opening a child", async (t) => {
   const source = configuration(t);
-  for (const binding of ["AUTH_STATE_DB", "TELEGRAM_DB"] as const) {
-    assert.deepEqual(
-      remoteD1Configuration(binding, source.path).databases.map(
-        (row) => row.binding,
-      ),
-      ["PROFILE_GAMES_DB", binding],
-    );
+  for (const binding of ["AUTH_STATE_DB", "TELEGRAM_DB", "UNKNOWN"] as const) {
     assert.throws(
       () => remoteMaintenanceConfiguration(binding as never, source.path),
       /invalid-binding/,
     );
     await assert.rejects(
-      openRemoteMaintenanceTransport(binding as never, {
-        configPath: source.path,
-        apiToken: "not-a-real-token",
-      }),
+      openRemoteMaintenanceTransport(
+        binding as never,
+        { configPath: source.path, apiToken: "private-test-token" },
+        {
+          spawn() {
+            assert.fail("unsupported binding must not start a child");
+          },
+          stopGroup() {},
+        },
+      ),
       /invalid-binding/,
     );
   }
-  await assert.rejects(
-    openRemoteD1Transport("UNKNOWN" as never, {
-      configPath: source.path,
-      apiToken: "not-a-real-token",
-    }),
-    /invalid-binding/,
-  );
 });
 
-test("six-binding native reads use primary sessions and never create admission bookkeeping", async (t) => {
-  const fixture = nativeFixture(t, "AUTH_STATE_DB"),
-    session = await fixture.open();
-  await session.transport.readRows("AUTH_STATE_DB", {
-    sql: "SELECT 1 AS marker",
-    bindings: [],
-  });
-  assert.ok(fixture.calls.includes("session:AUTH_STATE_DB:first-primary"));
-  assert.equal(fixture.batches.length, 0);
-  await assert.rejects(
-    session.transport.readRows("AUTH_STATE_DB", {
-      sql: "DELETE FROM application_data_admissions",
-      bindings: [],
-    }),
-    /invalid-statements/,
-  );
-  await assert.rejects(
-    session.transport.readRows("TELEGRAM_DB", {
-      sql: "SELECT 1",
-      bindings: [],
-    }),
-    /binding-outside-session/,
-  );
-  await session.dispose();
+test("native and parent transports omit readRows and reject unsupported batch bindings", async (t) => {
+  const native = nativeFixture(t),
+    parent = parentFixture(t),
+    nativeSession = await native.open(),
+    parentSession = await parent.open();
+  try {
+    for (const { transport } of [nativeSession, parentSession]) {
+      assert.equal("readRows" in transport, false);
+      for (const binding of ["AUTH_STATE_DB", "TELEGRAM_DB", "UNKNOWN"])
+        await assert.rejects(
+          transport.atomicBatch(binding as never, [
+            { sql: "SELECT 1", bindings: [] },
+          ]),
+          /invalid-binding/,
+        );
+    }
+    assert.equal(native.batches.length, 0);
+    assert.deepEqual(
+      parent.child.messages.map((message) => message.kind),
+      ["start"],
+    );
+  } finally {
+    await Promise.all([nativeSession.dispose(), parentSession.dispose()]);
+  }
 });

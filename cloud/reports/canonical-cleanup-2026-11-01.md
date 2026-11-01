@@ -38,6 +38,14 @@ No global generation change, write freeze, Queue pause, financial adjustment or 
 
 Final protected verification evidence SHA-256: `02e70d54d57906eaf694e1e8152e8cbc90b44839512f8c3f202e8a09abec65e3`.
 
+## Tooling retirement — 2026-11-01
+
+The completed admission-retirement CLI, helper and operator-dependent tests were verified against commit `8fe102548`, archived and removed from active source. The shared maintenance transport was restored to its earlier four-database interface, removing the unused six-database extension and general `readRows` operation. The seven ongoing maintenance commands retain their existing guarded transport.
+
+Standalone native D1 regression coverage preserves checks for the permanent retirement triggers, receipt protections and atomic rollback using synthetic data. Applied migrations, permanent application safeguards, production tombstones and receipts remain unchanged. This source cleanup required no production deployment or data operation; the cleanup outcomes above remain historical facts.
+
+Protected tooling archive manifest SHA-256: `b098bc18515a873ae2b9ca3fee115c53855317cefd2a7fbeb976b7159c2a535a`.
+
 ## Initial publication and inspection — 2026-11-01
 
 Commit `181e5152ae71b4d252183c30548e657f0343d165` published the migration and cleanup to `main` with 1,263 explicitly reviewed paths. The unused recovery inventory was removed from the active working tree after its protected archive was verified. Applied SQL migrations and private exports were preserved; credentials and logs were not committed.
