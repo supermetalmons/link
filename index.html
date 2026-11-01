@@ -2,6 +2,22 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta name="color-scheme" content="light dark" />
+    <style>
+      html,
+      body {
+        background-color: #ffffff;
+        color: #000000;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        html,
+        body {
+          background-color: #131313;
+          color: #e0e0e0;
+        }
+      }
+    </style>
     <link rel="preconnect" href="https://api.mons.link" crossorigin />
     <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
