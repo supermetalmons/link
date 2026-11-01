@@ -307,7 +307,7 @@ After promoting a candidate, trigger a unique read-only preflight and inspect th
 
 ```sh
 event_prize_preflight_id="preflight-$(date -u +%Y%m%d%H%M%S)-$$"
-npx wrangler workflows trigger mons-link-event-prize-withdrawal-data1 '{"schemaVersion":1,"kind":"preflight"}' --id "$event_prize_preflight_id" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler workflows trigger mons-link-event-prize-withdrawal-data1 '{"schemaVersion":2,"dataEpoch":1,"kind":"preflight"}' --id "$event_prize_preflight_id" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 npx wrangler workflows instances describe mons-link-event-prize-withdrawal-data1 "$event_prize_preflight_id" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 ```
 
