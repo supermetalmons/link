@@ -3,10 +3,10 @@ import { runConflictRetry } from "./conflictRetry.ts";
 import { CanonicalProfileConflict } from "./profileCanonicalD1.ts";
 import { readCanonicalAuthProfileByLogin } from "./profileCanonical/authProfile.ts";
 import {
-  commitCanonicalProfileUpdate,
-  materializeCanonicalProfileUpdate,
-  readCanonicalProfileMutationByLogin,
-} from "./profileMutationD1.ts";
+  buildMutableProfileMutation,
+  commitMutableProfileUpdate,
+  readMutableProfileMutationByLogin,
+} from "./profileMutableD1.ts";
 
 const MAX_TRANSACTION_ATTEMPTS = 5;
 
@@ -62,7 +62,7 @@ export function createUsernameRepository(
               ? null
               : await readCanonicalAuthProfileByLogin(d1, loginUid);
             const resolved = nextUsername
-              ? await readCanonicalProfileMutationByLogin(d1, loginUid)
+              ? await readMutableProfileMutationByLogin(d1, loginUid)
               : authSnapshot;
             if (!resolved) return { value: "profile-not-found" };
             const { owner, profile } = resolved;
@@ -98,7 +98,7 @@ export function createUsernameRepository(
               usernameOwnedByProfile =
                 existing?.profile_id === profile.profileId;
             }
-            const nextProfile = materializeCanonicalProfileUpdate(
+            const mutation = buildMutableProfileMutation(
               profile,
               {
                 ...profile.profile,
@@ -106,7 +106,7 @@ export function createUsernameRepository(
               },
               updatedAtMs,
             );
-            await commitCanonicalProfileUpdate(d1, profile, nextProfile, {
+            await commitMutableProfileUpdate(d1, mutation, {
               owner,
               additionalExpectations: usernameKey
                 ? usernameOwnedByProfile

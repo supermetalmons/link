@@ -3,12 +3,10 @@ import {
   parseMiningSnapshot,
   type MiningSnapshot,
 } from "@mons/shared/mining";
-import {
-  CanonicalProfileConflict,
-  commitCanonicalPlan,
-} from "./profileCanonicalD1.ts";
+import { CanonicalProfileConflict } from "./profileCanonicalD1.ts";
 import {
   buildMutableProfileMutation,
+  commitMutableProfileUpdate,
   readMutableProfileMutationByLogin,
 } from "./profileMutableD1.ts";
 
@@ -53,22 +51,7 @@ export function createMiningRepository(
             },
           );
           try {
-            await commitCanonicalPlan(d1, {
-              expectations: [
-                {
-                  kind: "profile-revision",
-                  profileId: profile.profileId,
-                  revision: profile.revision,
-                },
-                {
-                  kind: "login-owner-revision",
-                  loginUid: owner.loginUid,
-                  profileId: owner.profileId,
-                  revision: owner.revision,
-                },
-              ],
-              mutations: [mutation],
-            });
+            await commitMutableProfileUpdate(d1, mutation, { owner });
             return "updated";
           } catch (error) {
             if (error instanceof CanonicalProfileConflict) return "conflict";

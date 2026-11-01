@@ -6,6 +6,7 @@ import {
   collectSuccessfulClaims,
   recoverAndEnqueueProjectionPages,
   recoverAndEnqueueProjectionScan,
+  repairAndEnqueueProjectionTasks,
   sendQueueTasks,
 } from "../src/projectionSweep.ts";
 
@@ -775,4 +776,194 @@ test("projection dispatch preserves queue failure precedence and stops later bat
     Array.from({ length: 100 }, (_, index) => index + 101),
   ]);
   assert.deepEqual(reports, [[0, claimFailure, 0]]);
+});
+
+test("repair dispatch preserves phase order, task order, and separate failures", async () => {
+  const events: string[] = [];
+  const reports: unknown[][] = [];
+  const repairFailure = new Error("repair-unavailable");
+  const claimFailure = new Error("claim-unavailable");
+  const batches: string[][] = [];
+  const result = await repairAndEnqueueProjectionTasks({
+    invalidEntries: ["repaired", "failed", "non-error", "removed", "changed"],
+    async repair(entry) {
+      events.push(`repair-${entry}`);
+      await Promise.resolve();
+      if (entry === "failed") throw repairFailure;
+      if (entry === "non-error") throw undefined;
+      if (entry === "removed") return { kind: "removed" };
+      if (entry === "changed") return { kind: "changed" };
+      return { kind: "repaired", task: entry };
+    },
+    onRepairFailure(entry, error, index) {
+      events.push(`report-repair-${entry}`);
+      reports.push([entry, error, index]);
+      throw new Error("logger-failed");
+    },
+    onRepairsCollected(summary) {
+      events.push("summary");
+      assert.deepEqual(summary.repairedTasks, ["repaired"]);
+      assert.equal(summary.removedCount, 1);
+    },
+    candidates: ["skipped", "failed", "non-error", "claimed"],
+    async claim(candidate) {
+      events.push(`claim-${candidate}`);
+      await Promise.resolve();
+      if (candidate === "failed") throw claimFailure;
+      if (candidate === "non-error") throw false;
+      return candidate !== "skipped";
+    },
+    onClaimFailure(candidate, error, index) {
+      events.push(`report-claim-${candidate}`);
+      reports.push([candidate, error, index]);
+      throw new Error("logger-failed");
+    },
+    toTask: (candidate) => candidate,
+    getQueue() {
+      events.push("queue");
+      return {
+        async sendBatch(messages) {
+          events.push("send");
+          batches.push(Array.from(messages, ({ body }) => body));
+          return {
+            metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+          };
+        },
+      };
+    },
+    repairErrorMessage: "repair-failed",
+    claimErrorMessage: "claim-failed",
+  });
+
+  assert.deepEqual(events, [
+    "repair-repaired",
+    "repair-failed",
+    "report-repair-failed",
+    "repair-non-error",
+    "report-repair-non-error",
+    "repair-removed",
+    "repair-changed",
+    "summary",
+    "queue",
+    "claim-skipped",
+    "claim-failed",
+    "report-claim-failed",
+    "claim-non-error",
+    "report-claim-non-error",
+    "claim-claimed",
+    "send",
+  ]);
+  assert.deepEqual(reports, [
+    ["failed", repairFailure, 1],
+    ["non-error", undefined, 2],
+    ["failed", claimFailure, 1],
+    ["non-error", false, 2],
+  ]);
+  assert.deepEqual(batches, [["repaired", "claimed"]]);
+  assert.equal(result.sentCount, 2);
+  assert.equal(result.repairFailures.length, 2);
+  assert.equal(result.repairFailures[0], repairFailure);
+  assert.equal(result.repairFailures[1]!.message, "repair-failed");
+  assert.equal(result.claimFailures.length, 2);
+  assert.equal(result.claimFailures[0], claimFailure);
+  assert.equal(result.claimFailures[1]!.message, "claim-failed");
+});
+
+test("repair dispatch reports item failures before a Queue failure takes precedence", async () => {
+  const events: string[] = [];
+  const queueFailure = new Error("queue-unavailable");
+  await assert.rejects(
+    repairAndEnqueueProjectionTasks({
+      invalidEntries: ["invalid"],
+      async repair() {
+        throw new Error("repair-unavailable");
+      },
+      onRepairFailure() {
+        events.push("repair-failure");
+      },
+      candidates: ["failed", "healthy"],
+      async claim(candidate) {
+        if (candidate === "failed") throw new Error("claim-unavailable");
+        return true;
+      },
+      onClaimFailure() {
+        events.push("claim-failure");
+      },
+      toTask: (candidate) => candidate,
+      getQueue: () => ({
+        async sendBatch(messages) {
+          assert.deepEqual(Array.from(messages), [{ body: "healthy" }]);
+          events.push("send");
+          throw queueFailure;
+        },
+      }),
+      repairErrorMessage: "repair-failed",
+      claimErrorMessage: "claim-failed",
+    }),
+    (error) => error === queueFailure,
+  );
+  assert.deepEqual(events, ["repair-failure", "claim-failure", "send"]);
+});
+
+test("repair dispatch supports taskless repairs and skips empty batches", async () => {
+  const visited: string[] = [];
+  for (const invalidEntries of [[], ["invalid"]]) {
+    assert.deepEqual(
+      await repairAndEnqueueProjectionTasks({
+        invalidEntries,
+        async repair(entry): Promise<void> {
+          visited.push(entry);
+        },
+        candidates: ["stale"],
+        claim: async () => false,
+        toTask: (candidate) => candidate,
+        getQueue: () => ({
+          sendBatch: async () => assert.fail("unexpected-send"),
+        }),
+        repairErrorMessage: "repair-failed",
+        claimErrorMessage: "claim-failed",
+      }),
+      { sentCount: 0, repairFailures: [], claimFailures: [] },
+    );
+  }
+  assert.deepEqual(visited, ["invalid"]);
+});
+
+test("repair dispatch acquires the Queue after repair reporting and summary, before claims", async () => {
+  const events: string[] = [];
+  const queueFailure = new Error("queue-binding-unavailable");
+  await assert.rejects(
+    repairAndEnqueueProjectionTasks({
+      invalidEntries: ["failed", "repaired"],
+      async repair(entry) {
+        events.push(`repair-${entry}`);
+        if (entry === "failed") throw new Error("repair-unavailable");
+        return { kind: "repaired", task: entry };
+      },
+      onRepairFailure() {
+        events.push("report");
+      },
+      onRepairsCollected({ repairedTasks }) {
+        assert.deepEqual(repairedTasks, ["repaired"]);
+        events.push("summary");
+      },
+      candidates: ["candidate"],
+      claim: async () => assert.fail("unexpected-claim"),
+      toTask: (candidate) => candidate,
+      getQueue() {
+        events.push("queue");
+        throw queueFailure;
+      },
+      repairErrorMessage: "repair-failed",
+      claimErrorMessage: "claim-failed",
+    }),
+    (error) => error === queueFailure,
+  );
+  assert.deepEqual(events, [
+    "repair-failed",
+    "report",
+    "repair-repaired",
+    "summary",
+    "queue",
+  ]);
 });

@@ -21,9 +21,8 @@ import {
   reportRecoveryFailure,
 } from "../recoveryReporting.ts";
 import {
-  claimAndEnqueueProjectionTasks,
-  collectProjectionRepairs,
   recoverAndEnqueueProjectionPages,
+  repairAndEnqueueProjectionTasks,
   sendQueueTasks,
 } from "../projectionSweep.ts";
 import { PROJECTION_SWEEP_LIMIT } from "./policy.ts";
@@ -96,15 +95,15 @@ export async function sweepAutomatchProjections(
       const invalidInviteIds = entries.flatMap((entry) =>
         entry.kind === "invalid" ? [entry.inviteId] : [],
       );
-      const { failures: pageRepairFailures } = await collectProjectionRepairs(
-        invalidInviteIds,
-        (inviteId) =>
+      const result = await repairAndEnqueueProjectionTasks({
+        invalidEntries: invalidInviteIds,
+        repair: (inviteId) =>
           state.projectionRecovery.repairInvalidAutomatchTelegramOutbox(
             inviteId,
             nowMs,
           ),
-        "projection-invalid-record-failed",
-        (inviteId, error, itemIndex) =>
+        repairErrorMessage: "projection-invalid-record-failed",
+        onRepairFailure: (inviteId, error, itemIndex) =>
           reportRecoveryFailure(
             logger,
             {
@@ -117,14 +116,12 @@ export async function sweepAutomatchProjections(
             },
             error,
           ),
-      );
-      const result = await claimAndEnqueueProjectionTasks({
         candidates,
         claim: (candidate) =>
           claimAutomatchSweepCandidate(state, candidate, nowMs),
         toTask: ({ task }) => task,
-        queue: queueFor(env, "TELEGRAM_PROJECTION_QUEUE"),
-        fallbackErrorMessage: "projection-claim-failed",
+        getQueue: () => queueFor(env, "TELEGRAM_PROJECTION_QUEUE"),
+        claimErrorMessage: "projection-claim-failed",
         onClaimFailure: ({ task }, error, itemIndex) =>
           reportRecoveryFailure(
             logger,
@@ -141,7 +138,7 @@ export async function sweepAutomatchProjections(
       });
       sentCount += result.sentCount;
       claimFailures.push(...result.claimFailures);
-      repairFailures.push(...pageRepairFailures);
+      repairFailures.push(...result.repairFailures);
     }
     if (claimFailures.length > 0) {
       throw claimFailures[0];

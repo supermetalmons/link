@@ -214,3 +214,62 @@ export async function claimAndEnqueueProjectionTasks<Candidate, Task>({
     claimFailures: claims.failures,
   };
 }
+
+export async function repairAndEnqueueProjectionTasks<
+  Invalid,
+  Candidate,
+  Task,
+>({
+  invalidEntries,
+  repair,
+  candidates,
+  claim,
+  toTask,
+  getQueue,
+  repairErrorMessage,
+  claimErrorMessage,
+  onRepairFailure,
+  onClaimFailure,
+  onRepairsCollected,
+}: {
+  invalidEntries: readonly Invalid[];
+  repair: (entry: Invalid) => Promise<ProjectionRepairResult<Task> | void>;
+  candidates: readonly Candidate[];
+  claim: (candidate: Candidate) => Promise<boolean>;
+  toTask: (candidate: Candidate) => Task;
+  getQueue: () => Pick<QueueProducer<Task>, "sendBatch">;
+  repairErrorMessage: string;
+  claimErrorMessage: string;
+  onRepairFailure?: RecoveryFailureReporter<Invalid>;
+  onClaimFailure?: RecoveryFailureReporter<Candidate>;
+  onRepairsCollected?: (summary: {
+    repairedTasks: readonly Task[];
+    removedCount: number;
+  }) => void;
+}): Promise<{
+  sentCount: number;
+  repairFailures: Error[];
+  claimFailures: Error[];
+}> {
+  const repairs = await collectProjectionRepairs(
+    invalidEntries,
+    repair,
+    repairErrorMessage,
+    onRepairFailure,
+  );
+  onRepairsCollected?.(repairs);
+  const result = await claimAndEnqueueProjectionTasks({
+    candidates,
+    claim,
+    toTask,
+    queue: getQueue(),
+    initialTasks: repairs.repairedTasks,
+    fallbackErrorMessage: claimErrorMessage,
+    ...(onClaimFailure === undefined ? {} : { onClaimFailure }),
+  });
+  return {
+    sentCount: result.sentCount,
+    repairFailures: repairs.failures,
+    claimFailures: result.claimFailures,
+  };
+}

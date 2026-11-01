@@ -42,18 +42,6 @@ function fail(message: string): never {
   throw new AuthApiFailure(409, "failed-precondition", message);
 }
 
-function sameGameFields(
-  left: MatchTimerRecord,
-  right: MatchTimerRecord,
-): boolean {
-  return (
-    left.color === right.color &&
-    left.fen === right.fen &&
-    left.flatMovesString === right.flatMovesString &&
-    left.status === right.status
-  );
-}
-
 function timerTerminal(pair: TimerPair): boolean {
   return (
     pair.player.status === "surrendered" ||
@@ -105,21 +93,14 @@ export function buildMatchStateTimerStartCandidate(
 }
 
 export function decideMatchStateTimerStartCommit(
-  initial: TimerPair,
-  fresh: TimerPair,
+  current: TimerPair,
   marker: MatchTimerStartCandidate,
 ): { changed: boolean; playerMatch: MatchDocument; timer: RunningMatchTimer } {
-  assertTimerTurn(fresh);
-  if (
-    !sameGameFields(initial.player, fresh.player) ||
-    !sameGameFields(initial.opponent, fresh.opponent) ||
-    initial.game.turnNumber !== fresh.game.turnNumber ||
-    marker.turnNumber > fresh.game.turnNumber
-  )
-    fail("game state changed.");
+  assertTimerTurn(current);
+  if (marker.turnNumber > current.game.turnNumber) fail("game state changed.");
   const parsedMarker = parseStrictMatchTimer(marker.timer);
   if (
-    marker.turnNumber !== fresh.game.turnNumber ||
+    marker.turnNumber !== current.game.turnNumber ||
     parsedMarker?.turnNumber !== marker.turnNumber
   ) {
     throw new AuthApiFailure(
@@ -128,12 +109,12 @@ export function decideMatchStateTimerStartCommit(
       "gameplay-service-unavailable",
     );
   }
-  const freshTimer = parseStrictMatchTimer(fresh.player.timer);
-  if (freshTimer && freshTimer.turnNumber > fresh.game.turnNumber)
+  const currentTimer = parseStrictMatchTimer(current.player.timer);
+  if (currentTimer && currentTimer.turnNumber > current.game.turnNumber)
     fail("game state changed.");
   return {
-    changed: !matchTimersEqual(fresh.player.timer, marker.timer),
-    playerMatch: writeMatchTimer(fresh.pair.playerMatch, marker.timer),
+    changed: !matchTimersEqual(current.player.timer, marker.timer),
+    playerMatch: writeMatchTimer(current.pair.playerMatch, marker.timer),
     timer: marker.timer,
   };
 }

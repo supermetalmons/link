@@ -633,25 +633,16 @@ export class MatchStateStore {
       !matchTimersEqual(marker.timer, prepared.existingTimer)
     )
       unavailable("match-timer-storage-conflict");
-    return this.commitTimerStart(input, current, current, marker);
+    return this.commitTimerStart(input, current, marker);
   }
 
   private commitTimerStart(
     input: MatchStateStartTimerRequest,
-    initial: TimerPair,
-    fresh: TimerPair,
+    current: TimerPair,
     marker: MatchTimerStartCandidate,
   ): StartMatchTimerResponse {
     this.assertTimerNotRetired(input, marker.timer);
-    if (
-      canonicalMatchStateJson(fresh.player.timer) !==
-        canonicalMatchStateJson(marker.timer) &&
-      (fresh.pair.revision !== initial.pair.revision ||
-        canonicalMatchStateJson(fresh.player.timer) !==
-          canonicalMatchStateJson(initial.player.timer))
-    )
-      fail("game state changed.");
-    const decision = decideMatchStateTimerStartCommit(initial, fresh, marker);
+    const decision = decideMatchStateTimerStartCommit(current, marker);
     if (decision.changed) {
       this.putRecord(input.matchId, input.playerId, decision.playerMatch);
       this.bump(input.matchId);

@@ -2,22 +2,23 @@ import {
   prepareCanonicalOwnedProfileRead,
   parseCanonicalOwnedProfileRowWith,
 } from "./profileCanonical/ownedProfile.ts";
-import {
-  materializeCanonicalProfileFields,
-  resolveCanonicalProfilesUsing,
-} from "./profileCanonical/profiles.ts";
+import { resolveCanonicalProfilesUsing } from "./profileCanonical/profiles.ts";
+import { commitCanonicalPlan } from "./profileCanonical/commit.ts";
 import {
   mutableProfileColumns,
   mutableProfileValue,
   parseMutableProfileRow,
 } from "./profileCanonical/mutableProfiles.ts";
 import type {
+  CanonicalExpectation,
   CanonicalLoginOwnerSnapshot,
   CanonicalMutableProfileSnapshot,
   CanonicalMutation,
-  CanonicalSortKey,
 } from "./profileCanonical/types.ts";
-import type { EmojiId } from "@mons/shared/appearance";
+import {
+  materializeProfileUpdateFields,
+  type MutableProfileUpdateOptions,
+} from "./profileUpdateFields.ts";
 
 export type { CanonicalMutableProfileSnapshot } from "./profileCanonical/types.ts";
 
@@ -26,16 +27,9 @@ export type CanonicalOwnedMutableProfileSnapshot = {
   profile: CanonicalMutableProfileSnapshot;
 };
 
-export type MutableProfileUpdateOptions = {
-  sortUpdates?: Partial<Record<CanonicalSortKey, number>>;
-  winPresent?: boolean;
-  emojiPresent?: boolean;
-  gameplayEmoji?: EmojiId;
-};
-
 export type MutableProfileMutation = Extract<
   CanonicalMutation,
-  { kind: "patch-profile-fields" | "patch-active-profile" }
+  { kind: "patch-profile-fields" }
 >;
 
 export async function readMutableProfileMutationByLogin(
@@ -106,32 +100,47 @@ export function buildMutableProfileMutation(
   snapshot: CanonicalMutableProfileSnapshot,
   profile: CanonicalMutableProfileSnapshot["profile"],
   updatedAtMs: number,
-  {
-    sortUpdates = {},
-    winPresent = snapshot.winPresent,
-    emojiPresent = snapshot.emojiPresent,
-    gameplayEmoji = snapshot.gameplayEmoji,
-  }: MutableProfileUpdateOptions = {},
+  options: MutableProfileUpdateOptions = {},
 ): MutableProfileMutation {
-  const input = {
-    profile,
-    createdAtMs: snapshot.createdAtMs,
-    updatedAtMs,
-    mergedAtMs: snapshot.mergedAtMs,
-    mergedIntoProfileId: snapshot.mergedIntoProfileId,
-    state: snapshot.state,
-    sortPresence: {
-      ...snapshot.sortPresence,
-      ...Object.fromEntries(Object.keys(sortUpdates).map((key) => [key, true])),
-    },
-    sortValues: { ...snapshot.sortValues, ...sortUpdates },
-    winPresent,
-    emojiPresent,
-    gameplayEmoji,
-  };
   return {
     kind: "patch-profile-fields",
     current: snapshot,
-    value: mutableProfileValue(materializeCanonicalProfileFields(input)),
+    value: mutableProfileValue(
+      materializeProfileUpdateFields(snapshot, profile, updatedAtMs, options),
+    ),
   };
+}
+
+export function commitMutableProfileUpdate(
+  db: D1Database,
+  mutation: MutableProfileMutation,
+  {
+    owner,
+    additionalExpectations = [],
+  }: {
+    owner?: CanonicalLoginOwnerSnapshot;
+    additionalExpectations?: readonly CanonicalExpectation[];
+  } = {},
+): Promise<void> {
+  return commitCanonicalPlan(db, {
+    expectations: [
+      {
+        kind: "profile-revision",
+        profileId: mutation.current.profileId,
+        revision: mutation.current.revision,
+      },
+      ...(owner
+        ? ([
+            {
+              kind: "login-owner-revision",
+              loginUid: owner.loginUid,
+              profileId: owner.profileId,
+              revision: owner.revision,
+            },
+          ] as const)
+        : []),
+      ...additionalExpectations,
+    ],
+    mutations: [mutation],
+  });
 }

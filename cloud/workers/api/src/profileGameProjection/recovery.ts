@@ -32,6 +32,7 @@ import {
   claimAndEnqueueProjectionTasks,
   collectProjectionRepairs,
   recoverAndEnqueueProjectionPages,
+  repairAndEnqueueProjectionTasks,
 } from "../projectionSweep.ts";
 import {
   PROFILE_GAME_PROJECTION_SWEEP_LIMIT,
@@ -302,21 +303,20 @@ export async function sweepAutomatchProfileGameProjections(
     const invalidInviteIds = entries.flatMap((entry) =>
       entry.kind === "invalid" ? [entry.inviteId] : [],
     );
-    const {
-      repairedTasks,
-      removedCount: invalidRemoved,
-      failures: pageRepairFailures,
-    } = await collectProjectionRepairs(
-      invalidInviteIds,
-      (inviteId) =>
+    const candidates = entries.flatMap((entry) =>
+      entry.kind === "candidate" ? [entry.value] : [],
+    );
+    const result = await repairAndEnqueueProjectionTasks({
+      invalidEntries: invalidInviteIds,
+      repair: (inviteId) =>
         repairInvalidAutomatchSweepEntry(
           state,
           inviteId,
           nowMs,
           createRequestId,
         ),
-      "profile-game-projection-invalid-record-failed",
-      (inviteId, error, itemIndex) =>
+      repairErrorMessage: "profile-game-projection-invalid-record-failed",
+      onRepairFailure: (inviteId, error, itemIndex) =>
         reportRecoveryFailure(
           logger,
           {
@@ -329,25 +329,21 @@ export async function sweepAutomatchProfileGameProjections(
           },
           error,
         ),
-    );
-    if (repairedTasks.length > 0 || invalidRemoved > 0) {
-      logRecoveryEvent(logger, "error", {
-        event: "profile_game_projection_invalid_outboxes_recovered",
-        repaired: repairedTasks.length,
-        removed: invalidRemoved,
-      });
-    }
-    const candidates = entries.flatMap((entry) =>
-      entry.kind === "candidate" ? [entry.value] : [],
-    );
-    const result = await claimAndEnqueueProjectionTasks({
+      onRepairsCollected: ({ repairedTasks, removedCount }) => {
+        if (repairedTasks.length > 0 || removedCount > 0) {
+          logRecoveryEvent(logger, "error", {
+            event: "profile_game_projection_invalid_outboxes_recovered",
+            repaired: repairedTasks.length,
+            removed: removedCount,
+          });
+        }
+      },
       candidates,
       claim: (candidate) =>
         claimAutomatchSweepCandidate(state, candidate, nowMs),
       toTask: ({ task }) => task,
-      queue: queueFor(env, "PROFILE_GAME_PROJECTION_QUEUE"),
-      initialTasks: repairedTasks,
-      fallbackErrorMessage: "profile-game-projection-claim-failed",
+      getQueue: () => queueFor(env, "PROFILE_GAME_PROJECTION_QUEUE"),
+      claimErrorMessage: "profile-game-projection-claim-failed",
       onClaimFailure: ({ task }, error, itemIndex) =>
         reportRecoveryFailure(
           logger,
@@ -364,7 +360,7 @@ export async function sweepAutomatchProfileGameProjections(
     });
     sentCount += result.sentCount;
     claimFailures.push(...result.claimFailures);
-    repairFailures.push(...pageRepairFailures);
+    repairFailures.push(...result.repairFailures);
   }
   if (claimFailures.length > 0) {
     throw claimFailures[0];

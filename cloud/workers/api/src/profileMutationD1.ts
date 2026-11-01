@@ -5,17 +5,13 @@ import {
 } from "@mons/shared/mining";
 import {
   CanonicalProfileCorruption,
-  commitCanonicalPlan,
-  materializeCanonicalProfile,
   parseCanonicalMergeTargetRow,
   parseCanonicalProfileRow,
-  type CanonicalExpectation,
-  type CanonicalLoginOwnerSnapshot,
   type CanonicalProfileSnapshot,
   type CanonicalProfileValue,
   type CanonicalSortKey,
 } from "./profileCanonicalD1.ts";
-import type { EmojiId } from "@mons/shared/appearance";
+import { materializeProfileUpdateFields } from "./profileUpdateFields.ts";
 import { parseStoredMining } from "./profileCanonical/contracts.ts";
 import {
   prepareCanonicalOwnedProfileRead,
@@ -30,40 +26,6 @@ export type CanonicalChallengeReplayProfileSnapshot = {
   profile: CanonicalProfileSnapshot | null;
   februaryOpponentProfileIds: string[];
 };
-
-export function materializeCanonicalProfileUpdate(
-  snapshot: CanonicalProfileSnapshot,
-  profile: CanonicalProfileSnapshot["profile"],
-  updatedAtMs: number,
-  {
-    sortUpdates = {},
-    winPresent = snapshot.winPresent,
-    emojiPresent = snapshot.emojiPresent,
-    gameplayEmoji = snapshot.gameplayEmoji,
-  }: {
-    sortUpdates?: Partial<Record<CanonicalSortKey, number>>;
-    winPresent?: boolean;
-    emojiPresent?: boolean;
-    gameplayEmoji?: EmojiId;
-  } = {},
-): CanonicalProfileValue {
-  return materializeCanonicalProfile({
-    profile,
-    createdAtMs: snapshot.createdAtMs,
-    updatedAtMs,
-    mergedAtMs: snapshot.mergedAtMs,
-    mergedIntoProfileId: snapshot.mergedIntoProfileId,
-    state: snapshot.state,
-    sortPresence: {
-      ...snapshot.sortPresence,
-      ...Object.fromEntries(Object.keys(sortUpdates).map((key) => [key, true])),
-    },
-    sortValues: { ...snapshot.sortValues, ...sortUpdates },
-    winPresent,
-    emojiPresent,
-    gameplayEmoji,
-  });
-}
 
 type CanonicalGameplayProfilePatch = {
   rating?: number;
@@ -137,47 +99,12 @@ export function patchCanonicalProfile(
     updatedAtMs,
     miningSortKeys,
   );
-  return materializeCanonicalProfileUpdate(
+  return materializeProfileUpdateFields(
     snapshot,
     prepared.profile,
     prepared.updatedAtMs,
     { sortUpdates: prepared.sortUpdates, winPresent: prepared.winPresent },
   );
-}
-
-export function commitCanonicalProfileUpdate(
-  db: D1Database,
-  snapshot: CanonicalProfileSnapshot,
-  value: CanonicalProfileValue,
-  {
-    owner,
-    additionalExpectations = [],
-  }: {
-    owner?: CanonicalLoginOwnerSnapshot;
-    additionalExpectations?: readonly CanonicalExpectation[];
-  } = {},
-): Promise<void> {
-  return commitCanonicalPlan(db, {
-    expectations: [
-      {
-        kind: "profile-revision",
-        profileId: snapshot.profileId,
-        revision: snapshot.revision,
-      },
-      ...(owner
-        ? ([
-            {
-              kind: "login-owner-revision",
-              loginUid: owner.loginUid,
-              profileId: owner.profileId,
-              revision: owner.revision,
-            },
-          ] as const)
-        : []),
-      ...additionalExpectations,
-    ],
-    mutations: [{ kind: "patch-active-profile", current: snapshot, value }],
-  });
 }
 
 export async function readCanonicalProfileMutationByLogin(

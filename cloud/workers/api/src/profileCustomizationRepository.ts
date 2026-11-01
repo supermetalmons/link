@@ -1,14 +1,12 @@
 import type { ProfileCustomizationUpdateRequest } from "@mons/shared/profiles";
 import { runConflictRetry } from "./conflictRetry.ts";
+import { CanonicalProfileConflict } from "./profileCanonicalD1.ts";
 import {
-  CanonicalProfileConflict,
-  type CanonicalProfileSnapshot,
-} from "./profileCanonicalD1.ts";
-import {
-  commitCanonicalProfileUpdate,
-  materializeCanonicalProfileUpdate,
-  readCanonicalProfileMutationByLogin,
-} from "./profileMutationD1.ts";
+  buildMutableProfileMutation,
+  commitMutableProfileUpdate,
+  readMutableProfileMutationByLogin,
+  type CanonicalMutableProfileSnapshot,
+} from "./profileMutableD1.ts";
 
 export type ProfileCustomizationProfile = {
   documentName: string;
@@ -28,7 +26,7 @@ export type ProfileCustomizationRepository = {
 };
 
 function customizedProfile(
-  profile: CanonicalProfileSnapshot,
+  profile: CanonicalMutableProfileSnapshot,
   request: ProfileCustomizationUpdateRequest,
 ) {
   if (request.field === "emojiAndAura") {
@@ -60,7 +58,7 @@ export function createProfileCustomizationRepository(
         maxAttempts: 5,
         async attempt() {
           try {
-            const resolved = await readCanonicalProfileMutationByLogin(d1, uid);
+            const resolved = await readMutableProfileMutationByLogin(d1, uid);
             if (!resolved) return { value: "profile-not-found" };
             const owner = resolved.owner;
             const profile = resolved.profile;
@@ -69,7 +67,7 @@ export function createProfileCustomizationRepository(
               eth: profile.profile.eth || "",
               sol: profile.profile.sol || "",
             });
-            const value = materializeCanonicalProfileUpdate(
+            const mutation = buildMutableProfileMutation(
               profile,
               customizedProfile(profile, request),
               now(),
@@ -77,7 +75,7 @@ export function createProfileCustomizationRepository(
                 ? { emojiPresent: true, gameplayEmoji: request.value.emoji }
                 : {},
             );
-            await commitCanonicalProfileUpdate(d1, profile, value, { owner });
+            await commitMutableProfileUpdate(d1, mutation, { owner });
             return { value: "updated" };
           } catch (error) {
             if (error instanceof CanonicalProfileConflict) {

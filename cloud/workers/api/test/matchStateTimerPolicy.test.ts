@@ -95,28 +95,33 @@ test("timer start preserves an existing current-turn deadline when the clock adv
 test("timer start rejects a stored timer ahead of the current turn", () => {
   const current = timerPair({ timer: formatMatchTimer(8, nowMs) });
   const before = structuredClone(current);
-  assert.throws(() => prepareMatchStateTimerStart(current), {
-    status: 409,
-    code: "failed-precondition",
-    message: "game state changed.",
-  });
+  for (const decide of [
+    () => prepareMatchStateTimerStart(current),
+    () => decideMatchStateTimerStartCommit(current, marker),
+  ]) {
+    assert.throws(decide, {
+      status: 409,
+      code: "failed-precondition",
+      message: "game state changed.",
+    });
+  }
   assert.deepEqual(current, before);
 });
 
-test("timer start accepts concurrent timer changes and preserves non-timer fields", () => {
+test("timer start applies and replays a timer while preserving non-timer fields", () => {
   const initial = timerPair();
-  const fresh = timerPair(
+  const current = timerPair(
     { timer: marker.timer },
     { timer: formatMatchTimer(6, nowMs - 1000) },
   );
-  const before = structuredClone(fresh);
-  const decision = decideMatchStateTimerStartCommit(initial, fresh, marker);
+  const before = structuredClone(current);
+  const decision = decideMatchStateTimerStartCommit(current, marker);
   assert.equal(decision.changed, false);
   assert.equal(decision.timer, marker.timer);
-  assert.deepEqual(decision.playerMatch, fresh.pair.playerMatch);
-  assert.deepEqual(fresh, before);
+  assert.deepEqual(decision.playerMatch, current.pair.playerMatch);
+  assert.deepEqual(current, before);
 
-  const first = decideMatchStateTimerStartCommit(initial, initial, marker);
+  const first = decideMatchStateTimerStartCommit(initial, marker);
   assert.equal(first.changed, true);
   assert.deepEqual(first.playerMatch, {
     ...matchRecordFixture(initial.pair.playerMatch),
@@ -128,27 +133,12 @@ test("timer start accepts concurrent timer changes and preserves non-timer field
   });
 });
 
-test("timer start rejects changed FEN or history from either player", () => {
-  for (const fields of [{ fen: "advanced" }, { flatMovesString: "a" }]) {
-    for (const fresh of [timerPair(fields), timerPair({}, fields)]) {
-      assert.throws(
-        () => decideMatchStateTimerStartCommit(timerPair(), fresh, marker),
-        {
-          status: 409,
-          code: "failed-precondition",
-          message: "game state changed.",
-        },
-      );
-    }
-  }
-});
-
 test("timer start distinguishes ahead markers from malformed or mismatched markers", () => {
   const current = timerPair();
   for (const timer of [formatMatchTimer(8, nowMs)]) {
     assert.throws(
       () =>
-        decideMatchStateTimerStartCommit(current, current, {
+        decideMatchStateTimerStartCommit(current, {
           timer,
           turnNumber: 8,
         }),
@@ -165,8 +155,7 @@ test("timer start distinguishes ahead markers from malformed or mismatched marke
     { timer: formatMatchTimer(6, nowMs), turnNumber: 6 },
   ]) {
     assert.throws(
-      () =>
-        decideMatchStateTimerStartCommit(current, current, invalid as never),
+      () => decideMatchStateTimerStartCommit(current, invalid as never),
       {
         status: 503,
         code: "unavailable",
@@ -181,8 +170,7 @@ test("timer decisions preserve terminal, history, then turn error precedence", (
   current.game.historyValid = false;
   current.game.activeColor = "white";
   current.game.winner = "white";
-  const start = () =>
-    decideMatchStateTimerStartCommit(timerPair(), current, marker);
+  const start = () => decideMatchStateTimerStartCommit(current, marker);
   const prepare = () => prepareMatchStateTimerStart(current);
   const claim = () => decideMatchStateTimerClaim(current, request, nowMs);
   for (const decide of [prepare, start, claim]) {
